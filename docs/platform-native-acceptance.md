@@ -54,6 +54,9 @@ forbidden accessibility member is ever touched.
 * One JSON document on stdin, one JSON result on stdout.
 * Accepted keys: `title`, `title_prefix`, `executable`, `actions`, `inspect`,
   `wait_absent`, `preserve_focus`. Exactly one of `title`/`title_prefix`.
+  `preserve_focus` with `inspect` is accepted only as the read-only snapshot
+  form: exact `title`, absolute `executable`, no `title_prefix`, zero actions;
+  a prefix, a missing title or executable, or any action refuses.
 * Accepted action keys: `click_label`, `wait_label`, `click`, `text`, `key`.
 * Bounds: request ≤ 64 KiB, ≤ 64 actions, titles ≤ 512 chars, executable ≤ 4096,
   ASCII text ≤ 256 chars, ≤ 4 chord parts, pointer offsets ±100000, plus hard

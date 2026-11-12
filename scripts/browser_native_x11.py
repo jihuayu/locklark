@@ -3,6 +3,11 @@
 Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
 libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
+
+One exact-title request is read-only: preserve_focus with inspect, exact title
+and executable, and no actions. It reports the public control states without
+raising, focusing or clicking anything, and a missing or unobservable window
+fails instead of reporting an absent window.
 """
 import ctypes as C
 import json
@@ -77,6 +82,7 @@ FAILURE_REASONS = {
     "Native acceptance control not ready": "control-ready-timeout",
     "X display unavailable": "x-display",
     "Exact native-window absence request required": "absence-request",
+    "Exact read-only native inspection required": "inspection-request",
     "Native acceptance X query failed": "x-query",
     "Previous native acceptance window did not close": "window-close-timeout",
     "Native acceptance window must be unique": "window-ambiguous",
@@ -510,6 +516,34 @@ def main():
         return attributes.map_state
 
     wait_window_viewable(selected_map_state,discovery_deadline)
+    # Read-only inspection: exact title and executable, preserve_focus, inspect
+    # and no actions. Nothing is raised, focused or clicked. The window above
+    # must exist, be unique and be viewable; an unobservable tree fails instead
+    # of reporting a missing window or an absent control.
+    if (request.get("preserve_focus") is True and request.get("inspect") is True
+            and not request.get("actions")):
+        if not request.get("title") or not request.get("executable") or request.get("title_prefix"):
+            raise RuntimeError("Exact read-only native inspection required")
+        x.XSync(display, 0)
+        # Popup destruction during read-only traversal is normal. Other X
+        # errors, or destruction of our selected target, must still fail closed.
+        check_x_target_errors(errors,target)
+        FAILURE_CONTEXT["action"] = "snapshot"
+        snapshot = NativeControls(request["title"],window_pid(target)).snapshot()
+        inspected = set(CONTROL_LABELS)
+        inspected.update(label for label in snapshot if control_label_allowed(label))
+        result = {"window": target, "x": 0, "y": 0, "clicks": []}
+        result["controls"] = {
+            label: {
+                "present": len(snapshot.get(label, [])) == 1,
+                "enabled": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["enabled"],
+                "showing": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["showing"],
+            }
+            for label in inspected
+        }
+        print(json.dumps(result))
+        x.XCloseDisplay(display)
+        return
     # An extension popup owns keyboard focus through its own transient window.
     # Refocusing the browser's main X window closes that popup. The Firefox
     # adapter checks the actual focused input before requesting this mode.

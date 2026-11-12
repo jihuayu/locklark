@@ -1,7 +1,7 @@
 // External end-to-end acceptance: actual extension action, native messaging,
 // MyGo UI input, and a controlled HTTPS document. No product test bypasses.
 import { createRequire } from "node:module";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
@@ -36,6 +36,10 @@ const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
 // token fragment. Action popups are that same document with no fragment.
 const ROUTE_PAGE = /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/;
 const ACTION_POPUP = /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/;
+// The source tab is titled "Locklark acceptance · …"; the route page is titled
+// "Locklark". Each key goes to its own exact expected title prefix.
+const SOURCE_TITLE_PREFIX = "Locklark acceptance";
+const ROUTE_TITLE_PREFIX = "Locklark";
 // The route checkpoint is the only requested journey in this mode, so every
 // mode that would change what pairing, fill or checkout mean is refused before
 // anything is launched.
@@ -283,6 +287,8 @@ function observeRouteLifecycle(target) {
     });
   } catch {}
 }
+// The controlled source page's title; source-tab keys use exactly this prefix.
+const browserWindowTitle = "Locklark acceptance";
 let privacyValues = [];
 let observedFixture = null;
 function popupStatusKind(value) {
@@ -507,14 +513,100 @@ async function refreshRouteStatusTrace(attach, target, uninstall = false) {
     } catch {}
   }
 }
+// The concealed password row's own Copy control. The route field-copy proof
+// clicks it; the revocation checkpoint proves it is absent after a reload.
+const ROUTE_COPY_FIELD_SELECTOR =
+  '[data-field-id="password"] [data-action="copy-field"]';
+// Route revocation checkpoint (after the field-copy proof). The user starts on
+// the route tab, physically switches to the source tab, comes back with
+// Control_L+Tab and physically reloads the stale fragment with Control_L+r.
+// Every key is one real XTest batch addressed to the exact Chromium window by
+// its expected title prefix and executable. Only fixed booleans and enums ever
+// leave either page: never title, value, text, URL, token, count, target or
+// tab id, which stay in this closure.
+const ROUTE_REVOKE_STATUS_KINDS = Object.freeze(["route-revoked", "claim-failed"]);
+// The route's own tab switch, return and reload; each is one real XTest key
+// batch sent with the exact-title-prefix form (never the native-window form)
+// and addressed to the title of the tab that is ACTIVE when the key is sent:
+// the route tab ("Locklark") for the switch away and the reload, the source tab
+// for the return.
+const ROUTE_SWITCH_SOURCE = Object.freeze([{ key: "Control_L+Shift_L+Tab" }]);
+const ROUTE_RETURN = Object.freeze([{ key: "Control_L+Tab" }]);
+const ROUTE_RELOAD = Object.freeze([{ key: "Control_L+r" }]);
+// The exact native approval title and the longest bounded no-prompt
+// observation after the stale reload. Every poll must observe the real native
+// window; a missing or unobservable one fails instead of passing the bound.
+const ROUTE_NATIVE_TITLE = "Locklark · 浏览器原生确认";
+const ROUTE_NATIVE_ABSENT_LIMIT = 3000;
+let routeMouseRejected = null;
+// Fixed fragments shared by the route page probes. Each handler resolves the
+// current nodes on every read and never holds references to them.
+const ROUTE_PAGE_STATE = `(()=>{
+  const body=document.body;
+  const detail=document.querySelector('#detail-view');
+  const heading=document.querySelector('#detail-title');
+  const fields=document.querySelector('#detail-fields');
+  return {
+    visible:document.visibilityState==='visible',
+    closed:!!body&&body.dataset.view==='closed',
+    detailHidden:!!detail&&detail.hidden===true,
+    titleEmpty:!!heading&&String(heading.textContent||'')==='',
+    fieldsEmpty:!!fields&&fields.childElementCount===0
+  };
+})()`;
+// The first tab switch away uses the fixed read-only page state as its
+// bounded host-side poll; no page observer is installed.
+const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;
+// The full wipe contract after the return to the route tab and after the stale
+// reload: the same fixed page state (including its `visible` boolean) plus the
+// two fixed revocation outcomes, the closed detail, the absent Copy control and
+// one boolean for whether the fixture title or value is anywhere in the body
+// text. The comparison happens in the page. The route-return wait and the stale
+// reload both use this one probe, so neither can pass the incomplete page state
+// to routeWiped().
+function routeRevokedProbe(title, value) {
+  return `(()=>{
+    const body=document.body;
+    const detail=document.querySelector('#detail-view');
+    const heading=document.querySelector('#detail-title');
+    const fields=document.querySelector('#detail-fields');
+    const status=document.querySelector('#status');
+    const text=status?String(status.textContent||'').trim():'';
+    const bodyText=body?String(body.innerText):'';
+    return {
+      visible:document.visibilityState==='visible',
+      closed:!!body&&body.dataset.view==='closed',
+      detailHidden:!!detail&&detail.hidden===true,
+      titleEmpty:!!heading&&String(heading.textContent||'')==='',
+      fieldsEmpty:!!fields&&fields.childElementCount===0,
+      copyAbsent:document.querySelectorAll(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR)}).length===0,
+      fixtureAbsent:!bodyText.includes(${JSON.stringify(title)})&&!bodyText.includes(${JSON.stringify(value)}),
+      statusKind:text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':'other'
+    };
+  })()`;
+}
+// Every fixed condition holds, including exactly one revoked/claim-failed
+// status kind.
+function routeWiped(value) {
+  const clean = {
+    closed: true,
+    detailHidden: true,
+    titleEmpty: true,
+    fieldsEmpty: true,
+    copyAbsent: true,
+    fixtureAbsent: true,
+  };
+  return (
+    Object.entries(clean).every(([key, expected]) => value?.[key] === expected) &&
+    ROUTE_REVOKE_STATUS_KINDS.includes(value?.statusKind)
+  );
+}
 // Route field-copy acceptance. The concealled password row's own Copy control
 // is clicked physically; the worker then re-reads the value under the same
 // native V2 approval, so either the field-disclosure review appears directly
 // (native clipboard path) or one ordinary item-get review for this exact item
 // precedes it (legacy path; only the exact route approval label is accepted).
 // Clipboard bytes travel only on the private pipe; only booleans are kept.
-const ROUTE_COPY_FIELD_SELECTOR =
-  '[data-field-id="password"] [data-action="copy-field"]';
 const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
 const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
 // Both native-lease success lines and the legacy manual-copy success line
@@ -571,7 +663,7 @@ const spki = createHash("sha256")
     }),
   )
   .digest("base64");
-const html = `<!doctype html><html><title>Locklark acceptance</title><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});</script></body></html>`;
+const html = `<!doctype html><html><title>${browserWindowTitle}</title><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});</script></body></html>`;
 const server = createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },
   (req, res) => {
@@ -684,16 +776,17 @@ try {
       "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/background.js",
     "Actual fixed extension identity required",
   );
+  // Native-window form only. Browser-tab keys go through browserKey below,
+  // which always names the Chromium window itself.
   function input(actions, native = true, inspect = false) {
+    assert(native !== false, "Native window input only");
     const options = typeof inspect === "object" ? inspect : { inspect };
-    const request = native
-      ? {
-          title: "Locklark · 浏览器原生确认",
-          executable: resolve(host),
-          actions,
-          ...options,
-        }
-      : { title_prefix: "Locklark acceptance", actions };
+    const request = {
+      title: "Locklark · 浏览器原生确认",
+      executable: resolve(host),
+      actions,
+      ...options,
+    };
     return JSON.parse(
       execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
         input: JSON.stringify(request),
@@ -702,6 +795,46 @@ try {
     );
   }
   nativeInput = input;
+  // Browser-tab keys are real XTest input to the exact Chromium window. The
+  // realpath comes from the launched browser, never from an environment
+  // guess. Only these two fixed title prefixes are accepted, and the request
+  // is always the helper's exact-title-prefix form: no native window title,
+  // no inspection and no other request options.
+  const chromiumExecutable = realpathSync(chromium.executablePath());
+  function browserKey(actions, titlePrefix) {
+    assert(
+      titlePrefix === ROUTE_TITLE_PREFIX ||
+        titlePrefix === SOURCE_TITLE_PREFIX,
+      "Unsupported browser key target",
+    );
+    const request = { title_prefix: titlePrefix, executable: chromiumExecutable, actions };
+    return JSON.parse(
+      execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
+        input: JSON.stringify(request),
+        env,
+      }).toString(),
+    );
+  }
+  // Read-only exact-title inspection of the native window that preserves
+  // focus: no raise, focus or click. It never swallows a failure, so a missing
+  // or unobservable window cannot be read as "no prompt".
+  function nativeInspection() {
+    const result = input([], true, {
+      inspect: true,
+      title: ROUTE_NATIVE_TITLE,
+      preserve_focus: true,
+    });
+    const { controls } = result;
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !controls ||
+      typeof controls !== "object" ||
+      Array.isArray(controls)
+    )
+      throw Error("Native no-prompt snapshot unavailable");
+    return controls;
+  }
   // Chrome action popups are real page targets but are not always surfaced by
   // Playwright Context.pages(). Attach to that popup through local test CDP.
   async function popupTargets() {
@@ -930,13 +1063,13 @@ try {
     await page.bringToFront();
     // Exactly one dismissal and one user action. Readiness is observed without
     // re-opening a popup or repeating a click/authorization request.
-    input([{ key: "Escape" }], false);
+    browserKey([{ key: "Escape" }], SOURCE_TITLE_PREFIX);
     await eventually(
       async () =>
         !(await popupTargets()).some((target) => previous.has(target.id)),
       "Previous action popup did not close",
     );
-    input([{ key: "Control_L+Shift_L+y" }], false);
+    browserKey([{ key: "Control_L+Shift_L+y" }], SOURCE_TITLE_PREFIX);
     let target;
     await eventually(async () => {
       const targets = (await popupTargets()).filter(
@@ -1053,6 +1186,12 @@ try {
     const rowSelector =
       '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]';
     const before = new Set((await targets()).map((target) => target.id));
+    // The original source tab is the one non-extension page the popup matched;
+    // it is kept by reference only, never by URL, id or index in a report.
+    const sourcePage = context
+      .pages()
+      .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+    assert(sourcePage, "Original source tab missing");
     const pagesBefore = new Set(
       context
         .pages()
@@ -1189,11 +1328,11 @@ try {
       // Ready-label polling is read-only. It must never raise or focus the
       // native window: doing so can hide the route page behind the idle native
       // window before any approval exists. The focus-preserving inspect form
-      // (same exact native title and executable, empty action list) keeps the
-      // window where it is, exactly like the popup-stage absence probes.
+      // (same exact native title and executable supplied by `input`, no prefix
+      // form, empty action list) keeps the window where it is, exactly like
+      // the popup-stage absence probes.
       const ROUTE_LABEL_INSPECT = Object.freeze({
         inspect: true,
-        title_prefix: "Locklark · 浏览器原生确认",
         preserve_focus: true,
       });
       const approveLabel = async () => {
@@ -1284,7 +1423,6 @@ try {
           return (
             input([], true, {
               inspect: true,
-              title_prefix: "Locklark · 浏览器原生确认",
               preserve_focus: true,
             }).controls?.[label] ?? null
           );
@@ -1369,6 +1507,191 @@ try {
       // it is still reachable; a closed page fails this read and the trace
       // stays as last observed.
       await refreshRouteStatusTrace(attach, opened, true);
+    }
+    // Route revocation checkpoint: the same tab and target, after the copy
+    // proof. The positive block's CDP client and diagnostics trace are already
+    // closed above; the revocation reads use only a fresh client reconnected
+    // to the same captured target.
+    let stale = null;
+    let revoked = null;
+    try {
+      // The route tab outlived the positive block; only the test's websocket
+      // client was closed. Reattach a fresh client to the same captured
+      // target, proven still to be the exact route page by the targets list
+      // first, and use it for every route-page read below. A failed attach or
+      // a page whose readyState is not complete throws and fails the
+      // checkpoint; it is never read as success.
+      assert.equal(
+        (await targets()).filter(
+          (target) => target.id === routeTarget && ROUTE_PAGE.test(target.url),
+        ).length,
+        1,
+        "Route target was replaced",
+      );
+      revoked = await attach(opened);
+      await wait(
+        async () => (await revoked.evaluate("document.readyState")) === "complete",
+        "Route page did not load",
+      );
+      // The route page is still the active tab, so the active window is titled
+      // exactly "Locklark". Exactly one XTest key batch, addressed to the
+      // Chromium window by the ACTIVE route tab's exact title prefix and
+      // executable, switches to the original source tab. Nothing is messaged
+      // to the worker, navigated via CDP or injected.
+      mark("route:switch-source");
+      assert.equal(
+        await revoked.evaluate(
+          'document.visibilityState === "visible" && document.hasFocus() === true',
+        ),
+        true,
+        "Route tab is not the active tab",
+      );
+      browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);
+      // The source tab became visible and focused again.
+      await wait(
+        async () =>
+          (await sourcePage.evaluate(
+            'document.visibilityState === "visible" && document.hasFocus() === true',
+          )) === true,
+        "Source tab did not become visible",
+      );
+      // The hidden route page then wipes itself: the real background switch
+      // revocation reaches its lifecycle port. Only booleans are read.
+      await wait(async () => {
+        try {
+          return routeWiped(
+            await revoked.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+          );
+        } catch (error) {
+          if (popupClosed(error)) throw Error("Route page was replaced");
+          throw error;
+        }
+      }, "Background revocation did not wipe the route detail");
+      recordRouteLifecycle("route-revoked");
+      // Back to that same route tab by one physical Control_L+Tab. The source
+      // tab is now the active one, so the key is addressed by the source
+      // page's own title prefix.
+      mark("route:return");
+      browserKey(ROUTE_RETURN, SOURCE_TITLE_PREFIX);
+      await wait(
+        async () =>
+          (await revoked.evaluate(
+            'document.visibilityState === "visible" && document.hasFocus() === true',
+          )) === true,
+        "Route page did not return to the foreground",
+      );
+      // The returned foreground page must still satisfy the full wipe contract,
+      // read by the same full probe as the reload below.
+      await wait(async () => {
+        const returned = await revoked.evaluate(
+          routeRevokedProbe(fixture.Title, fixture.Value),
+        );
+        return returned?.visible === true && routeWiped(returned);
+      }, "Returned route page kept its detail");
+      // The captured route target still exists and is still this one route
+      // page, both before the reload key and still after it; the route tab is
+      // the active tab before the key, so the key reaches it.
+      const routeTargets = async () =>
+        (await targets()).filter(
+          (target) => target.id === routeTarget && ROUTE_PAGE.test(target.url),
+        );
+      assert.equal((await routeTargets()).length, 1, "Route target was replaced");
+      // The reload must reach the route tab itself: one real XTest Control_L+r
+      // reloads its current document. The reload
+      // replaces that document, so its CDP session ends and the fresh page is
+      // re-attached: the fragment loaded again is exactly the stale one.
+      mark("route:reload");
+      browserKey(ROUTE_RELOAD, ROUTE_TITLE_PREFIX);
+      await wait(
+        async () =>
+          (await revoked.evaluate(
+            'document.visibilityState === "visible" && document.hasFocus() === true',
+          )) === true,
+        "Route tab was not active before reload",
+      );
+      assert.equal((await routeTargets()).length, 1, "Route target was replaced");
+      stale = await attach(opened);
+      await wait(async () => {
+        if ((await stale.evaluate("document.readyState")) !== "complete")
+          return false;
+        return routeWiped(
+          await stale.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+        );
+      }, "Stale route fragment did not fail closed");
+      assert.equal(
+        await stale.count(ROUTE_COPY_FIELD_SELECTOR),
+        0,
+        "Stale route page rendered a copy control",
+      );
+      // Bounded no-prompt observation: only read-only, focus-preserving
+      // snapshots of the exact native window, no click and no authorization,
+      // so a late native request would be seen. A missing or unobservable
+      // window throws through the helper and fails here; it is never read as
+      // "no prompt".
+      mark("route:native-absent");
+      const promptDeadline = Date.now() + ROUTE_NATIVE_ABSENT_LIMIT;
+      for (;;) {
+        const control = nativeInspection()[ROUTE_COPY_REVIEW_LABEL];
+        const offered =
+          control?.present === true &&
+          (control.enabled === true || control.showing === true);
+        if (offered) throw Error("Native route prompt is still present");
+        // The route-page read comes from the revocation client, not the stale
+        // one: a client failure fails here rather than reading as wiped.
+        if (
+          routeWiped(
+            await revoked.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+          ) !== true
+        )
+          throw Error("Stale route detail opened after reload");
+        if (Date.now() >= promptDeadline) break;
+        await delay(200);
+      }
+      // With the Copy control still missing, the reviewed physical mouse
+      // wrapper is run against its selector. Its fixed pre-dispatch rejection
+      // ("Popup control must be available", before Input.dispatchMouseEvent)
+      // proves the control is not there, without any injected counter or
+      // synthetic event.
+      assert.equal(
+        await stale.count(ROUTE_COPY_FIELD_SELECTOR),
+        0,
+        "Stale route page rendered a copy control",
+      );
+      mark("route:mouse-rejected");
+      let rejected = "";
+      try {
+        await stale.click(ROUTE_COPY_FIELD_SELECTOR);
+      } catch (error) {
+        rejected = error?.message;
+      }
+      routeMouseRejected = Object.freeze({
+        rejected: rejected === "Popup control must be available",
+      });
+      assert.equal(
+        rejected,
+        "Popup control must be available",
+        "Popup control must be available",
+      );
+      // The whole page's own log stays free of every fixture canary.
+      assert(
+        !logs.some((s) =>
+          fixtureCanaries(fixture).some((value) => s.includes(value)),
+        ),
+        "Synthetic secret found in browser console output",
+      );
+      for (const line of logs) assertPrivateText(line, fixture);
+      console.log(
+        "PASS: a physical tab switch reached the route page's lifecycle port and wiped its detail; the same target reopened only as closed/revoked, one physical Control_L+r reload of its stale fragment failed closed without a native prompt, and the mouse wrapper rejected the absent Copy control before input",
+      );
+    } finally {
+      try {
+        await stale?.close();
+      } catch {}
+      // The revocation client never outlives this checkpoint, on success or
+      // failure. A failed attach leaves it null and nothing is closed.
+      try {
+        await revoked?.close();
+      } catch {}
     }
     } finally {
       // Diagnostics only: the lifecycle socket never outlives this checkpoint.
@@ -1888,6 +2211,19 @@ try {
     "Native field disclosure did not follow its review",
     "Route copy feedback missing",
     "OS clipboard did not receive the approved field",
+    "Original source tab missing",
+    "Route tab is not the active tab",
+    "Source tab did not become visible",
+    "Background revocation did not wipe the route detail",
+    "Route page was replaced",
+    "Route page did not return to the foreground",
+    "Returned route page kept its detail",
+    "Stale route fragment did not fail closed",
+    "Stale route page rendered a copy control",
+    "Native no-prompt window unavailable",
+    "Native route prompt is still present",
+    "Stale route detail opened after reload",
+    "Mouse wrapper dispatched input",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -1940,6 +2276,15 @@ try {
                 routeTargetLifecycle: sanitizeRouteLifecycle(
                   routeLifecycleObservation,
                 ),
+              }
+            : {}),
+          // Present only once the physical mouse wrapper was run against the
+          // absent Copy selector: one fixed boolean.
+          ...(routeMouseRejected
+            ? {
+                routeMouseRejected: {
+                  rejected: routeMouseRejected.rejected === true,
+                },
               }
             : {}),
         }

@@ -312,5 +312,54 @@ class WindowViewabilityTests(unittest.TestCase):
         native.check_x_target_errors([(3,9)],5)  # Other popup destruction only.
 
 
+class ReadOnlyInspectionRequestTests(unittest.TestCase):
+    """The exact read-only inspection form is the only no-actions snapshot."""
+
+    source = open(native.__file__, encoding="utf-8").read()
+    branch = 'request.get("preserve_focus") is True and request.get("inspect") is True'
+
+    def branch_source(self):
+        start = self.source.index(self.branch)
+        self.assertLess(start, self.source.index('raise RuntimeError("Exact read-only native inspection required")'))
+        return self.source[start:self.source.index("return", self.source.index("XCloseDisplay(display)", start))]
+
+    def test_one_read_only_branch_after_unique_viewable_discovery(self):
+        self.assertEqual(self.source.count(self.branch), 1)
+        start = self.source.index(self.branch)
+        # A missing, ambiguous or unmapped window fails before any snapshot.
+        self.assertGreater(start, self.source.index("wait_window_viewable(selected_map_state,discovery_deadline)"))
+        self.assertGreater(start, self.source.index("if not target:"))
+        self.assertGreater(start, self.source.index("if len(matches)>1:"))
+        # The only remaining absence report is the unrelated exact-title
+        # wait_absent form, which this read-only request can never reach.
+        self.assertEqual(self.source.count('"absent": True'), 1)
+        self.assertLess(self.source.index('"absent": True'), start)
+
+    def test_requires_exact_title_and_executable_without_actions(self):
+        window = self.branch_source()
+        guard = window.index('raise RuntimeError("Exact read-only native inspection required")')
+        for requirement in ('not request.get("title")', 'not request.get("executable")',
+                            'request.get("title_prefix")', 'not request.get("actions")'):
+            with self.subTest(requirement=requirement):
+                self.assertLess(window.index(requirement), guard)
+        self.assertEqual(native.failure_reason(RuntimeError("Exact read-only native inspection required")),
+                         "inspection-request")
+
+    def test_never_raises_focuses_or_clicks(self):
+        # No side effect precedes the snapshot: no raise, no focus and no input.
+        window = self.branch_source()
+        for forbidden in ("XRaiseWindow(", "XSetInputFocus(", "XTestFakeKeyEvent(",
+                          "XTestFakeButtonEvent(", "XTestFakeMotionEvent(", "click("):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, window)
+        # A destroyed selected window still fails closed.
+        self.assertLess(window.index("check_x_target_errors(errors,target)"),
+                        window.index("NativeControls("))
+        self.assertIn("snapshot = NativeControls(request[\"title\"],window_pid(target)).snapshot()", window)
+        # The snapshot reports fixed control booleans, and an unobservable
+        # AT-SPI tree propagates instead of being read as an absent control.
+        self.assertIn('"present": len(snapshot.get(label, [])) == 1', window)
+
+
 if __name__ == "__main__":
     unittest.main()

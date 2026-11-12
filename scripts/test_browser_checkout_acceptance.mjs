@@ -1418,17 +1418,19 @@ test("route lifecycle sanitizer keeps only fixed booleans and capped counts", ()
 
 test("route label inspect preserves focus and the approval click stays physical", () => {
   // The native-label wait only reads the route page's approval state. It must
-  // use the helper's focus-preserving form (partial title, no raise/focus), or
-  // the idle native window can cover the route page before any approval
-  // exists. The later approval stays one ordinary physical click.
+  // use the helper's focus-preserving inspect form (no raise/focus), or the
+  // idle native window can cover the route page before any approval exists.
+  // The exact native title and executable come from `input`; the parser
+  // refuses a request that also carries `title_prefix`.
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+    /const ROUTE_LABEL_INSPECT = Object\.freeze\(\{\n\s+inspect: true,\n\s+preserve_focus: true,\n\s+\}\);/,
   );
+  assert.doesNotMatch(source, /title_prefix: ROUTE_NATIVE_TITLE/);
   assert.match(source, /input\(\[\], true, ROUTE_LABEL_INSPECT\)\.controls\?\.\["批准本次操作"\]/);
   // The raising/focusing positional form never appears in the route
   // checkpoint; it remains only for the unconditional-fill journeys.
@@ -1776,11 +1778,13 @@ test("route per-field copy uses physical input, exact native labels and the priv
       ),
       "unexpected native click label " + match[1],
     );
-  // Focus-preserving inspect only for the approval waits.
+  // Focus-preserving inspect only for the approval waits, with the exact
+  // title/executable from `input` and never the redundant `title_prefix`.
   assert.match(
     checkpoint,
-    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+    /input\(\[\], true, \{\n\s+inspect: true,\n\s+preserve_focus: true,\n\s+\}\)\.controls\?\.\[label\]/,
   );
+  assert.doesNotMatch(checkpoint, /title_prefix/);
   assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
   // The disclosure is always required, even after a legacy review.
   assert.match(checkpoint, /Native field disclosure did not appear/);
@@ -1929,4 +1933,687 @@ test("route per-field copy uses physical input, exact native labels and the priv
     "route:clipboard",
   ])
     assert.ok(source.includes('mark("' + stage + '")'), stage);
+});
+
+test("route checkpoint passes no outer sourcePage and binds its own real page", () => {
+  // The checkpoint binds the source tab itself from context.pages(); the
+  // caller object and the driver destructuring must not reference it, so a
+  // missing outer binding cannot fail the run before route acceptance.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const call = source.slice(
+    source.indexOf("await acceptRouteDetailRead({"),
+    source.indexOf("});", source.indexOf("await acceptRouteDetailRead({")),
+  );
+  assert.ok(call.length > 0, "missing acceptRouteDetailRead call");
+  assert.doesNotMatch(call, /\bsourcePage\b/);
+  const start = source.indexOf("async function acceptRouteDetailRead");
+  assert.ok(start > 0, "missing acceptRouteDetailRead");
+  const checkpoint = source.slice(start, source.indexOf("async function blank()"));
+  const destructured = checkpoint.slice(
+    checkpoint.indexOf("const {"),
+    checkpoint.indexOf("} = driver;"),
+  );
+  assert.ok(destructured.length > 0, "missing driver destructuring");
+  assert.doesNotMatch(destructured, /\bsourcePage\b/);
+  // Inside the try, before the physical row click or any tab switch, the
+  // checkpoint resolves exactly one non-extension page and asserts it.
+  const tryFrom = checkpoint.indexOf("    try {\n");
+  assert.ok(tryFrom > 0, "checkpoint must keep its try block");
+  assert.doesNotMatch(checkpoint.slice(0, tryFrom), /context\s*\n?\s*\.pages\(\)/);
+  const binding =
+    /const sourcePage = context\n\s+\.pages\(\)\n\s+\.find\(\(entry\) => !\/\^chrome-extension:\\\/\\\/\/\.test\(entry\.url\(\)\)\);\n\s+assert\(sourcePage, "Original source tab missing"\);/;
+  const bindAt = checkpoint.search(binding);
+  assert.ok(bindAt > tryFrom, "source page must be bound inside the try");
+  const rowClick = checkpoint.indexOf('mark("route:row-click")');
+  const tabSwitch = checkpoint.indexOf("await route.bringToFront();");
+  assert.ok(rowClick > bindAt, "source page must be bound before the row click");
+  assert.ok(tabSwitch > bindAt, "source page must be bound before the tab switch");
+});
+
+// The route-revocation section of the harness, from its fixed constants to the
+// browser block. It contains no import-time side effects, so it can be
+// evaluated like the route probes in an empty context.
+function routeRevocationHelpers(source) {
+  const start = source.indexOf("// Route revocation checkpoint (after the field-copy proof).");
+  const stop = source.indexOf("\nfunction phase(", start);
+  assert.ok(start > 0 && stop > start, "revocation helpers must stay top-level");
+  // The fixed route status literals and the Copy selector come first.
+  const literals = source.indexOf("const ROUTE_VIEWS = [");
+  assert.ok(literals > 0 && literals < start, "fixed literals must stay top-level");
+  const literalsEnd = source.indexOf("\n// The concealed password row's own Copy control.", literals);
+  assert.ok(literalsEnd > literals, "status literals must stay top-level");
+  // The browser key title prefixes are fixed constants next to the route page
+  // patterns.
+  const selector = source.indexOf("const ROUTE_COPY_FIELD_SELECTOR =");
+  assert.ok(selector > literalsEnd, "Copy selector must stay top-level");
+  const prefixes = source.indexOf("const SOURCE_TITLE_PREFIX =");
+  assert.ok(prefixes > 0 && prefixes < literals, "title prefixes must stay top-level");
+  return {
+    start,
+    stop,
+    code:
+      source.slice(prefixes, source.indexOf("\n", source.indexOf("const ROUTE_TITLE_PREFIX =", prefixes))) +
+      "\n" +
+      source.slice(literals, literalsEnd) +
+      "\n" +
+      source.slice(selector, source.indexOf("\n", source.indexOf("';", selector))) +
+      "\n" +
+      source.slice(start, stop),
+  };
+}
+
+function routeRevocationCheckpoint(source) {
+  const start = source.indexOf("    // Route revocation checkpoint: the same tab and target");
+  const stop = source.indexOf("\n  async function blank()", start);
+  assert.ok(start > 0 && stop > start, "revocation checkpoint must stay in the route journey");
+  return source.slice(start, stop);
+}
+
+// One context with the real revocation helpers and their JSON-able values.
+function routeRevocationContext(source) {
+  const context = vm.createContext({});
+  vm.runInContext(
+    routeRevocationHelpers(source).code +
+      "\nthis.probes={ROUTE_SWITCH_PROBE,routeRevokedProbe,routeWiped,ROUTE_NATIVE_ABSENT_LIMIT,ROUTE_NATIVE_TITLE,ROUTE_SWITCH_SOURCE,ROUTE_RETURN,ROUTE_RELOAD,SOURCE_TITLE_PREFIX,ROUTE_TITLE_PREFIX};",
+    context,
+  );
+  return context;
+}
+
+// The real page expression of one probe, run against a minimal fake DOM inside
+// the same helper context (so `routeWiped` is the real one).
+async function routeProbeResult(context, expression, document) {
+  const probe = vm.createContext({
+    document,
+    MutationObserver: class {
+      observe() {}
+      disconnect() {}
+    },
+    setTimeout,
+    clearTimeout,
+    Promise,
+  });
+  return JSON.parse(
+    await vm.runInContext("(async()=>JSON.stringify(await (" + expression + ")))()", probe),
+  );
+}
+
+function routeElement(extra = {}) {
+  return { hidden: true, childElementCount: 0, textContent: "", ...extra };
+}
+
+function routeFakePage({
+  visible = true,
+  view = "closed",
+  detailHidden = true,
+  title = "",
+  copy = false,
+  bodyText = "",
+  status = "条目已失效，请重新从金库打开",
+} = {}) {
+  const detail = routeElement({ hidden: detailHidden });
+  return {
+    body: { dataset: { view }, innerText: bodyText },
+    visibilityState: visible ? "visible" : "hidden",
+    querySelector(selector) {
+      if (selector === "#detail-view") return detail;
+      if (selector === "#detail-title") return routeElement({ textContent: title });
+      if (selector === "#detail-fields") return routeElement();
+      if (selector === "#status") return routeElement({ textContent: status });
+      return null;
+    },
+    querySelectorAll() {
+      return copy ? [{}] : [];
+    },
+  };
+}
+
+test("route probes return only fixed booleans and wipe only on a revoked or failed status", async () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const context = routeRevocationContext(source);
+  const routeRevokedProbe = vm.runInContext("routeRevokedProbe", context);
+  const routeWiped = vm.runInContext("routeWiped", context);
+  const helpers = vm.runInContext("JSON.stringify(probes)", context);
+  const {
+    ROUTE_SWITCH_PROBE,
+    ROUTE_NATIVE_ABSENT_LIMIT,
+    ROUTE_SWITCH_SOURCE,
+    ROUTE_RETURN,
+    ROUTE_RELOAD,
+    SOURCE_TITLE_PREFIX,
+    ROUTE_TITLE_PREFIX,
+  } = JSON.parse(helpers);
+  const FIXTURE_TITLE = "SYNTHETIC-TITLE-CANARY";
+  const FIXTURE_VALUE = "SYNTHETIC-VALUE-CANARY";
+  const notRevoked = "正在请求桌面审批…";
+
+  // Closed and wiped under the revoked and claim-failed statuses only.
+  for (const [status, kind] of [
+    ["条目已失效，请重新从金库打开", "route-revoked"],
+    ["无法打开此条目", "claim-failed"],
+  ]) {
+    const page = routeFakePage({ status });
+    const result = await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      page,
+    );
+    assert.equal(result.statusKind, kind);
+    assert.deepEqual(Object.keys(result).sort(), [
+      "closed",
+      "copyAbsent",
+      "detailHidden",
+      "fieldsEmpty",
+      "fixtureAbsent",
+      "statusKind",
+      "titleEmpty",
+      "visible",
+    ]);
+    assert.equal(result.visible, true);
+    assert.equal(routeWiped(result), true, kind);
+  }
+  // The full probe is the one the route-return wait uses, so it must report
+  // the fixed visibility boolean that wait requires.
+  for (const visible of [true, false]) {
+    const returned = await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      routeFakePage({ visible }),
+    );
+    assert.equal(returned.visible, visible);
+    assert.equal(routeWiped(returned), true);
+  }
+  // Any other status (pending, empty, closed text) is never a revocation.
+  for (const status of ["", notRevoked, "已关闭此条目", "other text"]) {
+    const result = await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      routeFakePage({ status }),
+    );
+    assert.equal(result.statusKind === "route-revoked" || result.statusKind === "claim-failed", false);
+    assert.equal(routeWiped(result), false, status);
+  }
+  // Each remaining fixed condition alone fails the wipe.
+  const failures = [
+    { detailHidden: false },
+    { view: "detail", detailHidden: false },
+    { title: FIXTURE_TITLE },
+    { copy: true },
+    { bodyText: "note " + FIXTURE_VALUE },
+    { bodyText: FIXTURE_TITLE + " elsewhere" },
+  ];
+  for (const override of failures) {
+    const result = await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      routeFakePage(override),
+    );
+    assert.equal(routeWiped(result), false, JSON.stringify(Object.keys(override)));
+  }
+  // The reported shape never carries the fixture title or value.
+  const withValues = JSON.stringify(
+    await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      routeFakePage({ title: FIXTURE_TITLE }),
+    ),
+  );
+  assert.doesNotMatch(withValues, /SYNTHETIC|条目|无法打开/);
+  // The switch-only page state resolves at once with fixed booleans whether
+  // the page is still visible or already hidden; the wait is host-side polling.
+  for (const visible of [true, false]) {
+    const switched = await routeProbeResult(context, ROUTE_SWITCH_PROBE, routeFakePage({ visible }));
+    assert.deepEqual(Object.keys(switched).sort(), [
+      "closed",
+      "detailHidden",
+      "fieldsEmpty",
+      "titleEmpty",
+      "visible",
+    ]);
+    assert.equal(switched.visible, visible);
+    // The switch shape is closed and wiped by checkWipe in the harness, not
+    // routeWiped (which, correctly, also requires the fixed status kind).
+    assert.equal(
+      ["closed", "detailHidden", "titleEmpty", "fieldsEmpty"].every(
+        (key) => switched[key] === true,
+      ),
+      true,
+    );
+    assert.equal(routeWiped(switched), false);
+  }
+  // The same read-only probe is the background-revocation wait: host-side
+  // polling of the fixed DOM probe, no page observer.
+  const hidden = await routeProbeResult(context, ROUTE_SWITCH_PROBE, routeFakePage({ visible: false }));
+  assert.equal(hidden.visible, false);
+  assert.equal(
+    ["closed", "detailHidden", "titleEmpty", "fieldsEmpty"].every(
+      (key) => hidden[key] === true,
+    ),
+    true,
+  );
+  // The physical keys are the browser's own single-shot shortcuts; the
+  // no-prompt bound is a fixed few seconds. Each key names its own browser
+  // window title: the source tab "Locklark acceptance", the route tab exactly
+  // "Locklark" (the route title does not start with a longer prefix).
+  assert.deepEqual(ROUTE_SWITCH_SOURCE, [{ key: "Control_L+Shift_L+Tab" }]);
+  assert.deepEqual(ROUTE_RETURN, [{ key: "Control_L+Tab" }]);
+  assert.deepEqual(ROUTE_RELOAD, [{ key: "Control_L+r" }]);
+  assert.equal(SOURCE_TITLE_PREFIX, "Locklark acceptance");
+  assert.equal(ROUTE_TITLE_PREFIX, "Locklark");
+  assert.ok(Number.isInteger(ROUTE_NATIVE_ABSENT_LIMIT));
+  assert.ok(ROUTE_NATIVE_ABSENT_LIMIT > 0 && ROUTE_NATIVE_ABSENT_LIMIT <= 5000);
+});
+
+test("route revocation checkpoint switches, wipes, reloads and never prompts", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const checkpoint = routeRevocationCheckpoint(source);
+  const at = (needle) => {
+    const index = checkpoint.indexOf(needle);
+    assert.ok(index >= 0, "checkpoint is missing " + needle);
+    return index;
+  };
+  // 1. One physical Control_L+Shift_L+Tab. The route tab is active when it is
+  //    sent, so it is addressed by the active route page's title prefix.
+  const switchKey = at("browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);");
+  const sourceVisible = at("Source tab did not become visible");
+  const hiddenWait = checkpoint.indexOf("routeWiped(", sourceVisible);
+  const returnKey = at("browserKey(ROUTE_RETURN, SOURCE_TITLE_PREFIX);");
+  assert.ok(switchKey < sourceVisible && sourceVisible < hiddenWait && hiddenWait < returnKey);
+  assert.match(source, /^const ROUTE_SWITCH_SOURCE = Object\.freeze\(\[\{ key: "Control_L\+Shift_L\+Tab" \}\]\);$/m);
+  assert.match(source, /^const ROUTE_RETURN = Object\.freeze\(\[\{ key: "Control_L\+Tab" \}\]\);$/m);
+  assert.match(source, /^const ROUTE_RELOAD = Object\.freeze\(\[\{ key: "Control_L\+r" \}\]\);$/m);
+  // The hidden route page loses its detail on its own before the return, by
+  // host-side polling of the fixed read-only DOM probe.
+  assert.match(
+    checkpoint.slice(hiddenWait, returnKey),
+    /^routeWiped\(\n\s+await revoked\.evaluate\(routeRevokedProbe\(fixture\.Title, fixture\.Value\)\),\n\s+\);/,
+  );
+  assert.match(checkpoint, /Background revocation did not wipe the route detail/);
+  assert.ok(at('recordRouteLifecycle("route-revoked")') > hiddenWait);
+  assert.doesNotMatch(checkpoint, /MutationObserver|ROUTE_HIDDEN_PROBE|routeHiddenProbe/);
+  // 2. The return proves the foreground and the same target, still wiped. The
+  //    source tab is active when it is sent, so it is addressed by the source
+  //    page's title prefix. The returned-route wait reads the full wipe probe
+  //    (the same one the stale reload uses), never the incomplete page state,
+  //    because routeWiped() also needs copyAbsent, fixtureAbsent and statusKind.
+  assert.ok(at("Route page did not return to the foreground") > returnKey);
+  const sameTarget = at('1, "Route target was replaced");');
+  assert.ok(sameTarget > returnKey);
+  const foreground = at("Route page did not return to the foreground");
+  const returnedWait = checkpoint.indexOf(
+    "routeRevokedProbe(fixture.Title, fixture.Value)",
+    foreground,
+  );
+  assert.ok(returnedWait > foreground && returnedWait < at('mark("route:reload");'));
+  assert.match(
+    checkpoint.slice(checkpoint.lastIndexOf("await wait(async () => {", returnedWait)),
+    /^await wait\(async \(\) => \{\n\s+const returned = await revoked\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),\n\s+\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);\n\s+\}, "Returned route page kept its detail"\);/,
+  );
+  // The full probe result includes the fixed visibility boolean the return wait
+  // requires, and the switch-only page state is never used for the return wait.
+  assert.match(
+    source,
+    /^function routeRevokedProbe\(title, value\) \{\n\s+return `\(\(\)=>\{\n(?:[^\n]*\n)*?\s{6}visible:document\.visibilityState==='visible',$/m,
+  );
+  assert.equal(
+    countMatches(checkpoint, /routeRevokedProbe\(fixture\.Title, fixture\.Value\)/g),
+    4,
+    "the background, return, reload and no-prompt waits share the full probe",
+  );
+  // No undefined probe name survives in the checkpoint or in the harness.
+  assert.doesNotMatch(checkpoint, /routeSwitchProbe/);
+  assert.doesNotMatch(source, /routeSwitchProbe\b/);
+  // ROUTE_SWITCH_PROBE is a defined fixed DOM expression, not a page hook.
+  assert.match(source, /^const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;$/m);
+  assert.match(source, /^const ROUTE_PAGE_STATE = `\(\(\)=>\{$/m);
+  assert.match(checkpoint, /Returned route page kept its detail/);
+  // 3. One real XTest Control_L+r to the route tab, only after the captured
+  //    target is proven still to be this route page and the route tab is
+  //    proven to be the active tab; then the fixed fail-closed state (closed
+  //    view, hidden detail, empty title/fields, no Copy, no fixture text)
+  //    plus the fixed revoked/claim-failed status kind.
+  const reload = at("browserKey(ROUTE_RELOAD, ROUTE_TITLE_PREFIX);");
+  assert.ok(reload > sameTarget);
+  // The captured target is proven still the one route page right before the
+  // key; the route tab was proven active at the start of the checkpoint.
+  const targetBefore = checkpoint.lastIndexOf(
+    '1, "Route target was replaced");',
+    reload,
+  );
+  assert.ok(targetBefore >= sameTarget && targetBefore < reload);
+  const reloadStage = at('mark("route:reload");');
+  assert.ok(switchKey < reloadStage && reloadStage < reload);
+  assert.doesNotMatch(
+    checkpoint.slice(targetBefore, reload),
+    /route\.evaluate/,
+    "the reload target checks stay read-only target lookups",
+  );
+  const failClosed = checkpoint.indexOf(
+    "routeRevokedProbe(fixture.Title, fixture.Value)",
+    reload,
+  );
+  assert.ok(failClosed > reload, "the stale fragment is probed after the reload");
+  assert.match(checkpoint, /Stale route fragment did not fail closed/);
+  // The fail-closed DOM probe is read both while waiting and, after the
+  // bounded no-prompt observation, right before the Copy assertion; that
+  // later probe is the one this ordering is anchored to.
+  const lastWipedProbe = checkpoint.lastIndexOf(
+    "routeRevokedProbe(fixture.Title, fixture.Value)",
+  );
+  assert.ok(lastWipedProbe > failClosed);
+  assert.ok(lastWipedProbe > failClosed);
+  const failClosedCopy = checkpoint.indexOf(
+    '0,\n        "Stale route page rendered a copy control",',
+    lastWipedProbe,
+  );
+  assert.ok(failClosedCopy > lastWipedProbe);
+  // The reload is never driven through extension APIs, CDP navigation or page
+  // injection: no reload expression, no chrome.tabs, no Page.* reload.
+  for (const forbidden of [
+    /routeReloadExpression/,
+    /chrome\.tabs/,
+    /Page\.navigate/,
+    /Page\.reload/,
+    /addInitScript/,
+  ])
+    assert.doesNotMatch(source, forbidden);
+  assert.doesNotMatch(checkpoint, /\broute\.evaluate\("[^"]*reload/i);
+  // 4. Every browser key goes through one helper: the X11 helper's exact
+  //    title-prefix form, the exact launched Chromium executable and one
+  //    single-shot action list. No prefix form or popup key remains.
+  assert.match(
+    source,
+    /const chromiumExecutable = realpathSync\(chromium\.executablePath\(\)\);/,
+  );
+  assert.match(
+    source,
+    /function browserKey\(actions, titlePrefix\) \{\n\s+assert\(\n\s+titlePrefix === ROUTE_TITLE_PREFIX \|\|\n\s+titlePrefix === SOURCE_TITLE_PREFIX,\n\s+"Unsupported browser key target",\n\s+\);/,
+  );
+  assert.match(
+    source,
+    /const request = \{ title_prefix: titlePrefix, executable: chromiumExecutable, actions \};/,
+  );
+  assert.doesNotMatch(source, /title_prefix: browserWindowTitle|, false\);/);
+  assert.match(
+    source.slice(source.indexOf("function input("), source.indexOf("nativeInput = input;")),
+    /assert\(native !== false, "Native window input only"\);/,
+  );
+  // Each key is addressed to the title of the tab that is ACTIVE when it is
+  // sent: the active route page ("Locklark") for the switch away and the
+  // Control_L+r reload, the source page for the return and the popup Escape /
+  // open keys. Every call is a single fixed action array, exactly once.
+  for (const [key, prefix] of [
+    ["ROUTE_SWITCH_SOURCE", "ROUTE_TITLE_PREFIX"],
+    ["ROUTE_RETURN", "SOURCE_TITLE_PREFIX"],
+    ["ROUTE_RELOAD", "ROUTE_TITLE_PREFIX"],
+    ['[{ key: "Escape" }]', "SOURCE_TITLE_PREFIX"],
+    ['[{ key: "Control_L+Shift_L+y" }]', "SOURCE_TITLE_PREFIX"],
+  ]) {
+    const literal = "browserKey(" + key + ", " + prefix + ");";
+    const call = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    assert.equal(countMatches(source, call), 1, literal);
+  }
+  const browserCalls = [...source.matchAll(/browserKey\((\[[^\n]*?\]|ROUTE_\w+), (\w+)\);/g)]
+    .map((match) => match[1] + " -> " + match[2]);
+  assert.deepEqual(browserCalls.sort((a, b) => a.localeCompare(b)), [
+    "[{ key: \"Control_L+Shift_L+y\" }] -> SOURCE_TITLE_PREFIX",
+    "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
+    "ROUTE_RELOAD -> ROUTE_TITLE_PREFIX",
+    "ROUTE_RETURN -> SOURCE_TITLE_PREFIX",
+    "ROUTE_SWITCH_SOURCE -> ROUTE_TITLE_PREFIX",
+  ]);
+  assert.doesNotMatch(checkpoint, /input\(/);
+  // 5. The native no-prompt check is a real, exact-title read-only inspection
+  //    of the native window: inspect + preserve_focus, no actions, and it
+  //    never swallows a failure. The old absence mode is gone.
+  assert.match(
+    source,
+    /input\(\[\], true, \{\n\s+inspect: true,\n\s+title: ROUTE_NATIVE_TITLE,\n\s+preserve_focus: true,\n\s+\}\);/,
+  );
+  assert.equal(countMatches(source, /title: ROUTE_NATIVE_TITLE,/g), 1);
+  assert.match(source, /^const ROUTE_NATIVE_TITLE = "Locklark · 浏览器原生确认";$/m);
+  const inspection = at("nativeInspection()[ROUTE_COPY_REVIEW_LABEL]");
+  assert.ok(inspection > failClosed);
+  assert.doesNotMatch(
+    checkpoint,
+    /"absent"|\babsent:|\babsent\?|wait_absent|controls\?\.present !== true|\?\? true/,
+  );
+  // `present` without a reported state is the absent-or-non-actionable case,
+  // never a prompt.
+  assert.match(
+    source,
+    /const offered =\n\s+control\?\.present === true &&\n\s+\(control\.enabled === true \|\| control\.showing === true\);\n\s+if \(offered\) throw Error\("Native route prompt is still present"\);/,
+  );
+  assert.match(checkpoint, /Native route prompt is still present/);
+  assert.match(checkpoint, /Date\.now\(\) \+ ROUTE_NATIVE_ABSENT_LIMIT/);
+  assert.match(source, /function nativeInspection\(\) \{/);
+  // The whole helper body: brace-matched from its declaration.
+  const helperStart = source.indexOf("function nativeInspection()");
+  let depth = 0,
+    helperEnd = -1;
+  for (let index = source.indexOf("{", helperStart); index >= 0; index++) {
+    if (source[index] === "{") depth++;
+    if (source[index] === "}" && --depth === 0) {
+      helperEnd = index + 1;
+      break;
+    }
+  }
+  const inspectionHelper = source.slice(helperStart, helperEnd);
+  assert.match(inspectionHelper, /throw Error\("Native no-prompt snapshot unavailable"\);/);
+  assert.doesNotMatch(inspectionHelper, /catch|\?\? \{\}|\|\| \{\}/);
+  // 6. The visible Copy assertion and the reviewed physical mouse wrapper run
+  //    in that order; the wrapper's own fixed pre-dispatch rejection is the
+  //    only mouse probe. No injected counter or trusted-event page probe.
+  const mouseClick = at("await stale.click(ROUTE_COPY_FIELD_SELECTOR);");
+  const absentCopy = checkpoint.indexOf(
+    'await stale.count(ROUTE_COPY_FIELD_SELECTOR),\n        0,\n        "Stale route page rendered a copy control",',
+  );
+  assert.ok(
+    absentCopy > failClosed && absentCopy < mouseClick,
+    "the missing Copy element is proven before the mouse click",
+  );
+  assert.doesNotMatch(
+    checkpoint.slice(absentCopy, mouseClick),
+    /route\.evaluate\(/,
+    "no page check runs between the Copy assertion and the mouse probe",
+  );
+  assert.equal(
+    countMatches(checkpoint, /await stale\.click\(ROUTE_COPY_FIELD_SELECTOR\);/g),
+    1,
+  );
+  assert.match(checkpoint, /rejected === "Popup control must be available"/);
+  assert.doesNotMatch(source, /ROUTE_INPUT_COUNT_PROBE|__locklarkRouteInputCount|isTrusted|inputEvents/);
+  assert.match(source, /^const ROUTE_COPY_FIELD_SELECTOR =\n  '\[data-field-id="password"\] \[data-action="copy-field"\]';$/m);
+  const wrapper = source.slice(
+    source.indexOf("click: async (selector) => {"),
+    source.indexOf("\n      },", source.indexOf("click: async (selector) => {")),
+  );
+  assert.match(wrapper, /document\.visibilityState!=="visible"/);
+  assert.match(wrapper, /Popup control must be available/);
+  assert.ok(wrapper.indexOf("Popup control must be available") < wrapper.indexOf('type: "mousePressed"'));
+  // No DOM event, worker message or target navigation is invented.
+  for (const forbidden of [
+    /dispatchEvent/,
+    /tabs\.onActivated/,
+    /relayMessage/,
+    /postMessage/,
+    /sendMessage/,
+    /bringToFront/,
+    /\.focus\(/,
+    /click_label/,
+    /wait_label/,
+  ])
+    assert.doesNotMatch(checkpoint, forbidden);
+  // The DOM probes return only fixed booleans and enums.
+  const helpers = routeRevocationHelpers(source).code;
+  const probes = helpers.slice(
+    helpers.indexOf("const ROUTE_PAGE_STATE ="),
+    helpers.indexOf("// Route field-copy acceptance."),
+  );
+  const returned = new Set(
+    [...probes.matchAll(/^\s{4,6}([a-zA-Z]+):/gm)].map((match) => match[1]),
+  );
+  assert.deepEqual([...returned].sort(), [
+    "closed",
+    "copyAbsent",
+    "detailHidden",
+    "fieldsEmpty",
+    "fixtureAbsent",
+    "statusKind",
+    "titleEmpty",
+    "visible",
+  ]);
+  assert.doesNotMatch(probes, /\b(title|value|url|token|count|id|text):/);
+  // Nothing in the revocation path is logged, and the only diagnostics it adds
+  // to a failure report are fixed booleans.
+  const consoleLines = checkpoint.match(/console\.(log|error|warn)\(([^;]*)\);/g) || [];
+  for (const line of consoleLines) assert.doesNotMatch(line, /fixture|routeTarget|targetId/);
+  assert.match(source, /routeMouseRejected: \{\n\s+rejected: routeMouseRejected\.rejected === true,\n\s+\},/);
+  assert.doesNotMatch(source, /routeGrant|sanitizeRouteGrantObservation|observeRouteGrantWindows|ROUTE_GRANT/);
+  // The existing positive journey is untouched: the same route target is the
+  // one page, the copy stays physical and the private pipe still decides.
+  const copyProof = source.slice(
+    source.indexOf('mark("route:native-approve")'),
+    source.indexOf("// Route revocation checkpoint: the same tab and target"),
+  );
+  assert.match(copyProof, /await route\.click\(ROUTE_COPY_FIELD_SELECTOR\);/);
+  assert.match(copyProof, /OS clipboard did not receive the approved field/);
+  assert.match(copyProof, /Native field disclosure did not appear/);
+  assert.match(copyProof, /Route detail did not survive native approval/);
+});
+
+// Read once at module load, before any test text exists, so anchor-count
+// checks never match this file's own source.
+const ROUTE_JOURNEY_SOURCE = readFileSync(
+  new URL("./browser_native_acceptance.mjs", import.meta.url),
+  "utf8",
+);
+
+test("route revocation reattaches a fresh client after the positive cleanup and closes it in its own finally", () => {
+  const source = ROUTE_JOURNEY_SOURCE;
+  // Each anchor is required to occur exactly once in the harness.
+  const unique = (needle) => {
+    const hits = countMatches(
+      source,
+      new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+    );
+    assert.equal(hits, 1, needle);
+    return source.indexOf(needle);
+  };
+  // From the positive block's cleanup and trace stop through the revoke
+  // checkpoint's own finally.
+  const positiveCleanup = unique("      await refreshRouteStatusTrace(attach, opened, true);");
+  const positiveClientClosed = unique("        await route.close();");
+  assert.ok(positiveClientClosed < positiveCleanup, "the positive client closes before its trace stops");
+  const from = unique("    // Route revocation checkpoint: the same tab and target");
+  assert.ok(from > positiveCleanup, "the revoke checkpoint follows the cleanup");
+  const stop = source.indexOf("\n  async function blank()", from);
+  assert.ok(stop > from, "revocation checkpoint must stay in the route journey");
+  // The cleanup slice alone, then the revoke checkpoint through its finally.
+  const cleanup = source.slice(positiveClientClosed, from);
+  const checkpoint = source.slice(from, stop);
+  const at = (needle) => {
+    const index = checkpoint.indexOf(needle);
+    assert.ok(index >= 0, "checkpoint is missing " + needle);
+    return index;
+  };
+  // 1. The cleanup ends with the page's trace stopped and nothing else; no
+  //    attach happens before the revoke checkpoint begins.
+  assert.match(cleanup, /await route\.close\(\);[\s\S]*await refreshRouteStatusTrace\(attach, opened, true\);\n    \}\n$/);
+  assert.doesNotMatch(cleanup, /\battach\(\s*opened\s*\)|\brevoked\b/);
+  // 2. The fresh attach happens after that cleanup and before the first
+  //    physical tab switch, reusing the captured `opened` target exactly once.
+  const switchKey = at("browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);");
+  const freshAttach = at("revoked = await attach(opened);");
+  const firstStep = Math.min(
+    ...[
+      checkpoint.indexOf("mark(", freshAttach),
+      checkpoint.indexOf("browserKey(", freshAttach),
+      checkpoint.indexOf("document.visibilityState", freshAttach),
+    ].filter((index) => index > freshAttach),
+  );
+  assert.ok(freshAttach > 0, "the revoke checkpoint must reattach a fresh client");
+  assert.ok(freshAttach < firstStep, "the fresh attach precedes the first revoke step");
+  assert.ok(freshAttach < switchKey, "the fresh attach precedes the first physical tab switch");
+  // Exactly one fresh client is bound for the revocation reads; the stale
+  // client's own later reattach stays as it was.
+  assert.equal(
+    countMatches(checkpoint, /revoked = await attach\(\s*opened\s*\);/g),
+    1,
+    "exactly one fresh revocation client",
+  );
+  assert.equal(countMatches(checkpoint, /\bstale = await attach\(\s*opened\s*\);/g), 1);
+  assert.doesNotMatch(checkpoint, /\broute = await attach\(/);
+  // The captured target is proven still the exact route page by the targets
+  // list immediately before the attach.
+  assert.match(
+    checkpoint.slice(0, freshAttach),
+    /assert\.equal\(\n\s+\(await targets\(\)\)\.filter\(\n\s+\(target\) => target\.id === routeTarget && ROUTE_PAGE\.test\(target\.url\),\n\s+\)\.length,\n\s+1,\n\s+"Route target was replaced",\n\s+\);/,
+  );
+  // A failed attach cannot be read as success: the attach is awaited outside
+  // any try, and its first read is a required readyState gate.
+  assert.doesNotMatch(
+    checkpoint.slice(Math.max(0, freshAttach - 120), freshAttach + 200),
+    /\btry\s*\{|catch|\?\?|\|\|/,
+  );
+  assert.match(
+    checkpoint,
+    /revoked = await attach\(opened\);\n\s+await wait\(\n\s+async \(\) => \(await revoked\.evaluate\("document\.readyState"\)\) === "complete",\n\s+"Route page did not load",\n\s+\);/,
+  );
+  // 3. Every route-page read in the revoke/reload/no-prompt checkpoint uses the
+  //    reattached client, never the closed positive client.
+  const afterAttach = checkpoint.slice(freshAttach);
+  assert.match(afterAttach, /await revoked\.evaluate\(/);
+  assert.doesNotMatch(afterAttach, /\broute\./);
+  // Only the fresh client (from this point) and the pre-existing stale client
+  // are attached; no further connection, and none without the captured target.
+  assert.equal(countMatches(afterAttach, /await attach\(/g), 2);
+  assert.doesNotMatch(afterAttach, /await attach\((?!opened\))/);
+  assert.match(afterAttach, /browserKey\(ROUTE_RETURN, SOURCE_TITLE_PREFIX\);[\s\S]*await revoked\.evaluate\(/);
+  assert.match(afterAttach, /browserKey\(ROUTE_RELOAD, ROUTE_TITLE_PREFIX\);[\s\S]*await revoked\.evaluate\(/);
+  // The bounded no-prompt loop reads the reattached client, not `stale`.
+  const promptLoop = afterAttach.slice(
+    afterAttach.indexOf("for (;;) {"),
+    afterAttach.indexOf("await delay(200);"),
+  );
+  assert.ok(promptLoop.length > 0, "the no-prompt loop must stay bounded");
+  assert.match(promptLoop, /await revoked\.evaluate\(routeRevokedProbe\(/);
+  assert.doesNotMatch(promptLoop, /stale\.evaluate\(routeRevokedProbe/);
+  // The physical keys, read-only probes and native inspection are unchanged.
+  for (const fixed of [
+    /browserKey\(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX\);/,
+    /browserKey\(ROUTE_RETURN, SOURCE_TITLE_PREFIX\);/,
+    /browserKey\(ROUTE_RELOAD, ROUTE_TITLE_PREFIX\);/,
+    /nativeInspection\(\)\[ROUTE_COPY_REVIEW_LABEL\]/,
+    /await stale\.count\(ROUTE_COPY_FIELD_SELECTOR\)/,
+    /await stale\.click\(ROUTE_COPY_FIELD_SELECTOR\)/,
+  ])
+    assert.match(checkpoint, fixed);
+  // 4. The fresh client is closed in the revoke checkpoint's own finally, on
+  //    success and failure, alongside the stale client.
+  const finallyAt = checkpoint.lastIndexOf("} finally {\n      try {\n        await stale?.close();");
+  assert.ok(finallyAt > freshAttach, "the revoke finally must follow the attach");
+  const revokeFinally = checkpoint.slice(
+    finallyAt,
+    checkpoint.indexOf("} finally {", finallyAt + 1),
+  );
+  assert.match(revokeFinally, /await stale\?\.close\(\);/);
+  assert.match(revokeFinally, /await revoked\?\.close\(\);/);
+  assert.equal(countMatches(checkpoint, /revoked\?\.close\(\)/g), 1);
+  // Nothing navigates, messages the worker, installs a page hook or clicks
+  // natively inside the revoke checkpoint.
+  assert.doesNotMatch(
+    afterAttach,
+    /\bgoto\b|sendMessage|relayMessage|postMessage|addInitScript|routeStatusTraceProbe|\binput\(|click_label|wait_label/,
+  );
+  assert.match(checkpoint, /^\s+let revoked = null;$/m);
 });
