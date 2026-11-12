@@ -303,7 +303,7 @@ jobs:
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs scripts/test_browser_edge_install.mjs
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
       - name: Prepare reproducible unsigned extension packages
         timeout-minutes: 5
         run: |
@@ -311,6 +311,7 @@ jobs:
           PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
           python3 scripts/test_package_browser_extension.py
           python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
+          node --test scripts/test_browser_edge_install.mjs
           python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
           for product in chromium firefox safari; do
             PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
