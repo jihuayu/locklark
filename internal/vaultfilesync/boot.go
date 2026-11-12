@@ -80,7 +80,9 @@ type Receipt struct {
 	RemoteRevision vaultfilebackend.Revision
 	// FileDigest is vaultfile.FileDigest of the verified remote file,
 	// recomputed locally from the opened file: the lowercase hex SHA-256 of
-	// the complete canonical sealed file. It is not a value named by the file
+	// the domain separator DomainFileDigest, a NUL byte, and EncodeFile(f)
+	// (the canonical sealed encoding, with header.revision_id and
+	// content_signature kept unchanged). It is not a value named by the file
 	// header (header.revision_id is a different, derived identifier); it
 	// identifies the content, not a backend version.
 	FileDigest string
