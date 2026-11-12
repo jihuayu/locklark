@@ -411,7 +411,7 @@ func multiProofRemote(t *testing.T) []byte {
 func TestUpdateWorkingItemsPreservesOlderPolicyProofs(t *testing.T) {
 	f := newFixture(t)
 	multi := multiProofRemote(t)
-	current, err := f.remote.Dir.Read(context.Background(), remoteName)
+	current, err := f.remote.Backend.Read(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("read current fixture revision: %v", err)
 	}

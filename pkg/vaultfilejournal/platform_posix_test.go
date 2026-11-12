@@ -4,8 +4,21 @@ package vaultfilejournal
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+// privateDir returns a fresh 0700 directory under t.TempDir(). The enclosing
+// temp directory keeps its own mode; the journal only requires its direct
+// parent to be private and does not tighten somebody else's directory.
+func privateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "journal")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
 
 // makeParentShared widens the directory's POSIX mode so it grants group and
 // other access. The journal must reject it, never tighten it.
