@@ -63,6 +63,26 @@ import (
 // sealing API: SealAuthenticatedFile is the caller-pinned seal that produces
 // the bytes this path accepts.
 func OpenAuthenticatedFile(encoded []byte, checkpoint *PolicyCheckpoint, deviceID string, identity *age.X25519Identity) (*File, *kdbx.Database, error) {
+	f, current, err := verifyParsedAuthenticatedFile(encoded, checkpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	return openVerifiedFile(f, current, checkpoint, deviceID, identity)
+}
+
+// verifyParsedAuthenticatedFile is steps 1 and 2 of OpenAuthenticatedFile
+// without repetition: it parses the canonical file and returns it together
+// with the current policy that VerifyPolicyCheckpoint authenticated under the
+// caller's checkpoint. A caller that authenticated a file for its own purpose
+// and then needs the ordered open continues with openVerifiedFile, so no
+// proof or content signature is verified twice and no untrusted roster is
+// consulted in between.
+//
+// The order and the errors are exactly OpenAuthenticatedFile's, which calls
+// this function unchanged: ParseFile, then VerifyPolicyCheckpoint, then the
+// validateStructure pass OpenAuthenticatedFile has always run after the
+// verifier. Every error returns nil, nil.
+func verifyParsedAuthenticatedFile(encoded []byte, checkpoint *PolicyCheckpoint) (*File, *Policy, error) {
 	f, err := ParseFile(encoded)
 	if err != nil {
 		return nil, nil, err
@@ -77,6 +97,16 @@ func OpenAuthenticatedFile(encoded []byte, checkpoint *PolicyCheckpoint, deviceI
 	if err != nil {
 		return nil, nil, err
 	}
+	return f, current, nil
+}
+
+// openVerifiedFile is steps 3 to 6 of OpenAuthenticatedFile for a file that
+// verifyParsedAuthenticatedFile already authenticated under checkpoint on
+// behalf of the same caller. f and current must be exactly that returned pair;
+// passing a file that was not authenticated, or a different checkpoint, is a
+// caller error this package cannot detect. The caller device is resolved only
+// in current, the authenticated policy, and every error returns nil, nil.
+func openVerifiedFile(f *File, current *Policy, checkpoint *PolicyCheckpoint, deviceID string, identity *age.X25519Identity) (*File, *kdbx.Database, error) {
 	dev := findDevice(current, deviceID)
 	if dev == nil || !current.hasRole(dev.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
 		return nil, nil, Err("device_id", CodeInvalidValue)

@@ -1227,12 +1227,167 @@ learned. If that same VUK is reused, the device can
 still use the low-level [`OpenCEK`](#cek-sealing-and-opening) with the new
 `cek_slot` to recover the new per-snapshot CEK, and then
 [`OpenKDBXPayload`](#kdbx-payload-sealing-and-opening) to decrypt the new
-payload. Cryptographic reader revocation requires a separate rotation to a
+payload. Cryptographic reader withdrawal requires a separate rotation to a
 fresh VUK, together with a protocol epoch advance, so that new envelopes and
-CEK slots are bound to a key the removed device never held. This API does not
-implement that rotation: after a device removal it produces a file that binds
-the current policy, not one from which the removed device's knowledge of the
-VUK has been cryptographically withdrawn.
+CEK slots are bound to a key the removed device never held.
+`SealAuthenticatedFile` does not implement that rotation: after a device
+removal it produces a file that binds the current policy, not one from which
+the removed device's knowledge of the VUK has been cryptographically
+withdrawn. [`RotateAuthenticatedFile`](#caller-pinned-epoch-rotation) is the
+separate caller-pinned rotation that produces such a successor from one
+complete old authenticated file, without recalling an old VUK a device has
+already learned.
+
+## Caller-pinned epoch rotation
+
+```
+RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, sourceDeviceID string, sourceIdentity *age.X25519Identity, nextDraft *File, authorPrivateKey ed25519.PrivateKey) (newEncoded []byte, newVUK []byte, err error)
+```
+
+`RotateAuthenticatedFile` produces one complete next-epoch baseline file from
+one specified old authenticated whole file, and returns the new epoch VUK only
+to the caller whose source device remains authorized. It is the only API in
+this schema revision that generates a VUK. `checkpoint` is the caller's
+already-trusted `PolicyCheckpoint` and the only trust anchor; `nextDraft` is a
+builder `File` whose policy chain already continues that checkpoint and reaches
+it as the immediate successor of the policy that is current in the old file.
+The next chain is therefore validated twice, against the caller's pin and
+against an internal checkpoint derived from the authenticated old file, and the
+sealed output is validated again under the caller's pin before success.
+
+The order is fixed and is the security boundary. Nothing is decrypted,
+generated, wrapped or encrypted before every check in steps 1 to 5 passes.
+
+1. **Basic inputs.** A nil `nextDraft`, `checkpoint`, `sourceIdentity` or
+   author key, an empty `sourceDeviceID`, and a draft `format` or `version`
+   other than the protocol's are `invalid_value` at the empty path;
+   `content_encoding` must be empty (the protocol value) or `kdbx`, else
+   `invalid_value` at `content_encoding`.
+2. **Old file.** The old bytes are parsed and authenticated exactly as
+   [`OpenAuthenticatedFile`](#trusted-full-file-open) does, by the shared
+   parse-and-verify steps: `ParseFile`, then `VerifyPolicyCheckpoint` against
+   the caller's pin. Every error is returned unchanged, and no old-file field
+   is read as an input before this succeeds. The old file's own carried
+   roster is never a trust source.
+3. **Next policy, twice.** The next chain must be root-signed or an authorized
+   delegated `InviteReaders` transition (see [Admin-delegated
+   InviteReaders](#admin-delegated-invitereaders-transitions)), and it is
+   authenticated by the unchanged `verifyPolicyChain` twice, each call before
+   any KDBX decrypt in step 6, and both must pass:
+   `verifyPolicyChain(nextDraft.header, nextDraft.signed_policy_proofs,
+   checkpoint)` against the original caller pin, and
+   `verifyPolicyChain(nextDraft.header, nextDraft.signed_policy_proofs,
+   oldCurrent)` against an internal old-current checkpoint. The internal
+   checkpoint is built from the authenticated old file: the caller pin's
+   `VaultID` and original owner root (key id and public key, copied) with
+   `PolicySeq` = the old header `policy_seq` and `PolicyDigest` = the
+   authenticated old header `policy_digest`. It is not a new trust root; it only
+   binds the successor to the old file's current policy. Because of it, a
+   well-formed chain that continues the older caller pin on another branch, or
+   skips the old current policy, is `policy_checkpoint_failed` at the empty
+   path. Because of the caller-pin check, a correctly root-signed suffix that
+   starts at old `policy_seq` + 1 and links the old current digest but omits
+   the caller pin's intervening proofs (for example `p6`, `p7` under a seq 5
+   pin) is `policy_checkpoint_failed` at the empty path instead of being sealed
+   into a file the caller pin could not open. The helper enforces contiguity,
+   structure and signatures only: from either pin it accepts any number of
+   contiguous valid policies, so a valid `p9` over a valid `p8` over the old
+   current `p7` authenticates from both pins and the helper does not make the
+   header end at old `policy_seq` + 1. The explicit step-4 guard below is what
+   requires exactly one policy successor. Both checks return their errors
+   unchanged. A next header whose `vault_id` differs from
+   `checkpoint.VaultID` is rejected here as `policy_checkpoint_failed` at the
+   empty path by the caller-pin check, before the explicit vault equality
+   check in step 4 is reached. The draft is not structurally
+   validated as a sealed file: it has exactly the builder
+   contract of the `File` the seal takes, and its carried `vuk_device_slots`,
+   `cek_slot`, `kdbx_ciphertext`, `revision_id` and `content_signature` are
+   allowed to be nil or stale and are ignored. The author and source lookups
+   below use the policy returned by the old-current check; both checks end at
+   the draft's same header policy, and step 4 ties it to the old current
+   policy, so they agree. In the authenticated next policy the
+   author device must be a writer, admin or owner whose Ed25519 content
+   signing key matches `authorPrivateKey` (`author_signing_key_mismatch` at
+   `content_signature`, the same check the seal performs); the
+   `sourceDeviceID` device must be listed with a read-capable role, and its
+   `age_encryption_key` must equal `sourceIdentity.Recipient()`'s string
+   (`invalid_value` at `device_id`).
+4. **Exact immediate continuation.** Against the authenticated old header the
+   draft must carry the same `vault_id` (`invalid_value` at `vault_id`; a
+   draft of another vault has already failed in step 3 as
+   `policy_checkpoint_failed` at the empty path), `key_epoch` exactly old + 1
+   and `content_seq` exactly old + 1, with no
+   64-bit wrap (`key_epoch`, `content_seq`), `prev_digest` equal to the raw 32
+   bytes of `FileDigest(old)` (`prev_digest`), and a different `op_id`
+   (`op_id`). A missing, stale, skipped or wrapped transition is
+   `invalid_value` at its field path. The next policy must also be the
+   immediate successor of the authenticated old current policy: the header
+   `policy_seq` must be exactly old `policy_seq` + 1 and the authenticated next
+   policy's `prev_policy_digest` exactly the old header `policy_digest`, with no
+   64-bit wrap, else `policy_checkpoint_failed` at the empty path. This guard
+   is necessary rather than merely explicit: step 3's `verifyPolicyChain`
+   admits several contiguous valid successors, so only this guard makes a
+   header that is two or more valid policies past the old current policy, such
+   as a valid `p9` over `p8` over `p7`, a `policy_checkpoint_failed` at the
+   empty path.
+5. **Seal preconditions.** The successor epoch must be positive
+   (`invalid_value` at `key_epoch`).
+6. **Open.** The old full database is opened through the authenticated open's
+   ordered device, VUK, CEK and KDBX steps for `sourceDeviceID` and
+   `sourceIdentity`; their errors are returned unchanged.
+7. **Fresh VUK.** A fresh random 32-byte epoch VUK is drawn with
+   `crypto/rand`. Its package-owned buffer is cleared on every failure,
+   including a `crypto/rand` or seal failure, and only its exact buffer is
+   handed to the caller on successful sealed bytes.
+8. **Seal.** `SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK,
+   authorPrivateKey)` seals the new baseline under the original caller
+   checkpoint, so the returned file is openable under exactly the pin supplied
+   to the rotation: it derives a VUK envelope for every read-capable device of
+   the authenticated next policy only, generates a fresh per-snapshot CEK and a
+   fresh CEK slot, encrypts the opened database and signs the content. No old
+   VUK, CEK or CEK slot is reused.
+9. **Final output.** `ParseFile(encoded)` and then
+   `VerifyPolicyCheckpoint(parsed, checkpoint)` run on the sealed bytes under
+   the original caller pin. Either error is returned unchanged with nil
+   outputs, and the parsed file is not returned. Success therefore yields a
+   complete file that parses, is structurally valid, is signed by the
+   authenticated next policy's author and verifies under the exact caller
+   checkpoint.
+
+On success `newEncoded` is the sealed successor, already verified under
+`checkpoint`, and `newVUK` is a caller-owned 32-byte value the caller must
+clear. On every error, including the seal and the final parse or verification
+error, both are nil and the package-owned new VUK buffer is cleared. The caller's old bytes, checkpoint,
+draft, identity and author key are never modified or retained. The opened
+database is owned by the call and never returned; the content of its
+InnerHeader binaries is cleared in place after sealing on success and error,
+which is a minimum cleanup only: decrypted XML, protected values, Go strings
+and library temporaries are not claimed to be securely zeroed.
+
+**Scope and limits.** This produces one complete next-epoch baseline from the
+specified old authenticated file, and requires the next policy chain to be
+already root- or delegation-authorized under the caller's pin and to be the
+immediate successor of the old file's authenticated current policy, carrying
+the caller pin's full intervening proof chain; the immediate-successor
+requirement is enforced by the explicit step-4 guard, not by the step-3 chain
+verification, which admits several contiguous valid successors. The next chain
+is validated against the caller's pin and against the internal old-current
+checkpoint, the seal uses the original caller checkpoint, and the sealed output
+is parsed and verified under that same checkpoint. The old-current checkpoint is derived only
+from the authenticated old file and the pin's original root, so it is not a
+second trust anchor. It is not
+server freshness and not compare-and-swap: `prev_digest` and
+`content_seq + 1` are checked against this one old file only, nothing proves a
+backend holds the same baseline, and two callers may rotate the same old file
+into different successors. It does not create policies, invitations or device
+keys, does not perform device-key generation or restore roots, does not recover
+old plaintext the caller could not already open, and cannot recall an old VUK
+an already-authorized device learned. A device removed by this rotation is
+rejected by the next policy and receives no new VUK; a device is rotated by
+another device that stays authorized. The fresh epoch VUK makes the old VUK
+unable to open the next CEK, so the removed device cannot read the successor
+through the ordinary open path; prior plaintext is not erased from old copies
+the device already holds.
 
 ## Trusted full-file open
 
@@ -1370,6 +1525,21 @@ authorization is implemented. In particular:
   generating or rotating them, creates no policy change or invitation, and
   establishes nothing about the provenance or freshness of the checkpoint or
   content history through `prev_digest`.
+- `RotateAuthenticatedFile` proves only the ordered result of [Caller-pinned
+  epoch rotation](#caller-pinned-epoch-rotation): one specified old file is
+  authenticated under the caller's pin, the next draft's chain continues the
+  same pin and is the immediate successor of the old file's authenticated
+  current policy (validated against the caller pin and against an internal
+  old-current checkpoint derived from that old file), its author and source
+  device are authorized there, the draft is an exact `content_seq + 1` /
+  `key_epoch + 1` continuation of that old file, a complete successor is
+  sealed under a fresh random epoch VUK with the original caller checkpoint,
+  and that sealed successor then parses and verifies under the same caller
+  checkpoint before it is returned. It is not
+  server freshness, compare-and-swap or a sync protocol, does not create
+  policies, invitations, device keys or roots, does not recover old plaintext,
+  and does not revoke a VUK an already-authorized device learned from an old
+  copy.
 
 ## Budgets
 
@@ -1454,7 +1624,9 @@ This schema revision includes the two verification APIs described above,
 `VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward),
 the caller-pinned full-file seal `SealAuthenticatedFile` ([Trusted full-file
 seal](#trusted-full-file-seal)) and open `OpenAuthenticatedFile` ([Trusted
-full-file open](#trusted-full-file-open)), two key-wrapping primitives,
+full-file open](#trusted-full-file-open)), the caller-pinned complete-file
+epoch rotation `RotateAuthenticatedFile` ([Caller-pinned epoch
+rotation](#caller-pinned-epoch-rotation)), two key-wrapping primitives,
 `SealCEK`/`OpenCEK`
 ([CEK sealing and opening](#cek-sealing-and-opening)) and
 `SealVUKForDevice`/`OpenVUKForDevice` ([VUK device-slot
@@ -1479,13 +1651,17 @@ delegated diff it implements no other policy proof, signature-chain or
 authorization verification and no permission checks. It also leaves the
 provenance of the caller's root outside its scope, key or digest crypto
 beyond the definitions, content history through `prev_digest`, server
-freshness, migration/import, VUK and epoch generation or rotation, the
-invitation and epoch rewrap workflow that would produce a new VUK or epoch for
-changed device sets, or product wiring. `SealAuthenticatedFile` seals under an
-existing signed chain with a caller-supplied VUK and epoch, and
+freshness, migration/import, any VUK or epoch rotation beyond the single
+caller-pinned one described below, the invitation workflow, or product wiring.
+`SealAuthenticatedFile` seals under an existing signed chain with a
+caller-supplied VUK and epoch,
+`RotateAuthenticatedFile` advances the epoch by exactly one for one specified
+old file under an already authorized next chain, and
 `OpenAuthenticatedFile` is only the ordered caller-pinned open above:
 it does not claim server freshness, complete content history through
 `prev_digest`, checkpoint provenance, epoch/key generation or an invitation
-flow. The VUK device-slot envelope of [VUK device-slot
-envelope](#vuk-device-slot-envelope) wraps only the caller-supplied VUK; it
-authenticates no policy and opens no file.
+flow. `RotateAuthenticatedFile` creates no policy, invitation, device key or
+root, is neither server freshness nor compare-and-swap, and does not revoke a
+VUK already learned from an old copy. The VUK device-slot envelope of [VUK
+device-slot envelope](#vuk-device-slot-envelope) wraps only the caller-supplied
+VUK; it authenticates no policy and opens no file.
