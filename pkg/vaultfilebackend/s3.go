@@ -144,11 +144,26 @@ type S3Config struct {
 //     connection"; the driver correctly reported this as ErrUnknown.
 //
 // This MinIO version is therefore not qualified by full conformance, and the
-// bridge work is not complete. AWS S3, every other S3-compatible provider,
-// real cloud accounts, multi-device recovery and fault matrices, and any
-// product or account wiring remain unverified. This is not production
-// acceptance of any provider: the bridge is not wired to product or account
-// code and has not been accepted by or against any provider or account.
+// bridge work is not complete on that instance.
+//
+// A local RustFS 1.0.5 candidate runtime was then exercised: the official
+// image
+// ghcr.io/rustfs/rustfs@sha256:829b46dd6f2bbf0ece67e5ef6ae3f1de3b3542ad3b8b614288b17b98cca61c3e
+// (linux/arm64), run as the owned container
+// locklark-s3-smoke-rustfs-cbe3121f452a on the loopback TLS endpoint
+// https://127.0.0.1:32875, with synthetic credentials held only in private
+// temporary files. TestS3RustFSAllocatorSafetyTLSSmoke passed on it: a
+// missing-key If-Match write was rejected and left the key absent, an exact
+// create-read returned a strong revision, a same-revision race committed one
+// winner, and a stale write conflicted. TestS3RustFSTLSConformance ran every
+// one of the 13 shared subtests against the same instance with no skips and
+// passed all 13, including durability across reopen.
+//
+// This is local candidate evidence only. It is not AWS account or provider
+// qualification and not production acceptance: the bridge is not wired to
+// product or account code (configs remain empty), AWS S3, real cloud
+// accounts, multi-device recovery and fault matrices remain unverified, and
+// the bridge work, tracked as issue #112, is not complete or closed.
 type s3Backend struct {
 	client *s3.Client
 	bucket string
