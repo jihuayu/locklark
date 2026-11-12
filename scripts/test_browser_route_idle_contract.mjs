@@ -414,27 +414,29 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
 
 test("the idle live probe compares fixed booleans inside the page", () => {
   const start = SOURCE.indexOf(
-    "function routeIdleLiveProbe(title, canaries, detailTemplateHTML, baselineText) {",
+    "function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {",
   );
   const stop = SOURCE.indexOf("\nfunction routeIdleLive(", start);
   assert.ok(start > 0 && stop > start);
-  // The selector split helper is the only harness constant the probe uses.
+  // The selector split helper and the text policy the probe embeds are the
+  // only harness functions/constants it uses.
   const context = vm.createContext({
     ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE,
   });
-  vm.runInContext(
-    SOURCE.slice(start, stop) + "\nthis.probe = routeIdleLiveProbe;",
-    context,
-  );
-  const expression = context.probe(
+  vm.runInContext(policySource() + "\n" + SOURCE.slice(start, stop) + "\nthis.probe = routeIdleLiveProbe;", context);
+  const expression = context.routeIdleLiveProbe(
     "Fixture title",
+    ["Fixture title", "canary"],
     ["canary"],
     '<body><section id="detail-view"></section></body>',
     ["static"],
   );
   assert.equal(typeof expression, "string");
-  // Only fixed keys and per-condition booleans leave the page.
-  const keys = [...expression.matchAll(/^\s{6}([a-zA-Z]+):/gm)].map((m) => m[1]);
+  // Only fixed keys and per-condition booleans leave the page: the probe's
+  // final return object (the embedded policy only feeds the page).
+  const returns = expression.lastIndexOf("    return {");
+  assert.ok(returns > 0);
+  const keys = [...expression.slice(returns).matchAll(/^\s{6}([a-zA-Z]+):/gm)].map((m) => m[1]);
   assert.deepEqual(keys.sort(), [
     "copyControl",
     "detailShown",
@@ -466,4 +468,113 @@ test("the idle live probe compares fixed booleans inside the page", () => {
   }
   assert.equal(live(null), false);
   assert.equal(live({ ...good, view: "other" }), false);
+});
+
+// The harness's route detail text policy, as its own source.
+function policySource() {
+  const start = SOURCE.indexOf("function routeDetailPrivacyPolicy(texts, forbidden) {");
+  const stop = SOURCE.indexOf("\n// The route's own tab switch", start);
+  assert.ok(start > 0 && stop > start, "the text policy must exist");
+  return SOURCE.slice(start, stop);
+}
+
+// A wholly synthetic login: Title and Username are visible fixture text,
+// every other canary must stay off the page. No real fixture value is used.
+const SYNTHETIC = Object.freeze({
+  Title: "Synthetic title",
+  Username: "synthetic-user",
+  Password: "SyntheticPass",
+  Secret: "SyntheticSeed",
+  Value: "SyntheticPass-value",
+  OTPSeed: "SyntheticOTPSeed",
+});
+const SYNTHETIC_KEYS = [
+  "Password", "Secret", "Username", "Value", "SaveUsername", "SaveValue",
+  "UpdateUsername", "UpdateValue", "RejectedUsername", "RejectedValue",
+  "OTPSeed", "OTPURI", "CardNumber", "CardHolder", "CardVerification",
+  "CardExpiry", "CardPIN",
+];
+const VISIBLE_KEYS = ["Username"];
+const allTexts = () => SYNTHETIC_KEYS.map((key) => SYNTHETIC[key]).filter((v) => typeof v === "string" && v);
+const forbiddenTexts = () => allTexts().filter((v) => !VISIBLE_KEYS.map((key) => SYNTHETIC[key]).includes(v));
+
+// The harness's forbidden-canary filter, given a synthetic canary function.
+function forbiddenFor(fixture) {
+  const context = vm.createContext({ fixtureCanaries: allTexts });
+  vm.runInContext(
+    SOURCE.slice(
+      SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS ="),
+      SOURCE.indexOf("\n// The route detail's text policy"),
+    ) + "\nthis.filter = routeForbiddenCanaries;",
+    context,
+  );
+  return [...context.filter(fixture)];
+}
+
+function policyScreen(overrides = {}) {
+  return {
+    title: SYNTHETIC.Title,
+    headingText: SYNTHETIC.Title,
+    detailText: [SYNTHETIC.Title, "用户名", SYNTHETIC.Username, "密码", "••••••••"].join("\n"),
+    pageText: [SYNTHETIC.Title, SYNTHETIC.Username, "••••••••", "static note"].join("\n"),
+    noteTexts: [SYNTHETIC.Username],
+    staticLines: ["用户名", "密码", "••••••••", "static note"],
+    ...overrides,
+  };
+}
+
+function runPolicy(overrides) {
+  const context = vm.createContext({});
+  vm.runInContext(policySource() + "\nthis.policy = routeDetailPrivacyPolicy;", context);
+  return { ...context.policy(allTexts(), forbiddenTexts())(policyScreen(overrides)) };
+}
+
+test("the route text policy allows the verified Username and every secret stays forbidden", () => {
+  // Only the verified Username is excluded from the forbidden set.
+  assert.deepEqual(forbiddenFor(SYNTHETIC), forbiddenTexts());
+  assert.equal(forbiddenFor(SYNTHETIC).includes(SYNTHETIC.Username), false);
+  // The allowed title, Username and static text all pass.
+  assert.deepEqual(runPolicy(), {
+    forbiddenAbsent: true,
+    titleMatchesFixture: true,
+    detailOnlyKnown: true,
+    notesOnlyFixture: true,
+  });
+  // Any leaked Password, Secret, Value or OTP value fails the absence check
+  // even when it would otherwise be fixture-supplied detail text.
+  for (const key of ["Password", "Secret", "Value", "OTPSeed"]) {
+    const leaked = runPolicy({
+      pageText: [policyScreen().pageText, SYNTHETIC[key]].join("\n"),
+    });
+    assert.equal(leaked.forbiddenAbsent, false, key);
+  }
+});
+
+test("the route text policy refuses text that is neither template nor fixture text", () => {
+  // An unknown detail line and an unknown note fail their known-text checks.
+  assert.equal(runPolicy({ detailText: "unrelated detail text" }).detailOnlyKnown, false);
+  assert.equal(runPolicy({ noteTexts: ["unrelated note"] }).notesOnlyFixture, false);
+  // A heading that is not the fixture title fails too.
+  assert.equal(runPolicy({ headingText: "Other title" }).titleMatchesFixture, false);
+  // A missing note still fails closed, and a non-array note list fails closed.
+  assert.equal(runPolicy({ noteTexts: null }).notesOnlyFixture, false);
+});
+
+test("the idle live probe embeds the shared text policy with both canary inputs", () => {
+  const probe = SOURCE.slice(
+    SOURCE.indexOf("function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {"),
+    SOURCE.indexOf("\nfunction routeIdleLive("),
+  );
+  // The page probe runs the harness policy itself, over both arrays.
+  assert.match(probe, /const policy = routeDetailPrivacyPolicy\(texts, forbidden\)\.toString\(\);/);
+  assert.match(probe, /const forbiddenTexts=\$\{JSON\.stringify\(forbidden\)\};/);
+  assert.match(probe, /const privacy=\$\{policy\};/);
+  assert.match(probe, /fixtureAbsent:privacyVerdict\.forbiddenAbsent,/);
+  // The call passes all fixture canaries for known text and only the
+  // non-displayable ones as forbidden.
+  assert.match(
+    idleJourney(),
+    /routeIdleLiveProbe\(\n\s+fixture\.Title,\n\s+fixtureCanaries\(fixture\),\n\s+routeForbiddenCanaries\(fixture\),\n/,
+  );
+  assert.match(SOURCE, /^const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS = Object\.freeze\(\["Username"\]\);$/m);
 });

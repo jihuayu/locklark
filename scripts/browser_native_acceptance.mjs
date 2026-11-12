@@ -540,6 +540,45 @@ const ROUTE_COPY_FIELD_SELECTOR =
 // leave either page: never title, value, text, URL, token, count, target or
 // tab id, which stay in this closure.
 const ROUTE_REVOKE_STATUS_KINDS = Object.freeze(["route-revoked", "claim-failed"]);
+// Product design: the approved login detail shows the synthetic Username (the
+// item's subtitle and the username field). Only this verified value is
+// displayable; the password value stays masked and every other canary
+// (password, secret, OTP seed/URI, other fixture values) must stay absent.
+const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS = Object.freeze(["Username"]);
+// Every fixture canary the page text must still not contain: all of them
+// except only the allowlisted values above.
+function routeForbiddenCanaries(fixture) {
+  const displayable = ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS.map((key) => fixture?.[key]);
+  return fixtureCanaries(fixture).filter((value) => !displayable.includes(value));
+}
+// The route detail's text policy, shared verbatim by the live probe. `texts`
+// are the fixture's synthetic strings that may supply detail text (the
+// verified Username included); `forbidden` are the ones that must not appear
+// in the page text at all. A detail line is known when it is static text the
+// route showed before approval or text the fixture supplies; the title must be
+// the fixture title and each note line fixture text. Returns fixed booleans.
+function routeDetailPrivacyPolicy(texts, forbidden) {
+  const known = (value) => typeof value === "string" && value.length > 0;
+  const supplied = texts.filter(known);
+  const hidden = forbidden.filter(known);
+  return (screen) => {
+    const title = String(screen.title || "");
+    const heading = String(screen.headingText || "");
+    const suppliedText = (text) => supplied.some((value) => value.includes(text));
+    const staticLines = Array.isArray(screen.staticLines) ? screen.staticLines : [];
+    const lines = String(screen.detailText || "")
+      .replaceAll(title, "").replaceAll(heading, "")
+      .split("\n").map((line) => line.trim()).filter(Boolean);
+    const pageText = String(screen.pageText || "").replaceAll(title, "");
+    return {
+      forbiddenAbsent: !hidden.some((value) => pageText.includes(value)),
+      titleMatchesFixture: title.length > 0 && heading === title,
+      detailOnlyKnown: lines.every((line) => staticLines.includes(line) || suppliedText(line)),
+      notesOnlyFixture: Array.isArray(screen.noteTexts) &&
+        screen.noteTexts.every((text) => suppliedText(text)),
+    };
+  };
+}
 // The route's own tab switch, return and reload; each is one real XTest key
 // batch sent with the exact-title-prefix form (never the native-window form)
 // and addressed to the title of the tab that is ACTIVE when the key is sent:
@@ -710,11 +749,16 @@ function sourcePageIntact(value) {
 // popup.html's own markup, parsed in the page into an inert document: the same
 // elements and attributes, with hidden children ignored, and only text the
 // route already showed before approval (static template text) or the fixture
-// itself may appear. `canaries` are the fixture's own synthetic strings; none
-// leaves the page, and the comparison happens there.
-function routeIdleLiveProbe(title, canaries, detailTemplateHTML, baselineText) {
+// itself may appear. `texts` are all of the fixture's synthetic strings that
+// may supply detail text, the verified Username included; `forbidden` are the
+// ones the page text must not contain. Neither leaves the page, and the
+// comparison happens there.
+function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {
+  const policy = routeDetailPrivacyPolicy(texts, forbidden).toString();
   return `(()=>{
-    const fixtureTexts=${JSON.stringify(canaries)};
+    const fixtureTexts=${JSON.stringify(texts)};
+    const forbiddenTexts=${JSON.stringify(forbidden)};
+    const privacy=${policy};
     const baseline=new Set(${JSON.stringify(baselineText)});
     const body=document.body;
     const detail=document.querySelector('#detail-view');
@@ -761,25 +805,27 @@ function routeIdleLiveProbe(title, canaries, detailTemplateHTML, baselineText) {
       walk(body);
       return parts.join('\n');
     })();
-    // Leaving the match and the title out, every remaining text line of the
-    // detail must be a static line it already showed or one the fixture
-    // supplies.
-    const detailRest=detailText
-      .replaceAll(${JSON.stringify(title)},'')
-      .replaceAll(String(heading?.textContent||''),'');
-    const allowed=(text)=>baseline.has(text)||fixtureTexts.some((known)=>known.includes(text));
-    const detailOnlyKnown=detailRest.split('\n').map((line)=>line.trim()).filter(Boolean).every(allowed);
     // The title may only quote the fixture; the note line only the fixture too.
-    const titleOK=!!heading&&String(heading.textContent||'')===${JSON.stringify(title)};
     const notes=document.querySelector('#detail-notes');
-    const notesOK=!!notes&&ownText(notes).every((text)=>fixtureTexts.some((known)=>known.includes(text)));
+    // The shared policy decides the page text: every forbidden canary stays
+    // off the page, while the allowed fixture text (the verified Username) may
+    // supply detail and note lines.
+    const privacyVerdict=privacy({
+      title:${JSON.stringify(title)},
+      headingText:String(heading?.textContent||''),
+      detailText,
+      pageText:body?String(body.innerText):'',
+      noteTexts:notes?ownText(notes):null,
+      staticLines:[...baseline]
+    });
+    const titleOK=privacyVerdict.titleMatchesFixture;
+    const detailOnlyKnown=privacyVerdict.detailOnlyKnown;
+    const notesOK=privacyVerdict.notesOnlyFixture;
     // The template's own title is empty: no static title text is expected.
     const template=inert.querySelector('#detail-view');
     const templateTitle=template?template.querySelector('#detail-title'):null;
     const titleStatic=!Array.from(templateTitle?.childNodes||[]).some((child)=>child.nodeType===3&&String(child.data||'').trim());
     const detailShape=templateShaped(detail,template)&&templateShaped(heading,templateTitle)&&titleStatic;
-    const bodyText=body?String(body.innerText):'';
-    const canaryText=bodyText.replaceAll(${JSON.stringify(title)},'');
     return {
       visible:document.visibilityState==='visible',
       view:body?.dataset?.view||'',
@@ -787,7 +833,7 @@ function routeIdleLiveProbe(title, canaries, detailTemplateHTML, baselineText) {
       titleMatchesFixture:titleOK,
       copyControl:!!row&&row.querySelectorAll('[data-action="copy-field"]').length===1,
       masked:!!fieldValue&&/^[\u2022\u25cf*]+$/.test(String(fieldValue.textContent||'').trim()),
-      fixtureAbsent:!fixtureTexts.some((known)=>known.length>0&&canaryText.includes(known)),
+      fixtureAbsent:privacyVerdict.forbiddenAbsent,
       fixtureOnly:detailShape&&detailOnlyKnown&&titleOK&&notesOK
     };
   })()`;
@@ -1113,6 +1159,7 @@ async function acceptRouteIdleExpiry(driver) {
     const liveProbe = routeIdleLiveProbe(
       fixture.Title,
       fixtureCanaries(fixture),
+      routeForbiddenCanaries(fixture),
       templateHTML,
       baseline.filter((line) => typeof line === "string" && line.length > 0),
     );
