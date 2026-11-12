@@ -665,10 +665,15 @@ class OfflineVaultTest {
 
     @Test fun realOfflineVaultNativeFlowsAndBackgroundLock() {
         val context = instrumentation.targetContext
-        val database = File(context.noBackupFilesDir, "personal.ll")
-        // The target Activity owns this path. Refuse before launching so a
-        // pre-existing vault can never be overwritten or deleted by this test.
-        assertFalse("An existing target vault must not be overwritten", database.exists())
+        val owned = ownedSyntheticVaultPaths(context.noBackupFilesDir)
+        // The target Activity owns exactly this path. Refuse before launching
+        // unless every path cleanup may remove is absent. NOFOLLOW_LINKS also
+        // treats a dangling symlink as present, so it is never overwritten or
+        // deleted by this test.
+        for (path in owned) {
+            assertFalse("An existing target vault must not be overwritten",
+                Files.exists(path.toPath(), LinkOption.NOFOLLOW_LINKS))
+        }
         var failure: Throwable? = null
         try {
             runOfflineVaultFlow(context)
@@ -687,7 +692,7 @@ class OfflineVaultTest {
                 failure.addSuppressed(closeFailure)
             } else {
                 runCleanup(failure) {
-                    deleteOwnedSyntheticVault(database, context.noBackupFilesDir)
+                    deleteOwnedSyntheticVault(owned, context.noBackupFilesDir)
                 }
             }
         }
@@ -824,20 +829,28 @@ class OfflineVaultTest {
     }
 
     /**
-     * Deletes only the exact synthetic target vault and its exact temporary
-     * sidecars. The canonical parent and non-symlink checks keep this from
+     * Exact paths this exclusive test run may remove. `personal.Create` stages
+     * a random `.locklark-personal-*` temporary file and publishes
+     * `personal.ll` by a non-replacing rename; it does not create fixed
+     * `.new`/`.bak` sidecars, so none may be treated as owned here.
+     */
+    private fun ownedSyntheticVaultPaths(parent: File): List<File> =
+        listOf(File(parent, "personal.ll"))
+
+    /**
+     * Deletes only the preflight-confirmed synthetic target vault. The
+     * canonical parent, exact-name and non-symlink checks keep this from
      * touching `device-unlock`, parent directories or any other shared entry.
      */
-    private fun deleteOwnedSyntheticVault(path: File, parent: File) {
-        require(path.name == "personal.ll") { "Owned vault name mismatch" }
-        require(!Files.isSymbolicLink(path.toPath())) { "Owned vault must not be a symbolic link" }
-        require(path.canonicalFile.parentFile == parent.canonicalFile) { "Owned vault escaped its directory" }
-        for (owned in listOf(path, File(parent, "personal.ll.new"), File(parent, "personal.ll.bak"))) {
-            require(owned.canonicalFile.parentFile == parent.canonicalFile) { "Owned vault escaped its directory" }
-            require(!Files.isSymbolicLink(owned.toPath())) { "Owned vault must not be a symbolic link" }
-            if (!Files.exists(owned.toPath(), LinkOption.NOFOLLOW_LINKS)) continue
-            require(!Files.isDirectory(owned.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Owned vault must be a file" }
-            if (!Files.deleteIfExists(owned.toPath())) throw IOException("Owned vault cleanup failed")
+    private fun deleteOwnedSyntheticVault(paths: List<File>, parent: File) {
+        val canonicalParent = parent.canonicalFile
+        require(paths.size == 1 && paths.single().name == "personal.ll") { "Owned vault set mismatch" }
+        for (path in paths) {
+            require(path.canonicalFile.parentFile == canonicalParent) { "Owned vault escaped its directory" }
+            require(!Files.isSymbolicLink(path.toPath())) { "Owned vault must not be a symbolic link" }
+            if (!Files.exists(path.toPath(), LinkOption.NOFOLLOW_LINKS)) continue
+            require(!Files.isDirectory(path.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Owned vault must be a file" }
+            if (!Files.deleteIfExists(path.toPath())) throw IOException("Owned vault cleanup failed")
         }
     }
 }
