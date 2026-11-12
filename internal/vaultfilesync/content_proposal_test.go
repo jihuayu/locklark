@@ -537,9 +537,10 @@ func TestContentProposalVerifierRejectsPolicyChangeFromAuthorizedDevice(t *testi
 	}
 
 	// The same valid root-signed p5->p6 transition that adds writer eve, but
-	// authored by existing device-1, which is an authorized writer, admin and
-	// owner in both the current and successor policies. This isolates the
-	// prohibition on policy changes from the author-role restriction.
+	// authored by existing device-1, which is authorized to author as an Admin
+	// and Owner in both the current and successor policies, but is not listed
+	// as a Writer. This isolates the prohibition on policy changes from the
+	// author-role restriction.
 	proofs := append([]vaultfile.SignedPolicy(nil), fx.baseFile.SignedPolicyProofs...)
 	proofs = append(proofs, fx.nextProof)
 	header := fx.baseFile.Header
