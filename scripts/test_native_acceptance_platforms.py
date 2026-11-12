@@ -764,6 +764,9 @@ class FakeMacApi:
         self.focus_window = WINDOW_RAW["id"] if focus_window is None else focus_window
         self.root = root
         self.visible = visible
+        self.display_bounds = [(0, 0, 3840, 2160)]
+        self.display_error = None
+        self.display_queries = 0
         self.trusted = trusted
         self.activations = 0
         self.clicks = []
@@ -794,7 +797,13 @@ class FakeMacApi:
         return self.control_hit
 
     def point_visible(self, window, x, y):
-        return self.visible
+        # Real QuartzApi.point_visible: membership only, with a replaceable
+        # ``display_bounds`` so tests can move the active display.
+        self.display_queries = getattr(self, "display_queries", 0) + 1
+        if self.display_error is not None:
+            raise self.display_error
+        return any(left <= x < left + width and top <= y < top + height
+                   for left, top, width, height in self.display_bounds)
 
     def activate(self, pid):
         self.activations += 1
@@ -2234,16 +2243,17 @@ class MacInputPreconstructionTests(unittest.TestCase):
 class MacDisplayMembershipTests(unittest.TestCase):
     """CGGetActiveDisplayList/CGDisplayBounds: per-display membership."""
 
-    def api(self, result=None, bounds=None):
+    def api(self, result=None, bounds=None, raise_error=False):
         api = macos.QuartzApi.__new__(macos.QuartzApi)
 
         class Quartz(object):
             def CGGetActiveDisplayList(self, maximum, displays, count):
-                if isinstance(result, Exception):
-                    raise result
+                if raise_error or isinstance(result, Exception):
+                    raise result if isinstance(result, Exception) else RuntimeError("CG")
                 return result
 
             def CGDisplayBounds(self, display):
+                # A per-display dict: a missing display has no readable bounds.
                 value = bounds[display] if isinstance(bounds, dict) else bounds
                 if isinstance(value, Exception):
                     raise value
@@ -2253,24 +2263,34 @@ class MacDisplayMembershipTests(unittest.TestCase):
         return api
 
     def test_count_consistent_valid_display_is_visible(self):
-        api = self.api((0, [1, 2, 3], 1), {1: ((0, 0), (1920, 1080)),
-                                           2: ((3000, 0), (1280, 1024)),
-                                           3: ((9000, 0), (1280, 1024))})
+        api = self.api(result=(0, [1, 2, 3], 1),
+                       bounds={1: ((0, 0), (1920, 1080)),
+                               2: ((3000, 0), (1280, 1024)),
+                               3: ((9000, 0), (1280, 1024))})
         self.assertTrue(api.point_visible(None, 100, 100))
         self.assertFalse(api.point_visible(None, 3100, 100))  # beyond reported count
 
     def test_point_inside_one_display_is_visible(self):
-        api = self.api((0, [1, 2], 2), {1: ((0, 0), (1920, 1080)),
-                                        2: ((1920, 0), (1280, 1024))})
+        api = self.api(result=(0, [1, 2], 2),
+                       bounds={1: ((0, 0), (1920, 1080)), 2: ((1920, 0), (1280, 1024))})
         self.assertTrue(api.point_visible(None, 100, 100))
         self.assertTrue(api.point_visible(None, 2000, 1000))
 
     def test_gap_between_display_rectangles_is_not_screen(self):
-        api = self.api((0, [1, 2], 2), {1: ((0, 0), (1920, 1080)),
-                                        2: ((2000, 0), (1280, 1024))})
+        api = self.api(result=(0, [1, 2], 2),
+                       bounds={1: ((0, 0), (1920, 1080)), 2: ((2000, 0), (1280, 1024))})
         self.assertFalse(api.point_visible(None, 1950, 100))
 
-    def test_unknown_or_empty_display_list_fails_closed(self):
+    def refusal(self, result, bounds=((0, 0), (1920, 1080)), point=(100, 100)):
+        api = self.api(result=result, bounds=bounds)  # keywords: never misaligned
+        with self.assertRaises(contract.ContractError) as error:
+            api.point_visible(None, *point)
+        self.assertEqual(error.exception.code, "a11y-query")
+
+    def test_display_api_exception_is_a_query_refusal_not_a_miss(self):
+        self.refusal(RuntimeError("CGGetActiveDisplayList failed"))
+
+    def test_unknown_or_empty_display_list_is_a_query_refusal(self):
         cases = ((1, [1], 1),          # CoreGraphics error
                  (0, [], 0),           # no active display
                  (0, None, 0),         # unreadable list
@@ -2278,24 +2298,101 @@ class MacDisplayMembershipTests(unittest.TestCase):
                  (0, [1], 2),          # count larger than the returned list
                  (0, [1], True),       # a bool is never a display count
                  (0, [1], "1"),        # non-integer count
-                 (0, [1], 0), (0, [1], 33))
+                 (0, [1], 0), (0, [1], 33),
+                 (0, [1], 1, 4),       # malformed arity (any non-3-tuple)
+                 (None, [1], 1),       # missing error status
+                 (0, 7, 1),            # an int is not a display sequence
+                 (0, object(), 1),     # an unreadable list
+                 (0, [1, 2], 3))       # count larger than the returned list
+        # A returned member whose bounds cannot be read is checked separately
+        # (the per-display bounds mapping only has a value for a member there).
+        self.refusal((0, [1, "x"], 2), {1: ((0, 0), (1920, 1080)), "x": "bounds"})
         for result in cases:
             with self.subTest(result=result):
-                api = self.api(result, ((0, 0), (1920, 1080)))
-                self.assertFalse(api.point_visible(None, 100, 100))
+                self.refusal(result)
 
-    def test_unreadable_display_bounds_fail_closed(self):
-        for bounds in (RuntimeError("no bounds"), ("x", "y"), ((0, 0), (0, 0)),
+    def test_unreadable_display_bounds_is_a_query_refusal(self):
+        for bounds in (RuntimeError("no bounds"), ("x", "y"), ("x", (0, 0)),
+                       ((0, 0), (0, 0)), (None, (1920, 1080)),
                        ((0, 0), (float("nan"), 1080)),
-                       ((float("inf"), 0), (1920, 1080)), None):
+                       ((float("inf"), 0), (1920, 1080)), None, "bounds"):
             with self.subTest(bounds=bounds):
-                api = self.api((0, [1], 1), {1: bounds})
-                self.assertFalse(api.point_visible(None, 100, 100))
+                self.refusal((0, [1], 1), {1: bounds})
+
+    def test_zero_area_display_is_a_malformed_query_and_never_skipped(self):
+        on_display = (0, [1, 2], 2)
+        both = {1: ((0, 0), (1920, 1080)), 2: ((2000, 0), (1280, 1024))}
+        usable = self.api(result=on_display, bounds=both)
+        self.assertIs(usable.point_visible(None, 100, 100), True)
+        self.assertIs(usable.point_visible(None, 2500, 500), True)
+        # The first display contains the point; the second (zero-area or
+        # negative) still has to be a usable display for the whole query to be
+        # trustworthy, so such a member is never silently passed over.
+        for second in (((3000, 0), (0, 1024)), ((3000, 0), (1280, 0)),
+                       ((3000, 0), (1280, -1))):
+            with self.subTest(second=second):
+                self.refusal(on_display,
+                             {1: ((0, 0), (1920, 1080)), 2: second}, (100, 100))
+        # Neither display reports usable bounds.
+        self.refusal(on_display,
+                     {1: ((3000, 0), (0, 1080)), 2: ((9000, 0), (1280, 0))},
+                     (100, 100))
+
+    def test_pyobjc_native_sequence_forms_are_accepted(self):
+        # PyObjC returns a CoreFoundation array as NSArray (and the count as an
+        # NSNumber); the documented native forms are read, not rejected for
+        # not being a builtin list.
+        class NSArray(object):
+            def __init__(self, items):
+                self.items = list(items)
+
+            def __len__(self):
+                return len(self.items)
+
+            def __getitem__(self, index):
+                return self.items[index]
+
+        api = self.api(result=(0, NSArray([1, 2]), 2),
+                       bounds={1: NSArray([NSArray([0, 0]), NSArray([1920, 1080])]),
+                               2: NSArray([NSArray([1920, 0]), NSArray([1280, 1024])])})
+        self.assertIs(api.point_visible(None, 100, 100), True)
+        self.assertIs(api.point_visible(None, 2500, 100), True)
+        self.assertIs(api.point_visible(None, 5000, 100), False)
+
+    def test_out_of_display_membership_is_still_a_valid_false(self):
+        api = self.api(result=(0, (1, 2), 2),
+                       bounds={1: ((0, 0), (1920, 1080)), 2: ((2000, 0), (1280, 1024))})
+        self.assertIs(api.point_visible(None, 1950, 100), False)  # the gap
+        self.assertIs(api.point_visible(None, 5000, 100), False)  # beyond every display
+
+    def test_real_display_error_reaches_the_contract_as_a11y_query(self):
+        # The real QuartzApi over a failing CG fake: the search must abort on
+        # the error, never fall through to another candidate.
+        api = self.api(result=RuntimeError("CGGetActiveDisplayList failed"))
+        with self.assertRaises(contract.ContractError) as error:
+            macos.MacAdapter(api=api).point_visible(dict(WINDOW_RAW), 240, 315)
+        self.assertEqual(error.exception.code, "a11y-query")
+        for verdict in (None, 1, 0, "yes"):
+            with self.subTest(adapter_answer=verdict):
+                with self.assertRaises(contract.ContractError) as error:
+                    macos.MacAdapter(api=types.SimpleNamespace(
+                        point_visible=lambda window, x, y, value=verdict: value)
+                    ).point_visible(dict(WINDOW_RAW), 240, 315)
+                self.assertEqual(error.exception.code, "a11y-query")
+        with self.assertRaises(contract.ContractError) as error:
+            macos.MacAdapter(api=types.SimpleNamespace(
+                point_visible=lambda window, x, y: (_ for _ in ()).throw(
+                    OSError("display query")))).point_visible(dict(WINDOW_RAW), 240, 315)
+        self.assertEqual(error.exception.code, "a11y-query")
+        self.assertIs(macos.MacAdapter(api=types.SimpleNamespace(
+            point_visible=lambda window, x, y: False)).point_visible(
+                dict(WINDOW_RAW), 240, 315), False)
 
     def test_adapter_refuses_a_point_outside_every_display(self):
+        # A SUCCESSFUL off-display verdict is a legitimate miss for every
+        # bounded candidate: the search ends in control-hit, not a query error.
         api = FakeMacApi()
-        probed = []
-        api.point_visible = lambda window, x, y: probed.append((x, y)) and False
+        api.display_bounds = [(-1000, -1000, 100, 100)]  # the control is on none
         adapter = macos.MacAdapter(api=api)
         with self.assertRaises(contract.ContractError) as error:
             execute(adapter, document())
@@ -2304,7 +2401,7 @@ class MacDisplayMembershipTests(unittest.TestCase):
         # no control hit was even probed and nothing was clicked.
         candidates = [(item["x"], item["y"]) for item in macos.MacAdapter.click_candidates(
             dict(CONTROL["bounds"]))]
-        self.assertEqual(probed, candidates)
+        self.assertEqual(api.display_queries, len(candidates))
         self.assertEqual(api.hit_calls, [])
         self.assertEqual(api.clicks, [])
 
@@ -2316,6 +2413,257 @@ class MacDisplayMembershipTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "control-hit")
         self.assertEqual(api.hit_calls, [])
         self.assertEqual(api.clicks, [])
+
+
+class MacRootAtQueryTests(unittest.TestCase):
+    """root_at: a successful miss is False; an unknown query is a11y-query."""
+
+    def api(self, position=None, application="application", attributes=None,
+            parent="none"):
+        """A QuartzApi over native-shaped AX fakes.
+
+        ``position`` is the ``AXUIElementCopyElementAtPosition`` result: a
+        ``(AXError, element)`` status tuple, a bare element (PyObjC may return
+        the out-parameter alone) or a callable making a fresh element per
+        query.  Attributes are read as ``(AXError, value)``.  ``parent`` is
+        "none" (the chain ends at the leaf), "bound" (the leaf's AXParent is
+        the bound AXWindow element) or "other" (a non-bound AXWindow).
+        """
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        window_element, other_window = object(), object()
+        if isinstance(parent, str):
+            parent = {"none": None, "bound": window_element, "other": other_window}[parent]
+        values = {"AXRole": "AXButton", "AXParent": parent}
+        values.update(attributes or {})
+
+        def copy_attribute(element, name, out):
+            # Checked first: a nil AXParent is not an AXWindow element.
+            if element in (window_element, other_window) and name in ("AXRole", "AXParent"):
+                return 0, "AXWindow" if name == "AXRole" else None
+            value = values.get(name)
+            return 0, (value(element) if callable(value) else value)
+
+        def element_at(app, x, y, out):
+            return position() if callable(position) else position
+
+        api.ax = types.SimpleNamespace(
+            AXUIElementCreateApplication=lambda pid: application,
+            AXUIElementCopyElementAtPosition=element_at,
+            AXUIElementCopyAttributeValue=copy_attribute,
+            # Held on the instance: a class attribute would be a bound method.
+            CFEqual=staticmethod(lambda left, right: left is right))
+        api.identity = []
+
+        def matches(element, bound):
+            api.identity.append(element)
+            return element is window_element
+
+        api._identity_matches = matches
+        return api
+
+    def root(self, api):
+        return api.root_at(dict(WINDOW_RAW), 240, 315)
+
+    def refused(self, api):
+        identity = getattr(api, "identity", [])
+        with self.assertRaises(contract.ContractError) as error:
+            self.root(api)
+        self.assertEqual(error.exception.code, "a11y-query")
+        self.assertEqual(identity, [])
+
+    def test_successful_queries_with_no_element_or_no_axwindow_are_false(self):
+        # Trustworthy "no element at the point" is a legitimate miss.
+        self.assertIs(self.root(self.api(position=(0, None))), False)
+        # A chain that ends (nil AXParent) before any AXWindow has no root.
+        self.assertIs(self.root(self.api(position=(0, "leaf"))), False)
+        self.assertIs(self.root(self.api(position=lambda: {"AXRole": "AXButton"})), False)
+        # The bound AXWindow under the point is the root (CFEqual identity).
+        self.assertIs(self.root(self.api(position=(0, "window"), parent="bound")), True)
+        # A chain whose AXWindow is not the bound element is a miss.
+        self.assertIs(self.root(self.api(position=(0, "other"), parent="other")), False)
+
+    def test_documented_native_output_forms_are_preserved(self):
+        # PyObjC may surface the out-parameter as a bare element (no tuple):
+        # an exact element, read like the (AXError, element) form.
+        self.assertIs(self.root(self.api(position={"AXRole": "AXButton"})), False)
+        self.assertIs(self.root(self.api(position={"AXRole": "AXWindow"},
+                                         parent="bound")), True)
+        # An unreadable out-parameter is an unknown query; a nil one is a miss.
+        self.refused(self.api(position=()))
+        self.refused(self.api(position=(0, "unreadable", 0)))
+        self.refused(self.api(position=("element",)))
+        self.assertIs(self.root(self.api(position=None)), False)
+
+    def test_query_failures_refuse_a11y_query(self):
+        def raising():
+            raise OSError("AX position query failed")
+
+        self.refused(self.api(position=raising))          # raised position query
+        self.refused(self.api(position=(7, None)))        # AX error status
+        self.refused(self.api(application=None))          # unavailable application
+        self.refused(self.api(position=(0, "leaf", None)))  # odd status tuple
+        # An unreadable role/status query is unknown, never a skipped miss.
+        for payload in ((5, "AXButton"), (0, "AXButton", None), "AXButton", ()):
+            with self.subTest(payload=payload):
+                corrupt = self.api(position=(0, "leaf"))
+                corrupt.ax.AXUIElementCopyAttributeValue = (
+                    lambda element, name, out, payload=payload: payload)
+                self.refused(corrupt)
+        # A cyclic parent chain never reaches an AXWindow.
+        self.refused(self.api(position=(0, "leaf"),
+                              attributes={"AXParent": lambda element: element}))
+
+    def adapter_refusal(self, api):
+        with self.assertRaises(contract.ContractError) as error:
+            execute(macos.MacAdapter(api=api), document())
+        self.assertEqual(error.exception.code, "a11y-query")
+        self.assertEqual(api.clicks, [])
+
+    def test_adapter_root_error_is_refused_before_any_click(self):
+        api = FakeMacApi()
+
+        def failing_root(window, x, y):
+            raise OSError("AX position query failed")
+
+        api.root_at = failing_root
+        self.adapter_refusal(api)
+        self.assertEqual(api.hit_calls, [])
+
+    def test_adapter_non_boolean_or_unavailable_root_is_refused(self):
+        for value in (None, 1, 0, "window"):
+            with self.subTest(value=value):
+                api = FakeMacApi()
+                api.root_at = lambda window, x, y, value=value: value
+                self.adapter_refusal(api)
+        api = FakeMacApi()
+        unavailable = self.api(application=None)
+        api.root_at = lambda window, x, y: unavailable.root_at(window, x, y)
+        self.adapter_refusal(api)
+
+CENTRE = (CONTROL["bounds"]["x"] + CONTROL["bounds"]["width"] // 2,
+          CONTROL["bounds"]["y"] + CONTROL["bounds"]["height"] // 2)
+
+
+class ScriptedMacApi(FakeMacApi):
+    """FakeMacApi whose display/root queries are answered per point.
+
+    ``failures`` maps a point to the query kind(s) that raise the real fixed
+    ``a11y-query`` there; every other point is a successful display/root hit.
+    Both queries are recorded so a test can show exactly how far the search
+    got before it stopped.
+    """
+
+    def __init__(self, failures):
+        FakeMacApi.__init__(self)
+        self.failures = dict(failures)
+        self.display_points = []
+        self.root_points = []
+
+    def hit_test_control(self, window, label, rect, x, y):
+        # Every point reaches the selected control unless the query failed
+        # first, so a skippable error WOULD recover and click here.
+        self.hit_calls.append((window["id"], label, dict(rect), x, y))
+        return True
+
+    def _query(self, seen, kind, x, y):
+        seen.append((x, y))
+        if kind in self.failures.get((x, y), ()):
+            raise contract.ContractError("a11y-query")
+        return True
+
+    def point_visible(self, window, x, y):
+        return self._query(self.display_points, "display", x, y)
+
+    def root_at(self, window, x, y):
+        return self._query(self.root_points, "root", x, y)
+
+
+def run_macos_queries(api):
+    """Run one end-to-end macOS label click over a scripted QuartzApi fake."""
+    return execute(macos.MacAdapter(api=api), document())
+
+
+def macos_candidates(rect):
+    return [(item["x"], item["y"])
+            for item in macos.MacAdapter.click_candidates(rect)]
+
+
+class MacEarlyCandidateQueryTests(unittest.TestCase):
+    """A query failure on an early candidate aborts; it never skips ahead."""
+
+    def assert_aborted(self, api, *, root):
+        """Run to the first refusal; no click and no display query past it."""
+        with self.assertRaises(contract.ContractError) as error:
+            run_macos_queries(api)
+        self.assertEqual(error.exception.code, "a11y-query")
+        self.assertEqual(api.root_points, root)
+        self.assertEqual(api.clicks, [])
+        return error.exception
+
+    def test_centre_display_query_failure_aborts_without_click(self):
+        # Only the centre's display query fails; every later candidate is a
+        # successful display/root hit whose control probe would pass, so a
+        # skippable miss would recover and click.  The search must stop on the
+        # first error after exactly one root and one display query.
+        self.assert_aborted(ScriptedMacApi({CENTRE: ("display",)}), root=[CENTRE])
+
+    def test_centre_window_root_failure_aborts_without_click(self):
+        self.assert_aborted(ScriptedMacApi({CENTRE: ("root",)}), root=[CENTRE])
+
+    def test_centre_display_failure_aborts_on_the_post_accept_reproof(self):
+        # The centre passes its initial full proof; the display query then
+        # fails on the immediate pre-click re-proof.  The accepted point is
+        # never clicked and the search never resumes with an alternate.
+        api = ScriptedMacApi({})
+        queries = []
+
+        def visible(window, x, y):
+            queries.append((x, y))
+            if len(queries) == 2:
+                raise contract.ContractError("a11y-query")
+            return True
+
+        api.point_visible = visible
+        self.assert_aborted(api, root=[CENTRE, CENTRE])
+        self.assertEqual(queries, [CENTRE, CENTRE])
+        self.assertEqual(api.root_points, [CENTRE, CENTRE])
+        self.assertEqual(api.hit_calls,
+                         [(WINDOW_RAW["id"], LABEL, dict(CONTROL["bounds"]), *CENTRE)])
+
+    def test_accepted_click_receipt_names_the_fresh_window(self):
+        # The adapter reports a new observation of the same window for the
+        # post-accept re-proof; the receipt and the result use that fresh
+        # window, not the one the search started from.
+        api = FakeMacApi()
+        fresh_bounds = {"x": 100, "y": 100, "width": 801, "height": 600}
+        fresh = dict(WINDOW_RAW, bounds=dict(fresh_bounds), client=dict(fresh_bounds))
+        reads = []
+
+        class FreshWindowAdapter(macos.MacAdapter):
+            def read_window(self, identifier):
+                reads.append(identifier)
+                return dict(fresh)
+
+        result = execute(FreshWindowAdapter(api=api), document())
+        self.assertEqual(reads, [WINDOW_RAW["id"], WINDOW_RAW["id"]])
+        self.assertEqual(api.clicks, [CENTRE])
+        self.assertEqual(result["clicks"][0]["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual((result["x"], result["width"]),
+                         (fresh_bounds["x"], fresh_bounds["width"]))
+
+    def test_legitimate_off_display_miss_still_moves_on(self):
+        # Control: a successful False (not an error) on the centre is a miss
+        # and the next in-bounds candidate is clicked exactly once.
+        api = FakeMacApi()
+        api.display_bounds = [(0, 0, CENTRE[0], 2160)]
+        result = run_macos_queries(api)
+        accepted = macos_candidates(CONTROL["bounds"])[1]
+        self.assertEqual(api.clicks, [accepted])
+        # One full proof per candidate (the display query precedes the root
+        # query in check_point) and the accepted point proved again before input.
+        self.assertEqual(api.display_queries, 3)
+        self.assertEqual(result["clicks"][0]["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), accepted)
 
 
 class DispatcherTests(unittest.TestCase):
@@ -2519,10 +2867,12 @@ class MacFractionalGeometryTests(unittest.TestCase):
                         FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] <= bottom)
         self.assertTrue(contract.rect_within(FRACTIONAL_CONTROL, window["client"]))
         result = self.execute(api)
-        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL])
+        # The accepted centre is proved once to accept and once more, on the
+        # fresh window, immediately before the single click.
+        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL, FRACTIONAL_CONTROL])
         # The window-root hit test and the strict control hit test both query
-        # the element under the very same exact centre.
-        self.assertEqual(api.probed, [self.CENTRE, self.CENTRE])
+        # the element under the very same exact centre, twice per accepted point.
+        self.assertEqual(api.probed, [self.CENTRE] * 4)
         self.assertEqual([event["point"] for event in api.quartz.posted],
                          [self.CENTRE, self.CENTRE, self.CENTRE])
         self.assertEqual([event["kind"] for event in api.quartz.posted],
@@ -2685,7 +3035,10 @@ class MacFractionalGeometryTests(unittest.TestCase):
         result = self.execute(api, actions=[{"click_label": "主密码"}])
         accepted = (FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"] * 0.2,
                     FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] * 0.2)
-        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL, FRACTIONAL_CONTROL])
+        # The three overlay probes are the test's own; the contract probes only
+        # the covered centre (a miss) and the accepted point, which is then
+        # proved once more before the single click.
+        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL] * 3)
         self.assertEqual([event["point"] for event in api.quartz.posted],
                          [accepted, accepted, accepted])
         recorded = result["clicks"][0]

@@ -175,6 +175,104 @@ def _native_text(value):
     return ""
 
 
+def _a11y_query():
+    """The one fixed refusal for an unknown accessibility/display query."""
+    return contract.ContractError("a11y-query")
+
+
+def _sequence(value):
+    """A readable ordered collection, or None.
+
+    PyObjC may return a native ``NSArray``/``CFArray`` instead of a builtin
+    list, which is a legitimate documented form and is read as an indexable,
+    sized sequence; anything that cannot be read that way is unusable and
+    refuses rather than being treated as an empty result.
+    """
+    if type(value) in (list, tuple):
+        return value
+    try:
+        size = len(value)
+        if size < 0:
+            return None
+        value[0:0]
+    except Exception:
+        return None
+    return value
+
+
+def _ax_value(ax, element, name):
+    """One raw AX attribute read: the value, or ``None`` for a nil result.
+
+    Only the documented ``(AXError, value)`` status tuple is unpacked; the
+    returned value itself (nil or not) is returned verbatim for the caller to
+    validate.  A raised call or a malformed result is an unknown query.
+    """
+    try:
+        result = ax.AXUIElementCopyAttributeValue(element, name, None)
+    except contract.ContractError:
+        raise
+    except Exception:
+        raise _a11y_query()
+    if isinstance(result, tuple):
+        if len(result) != 2 or result[0] != 0:
+            raise _a11y_query()
+        return result[1]
+    return result
+
+
+def _display_query(quartz):
+    """The active-display triple; an exception or malformed shape refuses."""
+    try:
+        result = quartz.CGGetActiveDisplayList(MAX_DISPLAYS, None, None)
+    except Exception:
+        raise _a11y_query()
+    if type(result) is not tuple:
+        raise _a11y_query()
+    if len(result) != 3:
+        raise _a11y_query()
+    return result
+
+
+def _display_list(displays, count):
+    """The first ``count`` returned displays; an unusable sequence refuses."""
+    active = _sequence(displays)
+    if active is None:
+        raise _a11y_query()
+    if len(active) < count:
+        raise _a11y_query()
+    try:
+        return [active[index] for index in range(count)]
+    except Exception:
+        raise _a11y_query()
+
+
+def _display_rect(quartz, display):
+    """One display's (left, top, width, height) floats; malformed refuses."""
+    try:
+        bounds = _sequence(quartz.CGDisplayBounds(display))
+        if bounds is None:
+            raise ValueError("unreadable bounds")
+        origin = _sequence(bounds[0])
+        size = _sequence(bounds[1])
+        if origin is None or size is None:
+            raise ValueError("unreadable origin/size")
+        left = float(origin[0])
+        top = float(origin[1])
+        width = float(size[0])
+        height = float(size[1])
+    except Exception:
+        raise _a11y_query()
+    if not math.isfinite(left):
+        raise _a11y_query()
+    if not math.isfinite(top):
+        raise _a11y_query()
+    if not math.isfinite(width):
+        raise _a11y_query()
+    if not math.isfinite(height):
+        raise _a11y_query()
+    return left, top, width, height
+
+
 class QuartzApi:
     """Real ApplicationServices (AX) + CoreGraphics (Quartz) access on macOS.
 
@@ -597,42 +695,35 @@ class QuartzApi:
         ``CGGetActiveDisplayList`` + ``CGDisplayBounds`` need no Screen
         Recording permission and cannot prompt.  Membership is tested display by
         display: the union of display rectangles is not the screen, so a gap
-        between two displays is not clickable.  An unreadable or empty display
-        list fails closed.
+        between two displays is not clickable.  ``False`` means the query
+        SUCCEEDED and proved the point outside every active display; a raised
+        API exception, a CoreGraphics error, an empty or malformed display list,
+        an unusable count or unreadable/undisplayable bounds is an unknown query
+        state and refuses the fixed ``a11y-query`` instead of a skippable miss.
         """
         del window
-        quartz = self.quartz
-        try:
-            result = quartz.CGGetActiveDisplayList(MAX_DISPLAYS, None, None)
-        except Exception:
-            return False
-        if not isinstance(result, tuple) or len(result) != 3:
-            return False
-        error, displays, count = result
-        if error or displays is None:
-            return False
-        # A count that is bool, non-integer, out of range or longer than the
-        # returned list means the query result is not trustworthy.
-        if type(count) is not int or not 1 <= count <= MAX_DISPLAYS:
-            return False
-        try:
-            active = list(displays)
-        except Exception:
-            return False
-        if len(active) < count:
-            return False
-        for display in active[:count]:
-            try:
-                bounds = quartz.CGDisplayBounds(display)
-                origin, size = bounds[0], bounds[1]
-                left, top = float(origin[0]), float(origin[1])
-                width, height = float(size[0]), float(size[1])
-            except Exception:
-                return False
-            if not all(math.isfinite(value) for value in (left, top, width, height)):
-                return False
+        result = _display_query(self.quartz)
+        error = result[0]
+        displays = result[1]
+        count = result[2]
+        if error != 0:
+            raise _a11y_query()
+        if displays is None:
+            raise _a11y_query()
+        if type(count) is not int:
+            raise _a11y_query()
+        if count < 1:
+            raise _a11y_query()
+        if count > MAX_DISPLAYS:
+            raise _a11y_query()
+        rects = [_display_rect(self.quartz, display)
+                 for display in _display_list(displays, count)]
+        for left, top, width, height in rects:
+            # A zero/negative-area member is not a usable display rather than
+            # a member that silently contains nothing.
             if width <= 0 or height <= 0:
-                continue
+                raise _a11y_query()
+        for left, top, width, height in rects:
             if left <= x < left + width and top <= y < top + height:
                 return True
         return False
@@ -670,26 +761,53 @@ class QuartzApi:
 
         The ancestor must satisfy the same uniqueness and ``CFEqual`` identity
         as ``_identity_matches``; a duplicate same-title window refuses here
-        too, and any failure fails closed with no hit.
+        too.  A succeeded query with no element, a chain that ends before any
+        AXWindow or a bound AXWindow under another window are a legitimate
+        ``False`` miss.  An unavailable application, a raised AX query, a
+        non-zero error code, a malformed result or a bounded walk that never
+        reaches an AXWindow is an unknown query state and refuses the fixed
+        ``a11y-query``; it never looks like a skippable candidate miss.
         """
-        application = self.application(window["pid"])
-        if application is None:
-            return False
-        result = self.ax.AXUIElementCopyElementAtPosition(
-            application, float(x), float(y), None)
+        try:
+            application = self.application(window["pid"])
+            available = application is not None
+        except Exception:
+            available = False
+        if not available:
+            raise contract.ContractError("a11y-query")
+        try:
+            result = self.ax.AXUIElementCopyElementAtPosition(
+                application, float(x), float(y), None)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise contract.ContractError("a11y-query")
         if isinstance(result, tuple) and len(result) == 2:
             code, element = result
+        elif type(result) is tuple:
+            raise contract.ContractError("a11y-query")
         else:
+            # A native out-parameter may surface as the bare element.
             code, element = 0, result
-        if code != 0 or element is None:
+        if code != 0:
+            raise contract.ContractError("a11y-query")
+        if element is None:
             return False
+        # A nil AXParent is a successful "no parent": the chain ends before
+        # any AXWindow and the point has no window root (a legitimate miss).
+        # A raised read or an unreadable role/parent payload is an unknown
+        # query and refuses; a walk that never ends refuses too.
         for _ in range(MAX_DEPTH + 1):
-            if self.attribute(element, "AXRole") == "AXWindow":
+            role = _ax_value(self.ax, element, "AXRole")
+            if role is None or type(role) is not str:
+                raise contract.ContractError("a11y-query")
+            if role == "AXWindow":
                 return self._identity_matches(element, window)
-            element = self.attribute(element, "AXParent")
-            if element is None:
+            parent = _ax_value(self.ax, element, "AXParent")
+            if parent is None:
                 return False
-        return False
+            element = parent
+        raise contract.ContractError("a11y-query")
 
     def activate(self, pid):
         running = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
@@ -900,8 +1018,22 @@ class MacAdapter:
                 for point in points[:contract.MAX_CLICK_CANDIDATES]]
 
     def point_visible(self, window, x, y):
-        """Point must lie inside one active display; unknown fails closed."""
-        return self.api.point_visible(window, x, y)
+        """Point must lie inside one active display; unknown fails closed.
+
+        Only a successful ``True`` (inside an active display) or a successful
+        ``False`` (outside every active display) is a query verdict.  A raised
+        error, a non-boolean answer or any other value is an unknown query
+        state and refuses ``a11y-query``; it is never reported as a miss.
+        """
+        try:
+            verdict = self.api.point_visible(window, x, y)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise contract.ContractError("a11y-query")
+        if verdict is not True and verdict is not False:
+            raise contract.ContractError("a11y-query")
+        return verdict
 
     def activate(self, window):
         if not self.api.activate(window["pid"]):

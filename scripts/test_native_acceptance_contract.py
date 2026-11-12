@@ -451,11 +451,23 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_click_point_must_hit_the_selected_window(self):
         adapter = SpyAdapter(hit=False)
         self.assert_refused(adapter, "control-offscreen")
+        for verdict in (None, 1, "yes"):
+            with self.subTest(verdict=verdict):
+                self.assert_refused(SpyAdapter(hit=verdict), "a11y-query")
 
     def test_click_point_must_be_on_a_visible_display(self):
-        for verdict in (False, None, "yes", 1):
+        # A successful False proves the point outside every active display.
+        self.assert_refused(SpyAdapter(visible=False), "control-offscreen")
+        # Any other answer is an unknown query state, never a miss.
+        for verdict in (None, "yes", 1, 0):
             with self.subTest(verdict=verdict):
-                self.assert_refused(SpyAdapter(visible=verdict), "control-offscreen")
+                self.assert_refused(SpyAdapter(visible=verdict), "a11y-query")
+        adapter = SpyAdapter()
+        adapter.point_visible = lambda window, x, y: (_ for _ in ()).throw(OSError("display"))
+        self.assert_refused(adapter, "a11y-query")
+        adapter = SpyAdapter(hit=None)
+        adapter.hit_test = lambda window, x, y: (_ for _ in ()).throw(OSError("root"))
+        self.assert_refused(adapter, "a11y-query")
 
     def test_click_point_outside_virtual_screen_refused(self):
         adapter = SpyAdapter(screen={"x": 0, "y": 0, "width": 100, "height": 100})
@@ -1481,9 +1493,11 @@ class CandidateClickTests(unittest.TestCase):
         adapter = CandidateAdapter(hits={0: True})
         result = self.run_plan(adapter)
         self.assertEqual(adapter.clicked, [self.CENTRE])
-        self.assertEqual(adapter.probed, [self.CENTRE])
+        # Proved once to accept, then the complete check again on the fresh
+        # window before the single click.
+        self.assertEqual(adapter.probed, [self.CENTRE, self.CENTRE])
         self.assertEqual(adapter.control_hits,
-                         [(WINDOW["id"], LABEL, dict(self.BOUNDS), *self.CENTRE)])
+                         [(WINDOW["id"], LABEL, dict(self.BOUNDS), *self.CENTRE)] * 2)
         self.assertEqual(adapter.calls.count("click_candidates"), 1)
         recorded = result["clicks"][0]
         self.assertEqual((recorded["x"], recorded["y"]), self.CENTRE)
@@ -1504,11 +1518,12 @@ class CandidateClickTests(unittest.TestCase):
                 self.assertEqual(adapter.calls.count("click_candidates"), 1)
                 # Exactly the candidates up to and including the accepted one
                 # were probed against the fresh selected control and its exact
-                # authorising rectangle; each candidate gets the same checks.
-                self.assertEqual(adapter.probed, self.POINTS[:index + 1])
+                # authorising rectangle; the accepted point is then proved a
+                # second time before input, and no later candidate is tried.
+                self.assertEqual(adapter.probed, self.POINTS[:index + 1] + [point])
                 self.assertEqual(adapter.control_hits,
                                  [(WINDOW["id"], LABEL, dict(self.BOUNDS), x, y)
-                                  for x, y in self.POINTS[:index + 1]])
+                                  for x, y in self.POINTS[:index + 1] + [point]])
                 recorded = result["clicks"][0]
                 self.assertEqual((recorded["x"], recorded["y"]), point)
                 self.assertEqual((type(recorded["x"]), type(recorded["y"])), (float, float))
@@ -1521,6 +1536,7 @@ class CandidateClickTests(unittest.TestCase):
         self.assertEqual(adapter.probed, self.POINTS)
         self.assertLessEqual(len(adapter.probed), contract.MAX_CLICK_CANDIDATES)
         self.assertEqual(adapter.calls.count("click_candidates"), 1)
+        # No point was accepted, so there is no post-accept re-proof.
         self.assertEqual(adapter.calls.count("hit_test_control"), len(self.POINTS))
 
     def test_invisible_points_move_to_the_next_candidate(self):
@@ -1528,16 +1544,17 @@ class CandidateClickTests(unittest.TestCase):
         adapter = CandidateAdapter(hits={2: True}, hidden={0, 1})
         self.run_plan(adapter)
         self.assertEqual(adapter.clicked, [point])
-        # Hidden points were never probed against the control and raise no
-        # refusal: the search simply moves on to the next in-bounds point.
-        self.assertEqual(adapter.probed, [point])
+        # A successful off-display verdict is a miss: those points were never
+        # probed against the control and raise no refusal, so the search simply
+        # moves on to the next in-bounds point (proved twice once accepted).
+        self.assertEqual(adapter.probed, [point, point])
 
     def test_a_window_root_miss_moves_to_the_next_candidate(self):
         adapter = CandidateAdapter(
             hits={1: True}, root_hit=lambda window, x, y: (x, y) != self.POINTS[0])
         self.run_plan(adapter)
         self.assertEqual(adapter.clicked, [self.POINTS[1]])
-        self.assertEqual(adapter.probed, [self.POINTS[1]])
+        self.assertEqual(adapter.probed, [self.POINTS[1], self.POINTS[1]])
 
     def test_rect_change_during_search_refuses_without_any_click(self):
         adapter = CandidateAdapter(hits={3: True})
@@ -1635,6 +1652,117 @@ class CandidateClickTests(unittest.TestCase):
         self.assertEqual(adapter.probed, [])
         # No candidate reaches the freshly selected control element.
         self.refused(CandidateAdapter(hits={}), "control-hit")
+
+    def test_post_accept_root_change_refuses_instead_of_resuming_the_search(self):
+        # The accepted centre passes its full proof; an overlay then takes the
+        # window root at that same point.  The fresh observation and the
+        # complete re-proof on the SAME point must refuse before input, never
+        # fall back to an in-bounds alternate that would still reach the field.
+        for error in (False, contract.ContractError("a11y-query")):
+            with self.subTest(error=error):
+                state = {"accepted": False}
+
+                def root(window, x, y):
+                    if state["accepted"] and (x, y) == self.POINTS[0]:
+                        if error is False:
+                            return False
+                        raise error
+                    return True
+
+                adapter = CandidateAdapter(hits={0: True, 1: True}, root_hit=root)
+                original = adapter.hit_test_control
+
+                def probe(window, label, rect, x, y):
+                    if (x, y) == self.POINTS[0]:
+                        state["accepted"] = True
+                    return original(window, label, rect, x, y)
+
+                adapter.hit_test_control = probe
+                self.refused(adapter, "control-hit" if error is False else "a11y-query")
+                self.assertEqual(adapter.clicked, [])
+                # The re-proof stops at the root/display gate of the SAME
+                # accepted point: no control probe and no alternate candidate.
+                self.assertEqual(adapter.probed, [self.POINTS[0]])
+                # It always follows the fresh window/control/focus observation.
+                self.assertEqual(adapter.calls.count("read_window"), 2)
+
+    def test_post_accept_display_change_refuses_instead_of_resuming_the_search(self):
+        # The display is switched away (a valid False) or the display query
+        # fails after acceptance; either way no input and no resume.
+        for verdict in (False, contract.ContractError("a11y-query")):
+            with self.subTest(verdict=verdict):
+                # The window root always resolves: only the display query is
+                # made to answer differently after acceptance.
+                state = {"accepted": False}
+                adapter = CandidateAdapter(hits={0: True, 1: True}, root_hit=True)
+                original = adapter.hit_test_control
+
+                def probe(window, label, rect, x, y):
+                    if (x, y) == self.POINTS[0]:
+                        state["accepted"] = True
+                    return original(window, label, rect, x, y)
+
+                def display(window, x, y):
+                    if state["accepted"] and (x, y) == self.POINTS[0]:
+                        if verdict is False:
+                            return False
+                        raise verdict
+                    return True
+
+                adapter.hit_test_control = probe
+                adapter.point_visible = display
+                # A valid miss refuses the whole search (control-hit), while
+                # the failed display query aborts as a11y-query; neither clicks
+                # nor resumes with an alternate.
+                self.refused(adapter, "control-hit" if verdict is False else "a11y-query")
+                self.assertEqual(adapter.clicked, [])
+                self.assertEqual(adapter.probed, [self.POINTS[0]])
+                self.assertEqual(adapter.calls.count("read_window"), 2)
+
+    def test_post_accept_control_change_refuses_instead_of_resuming_the_search(self):
+        state = {"accepted": False, "calls": 0}
+
+        adapter = CandidateAdapter(hits={0: True, 1: True})
+        original = adapter.read_controls
+
+        def controls(window):
+            if state["accepted"]:
+                # The control is rebuilt under the point after acceptance.
+                adapter.served[0]["bounds"] = dict(CANDIDATE_FRACTIONAL, width=80.0)
+            return original(window)
+
+        def probe(window, label, rect, x, y):
+            state["calls"] += 1
+            state["accepted"] = True
+            return True
+
+        adapter.read_controls = controls
+        adapter.hit_test_control = probe
+        self.refused(adapter, "control-hit")
+        self.assertEqual(adapter.clicked, [])
+        self.assertEqual(state["calls"], 1)  # no alternate was ever probed
+
+    def test_first_hit_control_returns_fresh_window_and_point(self):
+        adapter = CandidateAdapter(hits={0: True})
+        plan = contract.parse_request(request())
+        rect = dict(self.BOUNDS)
+        with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
+            fresh, point = contract.first_hit_control(
+                plan, adapter, dict(WINDOW), LABEL, rect, [self.CENTRE],
+                contract.Budget())
+        self.assertEqual(point, self.CENTRE)
+        self.assertIs(type(fresh), dict)
+        self.assertEqual(fresh["id"], WINDOW["id"])
+        for result in (None, self.CENTRE, (dict(WINDOW),), (dict(WINDOW), (1.0,)),
+                       ("window", self.CENTRE), (dict(WINDOW), (True, 315.0)),
+                       (dict(WINDOW), (float("nan"), 315.0))):
+            with self.subTest(result=result):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.accepted_candidate(result)
+                self.assertEqual(error.exception.code, "control-hit")
+        # The module keeps no accepted-candidate state between calls.
+        self.assertFalse(hasattr(contract, "_ACCEPTED_WINDOW"))
+        self.assertFalse(hasattr(contract, "_accepted_window"))
 
     def test_focus_loss_during_search_refuses_without_any_click(self):
         adapter = CandidateAdapter(hits={1: True})
@@ -1779,7 +1907,8 @@ class CandidateClickTests(unittest.TestCase):
                 adapter.platform = platform
                 result = self.run_plan(adapter)
                 self.assertEqual(adapter.clicked, [self.CENTRE])
-                self.assertEqual(adapter.probed, [self.CENTRE])
+                self.assertEqual(adapter.probed,
+                                 [self.CENTRE] * (2 if candidate_path else 1))
                 self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]),
                                  self.CENTRE)
                 if candidate_path:

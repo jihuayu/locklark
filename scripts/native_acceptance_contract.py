@@ -611,7 +611,11 @@ def screen_bounds(adapter):
 
 
 def check_point(adapter, window, x, y):
-    """Refuse any point outside the virtual screen or the selected window."""
+    """Refuse any point outside the virtual screen or the selected window.
+
+    A display/root query error (``a11y-query``) always propagates, while only
+    a successful ``False`` verdict becomes the skippable ``control-offscreen``.
+    """
     screen = screen_bounds(adapter)
     if screen is not None and not (screen["x"] <= x < screen["x"] + screen["width"] and
                                    screen["y"] <= y < screen["y"] + screen["height"]):
@@ -622,15 +626,57 @@ def check_point(adapter, window, x, y):
     if not (frame["x"] <= x < frame["x"] + frame["width"] and
             frame["y"] <= y < frame["y"] + frame["height"]):
         raise ContractError("control-offscreen")
-    hit = getattr(adapter, "hit_test", None)
-    if hit is not None and hit(window, x, y) is not True:
+    if point_hit(adapter, window, x, y) is not True:
         raise ContractError("control-offscreen")
-    visible = getattr(adapter, "point_visible", None)
-    if visible is not None and visible(window, x, y) is not True:
-        # A hidden display, an unreadable display list or any non-True verdict
-        # fails closed: permission to inject is never inferred from silence.
+    if point_visible(adapter, window, x, y) is not True:
         raise ContractError("control-offscreen")
     return x, y
+
+
+def point_hit(adapter, window, x, y):
+    """The window-root verdict for one point; a miss is False, never unknown.
+
+    Only a successful ``True`` (the point resolves to the selected window) or
+    a successful ``False`` (no window root or a bound window under the point)
+    is a verdict.  A raised error, a non-boolean answer, a missing hook or any
+    other value is an unknown query state and refuses ``a11y-query`` before a
+    caller can mistake it for a skippable candidate miss.
+    """
+    hit = getattr(adapter, "hit_test", None)
+    if hit is None:
+        return True
+    try:
+        verdict = hit(window, x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if verdict is not True and verdict is not False:
+        raise ContractError("a11y-query")
+    return verdict
+
+
+def point_visible(adapter, window, x, y):
+    """The active-display verdict for one point; a miss is False, never unknown.
+
+    Only a successful ``True`` (inside an active display) or a successful
+    ``False`` (outside every active display) is a verdict.  A raised error, a
+    non-boolean answer, a missing hook or any other value is an unknown query
+    state and refuses ``a11y-query``; permission to inject is never inferred
+    from silence, and an unknown state is never a skippable miss.
+    """
+    visible = getattr(adapter, "point_visible", None)
+    if visible is None:
+        return True
+    try:
+        verdict = visible(window, x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if verdict is not True and verdict is not False:
+        raise ContractError("a11y-query")
+    return verdict
 
 
 def confirm_control_hit(adapter, window, label, rect, x, y):
@@ -737,15 +783,15 @@ def candidate_hits_control(adapter, window, label, rect, points):
     """One candidate's full identity check; True only if every gate passes.
 
     The point must lie inside the exact selected window, inside one active
-    display and on the selected window root exactly as ``check_point`` demands
-    (``point_visible`` / ``hit_test``: a miss moves on to the next candidate,
-    while a lost display, window root or window frame refuses
-    ``control-offscreen`` for the whole search).  It must then resolve, under
-    the strict hook without ``control-hit``, to the same freshly selected
-    control: the unique selected label re-resolved in this same ``window`` at
-    its exact current rectangle, reached from the element under the point.
-    The caller re-proves window, rect and foreground after every probe.
-    Physical input is never attempted here.
+    display and on the selected window root exactly as ``check_point`` demands.
+    Only a successful ``False`` display/window-root verdict is a miss that
+    moves on to the next candidate; a query error refuses ``a11y-query`` for
+    the whole search and an off-window point refuses ``control-offscreen``.
+    It must then resolve, under the strict hook without ``control-hit``, to the
+    same freshly selected control: the unique selected label re-resolved in
+    this same ``window`` at its exact current rectangle, reached from the
+    element under the point.  The caller re-proves window, rect and foreground
+    after every probe.  Physical input is never attempted here.
     """
     try:
         check_point(adapter, window, *points)
@@ -777,21 +823,48 @@ def first_hit_control(plan, adapter, window, label, rect, points, budget):
     """The first exact point whose full identity checks pass; else refuse.
 
     Each point already passed the adapter's shape and in-rect validation; they
-    are tried in order and only a point that passed every gate on one and the
-    same fresh window, control rectangle and foreground is returned.  No point
-    is ever clicked here, so a refused search emits no input at all and a
-    failed or unknown physical click can never cause another point to be tried.
+    are tried in order.  A successful ``False`` display/window-root verdict is
+    the only skippable miss; a query error aborts the whole search.  After a
+    point passes its initial proof, the exact window, the unique current
+    control rect and the focus are re-observed once more, and the COMPLETE
+    point/root/display/control proof runs again on that SAME accepted point
+    and the returned fresh window; a valid miss or query error then refuses
+    before input instead of resuming the candidate search.  No point is ever
+    clicked here, so a refused search emits no input at all and a failed or
+    unknown physical click can never cause another point to be tried.
+
+    Returns ``(fresh_window, point)``: the fresh window the accepted point was
+    finally proved on and the exact ``(x, y)`` pair.  The caller uses that same
+    window for the input receipt and the next action; no state is kept here.
     """
     current = window
     for point in points:
         if candidate_hits_control(adapter, current, label, rect, point):
-            # The accepted point is re-proved on the same fresh window, exact
-            # control rectangle and foreground before it may be clicked, so a
-            # change during its own probe still refuses before any input.
-            _candidate_still_authorised(plan, adapter, current, label, rect, budget)
-            return point
+            fresh = _candidate_still_authorised(plan, adapter, current, label, rect, budget)
+            if not candidate_hits_control(adapter, fresh, label, rect, point):
+                raise ContractError("control-hit")
+            return fresh, point
         current = _candidate_still_authorised(plan, adapter, current, label, rect, budget)
     raise ContractError("control-hit")
+
+
+def accepted_candidate(result):
+    """The exact ``(fresh_window, (x, y))`` pair; any other shape refuses.
+
+    ``first_hit_control`` returns the fresh window the accepted point was
+    finally proved on and that point.  A hook that answers anything else never
+    authorises input, and is refused here instead of failing while unpacking.
+    """
+    try:
+        fresh, point = result
+    except Exception:
+        raise ContractError("control-hit")
+    if type(fresh) is not dict or type(point) is not tuple or len(point) != 2:
+        raise ContractError("control-hit")
+    if not all(type(value) in (int, float) and geometry_value(value) is not None
+               for value in point):
+        raise ContractError("control-hit")
+    return fresh, point
 
 
 def ensure_focus(plan, adapter, window, budget):
@@ -991,11 +1064,12 @@ def execute(plan, adapter):
                 # macOS only: the exact centre first, then at most eight more
                 # exact in-rect fractions. Each needs the same fresh window,
                 # display, selected control rectangle/identity and foreground;
-                # the first one that passes all of them is the single point
-                # clicked, and the search refuses before any input otherwise.
-                x, y = first_hit_control(
+                # the first one that passes all of them twice - initially and
+                # again on the same point and fresh window immediately before
+                # input - is the single point clicked; anything else refuses.
+                fresh, (x, y) = accepted_candidate(first_hit_control(
                     plan, adapter, fresh, action["click_label"], rect,
-                    control_candidates(adapter, rect), budget)
+                    control_candidates(adapter, rect), budget))
             else:
                 x, y = check_point(adapter, fresh, *_center(rect))
                 # The window-root hit test above cannot see a sibling or
@@ -1004,6 +1078,7 @@ def execute(plan, adapter):
                 confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
+            # The receipt names the window the point was finally proved on.
             clicks.append(click_record(fresh, action["click_label"], x, y,
                                        ack, kind, rect))
             window = fresh
