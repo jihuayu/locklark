@@ -30,6 +30,10 @@ MARKER = "Later independent synthetic clipboard owner"
 OTP_WINDOW_SECONDS = 20
 OTP_WINDOW_MIN_REMAINING = 18
 OTP_WINDOW_TIMEOUT = 30
+OTP_DIAGNOSTIC_PREFIX = "Desktop OTP failure diagnostic: "
+OTP_DIAGNOSTIC_DELTA_LIMIT = 64
+OTP_DIAGNOSTIC_LIMIT = 1024
+UNAVAILABLE = "unavailable"
 
 
 class AcceptanceFailure(Exception):
@@ -39,6 +43,27 @@ class AcceptanceFailure(Exception):
 def require(condition):
     if not condition:
         raise AcceptanceFailure()
+
+
+def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
+    """Project failure evidence onto the fixed OTP diagnostic line.
+
+    Each delta is kept only when it is an exact ``int`` (not a bool) within
+    ``[-64, 64]``; ``clipboard_empty`` only when it is an exact ``bool``.
+    Everything else becomes ``unavailable``. The record has exactly the three
+    fixed keys, no embedded newline, and fits the fixed prefix limit.
+    """
+    def delta(value):
+        return value if type(value) is int and abs(value) <= OTP_DIAGNOSTIC_DELTA_LIMIT else UNAVAILABLE
+
+    def empty(value):
+        return value if type(value) is bool else UNAVAILABLE
+
+    record = {"copy_window_delta": delta(copy_delta), "failure_window_delta": delta(failure_delta),
+              "clipboard_empty": empty(clipboard_empty)}
+    line = OTP_DIAGNOSTIC_PREFIX + json.dumps(record, separators=(",", ":"), ensure_ascii=True)
+    require(line.isascii() and "\n" not in line and len(line.encode("utf-8")) <= OTP_DIAGNOSTIC_LIMIT)
+    return line
 
 
 class Acceptance:
@@ -72,6 +97,11 @@ class Acceptance:
         self.foreign_owners = []
         self.foreign_observations = []
         self.output_lines = []
+        # Copy probe bookkeeping, kept in memory only: the accepted sample and
+        # its copy click (converted with otp_window only for deltas), and the
+        # fixed record of the first failed copy.
+        self.otp_copy = None
+        self.otp_diagnostic = None
         self.log = (self.state / "native.log").open("xb")
         os.chmod(self.state / "native.log", 0o600)
 
@@ -574,14 +604,61 @@ class Acceptance:
                 raise AcceptanceFailure()
             time.sleep(0.2)
 
+    def record_otp_copy_failure(self):
+        """Record one fixed line for a failed OTP copy. Catch-time only.
+
+        The accepted timestamp is a float; it is converted with
+        ``self.otp_window`` only to form the failure window delta, and the
+        copy click likewise for the copy window delta. A single clipboard read
+        records whether it is empty; the copy was just checked, so it is not
+        checked, clicked or waited on again. The line reaches stdout directly
+        and is never written to an artifact; the original stage, reason,
+        native action and exit code are kept and no click is issued. Every
+        failure of the probe itself is swallowed.
+        """
+        original = (self.stage, self.reason, self.native_action)
+        # A catch inside the probe itself records nothing and reads nothing.
+        busy = getattr(self, "otp_probe_busy", False)
+        copy = getattr(self, "otp_copy", None)
+        self.otp_copy, self.otp_diagnostic, self.otp_probe_busy = None, None, True
+        try:
+            if busy or copy is None:
+                return
+            # Both are converted with self.otp_window only for their deltas.
+            sample, click = copy
+            copy_window, click_window = self.otp_window(sample), self.otp_window(click)
+            # The raw value goes through the projection's exact-bool check:
+            # a missing or non-bool reply becomes "unavailable", never false.
+            try:
+                empty = self.clipboard().get("empty")
+            except Exception:
+                empty = None
+            line = otp_diagnostic(click_window - copy_window,
+                                  self.otp_window(time.time()) - copy_window, empty)
+            self.otp_diagnostic = line
+            print(line, flush=True)
+        except BaseException:
+            return
+        finally:
+            self.stage, self.reason, self.native_action = original
+            self.otp_probe_busy = False
+
     def show_copy_otp(self):
         self.wait("显示验证码")
         window = self.await_new_otp_window()
         self.click("显示验证码")
         self.wait("隐藏验证码")
         require(self.display(otp=True, expected=[self.otp(window)])["matches"] == [True])
+        copied = time.time()
         self.click("复制验证码")
-        self.eventually(lambda: self.clipboard([self.otp(window)])["matches"] == [True])
+        # Every attempt replaces the record, so a failure always reports this
+        # copy and never an earlier one. Both values stay internal.
+        self.otp_copy = (window, copied)
+        try:
+            self.eventually(lambda: self.clipboard([self.otp(window)])["matches"] == [True])
+        except AcceptanceFailure:
+            self.record_otp_copy_failure()
+            raise
 
     def otp_acceptance(self):
         self.select("Daily OTP login")
@@ -766,7 +843,11 @@ class Acceptance:
             except Exception:
                 failure["displays_unavailable"] = True
             self.reason, self.native_action = failure["reason"], failure["native_action"]
-            (self.diagnostics / "failure.json").write_text(json.dumps(failure))
+            # An artifact write must never change the failure line or exit code.
+            try:
+                (self.diagnostics / "failure.json").write_text(json.dumps(failure))
+            except Exception:
+                pass
         finally:
             # Include a value created immediately before an unrelated failure
             # in the final log scan, without changing the live source vault.
@@ -777,9 +858,14 @@ class Acceptance:
                     pass
             self.close()
         if self.foreign_observations:
+            # Best-effort extra detail: a write failure must never replace
+            # the primary outcome or stop the fixed lines below.
             path = self.diagnostics/"clipboard-ownership.json"
-            with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
-                json.dump(self.foreign_observations,output,indent=2)
+            try:
+                with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
+                    json.dump(self.foreign_observations,output,indent=2)
+            except Exception:
+                pass
         success_label = {
             "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
             "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
@@ -788,7 +874,8 @@ class Acceptance:
                        "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
                        "Desktop native private artifact and controller scan: passed",
                        success_label
-                       if success else "Desktop native acceptance failed at " + self.stage + " [" + self.reason + "] action=" + self.native_action]
+                       if success else "Desktop native acceptance failed at " + self.stage + " [" + self.reason + "] action=" + self.native_action,
+                       getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"]
         # Include every controller phase and the final summary in the same
         # scan as native/probe logs and diagnostics. Raw values remain only in
         # memory; the file contains the already public, fixed transcript.
@@ -798,11 +885,17 @@ class Acceptance:
                 output.write("\n".join(self.output_lines + final_lines) + "\n")
             self.scan()
         except Exception:
+            self.emit_lines(final_lines)
             print("Desktop native privacy scan failed", flush=True)
             return 1
-        for message in final_lines:
-            print(message, flush=True)
+        self.emit_lines(final_lines)
         return 0 if success else 1
+
+    @staticmethod
+    def emit_lines(lines):
+        # The OTP line reaches stdout here regardless of transcript or scan.
+        for message in lines:
+            print(message, flush=True)
 
 
 if __name__ == "__main__":
