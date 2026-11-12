@@ -1193,6 +1193,7 @@ class FolderActionTests(unittest.TestCase):
         for message in ("Chooser action request required",
                         "Chooser focus failed",
                         "Chooser shortcut unavailable",
+                        "Chooser shortcut input failed",
                         "Chooser navigation path required",
                         "Chooser folder point is not inside the chooser",
                         "Chooser must keep the requested title",
@@ -1867,24 +1868,86 @@ class ChooserNavigationTests(unittest.TestCase):
                 keycode, inverse.get(keycode, 0)),
         )
 
-    def test_exact_plan_is_ctrl_l_path_return(self):
+    def test_first_item_is_a_true_ctrl_l_chord(self):
         path = "/synthetic/package/chromium"
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50}
         code.update({ord(char): 100 + index for index, char in enumerate(path)})
         plan = native.chooser_navigation(self.xlib(code), "display", path)
-        # Exactly Control_L, l, each path character and Return: no other key.
-        self.assertEqual([keycode for keycode, _shift in plan],
-                         [37, 46] + [code[ord(char)] for char in path] + [36])
-        self.assertEqual(len(plan), len(path) + 3)
-        self.assertTrue(all(shift is None for _keycode, shift in plan))
+        # The first item is one chord: Control_L held while l is pressed, then
+        # released last, never two independent Control_L and l keystrokes.
+        self.assertEqual(plan[0], (((37, True), (46, True), (46, False),
+                                    (37, False)), "chord"))
+        # No item is a standalone Control_L or l keystroke.
+        self.assertNotIn((37, None), [keys for keys, _kind in plan])
+        self.assertNotIn((46, None), [keys for keys, _kind in plan])
+        down = [keycode for keycode, pressed in plan[0][0] if pressed]
+        self.assertEqual(down, [37, 46])
+        # Exactly one chord, each path character and Return: no other key.
+        self.assertEqual([kind for _keys, kind in plan],
+                         ["chord"] + ["path"] * len(path) + ["return"])
+        self.assertEqual([keys for keys, kind in plan if kind == "path"],
+                         [(code[ord(char)], None) for char in path])
+
+    def test_remainder_is_only_the_exact_path_plus_return(self):
+        path = "/synthetic/package/chromium"
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50}
+        code.update({ord(char): 100 + index for index, char in enumerate(path)})
+        plan = native.chooser_navigation(self.xlib(code), "display", path)
+        self.assertEqual(len(plan), len(path) + 2)
+        self.assertEqual(plan[1:], [((code[ord(char)], None), "path")
+                                    for char in path] + [((36, None), "return")])
 
     def test_shifted_symbols_are_shift_chords(self):
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
                 ord("Q"): 24, ord("e"): 26}
         first_level = {24: ord("q"), 26: ord("e"), 61: ord("/")}
         plan = native.chooser_navigation(self.xlib(code, first_level), "display", "/Qe")
-        self.assertEqual(plan, [(37, None), (46, None), (61, None), (24, 50),
-                                (26, None), (36, None)])
+        self.assertEqual(plan, [(((37, True), (46, True), (46, False),
+                                  (37, False)), "chord"),
+                                ((61, None), "path"), ((24, 50), "path"),
+                                ((26, None), "path"), ((36, None), "return")])
+
+    def test_emission_holds_ctrl_through_l_and_bounds_before_return(self):
+        path = "/Re/l"
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
+                ord("R"): 27, ord("e"): 26}
+        first_level = {27: ord("r"), 26: ord("e"), 61: ord("/")}
+        plan = native.chooser_navigation(self.xlib(code, first_level), "display", path)
+        events, boundaries = [], []
+        native.emit_chooser_plan(
+            plan, lambda keycode, down: events.append((keycode, down)),
+            lambda failure: boundaries.append((failure, len(events))))
+        self.assertEqual(events, [
+            (37, 1), (46, 1), (46, 0), (37, 0),            # the Ctrl+L chord
+            (61, 1), (61, 0),
+            (50, 1), (27, 1), (27, 0), (50, 0),            # /R
+            (26, 1), (26, 0),                              # e
+            (61, 1), (61, 0),
+            (46, 1), (46, 0),                              # l
+            (36, 1), (36, 0),                              # Return
+        ])
+        # The chord first, then the path text, then Return; nothing else.
+        self.assertEqual(boundaries, [("Chooser shortcut input failed", 4),
+                                      ("Chooser folder input failed", 16)])
+
+    def test_malformed_plan_emits_nothing(self):
+        events = []
+        for plan in ([(((46, True),), "chord")],
+                     [((37, None), "path"), ((36, None), "return")],
+                     [((37, None), "return")],
+                     [((36, None), "path")]):
+            with self.subTest(plan=plan):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "^Chooser shortcut unavailable$"):
+                    native.emit_chooser_plan(
+                        plan, lambda keycode, down: events.append(keycode),
+                        lambda failure: self.fail(failure))
+        self.assertEqual(events, [])
+
+    def test_shift_refusal_is_preserved(self):
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, ord("/"): 61}
+        with self.assertRaisesRegex(RuntimeError, "^Chooser shortcut unavailable$"):
+            native.chooser_navigation(self.xlib(code), "display", "/x")
 
     def test_unmapped_keys_are_refused(self):
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
