@@ -75,6 +75,11 @@ PROC_PIDTBSDINFO = 3
 # difference never matches.
 AX_CG_BORDER_INSET = 1
 RECT_KEYS = ("x", "y", "width", "height")
+# The one fixed set of fractional positions of every exact control rectangle
+# tried for a labelled click, in row-major order. The exact centre is always
+# first (MacAdapter.click_candidates), so adding the 50% column and row leaves
+# at most nine points, all strictly inside the authorising rectangle.
+CLICK_FRACTIONS = (0.2, 0.5, 0.8)
 
 
 def _frame_relation(frame, bounds):
@@ -855,6 +860,44 @@ class MacAdapter:
     def hit_test_control(self, window, label, rect, x, y):
         """Strict identity re-check for the uniquely selected AX control."""
         return self.api.hit_test_control(window, label, dict(rect), x, y) is True
+
+    @staticmethod
+    def click_candidates(rect):
+        """The fixed exact-point list inside one validated control rectangle.
+
+        The exact centre comes first: the historical integer centre for
+        purely integer geometry (unchanged from Windows/X11), otherwise the
+        true fractional centre.  It is followed by the points at
+        ``CLICK_FRACTIONS`` (20%, 50% and 80%) of the rectangle's width and
+        height, in row-major order and deduplicated against the centre, so the
+        list is at most ``MAX_CLICK_CANDIDATES`` (9) long.  Every point is
+        built from the exact rectangle values (never a tolerance and never an
+        offset outward), so it stays strictly inside the selected control.
+        Nothing is read from AX here: the caller validates shape, types and
+        rect membership.  Integer-resolved macOS geometry keeps the same
+        historical integer centre FIRST (bit-for-bit the Windows/X11 point);
+        the 3x3 fractional grid is still offered after it so a covered centre
+        can fall back to an exact in-bounds point.  Windows/X11 never call
+        this hook at all and keep the single centre.
+        """
+        if type(rect) is not dict:
+            raise contract.ContractError("control-hit")
+        values = [rect.get(key) for key in RECT_KEYS]
+        if not all(type(value) in (int, float) and math.isfinite(value) for value in values):
+            raise contract.ContractError("control-hit")
+        x, y, width, height = values
+        if all(type(value) is int for value in values):
+            first = (x + width // 2, y + height // 2)
+        else:
+            first = (x + width / 2, y + height / 2)
+        points = [first]
+        for fy in CLICK_FRACTIONS:
+            for fx in CLICK_FRACTIONS:
+                point = (x + width * fx, y + height * fy)
+                if point not in points:
+                    points.append(point)
+        return [{"x": point[0], "y": point[1]}
+                for point in points[:contract.MAX_CLICK_CANDIDATES]]
 
     def point_visible(self, window, x, y):
         """Point must lie inside one active display; unknown fails closed."""

@@ -7,11 +7,13 @@ import json
 import os
 import subprocess
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import browser_native_macos as macos
 import native_acceptance_contract as contract
 
 LABEL = "确认连接此扩展"
@@ -373,20 +375,20 @@ class ActivationRequestTests(unittest.TestCase):
 
 
 class ExecutionGuardTests(unittest.TestCase):
-    def execute(self, adapter, **overrides):
+    def run_plan(self, adapter, **overrides):
         plan = contract.parse_request(request(**overrides))
         with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
             return contract.execute(plan, adapter)
 
     def assert_refused(self, adapter, code, **overrides):
         with self.assertRaises(contract.ContractError) as error:
-            self.execute(adapter, **overrides)
+            self.run_plan(adapter, **overrides)
         self.assertEqual(error.exception.code, code, error.exception.args)
         self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
 
     def test_click_is_emitted_once_after_reobservation(self):
         adapter = SpyAdapter()
-        result = self.execute(adapter)
+        result = self.run_plan(adapter)
         self.assertEqual(adapter.calls[0], "list_windows")
         self.assertEqual(adapter.calls[-1], ("click", 240, 315))
         self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)],
@@ -401,7 +403,7 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_failed_ack_is_not_retried(self):
         adapter = SpyAdapter()
         adapter.click_ack = {"move": False, "down": False, "up": False}
-        result = self.execute(adapter)
+        result = self.run_plan(adapter)
         self.assertEqual(len([call for call in adapter.calls if isinstance(call, tuple)]), 1)
         self.assertEqual(result["clicks"][0]["ack"], {"move": False, "down": False, "up": False})
 
@@ -467,7 +469,7 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_posted_evidence_is_reported_for_post_only_platforms(self):
         adapter = SpyAdapter()
         adapter.input_evidence = "posted"
-        result = self.execute(adapter)
+        result = self.run_plan(adapter)
         self.assertEqual(result["clicks"][0]["evidence"], "posted")
 
     def test_preserve_focus_never_steals_focus(self):
@@ -498,7 +500,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def test_pointer_offset_resolves_inside_client_area(self):
         adapter = SpyAdapter()
-        result = self.execute(adapter, actions=[{"click": [10, 20]}])
+        result = self.run_plan(adapter, actions=[{"click": [10, 20]}])
         self.assertEqual(adapter.calls[-1], ("click", 120, 160))
         self.assertEqual(result["clicks"][0]["label"], "pointer")
 
@@ -507,7 +509,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def test_text_and_key_emit_once_each_after_focus(self):
         adapter = SpyAdapter()
-        self.execute(adapter, actions=[{"text": "abc"}, {"key": "Control_L+a"}])
+        self.run_plan(adapter, actions=[{"text": "abc"}, {"key": "Control_L+a"}])
         self.assertEqual(adapter.calls.count("type_text"), 1)
         self.assertEqual(adapter.calls.count("press_chord"), 1)
         self.assertLess(adapter.calls.index("type_text"), adapter.calls.index("press_chord"))
@@ -515,7 +517,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def test_absent_window_reports_only_absence(self):
         adapter = SpyAdapter(windows=[])
-        result = self.execute(adapter, actions=[], wait_absent=True)
+        result = self.run_plan(adapter, actions=[], wait_absent=True)
         self.assertEqual(result, {"absent": True})
 
     def test_absence_timeout_refused(self):
@@ -530,7 +532,7 @@ class ExecutionGuardTests(unittest.TestCase):
 
     def test_inspect_snapshot_has_only_public_state(self):
         adapter = SpyAdapter(controls=[control(LABEL), control(OTHER_LABEL, enabled=False)])
-        result = self.execute(adapter, actions=[], inspect=True)
+        result = self.run_plan(adapter, actions=[], inspect=True)
         self.assertEqual(set(result["controls"]), set(contract.KNOWN_SYNTHETIC_LABELS))
         self.assertEqual(result["controls"][LABEL],
                          {"present": True, "enabled": True, "showing": True})
@@ -773,7 +775,7 @@ class _Hookless(SpyAdapter):
 class ControlHitIdentityTests(unittest.TestCase):
     """The point must resolve to the SELECTED control, not just its window."""
 
-    def execute(self, adapter, **overrides):
+    def run_plan(self, adapter, **overrides):
         plan = contract.parse_request(request(**overrides))
         with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
             return contract.execute(plan, adapter)
@@ -783,14 +785,14 @@ class ControlHitIdentityTests(unittest.TestCase):
 
     def refused(self, adapter, code, **overrides):
         with self.assertRaises(contract.ContractError) as error:
-            self.execute(adapter, **overrides)
+            self.run_plan(adapter, **overrides)
         self.assertEqual(error.exception.code, code, error.exception.args)
         self.assertEqual(self.clicks(adapter), [])
         return error.exception
 
     def test_selected_control_is_re_probed_between_point_check_and_click(self):
         adapter = SpyAdapter()
-        result = self.execute(adapter)
+        result = self.run_plan(adapter)
         self.assertEqual(adapter.calls.count("hit_test"), 1)
         self.assertEqual(adapter.calls.count("hit_test_control"), 1)
         self.assertLess(adapter.calls.index("hit_test"), adapter.calls.index("hit_test_control"))
@@ -800,7 +802,7 @@ class ControlHitIdentityTests(unittest.TestCase):
 
     def test_probe_receives_the_authorising_control_rect_and_centre(self):
         adapter = SpyAdapter()
-        self.execute(adapter)
+        self.run_plan(adapter)
         self.assertEqual(adapter.control_hits, [
             (WINDOW["id"], LABEL, control(LABEL)["bounds"], 240, 315)])
 
@@ -813,7 +815,7 @@ class ControlHitIdentityTests(unittest.TestCase):
         for verdict in (False, None, 1, "yes", [], {"hit": True}):
             with self.subTest(verdict=verdict):
                 self.refused(SpyAdapter(control_hit=verdict), "control-hit")
-        result = self.execute(SpyAdapter(control_hit=True))
+        result = self.run_plan(SpyAdapter(control_hit=True))
         self.assertEqual(len(result["clicks"]), 1)
 
     def test_a_missing_hook_is_refused_not_trusted_by_omission(self):
@@ -831,7 +833,7 @@ class ControlHitIdentityTests(unittest.TestCase):
 
     def test_pointer_offset_clicks_keep_the_window_root_check_only(self):
         adapter = SpyAdapter()
-        result = self.execute(adapter, actions=[{"click": [10, 20]}])
+        result = self.run_plan(adapter, actions=[{"click": [10, 20]}])
         self.assertEqual(result["clicks"][0]["label"], "pointer")
         self.assertEqual(adapter.calls.count("hit_test"), 1)
         self.assertEqual(adapter.control_hits, [])
@@ -840,7 +842,7 @@ class ControlHitIdentityTests(unittest.TestCase):
         for action in ({"wait_label": LABEL}, {"text": "ascii"}, {"key": "Tab"}):
             with self.subTest(action=action):
                 adapter = SpyAdapter()
-                self.execute(adapter, actions=[action])
+                self.run_plan(adapter, actions=[action])
                 self.assertEqual(adapter.control_hits, [])
 
 
@@ -1239,7 +1241,7 @@ class GeometryValidationTests(unittest.TestCase):
         self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (120.5, 160.25))
 
     def executed(self, adapter, **overrides):
-        return ExecutionGuardTests.execute(self, adapter, **overrides)
+        return ExecutionGuardTests.run_plan(self, adapter, **overrides)
 
     def clicks(self, adapter):
         return [call for call in adapter.calls if isinstance(call, tuple)]
@@ -1250,6 +1252,553 @@ class GeometryValidationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, code)
         self.assertEqual(self.clicks(adapter), [])
         self.assertEqual(adapter.control_hits, [])
+
+
+def mac_points(rect):
+    """The required candidate grid, as (x, y) pairs.
+
+    The centre comes first: the historical integer centre for an integer
+    rectangle (bit-for-bit the Windows/X11 point), the exact true centre
+    otherwise.  Then the 20%/50%/80% fractions in row-major order,
+    deduplicated against the centre, so the list is at most nine long (the
+    50%/50% point is the centre already listed).
+    """
+    if all(type(rect[key]) is int for key in ("x", "y", "width", "height")):
+        centre = (rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2)
+    else:
+        centre = (rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)
+    points = [centre]
+    for fy in (0.2, 0.5, 0.8):
+        for fx in (0.2, 0.5, 0.8):
+            point = (rect["x"] + rect["width"] * fx, rect["y"] + rect["height"] * fy)
+            if point not in points:
+                points.append(point)
+    return points[:contract.MAX_CLICK_CANDIDATES]
+
+
+class CandidateAdapter(object):
+    """A minimal macOS-shaped adapter; every observation is a local stub.
+
+    ``hits`` maps the index of a point in ``points`` (the fixed 3x3 list of the
+    served control rectangle) to True/False/an exception; every other point,
+    including a covered centre, is a miss.  ``root_hit`` is the window-root
+    verdict (a literal or a callable), ``hidden`` the indices of the invisible
+    points, ``on_hit`` runs at each control probe and ``candidates`` replaces
+    the list.
+    """
+
+    platform = "macos"
+    input_evidence = "posted"
+    exact_focus = True
+    supports_activation = True
+    screen = None
+
+    def __init__(self, hits=None, hidden=(), on_hit=None, candidates=None,
+                 root_hit=True, windows=None, control=None, focus_window=None):
+        self.calls = []
+        self.hits = dict(hits or {})
+        self.hidden = list(hidden)
+        self.on_hit = on_hit
+        self.supplied = candidates
+        self.root_hit = root_hit
+        self.windows = [dict(WINDOW)] if windows is None else windows
+        served = control if control is not None else CandidateClickTests.fractional_control()
+        self.served = [dict(served)]
+        self.focus_window = WINDOW["id"] if focus_window is None else focus_window
+        bounds = self.served[0]["bounds"]
+        self.points = mac_points(bounds) if type(bounds) is dict else []
+        self.calls = []
+        self.clicked = []
+        self.probed = []
+        self.control_hits = []
+
+    # -- observation -------------------------------------------------------
+    def check_capability(self):
+        pass
+
+    def list_windows(self):
+        self.calls.append("list_windows")
+        return [dict(window) for window in self.windows]
+
+    def read_window(self, identifier):
+        self.calls.append("read_window")
+        for window in self.windows:
+            if window["id"] == identifier:
+                return dict(window)
+        return None
+
+    def read_controls(self, window):
+        self.calls.append("read_controls")
+        return [dict(item) for item in self.served]
+
+    def focus_state(self, window=None):
+        self.calls.append("focus_state")
+        return {"pid": WINDOW["pid"], "window": self.focus_window}
+
+    def hit_test(self, window, x, y):
+        self.calls.append("hit_test")
+        if not _within(window["client"], x, y):
+            return False
+        return self.root_hit(window, x, y) if callable(self.root_hit) else self.root_hit
+
+    def point_visible(self, window, x, y):
+        self.calls.append("point_visible")
+        for index in self.hidden:
+            point = self.points[index]
+            if point[0] == x and point[1] == y:
+                return False
+        return True
+
+    def click_candidates(self, rect):
+        """The real MacAdapter list (the stub's points follow its order)."""
+        self.calls.append("click_candidates")
+        if self.supplied is not None:
+            return self.supplied(rect)
+        listed = macos.MacAdapter.click_candidates(rect)
+        self.points = [(item["x"], item["y"]) for item in listed]
+        return listed
+
+    def hit_test_control(self, window, label, rect, x, y):
+        self.calls.append("hit_test_control")
+        self.control_hits.append((window["id"], label, dict(rect), x, y))
+        self.probed.append((x, y))
+        if self.on_hit is not None:
+            self.on_hit((x, y))
+        for index, point in enumerate(self.points):
+            if point[0] == x and point[1] == y:
+                verdict = self.hits.get(index, False)
+                if isinstance(verdict, Exception):
+                    raise verdict
+                return verdict
+        return False
+
+    def activate(self, window):
+        self.calls.append("activate")
+
+    def click(self, x, y):
+        self.clicked.append((x, y))
+        return {"move": True, "down": True, "up": True}
+
+
+def _within(rect, x, y):
+    return (rect["x"] <= x < rect["x"] + rect["width"] and
+            rect["y"] <= y < rect["y"] + rect["height"])
+
+
+CANDIDATE_CONTROL = control(LABEL)
+
+
+# The same control with genuine fractional (CGFloat) geometry: only such
+# geometry takes the macOS candidate path at all.
+CANDIDATE_FRACTIONAL = {"x": 200.5, "y": 300.25, "width": 80.5, "height": 30.5}
+CANDIDATE_GRID = mac_points(CANDIDATE_FRACTIONAL)
+
+
+class CandidateClickTests(unittest.TestCase):
+    """macOS: the exact centre first, then bounded exact in-rect alternates."""
+
+    BOUNDS = CANDIDATE_FRACTIONAL
+    POINTS = CANDIDATE_GRID
+    CENTRE = (CANDIDATE_FRACTIONAL["x"] + CANDIDATE_FRACTIONAL["width"] / 2,
+              CANDIDATE_FRACTIONAL["y"] + CANDIDATE_FRACTIONAL["height"] / 2)
+
+    @classmethod
+    def fractional_control(cls):
+        """A fresh copy of the shared label click with fractional bounds."""
+        return control(LABEL, bounds=dict(CANDIDATE_FRACTIONAL))
+
+    def run_plan(self, adapter, **overrides):
+        plan = contract.parse_request(request(**overrides))
+        with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
+            return contract.execute(plan, adapter)
+
+    def refused(self, adapter, code, **overrides):
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(adapter, **overrides)
+        self.assertEqual(error.exception.code, code)
+        self.assertEqual(adapter.clicked, [])
+        return error.exception
+
+    def execute(self, adapter, **overrides):
+        return self.run_plan(adapter, **overrides)
+
+    def test_candidates_are_bounded_fixed_and_strictly_in_bounds(self):
+        # The fixed set: the centre first, then the 20%/50%/80% fractions in
+        # row-major order, deduplicated against the centre, bounded at nine.
+        rect = self.BOUNDS
+        self.assertEqual(self.grid(rect),
+                         [(240.75, 315.5), (216.6, 306.35), (240.75, 306.35),
+                          (264.9, 306.35), (216.6, 315.5), (264.9, 315.5),
+                          (216.6, 324.65), (240.75, 324.65), (264.9, 324.65)])
+        self.assertEqual(self.POINTS, self.grid(rect))
+        self.assertEqual(self.POINTS[0], self.CENTRE)
+        self.assertEqual(len(self.POINTS), contract.MAX_CLICK_CANDIDATES)
+        self.assertEqual(len(set(self.POINTS)), len(self.POINTS))
+        for x, y in self.POINTS:
+            self.assertEqual((type(x), type(y)), (float, float))
+            self.assertTrue(rect["x"] <= x < rect["x"] + rect["width"])
+            self.assertTrue(rect["y"] <= y < rect["y"] + rect["height"])
+        # A different fractional rectangle keeps exactly the same shape: the
+        # true centre first, then the same eight in-bounds fractions.
+        odd = {"x": 400.5, "y": 300.25, "width": 80.5, "height": 31.25}
+        listed = mac_points(odd)
+        self.assertEqual(listed, self.grid(odd))
+        self.assertEqual(listed[0], (400.5 + 80.5 / 2, 300.25 + 31.25 / 2))
+        for x, y in listed:
+            self.assertTrue(odd["x"] <= x < odd["x"] + odd["width"])
+            self.assertTrue(odd["y"] <= y < odd["y"] + odd["height"])
+        # An integer rectangle still starts at the historical integer centre
+        # (the Windows/X11 point) and offers the same fixed in-bounds grid.
+        for integral in ({"x": 200, "y": 300, "width": 80, "height": 30},
+                         {"x": 200, "y": 300, "width": 81, "height": 31}):
+            with self.subTest(integral=integral):
+                expected = (integral["x"] + integral["width"] // 2,
+                            integral["y"] + integral["height"] // 2)
+                grid = mac_points(integral)
+                self.assertEqual(grid[0], expected)
+                self.assertEqual([(item["x"], item["y"]) for item in
+                                  macos.MacAdapter.click_candidates(integral)], grid)
+                self.assertLessEqual(len(grid), contract.MAX_CLICK_CANDIDATES)
+                self.assertEqual(len(set(grid)), len(grid))
+                for x, y in grid:
+                    self.assertTrue(integral["x"] <= x < integral["x"] + integral["width"])
+                    self.assertTrue(integral["y"] <= y < integral["y"] + integral["height"])
+
+    def grid(self, rect):
+        """The required set, rebuilt independently of MacAdapter."""
+        if all(type(rect[key]) is int for key in ("x", "y", "width", "height")):
+            points = [(rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2)]
+        else:
+            points = [(rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2)]
+        for fy in (0.2, 0.5, 0.8):
+            for fx in (0.2, 0.5, 0.8):
+                point = (rect["x"] + rect["width"] * fx, rect["y"] + rect["height"] * fy)
+                if point not in points:
+                    points.append(point)
+        return points[:contract.MAX_CLICK_CANDIDATES]
+
+    def test_uncovered_centre_clicks_once_without_trying_alternates(self):
+        adapter = CandidateAdapter(hits={0: True})
+        result = self.run_plan(adapter)
+        self.assertEqual(adapter.clicked, [self.CENTRE])
+        self.assertEqual(adapter.probed, [self.CENTRE])
+        self.assertEqual(adapter.control_hits,
+                         [(WINDOW["id"], LABEL, dict(self.BOUNDS), *self.CENTRE)])
+        self.assertEqual(adapter.calls.count("click_candidates"), 1)
+        recorded = result["clicks"][0]
+        self.assertEqual((recorded["x"], recorded["y"]), self.CENTRE)
+        self.assertEqual((type(recorded["x"]), type(recorded["y"])), (float, float))
+        self.assertEqual(recorded["evidence"], "posted")
+        self.assertEqual(recorded["ack"], {"move": True, "down": True, "up": True})
+        self.assertEqual(recorded["label"], LABEL)
+        self.assertEqual(recorded["window"], hex(WINDOW["id"]))
+        self.assertEqual(result["window"], hex(WINDOW["id"]))
+
+    def test_covered_centre_but_an_in_rect_candidate_reaches_the_control(self):
+        for index in (1, 5, 8):
+            with self.subTest(index=index):
+                point = self.POINTS[index]
+                adapter = CandidateAdapter(hits={index: True})
+                result = self.run_plan(adapter)
+                self.assertEqual(adapter.clicked, [point])
+                self.assertEqual(adapter.calls.count("click_candidates"), 1)
+                # Exactly the candidates up to and including the accepted one
+                # were probed against the fresh selected control and its exact
+                # authorising rectangle; each candidate gets the same checks.
+                self.assertEqual(adapter.probed, self.POINTS[:index + 1])
+                self.assertEqual(adapter.control_hits,
+                                 [(WINDOW["id"], LABEL, dict(self.BOUNDS), x, y)
+                                  for x, y in self.POINTS[:index + 1]])
+                recorded = result["clicks"][0]
+                self.assertEqual((recorded["x"], recorded["y"]), point)
+                self.assertEqual((type(recorded["x"]), type(recorded["y"])), (float, float))
+                self.assertTrue(_within(self.BOUNDS, recorded["x"], recorded["y"]))
+                self.assertEqual(recorded["ack"], {"move": True, "down": True, "up": True})
+
+    def test_all_candidates_covered_refuses_without_any_click(self):
+        adapter = CandidateAdapter(hits={})
+        self.refused(adapter, "control-hit")
+        self.assertEqual(adapter.probed, self.POINTS)
+        self.assertLessEqual(len(adapter.probed), contract.MAX_CLICK_CANDIDATES)
+        self.assertEqual(adapter.calls.count("click_candidates"), 1)
+        self.assertEqual(adapter.calls.count("hit_test_control"), len(self.POINTS))
+
+    def test_invisible_points_move_to_the_next_candidate(self):
+        point = self.POINTS[2]
+        adapter = CandidateAdapter(hits={2: True}, hidden={0, 1})
+        self.run_plan(adapter)
+        self.assertEqual(adapter.clicked, [point])
+        # Hidden points were never probed against the control and raise no
+        # refusal: the search simply moves on to the next in-bounds point.
+        self.assertEqual(adapter.probed, [point])
+
+    def test_a_window_root_miss_moves_to_the_next_candidate(self):
+        adapter = CandidateAdapter(
+            hits={1: True}, root_hit=lambda window, x, y: (x, y) != self.POINTS[0])
+        self.run_plan(adapter)
+        self.assertEqual(adapter.clicked, [self.POINTS[1]])
+        self.assertEqual(adapter.probed, [self.POINTS[1]])
+
+    def test_rect_change_during_search_refuses_without_any_click(self):
+        adapter = CandidateAdapter(hits={3: True})
+
+        def shrink(point):
+            if point == self.POINTS[1]:
+                adapter.served[0]["bounds"] = dict(CANDIDATE_FRACTIONAL, width=80.0)
+
+        adapter.on_hit = shrink
+        self.refused(adapter, "control-hit")
+        self.assertEqual(adapter.probed, self.POINTS[:2])
+
+    def test_query_error_during_search_refuses_without_any_click(self):
+        adapter = CandidateAdapter(hits={4: True})
+
+        def fail(point):
+            if point == self.POINTS[1]:
+                raise contract.ContractError("a11y-query")
+
+        adapter.on_hit = fail
+        self.refused(adapter, "a11y-query")
+        self.assertEqual(adapter.probed, self.POINTS[:2])
+
+    def test_probe_exception_is_a_query_refusal(self):
+        adapter = CandidateAdapter(hits={3: True})
+        original = adapter.hit_test_control
+
+        def probe(window, label, rect, x, y):
+            if (x, y) == self.POINTS[1]:
+                raise OSError("AX position query failed")
+            return original(window, label, rect, x, y)
+
+        adapter.hit_test_control = probe
+        self.refused(adapter, "a11y-query")
+
+    def test_successful_probe_never_relaxes_to_a_later_candidate_on_click_uncertainty(self):
+        # The single physical click is attempted exactly once; a click failure
+        # is reported, never turned into permission to try the next point.
+        adapter = CandidateAdapter(hits={0: True})
+
+        def click(x, y):
+            adapter.clicked.append((x, y))
+            raise contract.ContractError("input-unknown")
+
+        adapter.click = click
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(adapter)
+        self.assertEqual(error.exception.code, "input-unknown")
+        self.assertEqual(adapter.clicked, [self.CENTRE])
+        self.assertEqual(adapter.calls.count("click_candidates"), 1)
+
+    def test_ambiguity_and_missing_control_refuse_before_any_candidate(self):
+        adapter = CandidateAdapter(hits={1: True})
+        adapter.served = [self.fractional_control(), self.fractional_control()]
+        self.refused(adapter, "control-ambiguous")
+        self.assertEqual(adapter.probed, [])
+        self.assertNotIn("click_candidates", adapter.calls)
+        adapter = CandidateAdapter(hits={1: True}, control=control(OTHER_LABEL))
+        self.refused(adapter, "control-missing")
+        self.assertNotIn("click_candidates", adapter.calls)
+        adapter = CandidateAdapter(hits={1: True}, control=control(LABEL, visible=False))
+        self.refused(adapter, "control-hidden")
+        self.assertNotIn("click_candidates", adapter.calls)
+
+    def test_window_screen_control_and_focus_identity_failures_refuse(self):
+        # A second (title, executable) match is ambiguous whatever its state;
+        # a single ineligible tuple refuses its own fixed code.  Either way no
+        # candidate is ever listed and nothing is probed or clicked.
+        for change, code in (({"visible": False}, "window-hidden"),
+                             ({"trusted": False}, "process-untrusted"),
+                             ({"secure": True}, "secure-desktop"),
+                             ({"visible": False, "trusted": False}, "window-hidden")):
+            with self.subTest(code=code, change=change):
+                adapter = CandidateAdapter(hits={5: True},
+                                           windows=[dict(WINDOW), dict(WINDOW, **change)])
+                self.refused(adapter, "window-ambiguous")
+                self.assertNotIn("click_candidates", adapter.calls)
+                self.assertEqual(adapter.probed, [])
+                adapter = CandidateAdapter(hits={5: True}, windows=[dict(WINDOW, **change)])
+                self.refused(adapter, code)
+                self.assertNotIn("click_candidates", adapter.calls)
+                self.assertEqual(adapter.probed, [])
+        adapter = CandidateAdapter(hits={5: True}, focus_window=0x200004)
+        self.refused(adapter, "focus-lost")
+        self.assertNotIn("click_candidates", adapter.calls)
+        # A changed window identity in the fresh observation refuses first.
+        adapter = CandidateAdapter(hits={5: True}, windows=[dict(WINDOW)])
+        adapter.read_window = lambda identifier: dict(WINDOW, id=0x200004)
+        self.refused(adapter, "window-changed")
+        self.assertNotIn("click_candidates", adapter.calls)
+        # The window root never resolves to the selected window: a soft miss
+        # for every candidate, then one refusal, with no probe.
+        adapter = CandidateAdapter(hits={0: True}, root_hit=False)
+        self.refused(adapter, "control-hit")
+        self.assertEqual(adapter.probed, [])
+        # No candidate reaches the freshly selected control element.
+        self.refused(CandidateAdapter(hits={}), "control-hit")
+
+    def test_focus_loss_during_search_refuses_without_any_click(self):
+        adapter = CandidateAdapter(hits={1: True})
+
+        def lose_focus(point):
+            if point == self.POINTS[0]:
+                adapter.focus_window = 0x200004
+
+        adapter.on_hit = lose_focus
+        self.refused(adapter, "focus-lost")
+        self.assertEqual(adapter.probed, self.POINTS[:1])
+
+    def test_invalid_candidate_shape_is_refused_before_any_probe(self):
+        cases = (
+            lambda rect: [],                                    # empty
+            lambda rect: {"x": 216.0, "y": 306.0},              # not a list
+            lambda rect: [{"x": 216.0, "y": 306.0}] * 10,       # overrun
+            lambda rect: [{"x": 216.0}],                        # missing y
+            lambda rect: [{"x": 216.0, "y": 306.0, "s": 1}],    # extra key
+            lambda rect: [(216.0, 306.0)],                      # not named
+            lambda rect: [{"x": True, "y": 306.0}],             # bool
+            lambda rect: [{"x": "216", "y": 306.0}],            # string
+            lambda rect: [{"x": float("nan"), "y": 306.0}],     # non-finite
+            lambda rect: [{"x": 199.5, "y": 306.0}],            # left of the edge
+            lambda rect: [{"x": 281.0, "y": 306.0}],            # right edge (x + width)
+            lambda rect: [{"x": 216.0, "y": 330.75}],           # bottom edge (y + height)
+            lambda rect: [{"x": 216.0, "y": 299.0}],            # above
+            lambda rect: [{"x": 216.0, "y": 306.0}, {"x": 400.0, "y": 400.0}],
+            lambda rect: [None],                                # not a record
+        )
+        for listed in cases:
+            with self.subTest(listed=listed(self.BOUNDS)):
+                adapter = CandidateAdapter(hits={0: True}, candidates=listed)
+                self.refused(adapter, "control-hit")
+                self.assertEqual(adapter.probed, [])
+                self.assertNotIn("point_visible", adapter.calls)
+
+    def test_outer_edges_and_out_of_rect_points_are_never_candidates(self):
+        right = self.BOUNDS["x"] + self.BOUNDS["width"]
+        bottom = self.BOUNDS["y"] + self.BOUNDS["height"]
+        for point in ((right, 315.0), (240.0, bottom), (199.999, 315.0)):
+            with self.subTest(point=point):
+                adapter = CandidateAdapter(
+                    hits={0: True},
+                    candidates=lambda rect, point=point: [{"x": point[0], "y": point[1]}])
+                self.refused(adapter, "control-hit")
+
+    def test_int_and_float_subclasses_are_never_candidates(self):
+        class HostileFloat(float):
+            def __float__(self):
+                raise AssertionError("float() dispatch on a candidate")
+
+        class HostileInt(int):
+            def __index__(self):
+                raise AssertionError("index dispatch on a candidate")
+
+        class HostileDict(dict):
+            def __getitem__(self, key):
+                raise AssertionError("candidate dict dispatch")
+
+        for value in (HostileFloat(216.0), HostileInt(216)):
+            with self.subTest(value=type(value).__name__):
+                adapter = CandidateAdapter(
+                    hits={0: True},
+                    candidates=lambda rect, value=value: [{"x": value, "y": 306.0}])
+                self.refused(adapter, "control-hit")
+                self.assertEqual(adapter.probed, [])
+        adapter = CandidateAdapter(hits={0: True}, candidates=lambda rect: [
+            HostileDict(x=216.0, y=306.0)])
+        self.refused(adapter, "control-hit")
+        self.assertEqual(adapter.probed, [])
+
+    def test_missing_or_raising_hook_refuses(self):
+        adapter = CandidateAdapter(hits={0: True})
+
+        def raising(rect):
+            raise ValueError("boom")
+
+        adapter.click_candidates = raising
+        self.refused(adapter, "a11y-query")
+        adapter.click_candidates = lambda rect: None
+        self.refused(adapter, "control-hit")
+
+    def test_non_candidate_platforms_keep_the_centre_only_path(self):
+        # Windows/X11 list no candidates and keep exactly the shared centre
+        # arithmetic: an integer rectangle is the historical integer centre,
+        # fractional geometry is the same true centre, and the adapter's hook
+        # verdict is never consulted as a search history.
+        for platform in ("linux", "windows", "unknown"):
+            with self.subTest(platform=platform):
+                adapter = CandidateAdapter(hits={0: True, 1: True})
+                adapter.platform = platform
+                adapter.click_candidates = self.fail  # never queried
+                result = self.run_plan(adapter)
+                self.assertEqual(adapter.clicked, [self.CENTRE])
+                self.assertEqual(adapter.control_hits,
+                                 [(WINDOW["id"], LABEL, dict(self.BOUNDS), *self.CENTRE)])
+                self.assertNotIn("click_candidates", adapter.calls)
+                self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]),
+                                 self.CENTRE)
+                # An unreachable centre refuses; no alternate is tried.
+                refusing = CandidateAdapter(hits={1: True})
+                refusing.platform = platform
+                self.refused(refusing, "control-hit")
+                self.assertNotIn("click_candidates", refusing.calls)
+                self.assertEqual(refusing.calls.count("hit_test_control"), 1)
+                # A bare integer rectangle: the historical integer centre.
+                integral = CandidateAdapter(
+                    hits={0: True}, control=control(LABEL, bounds={"x": 200, "y": 300,
+                                                                   "width": 81, "height": 31}))
+                integral.platform = platform
+                self.run_plan(integral)
+                self.assertEqual(integral.clicked, [(240, 315)])
+
+    def test_the_centre_only_layers_share_one_strict_hook(self):
+        # probe_control_hit answers with the very verdict the strict layer
+        # would judge, so both platform paths see the same refusal.
+        for verdict in (True, False, None, 1):
+            with self.subTest(verdict=verdict):
+                adapter = SpyAdapter(control_hit=verdict)
+                window = dict(WINDOW)
+                self.assertEqual(
+                    contract.probe_control_hit(adapter, window, LABEL,
+                                               dict(self.BOUNDS), 240, 315),
+                    verdict is True)
+                if verdict is True:
+                    contract.confirm_control_hit(adapter, window, LABEL,
+                                                 dict(self.BOUNDS), 240, 315)
+                else:
+                    with self.assertRaises(contract.ContractError) as error:
+                        contract.confirm_control_hit(adapter, window, LABEL,
+                                                     dict(self.BOUNDS), 240, 315)
+                    self.assertEqual(error.exception.code, "control-hit")
+
+    def test_only_the_macos_platform_takes_the_candidate_path(self):
+        # Both platform paths click their own uncovered centre point here; the
+        # candidate list is listed for macOS only.
+        for platform, candidate_path in (("macos", True), ("linux", False),
+                                         ("windows", False), ("unknown", False)):
+            with self.subTest(platform=platform):
+                adapter = CandidateAdapter(hits={0: True}, root_hit=True)
+                adapter.platform = platform
+                result = self.run_plan(adapter)
+                self.assertEqual(adapter.clicked, [self.CENTRE])
+                self.assertEqual(adapter.probed, [self.CENTRE])
+                self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]),
+                                 self.CENTRE)
+                if candidate_path:
+                    self.assertEqual(adapter.calls.count("click_candidates"), 1)
+                else:
+                    self.assertNotIn("click_candidates", adapter.calls)
+
+    def test_pointer_and_label_wait_actions_never_list_candidates(self):
+        adapter = CandidateAdapter(hits={1: True})
+        result = self.run_plan(adapter, actions=[{"click": [10, 20]}, {"wait_label": LABEL}])
+        self.assertNotIn("click_candidates", adapter.calls)
+        self.assertEqual(adapter.clicked, [(120, 160)])
+        self.assertEqual(result["clicks"][0]["label"], "pointer")
+
+    def test_the_first_candidate_is_the_unchanged_platform_centre(self):
+        for rect in ({"x": 200, "y": 300, "width": 81, "height": 31},
+                     {"x": 200, "y": 300, "width": 80, "height": 30}):
+            with self.subTest(rect=rect):
+                self.assertEqual(mac_points(rect)[0], contract._center(rect))
 
 
 class IntegerGeometryRegressionTests(unittest.TestCase):

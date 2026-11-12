@@ -55,6 +55,7 @@ MAX_CHORD_PARTS = 4
 MAX_WINDOWS = 512
 MAX_CONTROLS = 4096
 MAX_OBSERVATIONS = 240
+MAX_CLICK_CANDIDATES = 9
 CLICK_LIMIT = 100000
 DISCOVER_TIMEOUT = 5.0
 CONTROL_TIMEOUT = 10.0
@@ -313,6 +314,12 @@ def evidence_kind(adapter):
     if type(kind) is str and kind in EVIDENCE_KINDS:
         return kind
     raise ContractError("input-unsupported")
+
+
+# Adapters that may offer an exact centre point and, only when that centre is
+# covered by another element, a few exact in-rect alternates. Every other
+# adapter keeps the single integer centre and its strictly refusing hook.
+CANDIDATE_PLATFORMS = frozenset({"macos"})
 PROVISIONAL = frozenset({"control-missing", "control-disabled", "control-hidden"})
 
 
@@ -655,6 +662,138 @@ def confirm_control_hit(adapter, window, label, rect, x, y):
     return x, y
 
 
+def probe_control_hit(adapter, window, label, rect, x, y):
+    """The strict hook's literal verdict; anything not ``True`` is False.
+
+    Same hook and same fail-closed rules as ``confirm_control_hit`` (a missing
+    hook, a non-``True`` verdict, a changed rectangle or a raised error never
+    authorise input), but a non-``True`` verdict is returned instead of raised
+    so the macOS candidate search can tell "this point does not reach the
+    selected control" from "the query itself failed".  A missing hook raises
+    ``control-hit``; any raised error still refuses ``a11y-query``.
+    """
+    probe = getattr(adapter, "hit_test_control", None)
+    if probe is None:
+        raise ContractError("control-hit")
+    try:
+        verdict = probe(window, label, dict(rect), x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    return verdict is True
+
+
+def _candidate_shape(candidate):
+    """True for one opaque, exactly shaped click-candidate record.
+
+    A candidate is the adapter's named pair ``x``/``y``; nothing else is read
+    from it.  The object is inspected with ``type(...) is dict`` (never
+    ``isinstance``), so an object with overridden attribute access can neither
+    answer for the shape nor run code while the contract looks at it.
+    """
+    if type(candidate) is not dict or set(candidate) != {"x", "y"}:
+        return False
+    return all(type(candidate[key]) in (int, float) and geometry_value(candidate[key]) is not None
+               for key in ("x", "y"))
+
+
+def control_candidates(adapter, rect):
+    """The adapter's bounded exact-point list for one validated control rect.
+
+    The list is queried once and must be an exact-list.  Every entry must pass
+    ``_candidate_shape`` and be an exact int/finite float pair inside ``rect``;
+    a non-candidate entry, an overrun, a non-callable hook or a raised query
+    refuses ``control-hit`` before any input.  Only the two coordinates are
+    ever copied out of a candidate.
+    """
+    if not rect_positive(rect):
+        raise ContractError("control-hit")
+    producer = getattr(adapter, "click_candidates", None)
+    if not callable(producer):
+        raise ContractError("control-hit")
+    try:
+        listed = producer(dict(rect))
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if type(listed) is not list or not 1 <= len(listed) <= MAX_CLICK_CANDIDATES:
+        raise ContractError("control-hit")
+    points = []
+    for candidate in listed:
+        if not _candidate_shape(candidate):
+            raise ContractError("control-hit")
+        # Copied out once, as the exact built-in value geometry_value returns.
+        values = geometry_value(candidate["x"]), geometry_value(candidate["y"])
+        if not (rect["x"] <= values[0] < rect["x"] + rect["width"] and
+                rect["y"] <= values[1] < rect["y"] + rect["height"]):
+            raise ContractError("control-hit")
+        points.append(values)
+    return points
+
+
+def candidate_hits_control(adapter, window, label, rect, points):
+    """One candidate's full identity check; True only if every gate passes.
+
+    The point must lie inside the exact selected window, inside one active
+    display and on the selected window root exactly as ``check_point`` demands
+    (``point_visible`` / ``hit_test``: a miss moves on to the next candidate,
+    while a lost display, window root or window frame refuses
+    ``control-offscreen`` for the whole search).  It must then resolve, under
+    the strict hook without ``control-hit``, to the same freshly selected
+    control: the unique selected label re-resolved in this same ``window`` at
+    its exact current rectangle, reached from the element under the point.
+    The caller re-proves window, rect and foreground after every probe.
+    Physical input is never attempted here.
+    """
+    try:
+        check_point(adapter, window, *points)
+    except ContractError as error:
+        if error.code != "control-offscreen":
+            raise
+        return False
+    return probe_control_hit(adapter, window, label, rect, *points)
+
+
+def _candidate_still_authorised(plan, adapter, window, label, rect, budget):
+    """Re-prove window, control rect and foreground after one candidate probe.
+
+    A changed rect refuses ``control-hit``; a control that is gone, disabled,
+    hidden, duplicated or no longer enabled/visible raises its own fixed code;
+    a changed window or lost foreground has the codes ``authorize`` uses.
+    Returns the fresh window, which the next probe is made against.
+    """
+    fresh = reobserve_window(plan, adapter, window, budget)
+    current = select_control(adapter, fresh, label, budget)
+    if any(current.get(key) != rect.get(key) for key in ("x", "y", "width", "height")):
+        raise ContractError("control-hit")
+    if not focus_matches(adapter, fresh, budget):
+        raise ContractError("focus-lost")
+    return fresh
+
+
+def first_hit_control(plan, adapter, window, label, rect, points, budget):
+    """The first exact point whose full identity checks pass; else refuse.
+
+    Each point already passed the adapter's shape and in-rect validation; they
+    are tried in order and only a point that passed every gate on one and the
+    same fresh window, control rectangle and foreground is returned.  No point
+    is ever clicked here, so a refused search emits no input at all and a
+    failed or unknown physical click can never cause another point to be tried.
+    """
+    current = window
+    for point in points:
+        if candidate_hits_control(adapter, current, label, rect, point):
+            # The accepted point is re-proved on the same fresh window, exact
+            # control rectangle and foreground before it may be clicked, so a
+            # change during its own probe still refuses before any input.
+            _candidate_still_authorised(plan, adapter, current, label, rect, budget)
+            return point
+        current = _candidate_still_authorised(plan, adapter, current, label, rect, budget)
+    raise ContractError("control-hit")
+
+
 def ensure_focus(plan, adapter, window, budget):
     """Single activation attempt, then re-observed foreground verification."""
     if focus_matches(adapter, window, budget):
@@ -848,11 +987,21 @@ def execute(plan, adapter):
         if "click_label" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, rect = authorize(plan, adapter, window, budget, action["click_label"])
-            x, y = check_point(adapter, fresh, *_center(rect))
-            # The window-root hit test above cannot see a sibling or
-            # transparent overlay: re-prove that the point resolves to the
-            # uniquely selected control itself before the single click.
-            confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
+            if getattr(adapter, "platform", None) in CANDIDATE_PLATFORMS:
+                # macOS only: the exact centre first, then at most eight more
+                # exact in-rect fractions. Each needs the same fresh window,
+                # display, selected control rectangle/identity and foreground;
+                # the first one that passes all of them is the single point
+                # clicked, and the search refuses before any input otherwise.
+                x, y = first_hit_control(
+                    plan, adapter, fresh, action["click_label"], rect,
+                    control_candidates(adapter, rect), budget)
+            else:
+                x, y = check_point(adapter, fresh, *_center(rect))
+                # The window-root hit test above cannot see a sibling or
+                # transparent overlay: re-prove that the point resolves to the
+                # uniquely selected control itself before the single click.
+                confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
             clicks.append(click_record(fresh, action["click_label"], x, y,

@@ -1164,14 +1164,6 @@ class MacAdapterTests(unittest.TestCase):
         self.assertEqual(result["clicks"][0]["evidence"], "posted")
         self.assertNotIn("title", result)
 
-    def test_overlay_at_the_control_centre_refuses_without_any_click(self):
-        api = FakeMacApi(root=True, control_hit=False)
-        with self.assertRaises(contract.ContractError) as error:
-            execute(macos.MacAdapter(api=api), document())
-        self.assertEqual(error.exception.code, "control-hit")
-        self.assertEqual(api.clicks, [])
-        self.assertEqual(api.hit_calls,
-                         [(WINDOW_RAW["id"], LABEL, dict(CONTROL["bounds"]), 240, 315)])
 
     def test_adapter_hit_verdict_is_strictly_boolean(self):
         rect = dict(CONTROL["bounds"])
@@ -2302,11 +2294,27 @@ class MacDisplayMembershipTests(unittest.TestCase):
 
     def test_adapter_refuses_a_point_outside_every_display(self):
         api = FakeMacApi()
-        api.point_visible = lambda window, x, y: False
+        probed = []
+        api.point_visible = lambda window, x, y: probed.append((x, y)) and False
         adapter = macos.MacAdapter(api=api)
         with self.assertRaises(contract.ContractError) as error:
             execute(adapter, document())
-        self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(error.exception.code, "control-hit")
+        # Every bounded candidate was refused on display visibility alone;
+        # no control hit was even probed and nothing was clicked.
+        candidates = [(item["x"], item["y"]) for item in macos.MacAdapter.click_candidates(
+            dict(CONTROL["bounds"]))]
+        self.assertEqual(probed, candidates)
+        self.assertEqual(api.hit_calls, [])
+        self.assertEqual(api.clicks, [])
+
+    def test_adapter_refuses_when_the_window_root_lacks_the_candidate(self):
+        api = FakeMacApi(root=False)
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document())
+        self.assertEqual(error.exception.code, "control-hit")
+        self.assertEqual(api.hit_calls, [])
         self.assertEqual(api.clicks, [])
 
 
@@ -2461,7 +2469,8 @@ class MacFractionalGeometryTests(unittest.TestCase):
 
         def element_at(app, x, y, out):
             api.probed.append((x, y))
-            return (0, api.glyph if hit is None else hit)
+            top = hit(x, y) if callable(hit) else hit
+            return (0, api.glyph if top is None else top)
 
         api.ax.AXUIElementCopyElementAtPosition = element_at
         api.control_rects = []
@@ -2530,17 +2539,20 @@ class MacFractionalGeometryTests(unittest.TestCase):
         self.assertEqual(recorded["evidence"], "posted")
         self.assertEqual(recorded["ack"], {"move": True, "down": True, "up": True})
         self.assertEqual(result["window"], hex(WINDOW_RAW["id"]))
-        # The real root/hit walks and the real identity check ran for it.
-        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"], WINDOW_RAW["id"]])
+        # The real root/hit walks and the real identity check ran for it:
+        # focus is proved before the search and again after the accepted
+        # candidate, along with the window/control re-observation.
+        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"]] * 3)
         self.assertIs(api.window_element(dict(window)), api.selected)
 
     def test_fractional_odd_and_non_quarter_bounds_are_not_rounded(self):
         cases = (
-            # Every control lies wholly inside MEASURED_CG.
+            # Every control lies wholly inside MEASURED_CG; the centre of
+            # geometry carrying a genuine fraction is the true centre.
             ("integral-origin-fractional-extent",
              {"x": 400.0, "y": 300.0, "width": 80.5, "height": 30.5}, (440.25, 315.25)),
             ("integral-floats-even-extent",
-             {"x": 400.0, "y": 300.0, "width": 80.0, "height": 30.0}, (440, 315)),
+             {"x": 400.0, "y": 300.0, "width": 80.0, "height": 30.0}, (440.0, 315.0)),
             ("fractional-origin-odd-extent",
              {"x": 400.25, "y": 300.25, "width": 81.0, "height": 31.0}, (440.75, 315.75)),
             ("quarter-extents",
@@ -2555,8 +2567,12 @@ class MacFractionalGeometryTests(unittest.TestCase):
                                  [centre, centre, centre])
                 recorded = (result["clicks"][0]["x"], result["clicks"][0]["y"])
                 self.assertEqual(recorded, centre)
-                # The centre is a float only when it carries a true fraction.
-                kinds = ["float" if str(value).count(".") else "int" for value in centre]
+                # Geometry with any genuine fraction yields a finite float
+                # centre; purely integral-float geometry keeps the historical
+                # integer centre.
+                kinds = (["int", "int"] if all(
+                    type(control[key]) is int or float(control[key]).is_integer()
+                    for key in ("x", "y", "width", "height")) else ["float", "float"])
                 self.assertEqual([type(value).__name__ for value in recorded], kinds)
 
     def test_integer_geometry_still_clicks_the_integer_centre(self):
@@ -2583,7 +2599,7 @@ class MacFractionalGeometryTests(unittest.TestCase):
         api = self.api(self.tree())
         result = self.execute(api)
         self.assertEqual(result["clicks"][0]["window"], hex(WINDOW_RAW["id"]))
-        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"], WINDOW_RAW["id"]])
+        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"]] * 3)
 
     def test_changed_fractional_frame_refuses_before_input(self):
         # The control is read at the authorising frame; it then moves to a
@@ -2615,6 +2631,73 @@ class MacFractionalGeometryTests(unittest.TestCase):
                     self.execute(api)
                 self.assertEqual(error.exception.code, "control-hit")
                 self.assertEqual(api.quartz.posted, [])
+
+    def test_centre_overlay_then_in_bounds_field_point_reaches_the_field(self):
+        # The unique synthetic 主密码 AXTextField lies wholly inside the exact
+        # client; its centre is stably covered by another AX element, while
+        # in-bounds left/right points still resolve to the field itself.
+        window = ax_window(frame=MEASURED_AX, focused=True)
+        field = {"role": "AXTextField", "title": "主密码", "enabled": True,
+                 "hidden": False, "parent": window, "children": [],
+                 "frame": dict(FRACTIONAL_CONTROL)}
+        window["children"] = [field]
+        overlay = {"role": "AXGroup", "title": "", "parent": window, "children": [],
+                   "frame": {"x": self.CENTRE[0] - 1, "y": self.CENTRE[1] - 1,
+                             "width": 2, "height": 2}}
+        glyph = {"role": "AXStaticText", "title": "", "children": [],
+                 "frame": {"x": 401, "y": 301, "width": 20, "height": 10},
+                 "parent": field, "enabled": None, "hidden": None,
+                 "description": None}
+        overlay_hits = []
+
+        def topmost(x, y):
+            covered = (x, y) == self.CENTRE
+            overlay_hits.append(covered)
+            return overlay if covered else glyph
+
+        api = self.api([window], hit=topmost)
+        api.glyph = glyph
+        served = api.window_list[0]
+        # Exact identity: one eligible control record, wholly inside the client.
+        controls = [record for record in api.controls(served)
+                    if record["name"] == "主密码"]
+        self.assertEqual(len(controls), 1)
+        self.assertEqual(controls[0]["role"], "entry")
+        self.assertEqual(controls[0]["bounds"], FRACTIONAL_CONTROL)
+        self.assertTrue(contract.rect_within(FRACTIONAL_CONTROL, served["client"]))
+        # The centre stays covered on every query; left/right in-bounds points
+        # resolve to the selected field through the real AXParent/CFEqual walk.
+        left = (FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"] * 0.2,
+                FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] * 0.5)
+        right = (FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"] * 0.8,
+                 FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] * 0.5)
+        for _ in range(2):
+            self.assertFalse(api.hit_test_control(
+                dict(served), "主密码", dict(FRACTIONAL_CONTROL), *self.CENTRE))
+        self.assertTrue(api.hit_test_control(
+            dict(served), "主密码", dict(FRACTIONAL_CONTROL), *left))
+        self.assertTrue(api.hit_test_control(
+            dict(served), "主密码", dict(FRACTIONAL_CONTROL), *right))
+        self.assertEqual(overlay_hits, [True, True, False, False])
+        # The shared contract takes the first in-bounds candidate after the
+        # covered centre and clicks it exactly once at that exact coordinate.
+        api.control_rects = []
+        result = self.execute(api, actions=[{"click_label": "主密码"}])
+        accepted = (FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"] * 0.2,
+                    FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] * 0.2)
+        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL, FRACTIONAL_CONTROL])
+        self.assertEqual([event["point"] for event in api.quartz.posted],
+                         [accepted, accepted, accepted])
+        recorded = result["clicks"][0]
+        self.assertEqual((recorded["x"], recorded["y"]), accepted)
+        self.assertEqual((type(recorded["x"]), type(recorded["y"])), (float, float))
+        self.assertEqual(recorded["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual(recorded["label"], "主密码")
+        self.assertEqual(recorded["evidence"], "posted")
+        self.assertEqual(recorded["ack"], {"move": True, "down": True, "up": True})
+        self.assertTrue(contract.rect_positive(FRACTIONAL_CONTROL))
+        self.assertTrue(accepted[0] < FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"])
+        self.assertTrue(accepted[1] < FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"])
 
     def test_sibling_overlay_at_fractional_centre_refuses_before_input(self):
         # A transparent group drawn above the control at the same fractional
