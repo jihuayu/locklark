@@ -1,11 +1,12 @@
-# Remote unlock wire v1: binding context, device binding, owner-root authorization, reusable admin delegation, per-request admin authorization and lifecycle
+# Remote unlock wire v1: binding context, device binding, owner-root authorization, reusable admin delegation, per-request admin authorization, pair consent and lifecycle
 
 Status: context and stable per-device binding codecs, the independent
 owner-root authorization object and its checkpoint-scoped verifier, a reusable
 owner-root-signed admin remote-unlock delegation with its current-policy
 verifier, a per-request delegated-device admin authorization composed with that
-grant, plus a process-local request lifecycle. The package `pkg/remoteunlock`
-implements exactly these encodings, the binding signature check in
+grant, a dual-signed pair consent, plus a process-local request lifecycle. The
+package `pkg/remoteunlock` implements exactly these encodings, the binding
+signature check in
 [Stable device transport binding v1](#stable-device-transport-binding-v1), the
 owner-root authorization in
 [Owner-root authorization v1](#owner-root-authorization-v1), the reusable
@@ -13,6 +14,7 @@ delegation in
 [Reusable owner-root admin delegation v1](#reusable-owner-root-admin-delegation-v1),
 the per-request admin authorization in
 [Per-request admin remote-unlock authorization v1](#per-request-admin-remote-unlock-authorization-v1),
+the pairing consent in [Pair consent v1](#pair-consent-v1),
 and the lifecycle in
 [Process-local request lifecycle](#process-local-request-lifecycle).
 `internal/remoteunlocktls` additionally exposes a narrow channel-side check of a
@@ -40,6 +42,9 @@ above, and nothing else:
   authorization](#per-request-admin-remote-unlock-authorization-v1) wire
   format, signed by the delegated admin device rather than the owner root, and
   the exact boundary of its composed verifier;
+- the [pair consent](#pair-consent-v1) wire format, signed by both endpoints'
+  current registered device identity keys over the same tuple, and the exact
+  boundary of `VerifyPairConsent`;
 - the [process-local request lifecycle](#process-local-request-lifecycle) state
   machine; and
 - the internal [peer-channel check](#peer-binding-over-an-established-channel)
@@ -70,7 +75,8 @@ The context is one UTF-8 JSON object:
 - Strings use no JSON escapes. Every value permitted by this schema is written
   literally, so canonical input contains no `\` bytes inside strings.
 - Integers use the canonical decimal spellings defined below.
-- Both parsing and encoding are bounded by 4096 bytes.
+- Both parsing and encoding are bounded by 4096 bytes. The later objects
+  define their own, smaller budgets.
 - Parsing is all-or-nothing. A decoder must reject any input that is not
   byte-for-byte the canonical re-encoding of the values it contains. The
   implementation additionally parses to values, re-encodes them canonically,
@@ -978,6 +984,193 @@ size or spelling; input over 1024 bytes; and any spelling that does not
 re-encode to the identical bytes. Errors name the failing member with a static
 message and never include a value, key, digest or signature byte.
 
+## Pair consent v1
+
+`PairConsent` is a separate canonical object, independent of
+`DeviceTransportBinding`, `ChannelBindingContext`, the owner-root authorization,
+the admin delegation and the request lifecycle. Both endpoints of one pair sign
+it with their **current registered device identity keys**; it records that
+both sides saw and signed the same metadata tuple for one server-issued pair
+challenge.
+
+```
+format, version, kind,
+tenant_id, user_id, pair_id, pair_generation,
+device_a_id, device_a_binding_sha256,
+device_b_id, device_b_binding_sha256,
+challenge_id, deadline_unix_ms,
+device_a_signature, device_b_signature
+```
+
+### Consent schema
+
+| # | Member | Type | Constraint |
+|---|--------|------|------------|
+| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 2 | `version` | integer | constant `1` |
+| 3 | `kind` | string | constant `pair-consent` |
+| 4 | `tenant_id` | string | identifier |
+| 5 | `user_id` | string | identifier |
+| 6 | `pair_id` | string | identifier |
+| 7 | `pair_generation` | unsigned integer | uint64, always present; `0` is explicit genesis |
+| 8 | `device_a_id` | string | identifier; strictly less than `device_b_id` in bytewise order |
+| 9 | `device_a_binding_sha256` | string | exactly 32 bytes: `DeviceTransportBindingDigest` of device a's complete binding |
+| 10 | `device_b_id` | string | identifier; strictly greater than `device_a_id` |
+| 11 | `device_b_binding_sha256` | string | exactly 32 bytes: `DeviceTransportBindingDigest` of device b's complete binding |
+| 12 | `challenge_id` | string | identifier of the server-issued pair challenge |
+| 13 | `deadline_unix_ms` | integer | int64, strictly positive: the exact original challenge deadline |
+| 14 | `device_a_signature` | string | exactly 64 bytes Ed25519, unpadded base64url |
+| 15 | `device_b_signature` | string | exactly 64 bytes Ed25519, unpadded base64url |
+
+Members appear exactly once, in this order; members 1..13 are signed.
+Identifier, canonical-string, integer, digest and all-or-nothing parsing rules
+are those of the [context](#encoding-rules). `pair_generation` has no sentinel
+spelling: a missing member is rejected, and the canonical integer `0` is an
+explicit genesis value that passes.
+
+The two endpoint identifiers are canonicalized by order, not by role:
+`device_a_id` must be strictly less than `device_b_id` in bytewise order. Equal
+or reversed identifiers are rejected, so both endpoints sign exactly the same
+bytes and neither side can choose which key signs which side.
+
+The encoded size cap is `MaxPairConsentSize` = 2048 bytes; larger input is
+rejected before interpretation. With six 128-byte identifiers, maximum
+`pair_generation` (20 digits), maximum deadline (19 digits), two 43-character
+digests and two 86-character signatures, the maximum legal encoding is
+**1372 bytes**, and the signed tuple alone is at most 1191 bytes.
+
+### Consent domain and preimage
+
+```
+locklark.remote-unlock/v1/pair-consent\x00
+  || canonical JSON of members 1..13 in order
+```
+
+`PairConsentSigningBytes` returns exactly that preimage (`\x00` is one zero
+byte); both endpoints sign it, and both signatures cover the same bytes.
+The domain is distinct from every other signature domain in this document.
+
+### Keys and verification boundary
+
+`VerifyPairConsent(c, expectedTenantID, expectedUserID, expectedPairID,
+expectedGeneration, expectedChallengeID, expectedDeadlineUnixMS,
+expectedDeviceAID, expectedDeviceBID, keys DeviceIDSignerKeys, nowUnixMS)`
+runs, in order:
+
+1. `nowUnixMS` must be positive; the expected scope must be canonical (every
+   expected identifier in the grammar, endpoints distinct and in strict
+   bytewise order, expected deadline positive); `c` must be canonical-valid.
+2. `nowUnixMS` must be strictly earlier than `c.deadline_unix_ms`. The deadline
+   is exclusive and is never extended.
+3. `tenant_id`, `user_id`, `pair_id`, `pair_generation`, `challenge_id` and
+   `deadline_unix_ms` must equal the caller-pinned expectations exactly.
+4. `device_a_id` and `device_b_id` must equal the expected identifiers exactly.
+5. `keys.DeviceAKey` must be exactly the 32-byte Ed25519 identity key
+   registered for device a and `keys.DeviceBKey` the one registered for
+   device b; the two keys must differ.
+6. `device_a_signature` must verify under `keys.DeviceAKey` and then
+   `device_b_signature` under `keys.DeviceBKey`, over the shared preimage.
+
+`DeviceIDSignerKeys` carries the **current registered device identity keys**.
+The caller must fetch each key from the tenant's and user's current verified
+device registration and pin it; the codec and verifier do not read, cache,
+refresh or establish that registration, and they never read the wall clock.
+
+Key separation:
+
+- Pair-consent signatures use the current registered device identity keys.
+- They are **not** the vault-policy `ContentSigningKey` that
+  `VerifyDeviceTransportBinding` and `VerifyOwnerRootAuthorization` use to
+  validate a `DeviceTransportBinding`. A content signing key never verifies a
+  `PairConsent`, and a consent key never verifies a binding.
+- The owner root, policy signing keys and admin delegation keys are not
+  accepted here.
+
+A `PairConsent` binds only the tenant, user, pair ID and generation, the two
+device IDs, the two 32-byte digests of the complete `DeviceTransportBinding`
+objects, the challenge ID and the deadline. It carries **no** `vault_id`, SPKI,
+age recipient, full binding bytes, VUK, grant, authorization or private key.
+
+A nil return proves only that the two caller-pinned registered device identity
+keys signed the same metadata tuple before the original deadline. It does
+**not** prove human scan or fingerprint confirmation, live or current
+registration by itself, vault authorization or role, that either digest matches
+a valid `DeviceTransportBinding`, the TLS identity of a live peer, replay
+safety, an unlock, or VUK delivery. Those remain separate checks.
+
+### Synthetic consent vector
+
+Every key, binding and signature below is synthetic, with two separately
+derived key roles; nothing was enrolled, no tenant, user, pair or challenge
+exists, and no human pairing ceremony or scan took place.
+
+- **Consent identity keys** sign the consent preimage only. Device a uses the
+  32-byte seed bytes `0x40`..`0x5f`; device b uses `0x50`..`0x6f`. The two seed
+  spans overlap at `0x50`..`0x5f`, but both complete 32-byte seeds and the
+  keypairs derived from them are distinct.
+- **Binding signing keys** sign the complete synthetic
+  `DeviceTransportBinding` objects only. Each seed is the SHA-256 expansion of
+  a fixed synthetic label (`pair-consent-binding-a`, `pair-consent-binding-b`),
+  not a seed byte-value span, and neither is a vault-policy
+  `ContentSigningKey`. Their public keys are distinct from the consent
+  identity keys.
+
+The bindings are digested with `DeviceTransportBindingDigest`; the consent
+carries only their digests, never the binding key or the binding bytes.
+
+- device a consent identity key: `JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0`
+  (seed bytes `0x40`..`0x5f`)
+- device b consent identity key: `P3cI1fXMK8YztZ0rOi7ZLnR5IgxvCK3iCL682FgKuTs`
+  (seed bytes `0x50`..`0x6f`)
+- device a binding signing key: `1fjtECib65ky-u_SQoI3dvB-kPEEm0NLI0UctmCGnjM`
+- device b binding signing key: `tlNSPkAw-DEz27XpdqyyPT4JgyoAuSEIyV_iUeDk4kU`
+
+Device a's complete signed binding (`DeviceTransportBindingDigest`
+`7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ`):
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-a","install_id":"install-device-a","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"uoqoeY0yK9mAuLEXv0L05INOZnBMrE2k_HZcdx6Ah9hHSLq_vMq3AAKhwWG7kQKFxCBpY4fwB-jZMsRmRWyWAQ"}
+```
+
+Device b's complete signed binding (digest
+`nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU`):
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-b","install_id":"install-device-b","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"VQ35nU7y3c3A_5FVwfwPb-GlBXBzddBexv7oaNO0OnO-9Xmsz9xuqSpuRWDZFPxauOKHAT6EhZ5UyBhZXWdNDg"}
+```
+
+Signed preimage (domain shown as `<pair-consent domain>`, one zero byte):
+
+```
+<pair-consent domain>{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}
+```
+
+Complete canonical consent (638 bytes):
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}
+```
+
+Each binding's signature verifies only under its intended binding signing key
+above, and nowhere under a consent identity key; each consent signature verifies
+only under the registered consent identity keys above, and nowhere under a
+binding signing key. With
+`nowUnixMS = 1799999900000` the consent verifies, and with
+`nowUnixMS = 1800000000000` it is expired. The literals are pinned in the
+package tests.
+
+### Rejected consent spellings
+
+Parsing a consent rejects a missing, unknown, duplicate or reordered member;
+missing `pair_generation`; wrong constants or types; surrounding whitespace,
+trailing data and malformed structure; invalid UTF-8 and JSON escapes;
+integer signs, leading zeros, fractions, exponents and overflow; a zero or
+negative deadline; equal or reversed device identifiers; digests or signatures
+of the wrong length, padded, in the standard base64 alphabet or with
+non-canonical trailing bits; input over 2048 bytes; and any spelling that does
+not re-encode to the identical bytes. Errors name the failing member with a
+static message and never include a value, key, digest or signature.
+
 ## Process-local request lifecycle
 
 `pkg/remoteunlock/lifecycle.go` defines `RequestLifecycle`, an in-memory status
@@ -1214,6 +1407,9 @@ binding](#stable-device-transport-binding-v1) signature and context; see the
 [peer-channel check](#peer-binding-over-an-established-channel).
 `VerifyOwnerRootAuthorization` and `VerifyAdminRemoteUnlockAuthorization`
 perform neither check, and none of them is integrated into either verifier.
+`VerifyPairConsent` likewise performs neither check and authorizes nothing: it
+proves only that both caller-pinned registered device identity keys signed the
+same consent tuple before the unextended challenge deadline.
 
 This context codec alone proves no authorization, requester identity, device
 identity, pairing, membership, policy, signature, request freshness or

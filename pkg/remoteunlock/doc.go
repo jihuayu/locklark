@@ -1,8 +1,8 @@
 // Package remoteunlock defines the standalone v1 canonical codecs for the
 // remote-unlock TLS exporter binding context, the stable per-device transport
 // binding, the owner-root authorization, the reusable owner-root admin
-// remote-unlock delegation and the per-request delegated-admin
-// authorization.
+// remote-unlock delegation, the per-request delegated-admin authorization and
+// the dual-signed pairing consent.
 //
 // A ChannelBindingContext is encoded to a single canonical UTF-8 JSON object
 // (at most MaxContextSize bytes) that is used as the exporter context of a
@@ -23,7 +23,10 @@
 // grant by digest, the full request context by digest, both complete endpoint
 // bindings by digest and one expiry. Every Encode* and Parse* pair writes and
 // accepts its members manually in the fixed schema order, so every accepted
-// input satisfies Encode(Parse(b)) == b.
+// input satisfies Encode(Parse(b)) == b. A PairConsent is a sixth, separate
+// canonical object (at most MaxPairConsentSize bytes) that both endpoints of
+// one pair sign with their current registered device identity keys for one
+// server-issued pair challenge.
 //
 // The wire format, domains, preimages, expiry semantics and limitation list
 // are documented in docs/remote-unlock-wire-v1.md. The reusable admin
@@ -112,6 +115,32 @@
 // lifecycle, not this verifier, must prevent replay and one-shot use.
 // vaultfile.AdminDelegation is never reinterpreted as remote-unlock authority,
 // no PC role is changed, and no vaultfile byte or schema changes here.
+//
+// VerifyPairConsent checks a PairConsent against the caller-pinned expected
+// tenant, user, pair, pair generation, challenge identifier, exact original
+// server-issued deadline and exact endpoint identifiers, and requires both
+// signatures to verify under the caller-supplied current registered device
+// identity keys, one pinned per endpoint (DeviceIDSignerKeys). Device a must be
+// the bytewise-lower identifier so both endpoints sign exactly the same tuple.
+// The caller-supplied nowUnixMS must be positive and strictly earlier than the
+// consent's deadline, which must equal the original challenge deadline exactly;
+// the deadline is never extended and no system clock is read.
+//
+// Pair-consent signatures use the current registered device identity keys that
+// the caller supplies. They are NOT the vault-policy ContentSigningKey used to
+// validate a DeviceTransportBinding, not the owner root and not a policy
+// signing key; a content signing key never verifies a PairConsent. A
+// PairConsent binds only the tenant, user, pair ID and generation, the two
+// device IDs, the two 32-byte DeviceTransportBindingDigest values of the
+// complete binding objects, the challenge ID and the deadline. It carries no
+// vault_id, SPKI, age recipient, full binding bytes, VUK, grant,
+// authorization or private key. A nil return proves only that both
+// caller-pinned registered device keys signed the same metadata tuple; it does
+// not establish human scan or fingerprint confirmation, current registration
+// by itself (the caller must have fetched the keys from verified registration),
+// vault authorization or role, a valid DeviceTransportBinding for either
+// digest, TLS identity, replay safety, or any unlock. The package never reads
+// a device or user registration store, and no production identity is claimed.
 //
 // The owner root is the sole issuer accepted by the owner-root authorization
 // and the reusable admin delegation; it issues no per-request admin
