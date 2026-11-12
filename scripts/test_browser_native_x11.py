@@ -1850,7 +1850,7 @@ class PointerDriverTests(unittest.TestCase):
 
 
 class ChooserNavigationTests(unittest.TestCase):
-    """The navigate action only maps Ctrl+L, the one path and Return."""
+    """The navigate action only maps Ctrl+L and the one path; never Return."""
 
     SHORTCUTS = {"Control_L": 0x100, "Shift_L": 0x400, "Return": 0xFF, "l": ord("l")}
 
@@ -1882,20 +1882,23 @@ class ChooserNavigationTests(unittest.TestCase):
         self.assertNotIn((46, None), [keys for keys, _kind in plan])
         down = [keycode for keycode, pressed in plan[0][0] if pressed]
         self.assertEqual(down, [37, 46])
-        # Exactly one chord, each path character and Return: no other key.
+        # Exactly one chord and each path character: no Return or other key.
         self.assertEqual([kind for _keys, kind in plan],
-                         ["chord"] + ["path"] * len(path) + ["return"])
+                         ["chord"] + ["path"] * len(path))
         self.assertEqual([keys for keys, kind in plan if kind == "path"],
                          [(code[ord(char)], None) for char in path])
 
-    def test_remainder_is_only_the_exact_path_plus_return(self):
+    def test_remainder_is_only_the_exact_path_without_return(self):
         path = "/synthetic/package/chromium"
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50}
         code.update({ord(char): 100 + index for index, char in enumerate(path)})
         plan = native.chooser_navigation(self.xlib(code), "display", path)
-        self.assertEqual(len(plan), len(path) + 2)
+        self.assertEqual(len(plan), len(path) + 1)
         self.assertEqual(plan[1:], [((code[ord(char)], None), "path")
-                                    for char in path] + [((36, None), "return")])
+                                    for char in path])
+        # No item carries Return: the plan ends at the last path character.
+        self.assertNotIn("return", [kind for _keys, kind in plan])
+        self.assertNotIn(36, [keycode for keys, _kind in plan[1:] for keycode in keys])
 
     def test_path_punctuation_uses_numeric_ascii_keysyms(self):
         # As observed in the Edge container/Xvfb: XStringToKeysym('/') and '-'
@@ -1932,24 +1935,26 @@ class ChooserNavigationTests(unittest.TestCase):
         # Only the named shortcut/modifier keys go through XStringToKeysym, and
         # in the existing order; no path character, punctuation included, is
         # ever looked up by name.
-        self.assertEqual(string_calls, [b"Shift_L", b"Control_L", b"l", b"Return"])
+        self.assertEqual(string_calls, [b"Shift_L", b"Control_L", b"l"])
+        # No named Return keysym is ever resolved.
+        self.assertNotIn(b"Return", string_calls)
         # Every path character is mapped by its numeric ASCII keysym only.
         self.assertEqual(sorted(keysym_calls),
-                         sorted([0x400, 0x100, 0xE06C, 0xFF] + [ord(char) for char in path]))
+                         sorted([0x400, 0x100, 0xE06C] + [ord(char) for char in path]))
         self.assertTrue({ord("/"), ord("-"), ord("_")} <= set(keysym_calls))
         # The named keys use the keysym XStringToKeysym returns for their name,
         # never their first ASCII byte ('C' of "Control_L", 'S' of "Shift_L").
-        for keysym in (0x100, 0xE06C, 0xFF, 0x400):
+        for keysym in (0x100, 0xE06C, 0x400):
             with self.subTest(keysym=keysym):
                 self.assertIn(keysym, keysym_calls)
         self.assertNotIn(ord("C"), keysym_calls)
         self.assertNotIn(ord("S"), keysym_calls)
         self.assertNotIn(ord("R"), keysym_calls)
-        # And the exact plan is unchanged: chord, the path, then Return.
+        # And the exact plan is unchanged: chord, then the path; no Return.
         self.assertEqual(plan, [(((37, True), (46, True), (46, False),
                                   (37, False)), "chord")] +
-                         [((code[ord(char)], None), "path") for char in path] +
-                         [((36, None), "return")])
+                         [((code[ord(char)], None), "path") for char in path])
+        self.assertNotIn(0xFF, keysym_calls)
 
     def test_shifted_symbols_are_shift_chords(self):
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
@@ -1959,9 +1964,9 @@ class ChooserNavigationTests(unittest.TestCase):
         self.assertEqual(plan, [(((37, True), (46, True), (46, False),
                                   (37, False)), "chord"),
                                 ((61, None), "path"), ((24, 50), "path"),
-                                ((26, None), "path"), ((36, None), "return")])
+                                ((26, None), "path")])
 
-    def test_emission_holds_ctrl_through_l_and_bounds_before_return(self):
+    def test_emission_holds_ctrl_through_l_and_never_sends_return(self):
         path = "/Re/l"
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
                 ord("R"): 27, ord("e"): 26}
@@ -1978,18 +1983,21 @@ class ChooserNavigationTests(unittest.TestCase):
             (26, 1), (26, 0),                              # e
             (61, 1), (61, 0),
             (46, 1), (46, 0),                              # l
-            (36, 1), (36, 0),                              # Return
         ])
-        # The chord first, then the path text, then Return; nothing else.
+        # The chord first, then the path text; the plan ends there.
         self.assertEqual(boundaries, [("Chooser shortcut input failed", 4),
                                       ("Chooser folder input failed", 16)])
+        # The keycode 36 (Return) is never emitted, pressed or released.
+        self.assertNotIn(36, [keycode for keycode, _down in events])
 
     def test_malformed_plan_emits_nothing(self):
         events = []
         for plan in ([(((46, True),), "chord")],
                      [((37, None), "path"), ((36, None), "return")],
                      [((37, None), "return")],
-                     [((36, None), "path")]):
+                     [((36, None), "path")],
+                     [(((37, True), (46, True), (46, False), (37, False)), "chord"),
+                      ((36, None), "unknown")]):
             with self.subTest(plan=plan):
                 with self.assertRaisesRegex(RuntimeError,
                                             "^Chooser shortcut unavailable$"):
@@ -2010,10 +2018,35 @@ class ChooserNavigationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,
                                     "^Acceptance keyboard mapping unavailable$"):
             native.chooser_navigation(xlib, "display", "/unmapped")
-        for key in (0x100, ord("l"), 0xFF, 0x400):
+        # Only the Ctrl+L chord's keys must be mapped; Return is never mapped
+        # and its absence is not a refusal.
+        for key in (0x100, ord("l"), 0x400):
             with self.subTest(missing=key):
                 with self.assertRaisesRegex(RuntimeError, "^Chooser shortcut unavailable$"):
                     native.chooser_navigation(self.xlib({**code, key: 0}), "display", "/z")
+        native.chooser_navigation(self.xlib({**code, 0xFF: 0}), "display", "/z")
+
+    def test_navigation_plan_has_no_return_step(self):
+        # The plan is a single Ctrl+L chord followed by exactly the path
+        # characters: no Return, Enter or any other trailing key.
+        path = "/synthetic/package/chromium"
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50}
+        code.update({ord(char): 100 + index for index, char in enumerate(path)})
+        plan = native.chooser_navigation(self.xlib(code), "display", path)
+        self.assertEqual(len(plan), 1 + len(path))
+        self.assertEqual([kind for _keys, kind in plan],
+                         ["chord"] + ["path"] * len(path))
+        # Enter is the same keycode as Return on the X keyboard; a plan that
+        # ends with either is refused before anything is emitted.
+        events = []
+        for tail in (((36, None), "return"), ((36, None), "enter")):
+            with self.subTest(tail=tail):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "^Chooser shortcut unavailable$"):
+                    native.emit_chooser_plan(
+                        plan + [tail], lambda keycode, down: events.append(keycode),
+                        lambda failure: self.fail(failure))
+        self.assertEqual(events, [])
 
     def test_non_ascii_or_relative_path_never_maps_a_key(self):
         calls = []

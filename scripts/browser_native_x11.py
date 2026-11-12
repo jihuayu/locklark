@@ -5,11 +5,12 @@ libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
 The Edge 157 directory chooser has two closed purpose-bound actions:
 `chooser_navigate` carries the package directory and only sends the true
-Ctrl+L chord, that path and Return in the focused, raised owned chooser, with
-the driver's bounded 150ms UI boundary after the chord and after the path;
-`chooser_open` only commits the real GTK Open button, clicked at the point
-derived from the measured chooser geometry. The chooser request accepts no
-caller coordinate, label or extra action.
+Ctrl+L chord and then that path in the focused, raised owned chooser, with the
+driver's bounded 150ms UI boundary after the chord and after the path; it
+never sends Return or any other key. `chooser_open` is the separate action
+that only commits the real GTK Open button, clicked once at the point derived
+from the measured chooser geometry. The chooser request accepts no caller
+coordinate, label or extra action.
 """
 import ctypes as C
 import json
@@ -158,10 +159,11 @@ EDGE_MANAGER_NATIVE_TITLES = (
 # input shape. The chooser title must equal this exact literal, the manager
 # window must equal the observed manager title and the chooser must keep the
 # measured client size; the Open point is always derived from that geometry.
-# `chooser_navigate` only types the package directory into the GTK location
-# entry and accepts Return; `chooser_open` only clicks the real GTK Open button
-# at the measured point. Neither action accepts a caller coordinate, label,
-# path in the wrong action or any extra key.
+# `chooser_navigate` only focuses/opens the GTK location entry with Ctrl+L and
+# types the package directory, never Return or any other key;
+# `chooser_open` only clicks the real GTK Open button once at the measured
+# point. Neither action accepts a caller coordinate, label, path in the wrong
+# action or any extra key.
 CHOOSER_NAVIGATE = {"chooser_navigate": True}
 CHOOSER_OPEN = {"chooser_open": True}
 CHOOSER_ACTIONS = {"navigate": CHOOSER_NAVIGATE, "open": CHOOSER_OPEN}
@@ -283,11 +285,11 @@ def folder_point(width, height):
 def folder_output(action, click_count):
     """Fixed action acknowledgement: no window, title, path, PID or coordinate.
 
-    `chooser_navigate` acknowledges the one path plus Return with zero clicks;
-    `chooser_open` acknowledges exactly one physical XTest click on the
-    internally derived Open point. This acknowledgement is not installation
-    success: the caller still waits for the real extension target, the
-    manifest-derived ID and the one background.js service worker.
+    `chooser_navigate` acknowledges the Ctrl+L chord and the one path only,
+    with zero clicks; `chooser_open` acknowledges exactly one physical XTest
+    click on the internally derived Open point. This acknowledgement is not
+    installation success: the caller still waits for the real extension
+    target, the manifest-derived ID and the one background.js service worker.
     """
     if type(click_count) is not int:
         return None
@@ -467,9 +469,11 @@ def chooser_navigation(x, display, path):
 
     The plan is exactly one modifier chord keyed on Ctrl+L (keys holds
     (Control_L, down), (l, down), (l, up), (Control_L, up): Control_L is held
-    while l is pressed and only released after), then each character of `path`
-    and finally Return. The named keys are resolved through XStringToKeysym;
-    a path character is resolved through the numeric ASCII keysym ord(char),
+    while l is pressed and only released after), then each character of `path`.
+    It never ends with Return: the chooser is left with the path typed into its
+    location entry for the separate chooser_open action. The named keys are
+    resolved through XStringToKeysym; a path character is resolved through the
+    numeric ASCII keysym ord(char),
     as the generic text driver does, because XStringToKeysym does not map
     punctuation like '/' or '-'. A character is a plain key when its
     first-level keysym is already that character and a Shift_L chord
@@ -494,11 +498,11 @@ def chooser_navigation(x, display, path):
             raise RuntimeError("Acceptance keyboard mapping unavailable")
         produces = x.XKeycodeToKeysym(display, keycode, 0) == ord(char)
         typed.append(((keycode, None if produces else shift), "path"))
-    ctrl, letter, ret = code("Control_L"), code("l"), code("Return")
-    if not (ctrl and letter and ret):
+    ctrl, letter = code("Control_L"), code("l")
+    if not (ctrl and letter):
         raise RuntimeError("Chooser shortcut unavailable")
     chord = ((ctrl, True), (letter, True), (letter, False), (ctrl, False))
-    return [(chord, "chord")] + typed + [((ret, None), "return")]
+    return [(chord, "chord")] + typed
 
 
 def emit_chooser_plan(plan, emit, boundary):
@@ -508,7 +512,8 @@ def emit_chooser_plan(plan, emit, boundary):
     only afterwards, never separate Control_L/l keystrokes. Every item is
     validated before the first key, so a malformed plan emits nothing. The
     path is one batch and `boundary(failure)` runs after the chord and after
-    the path text, before Return; Return is its own last batch.
+    the path text. Nothing follows the path: the plan never carries Return or
+    another key, so the separate Open action commits the chooser.
     """
     def keycode(value):
         return type(value) is int and value > 0
@@ -518,15 +523,13 @@ def emit_chooser_plan(plan, emit, boundary):
                 (keys[1] is None or keycode(keys[1])))
 
     def valid_shape():
-        if type(plan) is not list or len(plan) < 2:
+        if type(plan) is not list or not plan:
             return False
         chord_keys, first = plan[0]
         return (first == "chord" and type(chord_keys) is tuple and len(chord_keys) == 4 and
                 all(type(item) is tuple and keycode(item[0]) and item[1] in (True, False)
                     for item in chord_keys) and
-                all(item[1] == "path" and keypair(item[0]) for item in plan[1:-1]) and
-                plan[-1][1] == "return" and type(plan[-1][0]) is tuple and
-                keycode(plan[-1][0][0]) and plan[-1][0][1] is None)
+                all(item[1] == "path" and keypair(item[0]) for item in plan[1:]))
 
     try:
         valid = valid_shape()
@@ -537,7 +540,7 @@ def emit_chooser_plan(plan, emit, boundary):
     for keycode_value, down in plan[0][0]:
         emit(keycode_value, int(down))
     boundary("Chooser shortcut input failed")
-    for keys, _kind in plan[1:-1]:
+    for keys, _kind in plan[1:]:
         keycode_value, shift = keys
         if shift is not None:
             emit(shift, 1)
@@ -546,8 +549,6 @@ def emit_chooser_plan(plan, emit, boundary):
         if shift is not None:
             emit(shift, 0)
     boundary("Chooser folder input failed")
-    emit(plan[-1][0][0], 1)
-    emit(plan[-1][0][0], 0)
 
 
 def x_property(x, display, candidate, atom, expected_type):
@@ -1840,7 +1841,7 @@ def main():
         except Exception:
             raise RuntimeError("Chooser shortcut unavailable")
         # 2. Focus and raise the exact owned chooser, then send exactly
-        # Ctrl+L, the one path and Return; no other key is ever emitted.
+        # Ctrl+L and the one path; no Return or other key is ever emitted.
         errors.clear()
         x.XRaiseWindow(display, target)
         x.XSetInputFocus(display, target, 1, 0)
@@ -1850,8 +1851,9 @@ def main():
         FAILURE_CONTEXT["action"] = "chooser-navigate"
         # 3. Emit exactly the plan, as the generic driver does: the Ctrl+L
         # chord batch, the existing driver boundary so GTK can open the
-        # location entry, then every path character batch, the same boundary
-        # before Return, and finally Return; no other key is ever emitted.
+        # location entry, then every path character batch and the same
+        # boundary. The plan ends here: the path stays in the location entry
+        # and the separate chooser_open action commits it.
         emit_chooser_plan(
             plan,
             lambda keycode, down: xt.XTestFakeKeyEvent(display, keycode, down, 0),

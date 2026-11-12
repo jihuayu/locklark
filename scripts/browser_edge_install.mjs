@@ -19,8 +19,10 @@
 //      as the manager prefix, the exact private --user-data-dir and the real
 //      Edge image. First the purpose-bound navigate action
 //      {"chooser_navigate": true} with the one absolute package directory;
-//      the driver focuses and raises the exact owned chooser and sends only
-//      Ctrl+L, that path and Return. Then, as its own request, the Open action
+//      the driver focuses and raises the exact owned chooser, sends the true
+//      Ctrl+L chord to open the location entry and types exactly that path. It
+//      never sends Return or any other key, so the chooser stays open with the
+//      path in its location entry. Then, as its own request, the Open action
 //      {"chooser_open": true} with no caller coordinate: the driver re-proves
 //      the owner, title, pointer and X tree and emits one XTest click on the
 //      Open button at the measured point (width-48,height-23) of the measured
@@ -276,8 +278,9 @@ function chooserRequest(fields, executable, profile, title) {
 
 // The navigate action: `{"chooser_navigate": true}` and exactly the existing
 // absolute printable-ASCII package directory. There is no key, action list,
-// focus flag, label or coordinate: the driver itself focuses the owned chooser
-// and sends only Ctrl+L, this path and Return.
+// focus flag, label or coordinate: the driver itself focuses the owned chooser,
+// opens the location entry with Ctrl+L and types exactly this path, without
+// Return. The separate Open action below commits the chooser.
 export function edgeChooserNavigateRequest({ extensionDir, executable, profile, title }) {
   const refuse = (message) => {
     throw new Error(message);

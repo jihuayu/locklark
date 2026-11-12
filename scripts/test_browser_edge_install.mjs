@@ -179,6 +179,12 @@ test("chooser actions are exactly navigate then open, no select_folder", () => {
   });
   assert.deepEqual(Object.keys(navigate).sort(), [...EDGE_CHOOSER_NAVIGATE_KEYS].sort());
   assert.deepEqual(navigate.chooser_action, EDGE_CHOOSER_NAVIGATE);
+  // The navigate plan carries exactly the one validated package directory and
+  // no key, Return included; the X11 driver itself sends the true Ctrl+L
+  // chord and types that path only.
+  assert.deepEqual(Object.keys(navigate.chooser_action), ["chooser_navigate"]);
+  assert.equal(navigate.chooser_action.chooser_navigate, true);
+  assert.equal(navigate.extension_dir, PRIVATE.extensionDir);
   const open = edgeChooserOpenRequest(PRIVATE);
   assert.deepEqual(open, {
     owner: true,
