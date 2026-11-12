@@ -4,6 +4,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+// The optional route idle-expiry contract lives with the route contract and
+// registers its own tests when this file is executed.
+import "./test_browser_route_idle_contract.mjs";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
@@ -1428,17 +1431,21 @@ test("route label inspect preserves focus and the approval click stays physical"
   );
   assert.match(
     source,
-    /const ROUTE_LABEL_INSPECT = Object\.freeze\(\{\n\s+inspect: true,\n\s+preserve_focus: true,\n\s+\}\);/,
+    /const ROUTE_LABEL_INSPECT = Object\.freeze\(\{\n\s+inspect: true,\n\s+preserve_focus: true,\n\}\);/,
   );
   assert.doesNotMatch(source, /title_prefix: ROUTE_NATIVE_TITLE/);
   assert.match(source, /input\(\[\], true, ROUTE_LABEL_INSPECT\)\.controls\?\.\["批准本次操作"\]/);
   // The raising/focusing positional form never appears in the route
   // checkpoint; it remains only for the unconditional-fill journeys.
   assert.ok(countMatches(source, /input\(\[\], true, true\)/g) > 0);
-  const checkpoint = source.slice(
-    source.indexOf("async function acceptRouteDetailRead"),
-    source.indexOf("async function blank()"),
+  // The default route checkpoint ends where the optional idle journey starts.
+  const routeStart = source.indexOf("async function acceptRouteDetailRead");
+  const optIn = source.indexOf(ROUTE_IDLE_OPT_IN_ANCHOR, routeStart);
+  assert.ok(
+    optIn > routeStart,
+    "optional idle journey must start after the route checkpoint",
   );
+  const checkpoint = source.slice(routeStart, optIn);
   assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
   assert.equal(
     countMatches(checkpoint, /input\(\[\], true, ROUTE_LABEL_INSPECT\)/g),
@@ -2005,9 +2012,15 @@ function routeRevocationHelpers(source) {
   };
 }
 
+// The optional idle-expiry journey starts only after the revocation
+// checkpoint's finally; the checkpoint contract ends there and never absorbs
+// the opt-in journey or its own line comments.
+const ROUTE_IDLE_OPT_IN_ANCHOR = "// OPT-IN: The optional idle-expiry journey starts only here";
 function routeRevocationCheckpoint(source) {
   const start = source.indexOf("    // Route revocation checkpoint: the same tab and target");
-  const stop = source.indexOf("\n  async function blank()", start);
+  const optional = source.indexOf(ROUTE_IDLE_OPT_IN_ANCHOR, start);
+  const stop =
+    optional > start ? optional : source.indexOf("\n  async function blank()", start);
   assert.ok(start > 0 && stop > start, "revocation checkpoint must stay in the route journey");
   return source.slice(start, stop);
 }
@@ -2262,7 +2275,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   // requires, and the switch-only page state is never used for the return wait.
   assert.match(
     source,
-    /^function routeRevokedProbe\(title, value\) \{\n\s+return `\(\(\)=>\{\n(?:[^\n]*\n)*?\s{6}visible:document\.visibilityState==='visible',$/m,
+    /^function routeRevokedProbe\(title, value, canaries\) \{\n\s+const absent = canaries === undefined \? \[title, value\] : \[\.\.\.new Set\(\[title, value, \.\.\.canaries\]\)\];\n\s+return `\(\(\)=>\{\n(?:[^\n]*\n)*?\s{6}visible:document\.visibilityState==='visible',$/m,
   );
   assert.equal(
     countMatches(checkpoint, /routeRevokedProbe\(fixture\.Title, fixture\.Value\)/g),
@@ -2350,7 +2363,8 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   // Each key is addressed to the title of the tab that is ACTIVE when it is
   // sent: the active route page ("Locklark") for the switch away and the
   // Control_L+r reload, the source page for the return and the popup Escape /
-  // open keys. Every call is a single fixed action array, exactly once.
+  // open keys. Every default call is a single fixed action array, exactly once;
+  // the popup keys belong to openPopup, the checkpoint sends only its three.
   for (const [key, prefix] of [
     ["ROUTE_SWITCH_SOURCE", "ROUTE_TITLE_PREFIX"],
     ["ROUTE_RETURN", "SOURCE_TITLE_PREFIX"],
@@ -2362,11 +2376,19 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     const call = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
     assert.equal(countMatches(source, call), 1, literal);
   }
+  // The default revocation checkpoint sends exactly its three physical keys;
+  // the opt-in idle journey owns the one extra close key.
+  assert.equal(countMatches(checkpoint, /browserKey\(/g), 3);
+  assert.doesNotMatch(checkpoint, /ROUTE_IDLE_CLOSE_STALE/);
+  assert.equal(countMatches(source, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/g), 1);
+  // The whole harness inventory: the default route keys plus exactly one
+  // physical Ctrl+W of the stale tab, owned by the opt-in idle journey.
   const browserCalls = [...source.matchAll(/browserKey\((\[[^\n]*?\]|ROUTE_\w+), (\w+)\);/g)]
     .map((match) => match[1] + " -> " + match[2]);
   assert.deepEqual(browserCalls.sort((a, b) => a.localeCompare(b)), [
     "[{ key: \"Control_L+Shift_L+y\" }] -> SOURCE_TITLE_PREFIX",
     "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
+    "ROUTE_IDLE_CLOSE_STALE -> ROUTE_TITLE_PREFIX",
     "ROUTE_RELOAD -> ROUTE_TITLE_PREFIX",
     "ROUTE_RETURN -> SOURCE_TITLE_PREFIX",
     "ROUTE_SWITCH_SOURCE -> ROUTE_TITLE_PREFIX",
@@ -2516,7 +2538,9 @@ test("route revocation reattaches a fresh client after the positive cleanup and 
   assert.ok(positiveClientClosed < positiveCleanup, "the positive client closes before its trace stops");
   const from = unique("    // Route revocation checkpoint: the same tab and target");
   assert.ok(from > positiveCleanup, "the revoke checkpoint follows the cleanup");
-  const stop = source.indexOf("\n  async function blank()", from);
+  const optional = unique(ROUTE_IDLE_OPT_IN_ANCHOR);
+  assert.ok(optional > from, "the optional idle journey follows the revoke checkpoint");
+  const stop = optional;
   assert.ok(stop > from, "revocation checkpoint must stay in the route journey");
   // The cleanup slice alone, then the revoke checkpoint through its finally.
   const cleanup = source.slice(positiveClientClosed, from);

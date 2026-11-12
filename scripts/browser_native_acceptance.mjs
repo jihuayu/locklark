@@ -42,6 +42,19 @@ const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // Explicit opt-in: a QuickFill=false action row opens one persistent route tab
 // and its native per-operation approval, instead of the long default journeys.
 const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
+// Opt-in on top of the route detail mode only: after every existing physical
+// route switch/reload/no-prompt assertion has passed, one ordinary route
+// journey is left idle through its full two-minute route TTL and must then be
+// fully wiped. It never changes what the default route mode runs, and any
+// value other than the exactly paired flags fails closed at import, before
+// anything is launched.
+const routeIdleValue = process.env.LOCKLARK_TEST_ROUTE_IDLE_TTL;
+const routeIdleTtl = routeIdleValue === "1";
+assert(
+  routeIdleValue === undefined ||
+    (routeIdleValue === "1" && routeDetailRead),
+  "Route idle TTL mode requires route detail mode",
+);
 // Route pages are the fixed extension popup document plus exactly one 64-hex
 // token fragment. Action popups are that same document with no fragment.
 const ROUTE_PAGE = /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/;
@@ -109,6 +122,7 @@ if (edgeInstallOnly) {
     "LOCKLARK_TEST_FAILURE_STAGE",
     "LOCKLARK_TEST_BROWSER_PARITY",
     "LOCKLARK_TEST_ROUTE_DETAIL_READ",
+    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
     "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
     "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
     "LOCKLARK_TEST_OTHER_PROVIDER",
@@ -144,6 +158,9 @@ const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
   lastRouteObservation = null,
+  // Present only once the optional idle journey reached its post-approval
+  // detail and wipe checks; reported on its failure as fixed booleans only.
+  routeIdleObservation = null,
   routeAfterPopupClose = null,
   routeTargetAfterPopupClose = null,
   routeObservationHistory = [],
@@ -565,6 +582,17 @@ const ROUTE_COPY_FIELD_SELECTOR =
 // leave either page: never title, value, text, URL, token, count, target or
 // tab id, which stay in this closure.
 const ROUTE_REVOKE_STATUS_KINDS = Object.freeze(["route-revoked", "claim-failed"]);
+// Product design: the approved login detail shows the synthetic Username (the
+// item's subtitle and the username field). Only this verified value is
+// displayable; the password value stays masked and every other canary
+// (password, secret, OTP seed/URI, other fixture values) must stay absent.
+const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS = Object.freeze(["Username"]);
+// Every fixture canary the page text must still not contain: all of them
+// except only the allowlisted values above.
+function routeForbiddenCanaries(fixture) {
+  const displayable = ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS.map((key) => fixture?.[key]);
+  return fixtureCanaries(fixture).filter((value) => !displayable.includes(value));
+}
 // The route's own tab switch, return and reload; each is one real XTest key
 // batch sent with the exact-title-prefix form (never the native-window form)
 // and addressed to the title of the tab that is ACTIVE when the key is sent:
@@ -597,14 +625,17 @@ const ROUTE_PAGE_STATE = `(()=>{
 // The first tab switch away uses the fixed read-only page state as its
 // bounded host-side poll; no page observer is installed.
 const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;
-// The full wipe contract after the return to the route tab and after the stale
-// reload: the same fixed page state (including its `visible` boolean) plus the
-// two fixed revocation outcomes, the closed detail, the absent Copy control and
-// one boolean for whether the fixture title or value is anywhere in the body
-// text. The comparison happens in the page. The route-return wait and the stale
-// reload both use this one probe, so neither can pass the incomplete page state
-// to routeWiped().
-function routeRevokedProbe(title, value) {
+// The full wipe contract after the return to the route tab, after the stale
+// reload and after the idle TTL: the same fixed page state (including its
+// `visible` boolean) plus the two fixed revocation outcomes, the closed detail,
+// the absent Copy control and one boolean for whether any supplied canary is
+// anywhere in the body text. The comparison happens in the page. The
+// route-return wait and the stale reload both call it with the title/value
+// pair, unchanged; the idle expiry passes every fixture canary. Both waits use
+// this one probe, so neither can pass the incomplete page state to
+// routeWiped().
+function routeRevokedProbe(title, value, canaries) {
+  const absent = canaries === undefined ? [title, value] : [...new Set([title, value, ...canaries])];
   return `(()=>{
     const body=document.body;
     const detail=document.querySelector('#detail-view');
@@ -613,6 +644,7 @@ function routeRevokedProbe(title, value) {
     const status=document.querySelector('#status');
     const text=status?String(status.textContent||'').trim():'';
     const bodyText=body?String(body.innerText):'';
+    const canaries=${JSON.stringify(absent)};
     return {
       visible:document.visibilityState==='visible',
       closed:!!body&&body.dataset.view==='closed',
@@ -620,7 +652,7 @@ function routeRevokedProbe(title, value) {
       titleEmpty:!!heading&&String(heading.textContent||'')==='',
       fieldsEmpty:!!fields&&fields.childElementCount===0,
       copyAbsent:document.querySelectorAll(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR)}).length===0,
-      fixtureAbsent:!bodyText.includes(${JSON.stringify(title)})&&!bodyText.includes(${JSON.stringify(value)}),
+      fixtureAbsent:canaries.every((value)=>!bodyText.includes(value)),
       statusKind:text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':'other'
     };
   })()`;
@@ -649,6 +681,13 @@ function routeWiped(value) {
 // Clipboard bytes travel only on the private pipe; only booleans are kept.
 const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
 const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
+// The focus-preserving native inspect form shared by the default route
+// approval wait and the opt-in idle journey. It never raises or focuses the
+// native window.
+const ROUTE_LABEL_INSPECT = Object.freeze({
+  inspect: true,
+  preserve_focus: true,
+});
 // Both native-lease success lines and the legacy manual-copy success line
 // (popup.js writeClipboard -> copiedFeedback). Pending, refusal, unknown
 // outcome and missing feedback are never accepted.
@@ -672,6 +711,57 @@ const EDGE_INSTALL_STAGES = new Set([
   "edge-load-unpacked", "edge-chooser", "edge-activate", "edge-installed",
   "edge-service-worker", "continue",
 ]);
+// Read-only inspection of the exact page the harness itself controls: its own
+// pathname and form controls. Only fixed booleans leave the page.
+function sourcePageProbe(pathname) {
+  return `(()=>{
+    const username=document.getElementById('username');
+    const password=document.getElementById('password');
+    const form=username?username.form:null;
+    return {
+      visible:document.visibilityState==='visible',
+      path:location.pathname===${JSON.stringify(pathname)},
+      form:!!form&&!!password&&form.contains(password)&&username.type!=='password'&&password.type==='password'
+    };
+  })()`;
+}
+function sourcePageIntact(value) {
+  return value?.form === true && value?.path === true;
+}
+// Diagnostics only: the six fixed predicates of the idle stale-close wait's
+// latest poll. Null until the optional idle journey starts (and reset there),
+// then refreshed on every poll. Only the fixed booleans are stored and
+// reported; ids, URLs, titles, values, counts, text and canaries stay out.
+let routeIdleCloseStaleObservation = null;
+function sanitizeRouteIdleCloseStale(value) {
+  return {
+    staleIdAbsent: value?.staleIdAbsent === true,
+    routesAbsent: value?.routesAbsent === true,
+    popupAbsent: value?.popupAbsent === true,
+    sourceSame: value?.sourceSame === true,
+    sourceVisible: value?.sourceVisible === true,
+    sourceIntact: value?.sourceIntact === true,
+  };
+}
+// Optional idle-expiry journey (LOCKLARK_TEST_ROUTE_IDLE_TTL=1 in route detail
+// mode). It starts only after all of the default route switch/reload/
+// no-prompt/mouse-rejected assertions have passed, then runs one ordinary route
+// journey and leaves it idle: exactly one physical Ctrl+W addressed to the
+// stale route tab, an exact proof that the source page is back and that route
+// target is gone, the ordinary action popup, match, exact synthetic row and
+// physical row click, one physical 批准本次操作 click, and then no input at all
+// until the worker's own two-minute TTL revokes the new route and its rendered
+// detail wipes. Every page read is a read-only CDP DOM inspection by fixed
+// booleans/enums; nothing navigates, messages the worker, dispatches DOM events
+// or installs a hook. Secret values, tokens, URLs and raw logs never leave the
+// page, a helper or this closure.
+const ROUTE_IDLE_CLOSE_STALE = Object.freeze([{ key: "Control_L+w" }]);
+// The worker's fixed route lifetime: the live detail must survive this long
+// after the physical row click before any wipe may be accepted.
+const ROUTE_IDLE_TTL = 120000;
+// Bounded overall wipe window, measured from that same physical row click.
+const ROUTE_IDLE_WIPE_LIMIT = 150000;
+const ROUTE_IDLE_POLL = 2000;
 function phase(value) {
   stage = value;
   console.log(
@@ -751,6 +841,413 @@ const origin = "https://login.locklark.test:" + server.address().port;
 let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// One ordinary route journey, then idle through the worker's full two-minute
+// route TTL. It runs only in the opt-in route idle mode, after every default
+// route assertion passed. Every action is real (the XTest key, the native
+// pointer helper, the popup mouse wrapper); nothing messages the worker,
+// navigates, dispatches DOM events, installs a hook or advances a synthetic
+// clock. Only fixed booleans and enums leave each page, and secrets, tokens,
+// URLs and raw logs are never read out or printed. It returns three fixed
+// booleans for the failure report.
+async function acceptRouteIdleExpiry(driver) {
+  const {
+    browser: context,
+    input,
+    fixture,
+    phase: mark,
+    eventually: wait,
+    openPopup: openActionPopup,
+    extensionTargets: targets,
+    attachRoute: attach,
+    closeAdapter,
+    browserKey,
+    labelInspect,
+    vaultRows,
+    // The already-tested approved-detail probe/verifier and the read-only
+    // native no-prompt inspection are locals of the main acceptance block.
+    routeSurfaceProbe,
+    verifyRouteSurface,
+    nativeInspection,
+  } = driver;
+  assert(
+    typeof routeSurfaceProbe === "function" &&
+      typeof verifyRouteSurface === "function" &&
+      typeof nativeInspection === "function",
+    "Idle route probes missing",
+  );
+  const idle = { approvedDetail: false, liveObserved: false, wipeCompleted: false };
+  routeIdleObservation = idle;
+  // Diagnostics only: records of earlier routes are already closed; the fresh
+  // ones below describe this journey alone and are sanitized at the boundary.
+  routeLifecycleObservation = null;
+  routeStatusTrace = null;
+  routeIdleCloseStaleObservation = null;
+  // The controlled source page by reference only: never by URL, id or index.
+  const sourcePage = context
+    .pages()
+    .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+  assert(sourcePage, "Original source tab missing");
+  // The expected path is this exact controlled page's own pathname (opened at
+  // origin + "/login"), not the bare origin's "/" path. The synthetic URL is
+  // used only here to derive it and is never retained or reported.
+  const sourcePath = new URL(sourcePage.url()).pathname;
+  // The stale (closed/revoked) route left by the default checkpoint, found
+  // through the fixed route fragment pattern. Its tab and token stay here.
+  const staleRoutes = (await targets()).filter((target) =>
+    ROUTE_PAGE.test(target.url),
+  );
+  assert(staleRoutes.length === 1, "Route target was replaced");
+  const staleRoute = staleRoutes[0];
+  assert(
+    !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
+    "Action popup target stayed open",
+  );
+  // Read-only reattach to the stale route, proven complete and active before
+  // the key.
+  const stale = await attach(staleRoute);
+  try {
+    await wait(
+      async () => (await stale.evaluate("document.readyState")) === "complete",
+      "Route page did not load",
+    );
+    assert.equal(
+      await stale.evaluate(
+        'document.visibilityState === "visible" && document.hasFocus() === true',
+      ),
+      true,
+      "Route tab is not the active tab",
+    );
+    mark("route:idle-close-stale");
+    // Exactly one physical Ctrl+W addressed to the stale route tab by its
+    // active title prefix; only this adapter's client is disconnected first.
+    await closeAdapter(stale);
+    browserKey(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX);
+    // The exact source page is back and intact, the stale target is gone and
+    // no other route page or action popup is left.
+    await wait(async () => {
+      const live = await targets();
+      const current = context
+        .pages()
+        .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+      const sourceSame = current === sourcePage;
+      const state = sourceSame
+        ? await current.evaluate(sourcePageProbe(sourcePath))
+        : null;
+      const staleIdAbsent = !live.some(
+        (target) => target.id === staleRoute.id,
+      );
+      const routesAbsent = !live.some((target) => ROUTE_PAGE.test(target.url));
+      const popupAbsent = !live.some((target) => ACTION_POPUP.test(target.url));
+      const sourceVisible = state?.visible === true;
+      const sourceIntact = sourcePageIntact(state);
+      routeIdleCloseStaleObservation = sanitizeRouteIdleCloseStale({
+        staleIdAbsent,
+        routesAbsent,
+        popupAbsent,
+        sourceSame,
+        sourceVisible,
+        sourceIntact,
+      });
+      return (
+        staleIdAbsent &&
+        routesAbsent &&
+        popupAbsent &&
+        sourceSame &&
+        sourceVisible &&
+        sourceIntact
+      );
+    }, "Stale route tab was not closed");
+  } finally {
+    // Disconnecting an already disconnected adapter client is harmless.
+    try {
+      await closeAdapter(stale);
+    } catch {}
+  }
+  assert(
+    sourcePageIntact(await sourcePage.evaluate(sourcePageProbe(sourcePath))),
+    "Original source tab missing",
+  );
+  mark("route:idle-source");
+  // Second ordinary journey through the same rendered action popup. The host
+  // is already paired, so only the dismissal key and the real actuation key
+  // are sent: no connect or unlock is repeated.
+  const action = await openActionPopup();
+  await wait(
+    async () => (await action.disabled("#search-input")) === false,
+    "Paired popup not ready",
+  );
+  mark("route:idle-match");
+  await action.click("#refresh");
+  await wait(
+    async () =>
+      String(await action.text("#status")).includes("个当前网站") &&
+      (await action.disabled("#refresh")) === false,
+    "Exact-origin match missing",
+  );
+  mark("route:idle-vault-open");
+  await action.click('#filter-tabs [data-filter="all"]');
+  await wait(
+    async () =>
+      (await action.evaluate("document.readyState")) === "complete" &&
+      (await action.count("#vault-list .vault-item")) > 0,
+    "Vault rows missing",
+  );
+  mark("route:idle-exact-row");
+  const rows = await action.evaluate(vaultRows);
+  assert(
+    Array.isArray(rows) &&
+      rows.length === 1 &&
+      rows[0].id === fixture.SeedID &&
+      rows[0].title === fixture.Title &&
+      rows[0].visible === true,
+    "Exact synthetic vault row missing",
+  );
+  const rowSelector =
+    '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]';
+  // The approved-detail probe: the tested route surface check with every
+  // non-displayable fixture canary forbidden. The verified Username is the only
+  // canary that may appear, and the masked password value may not.
+  const liveProbe = routeSurfaceProbe(
+    fixture.Title,
+    fixture.Value,
+    routeForbiddenCanaries(fixture),
+  );
+  const before = new Set((await targets()).map((target) => target.id));
+  const pagesBefore = new Set(
+    context
+      .pages()
+      .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
+  );
+  mark("route:idle-row-click");
+  // The TTL is measured from this physical row click, immediately before it.
+  const idleStart = Date.now();
+  // Exactly one real CDP mouse press/release through the popup wrapper.
+  await action.click(rowSelector);
+  mark("route:idle-page-opened");
+  let opened;
+  await wait(async () => {
+    const candidates = (await targets()).filter(
+      (target) =>
+        !before.has(target.id) &&
+        ROUTE_PAGE.test(target.url) &&
+        (target.type === "page" || target.type === "tab"),
+    );
+    if (candidates.length > 1) throw Error("Route page must be unique");
+    opened = candidates[0];
+    return !!opened;
+  }, "Route page did not open");
+  const routeTarget = opened.id;
+  assert.equal(
+    (await targets()).filter((target) => ROUTE_PAGE.test(target.url)).length,
+    1,
+    "Route page must be unique",
+  );
+  // Diagnostics only: a bounded main-frame lifecycle record of this target.
+  observeRouteLifecycle(opened);
+  mark("route:idle-popup-closed");
+  await wait(async () => !(await action.ready()), "Action popup stayed open");
+  await wait(
+    async () =>
+      !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
+    "Action popup target stayed open",
+  );
+  // The route tab is the only new browser page.
+  const pagesAfter = context
+    .pages()
+    .filter((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+  assert(
+    pagesAfter.length === pagesBefore.size &&
+      pagesAfter.every((entry) => pagesBefore.has(entry)),
+    "Unexpected page opened",
+  );
+  mark("route:idle-attached");
+  const fresh = await attach(opened);
+  // Only a proven detail is ever read again by the diagnostics below.
+  let proven = false;
+  try {
+    await wait(
+      async () => (await fresh.evaluate("document.readyState")) === "complete",
+      "Route page did not load",
+    );
+    // The route claim starts the same native V2 item-get review. Read-only,
+    // focus-preserving inspections only; no label is clicked until it shows.
+    mark("route:idle-native-label");
+    await wait(async () => {
+      lastRouteObservation = sanitizeRouteObservation(
+        await fresh.evaluate(routeStateProbe(fixture.Title)),
+      );
+      try {
+        const control =
+          input([], true, labelInspect).controls?.[
+            ROUTE_COPY_REVIEW_LABEL
+          ];
+        return control?.present === true && control?.showing === true;
+      } catch {
+        return false;
+      }
+    }, "Native route approval label missing");
+    assert.equal(
+      (await targets()).filter((target) => ROUTE_PAGE.test(target.url)).length,
+      1,
+      "Route page must be unique",
+    );
+    mark("route:idle-native-approve");
+    // Exactly one real X11 pointer click on the native allowlisted label.
+    input([{ click_label: ROUTE_COPY_REVIEW_LABEL }]);
+    mark("route:idle-approved");
+    // The same target is still the only route page and no popup reopened.
+    const exactRoute = async () => {
+      const routes = (await targets()).filter((target) =>
+        ROUTE_PAGE.test(target.url),
+      );
+      assert(
+        routes.length === 1 && routes[0].id === routeTarget,
+        "Route target was replaced",
+      );
+      assert(
+        !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
+        "Action popup reopened",
+      );
+    };
+    // The native approval leaves the desktop app in front and changed no tab,
+    // so the new route tab is foregrounded in place with the same
+    // Page.bringToFront call the default copy proof uses: no navigation, no
+    // reload and no document change. Visibility is then proven read-only.
+    mark("route:idle-foreground");
+    await fresh.bringToFront();
+    await wait(
+      async () =>
+        (await fresh.evaluate("document.visibilityState")) === "visible",
+      "Route page did not return to the foreground",
+    );
+    // The approved detail: the tested surface probe/verifier proves the route
+    // is visible, shows the exact fixture title and keeps its password field
+    // concealed; the page text contains no forbidden fixture canary.
+    await wait(async () => {
+      await exactRoute();
+      const surface = await fresh.evaluate(liveProbe);
+      return (
+        surface?.visible === true &&
+        verifyRouteSurface(surface, fixture.Title) === ""
+      );
+    }, "Idle route detail did not survive native approval");
+    idle.approvedDetail = true;
+    proven = true;
+    // Nothing is touched from here: no key, pointer, CDP input or action.
+    // Every probe before the worker's full two-minute TTL must confirm the
+    // approved surface exactly, or fail; a wipe seen any earlier is a failure.
+    mark("route:idle-live");
+    mark("route:idle-wait");
+    const minimumWipe = idleStart + ROUTE_IDLE_TTL;
+    const wipeDeadline = idleStart + ROUTE_IDLE_WIPE_LIMIT;
+    for (;;) {
+      // The same target id is still the one route page between polls.
+      await exactRoute();
+      let wiped = false;
+      try {
+        wiped = routeWiped(
+          await fresh.evaluate(
+            routeRevokedProbe(
+              fixture.Title,
+              fixture.Value,
+              fixtureCanaries(fixture),
+            ),
+          ),
+        );
+      } catch (error) {
+        if (popupClosed(error)) throw Error("Route page was replaced");
+        throw error;
+      }
+      const now = Date.now();
+      if (now < minimumWipe) {
+        // A wipe before the full original TTL is a contract failure, and any
+        // other non-wiped probe must still show the approved surface.
+        assert.equal(wiped, false, "Idle route detail did not stay live");
+        const surface = await fresh.evaluate(liveProbe);
+        assert.equal(
+          surface?.visible,
+          true,
+          "Idle route detail left the foreground",
+        );
+        const finding = verifyRouteSurface(surface, fixture.Title);
+        assert.equal(
+          finding,
+          "",
+          finding || "Idle route detail did not stay live",
+        );
+      } else if (wiped) {
+        idle.liveObserved = true;
+        break;
+      }
+      if (Date.now() >= wipeDeadline)
+        throw Error("Idle route detail did not expire");
+      await delay(Math.min(ROUTE_IDLE_POLL, wipeDeadline - Date.now()));
+    }
+    // Bounded read-only inspection of the real native approval window after
+    // the wipe. Either existing approval label offered means the trust prompt
+    // is still there. An unobservable inspection throws and fails; it is never
+    // read as "no prompt".
+    mark("route:idle-native-absent");
+    const promptDeadline = Date.now() + ROUTE_NATIVE_ABSENT_LIMIT;
+    for (;;) {
+      const controls = nativeInspection();
+      const offered = [ROUTE_COPY_REVIEW_LABEL, ROUTE_COPY_DISCLOSURE_LABEL].some(
+        (label) => {
+          const control = controls?.[label];
+          return (
+            control?.present === true &&
+            (control.enabled === true || control.showing === true)
+          );
+        },
+      );
+      if (offered) throw Error("Idle route native prompt is still present");
+      if (Date.now() >= promptDeadline) break;
+      await delay(200);
+    }
+    idle.wipeCompleted = true;
+    mark("route:idle-wiped");
+  } finally {
+    try {
+      await closeAdapter(fresh);
+    } catch {}
+    // Diagnostics only, once the detail was proven: one bounded final
+    // lifecycle and visibility read of the same target, then the socket is
+    // closed. Nothing is clicked or uninstalled.
+    try {
+      const routes = (await targets()).filter(
+        (target) => target.id === routeTarget && ROUTE_PAGE.test(target.url),
+      );
+      if (proven && routes.length === 1) {
+        const final = await attach(opened);
+        try {
+          lastRouteObservation = sanitizeRouteObservation(
+            await final.evaluate(routeStateProbe(fixture.Title)),
+          );
+        } finally {
+          try {
+            await closeAdapter(final);
+          } catch {}
+        }
+      }
+    } catch {}
+    closeRouteLifecycle();
+  }
+  // The same console canary checks the ordinary journeys apply.
+  assert(
+    !logs.some((s) =>
+      fixtureCanaries(fixture).some((value) => s.includes(value)),
+    ),
+    "Synthetic secret found in browser console output",
+  );
+  for (const line of logs) assertPrivateText(line, fixture);
+  mark("route:idle-passed");
+  console.log(
+    "PASS: an idle second route tab kept its approved detail without input, stayed live through its full two-minute route TTL and was fully wiped without a native prompt",
+  );
+  return idle;
+}
+
 async function eventually(check, message, limit = 10000) {
   const end = Date.now() + limit;
   while (Date.now() < end) {
@@ -1202,11 +1699,15 @@ try {
     ".map(row=>({id:row.dataset.itemId||''," +
     "title:row.querySelector('.vault-item-title')?.textContent??null," +
     "visible:row.getClientRects().length>0}))";
-  // The route detail surface as rendered: view, visible title, concealed
-  // password control, and one boolean secret-substring check. Page text,
-  // values, identity, URL and token never leave the page.
-  function routeSurfaceProbe(title, password) {
+  // The route detail surface as rendered: visibility, view, visible title,
+  // concealed password control, one private-value substring check and the same
+  // check for every supplied forbidden canary. Callers that pass only the
+  // title/value pair keep their exact previous gate (the private value). Page
+  // text, values, identity, URL and token never leave the page.
+  function routeSurfaceProbe(title, password, forbidden = [password]) {
+    const forbiddenTexts = JSON.stringify([...forbidden]);
     return `(()=>{
+      const body=document.body;
       const detail=document.querySelector('#detail-view');
       const heading=document.querySelector('#detail-title');
       const fields=document.querySelector('#detail-fields');
@@ -1215,12 +1716,16 @@ try {
         fields?.querySelector('[data-field-type="password"],[data-field-type="concealed"],.concealed,[data-concealed="true"],input[type="password"]') ||
         values.some(value=>/^[\u2022\u25cf*]+$/.test(String(value.textContent||'').trim()))
       );
+      const bodyText=body?String(body.innerText):'';
+      const forbidden=${forbiddenTexts};
       return {
-        view:document.body?.dataset?.view||'',
+        visible:document.visibilityState==='visible',
+        view:body?.dataset?.view||'',
         detailShown:!!detail&&!detail.hidden,
         title:heading?heading.textContent:null,
         concealed,
-        passwordRendered:document.body?String(document.body.innerText).includes(${JSON.stringify(password)}):true
+        passwordRendered:body?bodyText.includes(${JSON.stringify(password)}):true,
+        forbiddenCanaryRendered:forbidden.some((value)=>bodyText.includes(value))
       };
     })()`;
   }
@@ -1231,6 +1736,8 @@ try {
     if (surface.title !== title) return "route-detail-title-mismatch";
     if (surface.concealed !== true) return "route-concealed-control-missing";
     if (surface.passwordRendered !== false) return "route-password-rendered";
+    if (surface.forbiddenCanaryRendered !== false)
+      return "route-forbidden-canary-rendered";
     return "";
   }
   async function acceptRouteDetailRead(driver) {
@@ -1435,14 +1942,10 @@ try {
       };
       // Ready-label polling is read-only. It must never raise or focus the
       // native window: doing so can hide the route page behind the idle native
-      // window before any approval exists. The focus-preserving inspect form
-      // (same exact native title and executable supplied by `input`, no prefix
-      // form, empty action list) keeps the window where it is, exactly like
-      // the popup-stage absence probes.
-      const ROUTE_LABEL_INSPECT = Object.freeze({
-        inspect: true,
-        preserve_focus: true,
-      });
+      // window before any approval exists. The shared focus-preserving inspect
+      // form (same exact native title and executable supplied by `input`, no
+      // prefix form, empty action list) keeps the window where it is, exactly
+      // like the popup-stage absence probes.
       const approveLabel = async () => {
         await observeRouteState();
         try {
@@ -1805,6 +2308,33 @@ try {
       // Diagnostics only: the lifecycle socket never outlives this checkpoint.
       closeRouteLifecycle();
     }
+  // OPT-IN: The optional idle-expiry journey starts only here, after the route
+    // checkpoint's own finally completed: every route switch, reload,
+    // no-prompt and mouse-rejected assertion above has passed.
+    if (routeIdleTtl) {
+      routeIdleObservation = await acceptRouteIdleExpiry({
+        browser: context,
+        input,
+        fixture,
+        phase: mark,
+        eventually: wait,
+        openPopup: openActionPopup,
+        extensionTargets: targets,
+        attachRoute: attach,
+        // Only the adapter's CDP disconnect; the stale tab itself is closed
+        // by the one physical key.
+        closeAdapter: (client) => client.close(),
+        browserKey,
+        labelInspect: ROUTE_LABEL_INSPECT,
+        vaultRows: VAULT_ROWS,
+        // The approved-detail probe/verifier and the no-prompt inspection are
+        // locals of this main acceptance block, so they cross the module-scope
+        // helper boundary explicitly.
+        routeSurfaceProbe,
+        verifyRouteSurface,
+        nativeInspection,
+      });
+    }
   }
   async function blank() {
     assert(
@@ -1913,6 +2443,7 @@ try {
         // The reviewed real CDP mouse wrapper (visibility/hit-test, then
         // mousePressed/mouseReleased). No second click path exists here.
         click: (selector) => route.click(selector),
+        // The adapter's own CDP connection only; never the page or the tab.
         close: () => route.close(),
       };
     }
@@ -2335,6 +2866,12 @@ try {
       "Native route prompt is still present",
       "Stale route detail opened after reload",
       "Mouse wrapper dispatched input",
+      "Stale route tab was not closed",
+      "Idle route detail did not survive native approval",
+      "Idle route detail did not stay live",
+      "Idle route detail did not expire",
+      "Route page text unavailable",
+      "Popup template unavailable",
     ];
     const report = {
       reason: safeReasons.includes(error?.message)
@@ -2396,6 +2933,28 @@ try {
                   routeMouseRejected: {
                     rejected: routeMouseRejected.rejected === true,
                   },
+                }
+              : {}),
+            // Present only once the optional idle journey started: three fixed
+            // booleans, never a target, tab, token, URL or page text.
+            ...(routeIdleObservation
+              ? {
+                  routeIdle: {
+                    approvedDetail:
+                      routeIdleObservation.approvedDetail === true,
+                    liveObserved: routeIdleObservation.liveObserved === true,
+                    wipeCompleted: routeIdleObservation.wipeCompleted === true,
+                  },
+                }
+              : {}),
+            // Present only once the idle stale-close wait polled: exactly the
+            // six fixed predicates, never an id, URL, title, value, count, text
+            // or canary. This identifies which close predicate failed.
+            ...(routeIdleCloseStaleObservation
+              ? {
+                  routeIdleCloseStale: sanitizeRouteIdleCloseStale(
+                    routeIdleCloseStaleObservation,
+                  ),
                 }
               : {}),
           }
@@ -2469,6 +3028,8 @@ if (edgeInstallOnly) {
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
       : checkoutFrames
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
+      : routeIdleTtl
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} route UI closed by an idle two-minute TTL`
       : routeDetailRead
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
       : process.env.LOCKLARK_TEST_BROWSER_PARITY
@@ -2476,6 +3037,13 @@ if (edgeInstallOnly) {
       : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
   );
 }
+// The optional idle journey waits two fixed observation/TTL bounds and never
+// runs without both flags; the default-checks summary printed by the route
+// journey above stays unchanged in every mode.
+if (routeIdleTtl)
+  console.log(
+    "PASS: default physical route revoke checks completed first, then an idle two-minute route TTL wiped the second route detail",
+  );
 console.log("Private synthetic artifacts: " + state);
 
 if (observedFixture) scanController(observedFixture);
