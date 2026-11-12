@@ -19,7 +19,7 @@ package vaultfilebackend
 //	RUSTFS_SMOKE_ENABLE=1 \
 //	RUSTFS_SMOKE_ENDPOINT=https://127.0.0.1:9443 \
 //	RUSTFS_SMOKE_CA_FILE=/private/tmp/rustfs-ca.pem \
-//	go test ./pkg/vaultfilebackend -run '^TestS3RustFSAllocatorSafetyTLSSmoke$' -v \
+//	go test ./pkg/vaultfilebackend -run '^TestS3RustFS(AllocatorSafetyTLSSmoke|TLSConformance)$' -v \
 //	    -args -rustfs-credential-file=/private/tmp/rustfs.env
 
 import (
@@ -320,4 +320,17 @@ func TestS3RustFSAllocatorSafetyTLSSmoke(t *testing.T) {
 		t.Fatalf("final version: bytes %q revision %q, want %q / %q",
 			final.Bytes, final.Revision, winner.val, afterRace.Revision)
 	}
+}
+
+// TestS3RustFSTLSConformance runs the shared contract suite unchanged against
+// the real RustFS endpoint over verified TLS. It provisions its own unique
+// bucket; open and reopen each build a fresh NewS3 instance over the same
+// bucket and prefix with the explicit static credentials and CA transport, so
+// the suite's durable reopen cases exercise real stored state.
+func TestS3RustFSTLSConformance(t *testing.T) {
+	env := requireRustFSsmoke(t)
+	bucket := provisionRustFSsmokeBucket(t, env)
+	const prefix = "rustfs-conformance"
+	fresh := func(t *testing.T) Backend { return env.newBackend(t, bucket) }
+	RunConformance(t, fresh, fresh)
 }
