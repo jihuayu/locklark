@@ -50,11 +50,12 @@ import (
 //	last    32    SHA-256 of the magic through the operation ID (domain separated)
 //
 // There are no trailing bytes. The decoder validates the versions, every
-// declared length against its fixed cap, the exact total in uint64 before any
-// conversion to int, the base/revision pairings, the checksum and the decoded
-// invariants (including proposal.ExpectedRevision == remote revision); only
-// then does it allocate the copies it returns. The audit format is independent
-// of LLVJ, LLVS and LLVP, whose layouts are unchanged.
+// declared length against its fixed cap and the exact total in uint64 before
+// any conversion to int, the checksum, the base/revision pairings and the
+// decoded invariants (including proposal.ExpectedRevision == remote revision),
+// all before it slices a payload span or allocates the copies it returns. The
+// audit format is independent of LLVJ, LLVS and LLVP, whose layouts are
+// unchanged.
 const (
 	auditMagic    = "LLVA"
 	auditVersion  = uint16(1)
@@ -190,13 +191,16 @@ func decodeRebaseAudit(raw []byte) (RebaseAudit, error) {
 	u6 := uint64(binary.BigEndian.Uint32(raw[38:42]))
 	u7 := uint64(binary.BigEndian.Uint16(raw[42:44]))
 	u8 := uint64(binary.BigEndian.Uint16(raw[44:46]))
-	// The old base and old remote revision are non-empty exactly together and
-	// are bounded by the new remote pair check below; the working bytes, new
-	// remote base, new remote revision, proposal bytes and operation ID are
-	// required non-empty by validRebaseAudit's length checks.
+	// Every field's fixed upper cap is enforced here, in uint64, before any
+	// int conversion, slicing or copy. The nonzero requirements for fields
+	// other than the working bytes are enforced below, before any copy.
 	if u1 > MaxBaseBytes ||
 		u2 > MaxStateRevisionBytes ||
 		u3 == 0 || u3 > MaxWorkingBytes ||
+		u4 > MaxBaseBytes ||
+		u5 > MaxStateRevisionBytes ||
+		u6 > MaxProposalBytes ||
+		u7 > MaxOperationIDBytes ||
 		u8 > MaxExpectedRevisionBytes {
 		return a, ErrCorrupt
 	}
@@ -216,7 +220,8 @@ func decodeRebaseAudit(raw []byte) (RebaseAudit, error) {
 	if (n1 == 0) != (n2 == 0) {
 		return a, ErrCorrupt
 	}
-	// Check every remaining semantic invariant against the raw header and
+	// With every cap and the exact total already enforced, check the
+	// remaining nonzero and semantic invariants against the raw header and
 	// spans before allocating any payload copy.
 	oldGen := binary.BigEndian.Uint64(raw[6:14])
 	newGen := binary.BigEndian.Uint64(raw[14:22])
