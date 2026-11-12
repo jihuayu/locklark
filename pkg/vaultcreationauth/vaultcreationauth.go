@@ -21,7 +21,7 @@
 //	  "context":{
 //	    "scope":{"tenant_id":…,"user_id":…,"device_id":…},
 //	    "challenge":{"id":…,"nonce":…,"deadline_unix_ms":…},
-//	    "plan_digest":…
+//	    "creation_plan_sha256":…
 //	  },
 //	  "signature":…
 //	}
@@ -46,7 +46,7 @@
 //	SigningBytes(c) = SigningDomain || 0x00 || canonicalContextJSON(c)
 //
 // where canonicalContextJSON is exactly the proof's "context" member: scope,
-// challenge and plan_digest in that order, and inside scope tenant_id,
+// challenge and creation_plan_sha256 in that order, and inside scope tenant_id,
 // user_id, device_id and inside challenge id, nonce, deadline_unix_ms. The
 // context appears identically in the proof and in the preimage.
 //
@@ -143,7 +143,7 @@ type Challenge struct {
 type Context struct {
 	Scope      Scope     `json:"scope"`
 	Challenge  Challenge `json:"challenge"`
-	PlanDigest [32]byte  `json:"plan_digest"`
+	PlanDigest [32]byte  `json:"creation_plan_sha256"`
 }
 
 // Proof is one complete locklark.vault-creation/v1 identity proof. Signature
@@ -291,7 +291,7 @@ type wireProof struct {
 type wireContext struct {
 	Scope      wireScope `json:"scope"`
 	Challenge  wireChall `json:"challenge"`
-	PlanDigest string    `json:"plan_digest"`
+	PlanDigest string    `json:"creation_plan_sha256"`
 }
 
 type wireScope struct {
@@ -347,7 +347,7 @@ func (w *wireProof) proof() (Proof, error) {
 		err  error
 	}{
 		{"nonce", w.Context.Challenge.Nonce, p.Context.Challenge.Nonce[:], ErrInvalidNonce},
-		{"plan_digest", w.Context.PlanDigest, p.Context.PlanDigest[:], ErrInvalidPlanDigest},
+		{"creation_plan_sha256", w.Context.PlanDigest, p.Context.PlanDigest[:], ErrInvalidPlanDigest},
 		{"signature", w.Signature, make([]byte, SignatureBytes), ErrInvalidSignature},
 	}
 	for _, m := range members {
@@ -369,12 +369,13 @@ func marshalContext(c Context) ([]byte, error) {
 	if c.Challenge.DeadlineUnixMS <= 0 {
 		return nil, ErrInvalidDeadline
 	}
-	// A valid id is printable ASCII without quote or backslash, so %q is the
-	// identity for it.
+	// validID admits printable ASCII, and %q escapes exactly the JSON-special
+	// bytes (quote, backslash, controls) that the strict wire decoder decodes
+	// back to the same ID; an escaped ID is non-canonical and Parse rejects it.
 	return fmt.Appendf(nil,
 		`{"scope":{"tenant_id":%q,"user_id":%q,"device_id":%q},`+
 			`"challenge":{"id":%q,"nonce":"%s","deadline_unix_ms":%d},`+
-			`"plan_digest":"%s"}`,
+			`"creation_plan_sha256":"%s"}`,
 		c.Scope.TenantID, c.Scope.UserID, c.Scope.DeviceID,
 		c.Challenge.ID, base64.RawURLEncoding.EncodeToString(c.Challenge.Nonce[:]),
 		c.Challenge.DeadlineUnixMS,

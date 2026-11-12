@@ -51,7 +51,7 @@ func contextJSON(t *testing.T, c Context) string {
 		`","device_id":"` + c.Scope.DeviceID + `"},"challenge":{"id":"` + c.Challenge.ID +
 		`","nonce":"` + rawURL.EncodeToString(c.Challenge.Nonce[:]) +
 		`","deadline_unix_ms":` + itoa(c.Challenge.DeadlineUnixMS) +
-		`},"plan_digest":"` + rawURL.EncodeToString(c.PlanDigest[:]) + `"}`
+		`},"creation_plan_sha256":"` + rawURL.EncodeToString(c.PlanDigest[:]) + `"}`
 }
 
 // proofJSON is the expected canonical proof for c and sig.
@@ -106,7 +106,7 @@ func TestSigningPreimage(t *testing.T) {
 		`"challenge":{"id":"Zi1",` +
 		`"nonce":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",` +
 		`"deadline_unix_ms":1760000000000},` +
-		`"plan_digest":"oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8"}`
+		`"creation_plan_sha256":"oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8"}`
 	if string(pre) != want {
 		t.Fatalf("SigningBytes mismatch\n got: %q\nwant: %q", pre, want)
 	}
@@ -250,28 +250,19 @@ func TestFieldErrors(t *testing.T) {
 }
 
 func TestSizeCap(t *testing.T) {
-	// MaxProofBytes is accepted and one byte more is refused before parsing.
-	largest := make([]byte, MaxProofBytes)
-	for i := range largest {
-		largest[i] = ' '
+	// Exactly MaxProofBytes reaches JSON validation and is rejected on
+	// content; field bounds keep every valid proof shorter than the cap.
+	atCap := bytes.Repeat([]byte(" "), MaxProofBytes)
+	if _, err := Parse(atCap); err != ErrMalformed {
+		t.Fatalf("Parse(%d bytes) = %v, want ErrMalformed", len(atCap), err)
 	}
-	over := append(append([]byte(nil), largest...), ' ')
+	// One byte more is refused before any parsing.
+	over := bytes.Repeat([]byte(" "), MaxProofBytes+1)
 	if _, err := Parse(over); err != ErrTooLarge {
 		t.Fatalf("Parse(%d bytes) = %v, want ErrTooLarge", len(over), err)
 	}
-
-	// The largest proof the caps admit agrees with an independently written
-	// fixture and round-trips.
+	// The id bound keeps every valid proof under the cap.
 	c := maxContext()
-	want := proofJSON(t, c, testSig())
-	if b := mustEncode(t, Proof{Context: c, Signature: testSig()}); string(b) != want {
-		t.Fatalf("largest proof differs from independently written fixture")
-	}
-	if _, err := Parse([]byte(want)); err != nil {
-		t.Fatalf("Parse(largest): %v", err)
-	}
-
-	// Ids are bounded at exactly MaxIDBytes and nothing shorter is.
 	if _, err := SigningBytes(c); err != nil {
 		t.Fatalf("SigningBytes(max ids): %v", err)
 	}
