@@ -1127,5 +1127,105 @@ class GuiSessionWrappingTests(unittest.TestCase):
         self.assertIn(b"AT-SPI", stderr)
 
 
+class T2F206FailureDiagnosticTests(unittest.TestCase):
+    """The oversized-passkey failure must expose fixed, bounded probe fields."""
+
+    CANARY = "CANARY-t2-f2-06-diagnostic"
+
+    def setUp(self):
+        from tests.e2e import tier2_f01_f08
+
+        self.module = tier2_f01_f08
+
+    class Probe:
+        def __init__(self, *, timed_out=False, returncode=1, frames=None):
+            self.timed_out = timed_out
+            self.returncode = returncode
+            self.frames = [] if frames is None else frames
+            self.raw_stdout = T2F206FailureDiagnosticTests.CANARY.encode("utf-8")
+            self.stderr = T2F206FailureDiagnosticTests.CANARY
+
+    def test_failure_message_is_bounded_and_never_exposes_probe_payloads(self):
+        class Exploding:
+            def __repr__(self):
+                raise RuntimeError("frame repr was touched")
+
+            __str__ = __repr__
+
+        frames = [
+            {
+                "type": "passkey-result",
+                "private": self.CANARY,
+                "danger": Exploding(),
+            }
+            for _ in range(20)
+        ]
+        probe = self.Probe(returncode=1, frames=frames)
+        with mock.patch.object(self.module, "native_probe", return_value=probe):
+            with self.assertRaises(AssertionError) as raised:
+                self.module.t2_f2_06(mock.Mock())
+
+        message = str(raised.exception)
+        self.assertEqual(
+            message,
+            "timed_out=False, exitState=EXIT_NONZERO, responseCount=16",
+        )
+        self.assertNotIn(self.CANARY, message)
+        self.assertNotIn("passkey-result", message)
+
+    def test_failure_diagnostic_is_not_built_for_a_passing_probe(self):
+        probe = self.Probe(
+            timed_out=False,
+            returncode=0,
+            frames=[{"type": "error", "error": "refused"}],
+        )
+        with mock.patch.object(
+            self.module, "native_probe", return_value=probe
+        ), mock.patch.object(
+            self.module, "_t2_f2_06_failure_diagnostic"
+        ) as diagnostic:
+            self.module.t2_f2_06(mock.Mock())
+        diagnostic.assert_not_called()
+
+    def test_exit_state_and_invalid_type_fallbacks_are_fixed(self):
+        def diagnose(probe):
+            return self.module._t2_f2_06_failure_diagnostic(probe)
+
+        cases = (
+            (True, 17, [], "timed_out=True, exitState=TIMEOUT, responseCount=0"),
+            (False, 0, [], "timed_out=False, exitState=EXIT_OK, responseCount=0"),
+            (False, 7, [], "timed_out=False, exitState=EXIT_NONZERO, responseCount=0"),
+            (False, -9, [], "timed_out=False, exitState=EXIT_SIGNALED, responseCount=0"),
+            (False, None, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (False, True, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (False, 1.0, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (1, 0, [], "timed_out=False, exitState=EXIT_OK, responseCount=0"),
+            (
+                False,
+                0,
+                (self.CANARY,),
+                "timed_out=False, exitState=EXIT_OK, responseCount=unknown",
+            ),
+        )
+        for timed_out, returncode, frames, expected in cases:
+            with self.subTest(
+                timed_out=timed_out, returncode=returncode, frames=type(frames)
+            ):
+                probe = self.Probe(
+                    timed_out=timed_out, returncode=returncode, frames=frames
+                )
+                self.assertEqual(diagnose(probe), expected)
+
+        class UnboundedFrames(list):
+            def __len__(self):
+                raise RuntimeError("frame iteration was touched")
+
+        probe = self.Probe(returncode=0, frames=UnboundedFrames())
+        self.assertEqual(
+            diagnose(probe),
+            "timed_out=False, exitState=EXIT_OK, responseCount=unknown",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
