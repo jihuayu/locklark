@@ -76,6 +76,10 @@ ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent"})
 # Activation-only form: exact {pid, executable} and nothing else. It is disjoint
 # from every normal request above and authorises no observation or input.
 ACTIVATION_KEYS = frozenset({"activate_pid", "executable"})
+# Optional process scope on a NORMAL request: the exact Popen PID this caller
+# launched. When present, window discovery is restricted to that owned process
+# and never consults the CoreGraphics window inventory.
+SCOPE_KEY = "owned_pid"
 
 # Fixed code -> fixed message. Nothing here is ever formatted with request data.
 ERROR_MESSAGES = {
@@ -288,7 +292,8 @@ def _activation_plan(document):
         raise ContractError("executable-invalid")
     return {"activation": {"pid": pid, "executable": document["executable"]},
             "title": None, "title_prefix": None, "executable": None, "actions": (),
-            "inspect": False, "wait_absent": False, "preserve_focus": False}
+            "inspect": False, "wait_absent": False, "preserve_focus": False,
+            "owned_pid": None}
 
 
 def parse_request(raw):
@@ -309,8 +314,11 @@ def parse_request(raw):
         raise ContractError("request-invalid")
     if "activate_pid" in document:
         return _activation_plan(document)
-    if [key for key in document if key not in REQUEST_KEYS]:
+    if [key for key in document if key not in REQUEST_KEYS | {SCOPE_KEY}]:
         raise ContractError("request-unknown-key")
+    if SCOPE_KEY in document and (type(document[SCOPE_KEY]) is not int
+                                  or document[SCOPE_KEY] <= 0):
+        raise ContractError("request-invalid", {"field": SCOPE_KEY})
     plan = {
         "title": None, "title_prefix": None, "executable": None, "actions": [],
         "inspect": False, "wait_absent": False, "preserve_focus": False,
@@ -341,6 +349,12 @@ def parse_request(raw):
             raise ContractError("absence-invalid")
     elif plan["preserve_focus"] and plan["title_prefix"] is None:
         raise ContractError("request-invalid", {"field": "preserve_focus"})
+    # A process scope narrows discovery; the exact title/executable fixture is
+    # still mandatory (never waived) and absence checks stay unscoped.
+    if SCOPE_KEY in document and (plan["title"] is None
+                                  or plan["executable"] is None):
+        raise ContractError("request-invalid", {"field": SCOPE_KEY})
+    plan["owned_pid"] = document.get(SCOPE_KEY)
     return plan
 
 # --------------------------------------------------------------- observation --
@@ -1197,6 +1211,18 @@ def execute(plan, adapter):
         return execute_activation(plan, adapter)
     if check is not None:
         check()
+    # An optional owned-process scope narrows discovery to that process only.
+    # It is installed before any window is listed; the release it returns stays
+    # with this request's caller (run_stdin) and in no shared state.
+    plan["releases"] = []
+    scope = plan.get("owned_pid")
+    if scope is not None:
+        scoper = getattr(adapter, "scope_owned_process", None)
+        if not callable(scoper):
+            raise ContractError("a11y-query")
+        release = scoper(scope)
+        if callable(release):
+            plan["releases"].append(release)
     if plan["wait_absent"]:
         FAILURE_CONTEXT["action"] = "absence"
         return await_absent(plan, adapter, budget)
@@ -1276,8 +1302,10 @@ def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     FAILURE_CONTEXT["action"], FAILURE_CONTEXT["index"] = "setup", -1
+    plan = None
     try:
-        result = execute(parse_request(stdin.read(MAX_REQUEST_BYTES + 1)), adapter)
+        plan = parse_request(stdin.read(MAX_REQUEST_BYTES + 1))
+        result = execute(plan, adapter)
     except ContractError as error:
         stderr.write(failure_line(error, FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
@@ -1286,5 +1314,13 @@ def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
         stderr.write(failure_line(ContractError("unexpected"), FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
         return 1
+    finally:
+        # Only this request's own releases, held in its local plan: nothing is
+        # shared between requests and nothing survives this call.
+        for release in (plan or {}).get("releases", ()):
+            try:
+                release()
+            except Exception:
+                pass
     stdout.write(json.dumps(result) + "\n")
     return 0
