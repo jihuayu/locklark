@@ -528,3 +528,42 @@ func TestContentProposalVerifierRejectsRootSignedPolicyChange(t *testing.T) {
 	contentProposalVerifyCandidate(t, candidate, fx.checkpoint)
 	contentProposalWantRejected(t, verifier(context.Background(), fx.base, fx.baseRevision, contentProposalProposal(fx, candidate)))
 }
+
+func TestContentProposalVerifierRejectsPolicyChangeFromAuthorizedDevice(t *testing.T) {
+	fx := newContentProposalFixture(t)
+	verifier, err := NewContentProposalVerifier(fx.checkpoint)
+	if err != nil {
+		t.Fatalf("NewContentProposalVerifier: %v", err)
+	}
+
+	// The same valid root-signed p5->p6 transition that adds writer eve, but
+	// authored by existing device-1, which is an authorized writer, admin and
+	// owner in both the current and successor policies. This isolates the
+	// prohibition on policy changes from the author-role restriction.
+	proofs := append([]vaultfile.SignedPolicy(nil), fx.baseFile.SignedPolicyProofs...)
+	proofs = append(proofs, fx.nextProof)
+	header := fx.baseFile.Header
+	header.ContentSeq = fx.baseFile.Header.ContentSeq + 1
+	header.PrevDigest = contentProposalFileDigestBytes(t, fx.baseFile)
+	header.OpID = fx.operationID
+	header.PolicySeq = fx.next.PolicySeq
+	header.PolicyDigest = vaultfile.PolicyDigest(fx.next)
+	header.AuthorDeviceID = "device-1"
+	candidate, candidateFile := contentProposalBuildFile(t, fx.next, proofs, header, fx.keys["device-1"].priv)
+
+	if candidateFile.ContentSignature.SignerID != "device-1" {
+		t.Fatalf("candidate author = %q, want device-1", candidateFile.ContentSignature.SignerID)
+	}
+	if !contentProposalCanAuthor(fx.current, "device-1") {
+		t.Fatal("the current policy does not authorize device-1")
+	}
+	if !contentProposalCanAuthor(fx.next, "device-1") {
+		t.Fatal("the successor policy does not authorize device-1")
+	}
+
+	// Independently prove the candidate parses and authenticates under the
+	// fixture pin; the verifier must reject it specifically for changing the
+	// policy, not for lack of author authority or an invalid structure.
+	contentProposalVerifyCandidate(t, candidate, fx.checkpoint)
+	contentProposalWantRejected(t, verifier(context.Background(), fx.base, fx.baseRevision, contentProposalProposal(fx, candidate)))
+}
