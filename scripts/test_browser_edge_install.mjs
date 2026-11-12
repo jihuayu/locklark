@@ -1491,3 +1491,205 @@ test("browser keys use Edge's launched executable and Playwright's Chromium", ()
   // Chromium keeps Playwright's executable even with an explicit Edge path.
   assert.deepEqual(requests("chromium"), expected("/resolved/chromium"));
 });
+
+// Executes the acceptance script's own managed branch with the real
+// installEdgeExtensionThroughManager. Every collaborator is a fake supplied
+// through one seam object. The popup key is a single binding, like the script's
+// lexical browserKey: the opener reads it and only the branch initialized it.
+// With `originalOrder`, the key comes from the original post-branch site, so
+// the opener reads the not-yet-initialized binding, as the reported failure
+// did. No browser, X server, chooser or private path is used.
+function edgeManagedInstallSeam(browserName, originalOrder = false) {
+  const count = (text, char) => [...text].filter((c) => c === char).length;
+  const H = "chrome-extension://" + EDGE_EXTENSION_ID + "/";
+  // The managed-install branch itself, from its opener to the first ordinary
+  // journey line after it. The launch-configuration block of the same name
+  // earlier in the script is not part of it.
+  const opener = "  if (edgeManagerInstall) {\n    // The popup key the install helper's openPopup() uses";
+  const start = nativeSource.indexOf(opener);
+  // Up to the install-only fork: the popup pairing continuation is not part of
+  // this install regression and is never executed here.
+  const end = nativeSource.indexOf("    if (edgeInstallOnly) {", start);
+  assert.ok(start > 0 && end > start, "managed install branch");
+  const branch = nativeSource.slice(start, end);
+  // The slice ends inside the script's try block, hence one unmatched brace.
+  assert.equal(count(branch, "{") - count(branch, "}"), 1, "one enclosing try");
+  assert.doesNotMatch(branch, /page\.goto|const browserKey\s*=|acceptEdgePairDisconnect/);
+
+  const events = [];
+  const requests = [];
+  const popup = { targetId: "popup" };
+  let opened = false;
+  let popupKey;
+  const tdz = new ReferenceError("Cannot access 'browserKey' before initialization");
+
+  // The script's openPopup(): same two physical keys, same unique popup.
+  async function openPopup() {
+    events.push("openPopup");
+    popupKey([{ key: "Escape" }], "Locklark acceptance");
+    await scope.eventually(async () => !opened, "Previous action popup did not close");
+    popupKey([{ key: "Control_L+Shift_L+y" }], "Locklark acceptance");
+    opened = true;
+    await scope.eventually(async () => opened, "Action popup did not open");
+    scope.lastPopup = popup;
+    return popup;
+  }
+
+  const scope = {
+    browserName,
+    assert,
+    EDGE_EXTENSION_ID,
+    EDGE_BACKGROUND_URL,
+    EdgeInstallError,
+    // The branch's own chooser transport; the install helper under test is real.
+    execFileSync: (command, args, options) => {
+      const request = JSON.parse(options.input);
+      const step = Object.hasOwn(request?.chooser_action || {}, "chooser_navigate") ||
+        Object.hasOwn(request || {}, "extension_dir")
+        ? "navigate"
+        : "open";
+      events.push("chooser:" + step);
+      return Buffer.from(JSON.stringify(answer(step)));
+    },
+    JSON,
+    join,
+    root: "/synthetic/root",
+    env: {},
+    // The script's browserKeyFor shape, with its two guarded title prefixes.
+    browserKeyFor: (chromium) => {
+      const executable = chromium.executablePath();
+      return function browserKey(actions, titlePrefix) {
+        if (titlePrefix !== "Locklark acceptance") throw Error("title");
+        events.push("key:" + actions[0].key);
+        requests.push({ executable, titlePrefix });
+        return {};
+      };
+    },
+    // The script-level browserKey helper built before the branch (unchanged,
+    // still used by the ordinary journeys) is present but not what opens here.
+    launchKey: null,
+    edgeManagerInstall: true,
+    edgePairDisconnect: false,
+    edgeInstallOnly: false,
+    browserExecutable: "/synthetic/edge",
+    // The real built package, so the manifest-derived fixed ID is really checked.
+    extension: fileURLToPath(new URL("../browser-extension/dist/chromium", import.meta.url)),
+    profile: "/synthetic/profile",
+    origin: "https://origin.test",
+    stage: "fixture",
+    nativeInput: null,
+    lastPopup: null,
+    browser: {
+      pages: () => [{ url: () => "http://127.0.0.1/" }],
+      serviceWorkers: () => (events.push("serviceWorkers"), [{ url: () => H + "background.js" }]),
+      waitForEvent: async () => {},
+      // The installed background target the manager really created.
+      newCDPSession: async () => ({
+        send: async () => ({ targetInfos: [{ type: "service_worker", url: H + "background.js" }] }),
+        detach: async () => {},
+      }),
+    },
+    page: {
+      bringToFront: async () => {},
+      goto: async () => (events.push("goto"), {}),
+      title: async () => EDGE_MANAGER_TITLE,
+      locator: () => {
+        const locator = {
+          filter: () => locator,
+          count: async () => 1,
+          first: () => locator,
+          boundingBox: async () => ({ x: 0, y: 0, width: 1, height: 1 }),
+          // The manager's developer switch reports its real checked state.
+          elementHandle: async () => ({ evaluate: async () => true, dispose: async () => {} }),
+        };
+        return locator;
+      },
+      context: () => ({ newCDPSession: async () => ({ send: async () => {}, detach: async () => {} }) }),
+    },
+    input: () => ({ ownership: { owned: true } }),
+    eventually: async (predicate, message) => {
+      events.push("eventually:" + message);
+      if (!(await predicate())) throw Error(message);
+    },
+    phase: (name) => events.push("phase:" + name),
+    openPopup,
+    acceptEdgePairDisconnect: async () => events.push("pair"),
+    EDGE_INSTALL_COMPLETE: { edgeInstallComplete: true },
+    EDGE_PAIR_COMPLETE: { edgePairDisconnectComplete: true },
+  };
+  const run = new Function(
+    Object.keys(scope).join(",") + ", installEdgeExtensionThroughManager",
+    // One async IIFE makes the branch's awaits legal; the truncated branch's
+    // block and the script's enclosing try are closed, and the branch's install
+    // result is returned without executing the pairing continuation.
+    "return (async () => {\n" + branch +
+      "\n    return { identity, installedPopup: lastPopup };\n  }\n})();",
+  );
+  // The call the branch makes runs after the branch's own key helper; assert
+  // the binding is initialized when the real helper is entered.
+  const enter = (request) => {
+    events.push("enter");
+    if (request.openPopup === openPopup) {
+      events.push("helper-called");
+      if (popupKey === undefined) throw tdz;
+    }
+    return installEdgeExtensionThroughManager(request);
+  };
+  return async () => {
+    opened = false;
+    events.length = 0;
+    requests.length = 0;
+    scope.lastPopup = null;
+    // With the original order the opener's single popup key is the helper the
+    // script declared after the branch, so its first read is a TDZ read.
+    popupKey = originalOrder
+      ? () => { throw tdz; }
+      : scope.browserKeyFor(
+          browserName === "edge"
+            ? { executablePath: () => "/synthetic/edge" }
+            : { executablePath: () => "/synthetic/chromium" },
+        );
+    const result = await run(...Object.values(scope), enter);
+    return { events, requests, ...result };
+  };
+}
+
+test("the real Edge manager branch builds its popup key helper before openPopup runs", async () => {
+  const result = await edgeManagedInstallSeam("edge")();
+  // edge-activate opens the popup before the helper returns, so the branch's
+  // popup key must be built when the helper is entered; the opener then reads
+  // it for the exact Escape and Ctrl+Shift+Y keys.
+  const openAt = result.events.indexOf("openPopup");
+  assert.ok(openAt > result.events.indexOf("helper-called"), "opener ran");
+  assert.ok(openAt > result.events.indexOf("phase:edge-activate"), "opened in edge-activate");
+  assert.deepEqual(result.events.slice(openAt, openAt + 6), [
+    "openPopup",
+    "key:Escape",
+    "eventually:Previous action popup did not close",
+    "key:Control_L+Shift_L+y",
+    "eventually:Action popup did not open",
+    "phase:edge-installed",
+  ]);
+  // Both physical keys name the explicitly launched Edge executable.
+  assert.deepEqual(result.requests, [
+    { executable: "/synthetic/edge", titlePrefix: "Locklark acceptance" },
+    { executable: "/synthetic/edge", titlePrefix: "Locklark acceptance" },
+  ]);
+  // The real helper still returns the manifest-derived fixed identity.
+  assert.deepEqual(result.identity, {
+    extensionId: EDGE_EXTENSION_ID,
+    workerUrl: EDGE_BACKGROUND_URL,
+  });
+});
+
+test("the original post-branch key declaration fails inside openPopup", async () => {
+  // Same branch and opener with the original order: the key helper is declared
+  // only after the managed install branch, so the openPopup() call in
+  // edge-activate reads it inside its temporal dead zone and the real helper
+  // fails with its fixed edge-activate class. This is the failure the fix
+  // prevents; it keeps the regression honest instead of a source-order check.
+  const result = await edgeManagedInstallSeam("edge", true)()
+    .then(() => null, (error) => error);
+  assert.ok(result instanceof EdgeInstallError, "install must fail");
+  assert.equal(result.message, EDGE_INSTALL_REASONS["edge-activate"]);
+});

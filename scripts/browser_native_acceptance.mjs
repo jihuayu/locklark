@@ -1516,6 +1516,17 @@ try {
     );
   }
   if (edgeManagerInstall) {
+    // The popup key the install helper's openPopup() uses is built here, before
+    // that call: openPopup sends the real Ctrl+Shift+Y through browserKey during
+    // edge-activate, so a helper declared only after this branch would be read
+    // inside its temporal dead zone. Same owner choice as browserKey below (Edge:
+    // the explicitly launched executable); the regression executes this via a
+    // fake-dependency seam and the product path is otherwise unchanged.
+    const popupKey = browserKeyFor(
+      browserName === "edge"
+        ? { executablePath: () => browserExecutable }
+        : chromium,
+    );
     // Visible manager UI only. The driver waits for the owned native chooser
     // before any XTest input; failures stay fixed classes.
     let identity = null;
