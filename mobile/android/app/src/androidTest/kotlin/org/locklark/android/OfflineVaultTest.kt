@@ -892,6 +892,7 @@ class OfflineVaultTest {
             require(entry.fileName.toString() in ownedDeviceUnlockEntries) { "Unknown device-unlock entry present" }
             require(!Files.isSymbolicLink(entry)) { "Device-unlock entry must not be a symbolic link" }
             require(!Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) { "Device-unlock entry must be a file" }
+            require(Files.isRegularFile(entry, LinkOption.NOFOLLOW_LINKS)) { "Device-unlock entry must be a regular file" }
             require(entry.toFile().canonicalFile.parentFile == canonicalRoot) { "Device-unlock entry escaped its root" }
         }
         for (entry in entries) Files.delete(entry)
