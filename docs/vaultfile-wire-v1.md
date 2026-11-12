@@ -1289,7 +1289,12 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    starts at old `policy_seq` + 1 and links the old current digest but omits
    the caller pin's intervening proofs (for example `p6`, `p7` under a seq 5
    pin) is `policy_checkpoint_failed` at the empty path instead of being sealed
-   into a file the caller pin could not open. Both checks return their errors
+   into a file the caller pin could not open. The helper enforces contiguity,
+   structure and signatures only: from either pin it accepts any number of
+   contiguous valid policies, so a valid `p9` over a valid `p8` over the old
+   current `p7` authenticates from both pins and the helper does not make the
+   header end at old `policy_seq` + 1. The explicit step-4 guard below is what
+   requires exactly one policy successor. Both checks return their errors
    unchanged. A next header whose `vault_id` differs from
    `checkpoint.VaultID` is rejected here as `policy_checkpoint_failed` at the
    empty path by the caller-pin check, before the explicit vault equality
@@ -1319,9 +1324,12 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    immediate successor of the authenticated old current policy: the header
    `policy_seq` must be exactly old `policy_seq` + 1 and the authenticated next
    policy's `prev_policy_digest` exactly the old header `policy_digest`, with no
-   64-bit wrap, else `policy_checkpoint_failed` at the empty path. Step 3
-   already establishes this for a verified chain; the guard states it
-   explicitly.
+   64-bit wrap, else `policy_checkpoint_failed` at the empty path. This guard
+   is necessary rather than merely explicit: step 3's `verifyPolicyChain`
+   admits several contiguous valid successors, so only this guard makes a
+   header that is two or more valid policies past the old current policy, such
+   as a valid `p9` over `p8` over `p7`, a `policy_checkpoint_failed` at the
+   empty path.
 5. **Seal preconditions.** The successor epoch must be positive
    (`invalid_value` at `key_epoch`).
 6. **Open.** The old full database is opened through the authenticated open's
@@ -1360,10 +1368,12 @@ and library temporaries are not claimed to be securely zeroed.
 specified old authenticated file, and requires the next policy chain to be
 already root- or delegation-authorized under the caller's pin and to be the
 immediate successor of the old file's authenticated current policy, carrying
-the caller pin's full intervening proof chain. The next chain is validated
-against the caller's pin and against the internal old-current checkpoint, the
-seal uses the original caller checkpoint, and the sealed output is parsed and
-verified under that same checkpoint. The old-current checkpoint is derived only
+the caller pin's full intervening proof chain; the immediate-successor
+requirement is enforced by the explicit step-4 guard, not by the step-3 chain
+verification, which admits several contiguous valid successors. The next chain
+is validated against the caller's pin and against the internal old-current
+checkpoint, the seal uses the original caller checkpoint, and the sealed output
+is parsed and verified under that same checkpoint. The old-current checkpoint is derived only
 from the authenticated old file and the pin's original root, so it is not a
 second trust anchor. It is not
 server freshness and not compare-and-swap: `prev_digest` and

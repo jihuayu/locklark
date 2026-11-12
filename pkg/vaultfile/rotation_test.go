@@ -768,6 +768,13 @@ func (c *craftedChain) rootSign(p *Policy) {
 // continuation in content seq and prev digest, a non-positive epoch so a draft
 // that reaches step 5 stops there, and the header naming the last proof.
 func (c *craftedChain) build(t *testing.T, oldFile *File) *File {
+	return c.buildWithEpoch(t, oldFile, 0)
+}
+
+// buildWithEpoch returns the builder draft of build with an explicit key
+// epoch, so a chain that must reach step 4 past every step-3 check can carry
+// the valid positive old.KeyEpoch+1 instead of the step-5-stopping zero.
+func (c *craftedChain) buildWithEpoch(t *testing.T, oldFile *File, epoch uint64) *File {
 	t.Helper()
 	last := &c.proofs[len(c.proofs)-1]
 	return &File{
@@ -775,7 +782,7 @@ func (c *craftedChain) build(t *testing.T, oldFile *File) *File {
 		Version: Version,
 		Header: Header{
 			VaultID:        oldFile.Header.VaultID,
-			KeyEpoch:       0,
+			KeyEpoch:       epoch,
 			ContentSeq:     oldFile.Header.ContentSeq + 1,
 			PrevDigest:     mustDigest(t, oldFile),
 			OpID:           "op-crafted-0043",
@@ -801,8 +808,12 @@ func (c *craftedChain) build(t *testing.T, oldFile *File) *File {
 // a well-formed but different seq 7 policy and its baseline; the old-current
 // policy can only treat the old current p7 as its own anchor and must reject a
 // different seq 7 that follows it.
-// The fork is rejected by verifyPolicyChain in step 3; the gap is rejected by
-// step 4's explicit immediate-successor guard. Both are replayed against an
+// The fork and the malformed p8 sequence gap are both rejected by
+// verifyPolicyChain in step 3, before step 4; step 4's explicit
+// immediate-successor guard, which rejects a well-formed chain that is two or
+// more valid policies ahead of the old current policy, is proved by
+// TestRotateAuthenticatedFileRequiresOnePolicySuccessor against a fully valid
+// contiguous p5 to p9 chain. Both cases here are replayed against an
 // old file whose KDBX ciphertext is tampered but which its valid old author
 // re-signed, so its file signature and policy verify while opening it would
 // fail: the policy rejection shows the authorization finished before any KDBX
@@ -850,7 +861,14 @@ func TestRotateAuthenticatedFileRequiresOldCurrentSuccessor(t *testing.T) {
 	forkChain.rootSign(q8)
 
 	// The gap: p9 names the uncarried p8 and adds one invited reader and its
-	// device, so its policy and root signature are valid and only p8 is missing.
+	// device, so its policy and root signature are valid and only p8 is
+	// missing. This malformed sequence gap is rejected as CodePolicyCheckpointFailed
+	// during chain verification in step 3, from both the caller pin and the
+	// old-current checkpoint, before step 4's explicit immediate-successor
+	// guard is reached: it therefore proves nothing about that guard. Strike
+	// p8 raises p9 to p10, a valid two-step successor that reaches step 4;
+	// TestRotateAuthenticatedFileRequiresOnePolicySuccessor proves the guard
+	// against it.
 	zoeKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -907,8 +925,15 @@ func TestRotateAuthenticatedFileRequiresOldCurrentSuccessor(t *testing.T) {
 	}
 	tampered.KDBXCiphertext[payloadFirstContentBlock] ^= 0x01
 	tamperedEnc := fx.resignOld(t, tampered)
-	if _, _, err := openVerifiedFile(tampered, fx.oldCurrentPolicy(t), pin, "device-1", fx.dev1); err == nil {
+	// The probe is exact: the re-signed file authenticates, so the probe must
+	// fail only at KDBX decryption, with no file and no database.
+	if f, db, err := openVerifiedFile(tampered, fx.oldCurrentPolicy(t), pin, "device-1", fx.dev1); err == nil {
 		t.Fatal("the tampered old payload opened")
+	} else {
+		wantCodeAt(t, err, CodeKDBXPayloadInvalid, "")
+		if f != nil || db != nil {
+			t.Fatalf("the tampered old payload returned file/database = %v/%v, want both nil", f, db)
+		}
 	}
 
 	for _, c := range []struct {
@@ -1027,8 +1052,15 @@ func TestRotateAuthenticatedFileRejectsSuffixWithoutCallerChainPin(t *testing.T)
 	}
 	tampered.KDBXCiphertext[payloadFirstContentBlock] ^= 0x01
 	tamperedEnc := fx.resignOld(t, tampered)
-	if _, _, err := openVerifiedFile(tampered, p7, pin, "device-1", fx.dev1); err == nil {
+	// The probe is exact: the re-signed file authenticates, so the probe must
+	// fail only at KDBX decryption, with no file and no database.
+	if f, db, err := openVerifiedFile(tampered, p7, pin, "device-1", fx.dev1); err == nil {
 		t.Fatal("the tampered old payload opened")
+	} else {
+		wantCodeAt(t, err, CodeKDBXPayloadInvalid, "")
+		if f != nil || db != nil {
+			t.Fatalf("the tampered old payload returned file/database = %v/%v, want both nil", f, db)
+		}
 	}
 
 	for _, tc := range []struct {
@@ -1055,6 +1087,141 @@ func TestRotateAuthenticatedFileRejectsSuffixWithoutCallerChainPin(t *testing.T)
 
 	// And the fixture's real rotation, which carries the pin's full chain,
 	// still seals and returns a successor openable under the same caller pin.
+	again := fx.rotate(t)
+	defer clear(again.vuk)
+	if _, _, err := OpenAuthenticatedFile(again.encoded, pin, "device-1", fx.dev1); err != nil {
+		t.Fatalf("the successor does not open under the caller pin: %v", err)
+	}
+}
+
+// TestRotateAuthenticatedFileRequiresOnePolicySuccessor proves the explicit
+// step-4 rule that the next policy_seq must equal the old current policy_seq + 1
+// is load-bearing: verifyPolicyChain accepts any number of contiguous valid
+// successors after the relevant pin, so it alone does not make the header end
+// at old + 1. The chain here is a fully valid root-signed p5, p6, p7, p8, p9
+// with p8 and p9 linked by their exact policy digests, so it authenticates both
+// from the original seq 5 caller pin, keeping p6 and p7, and from the
+// independent seq 7 old-current checkpoint. The draft that names p9 is a valid
+// builder draft in every other respect, including the positive key epoch
+// old + 1, so only step 4's immediate-successor guard can reject it (a writer
+// would otherwise resolve the p9 author and source device and pass every
+// continuation check), as CodePolicyCheckpointFailed at the empty path with nil
+// outputs, an unchanged VUK and an unchanged draft.
+func TestRotateAuthenticatedFileRequiresOnePolicySuccessor(t *testing.T) {
+	fx := newRotationFixture(t)
+	pin := fx.chain.anchor
+	p7 := fx.oldCurrentPolicy(t)
+	if pin.PolicySeq != 5 || p7.PolicySeq != 7 || fx.old.Header.KeyEpoch == 0 {
+		t.Fatalf("fixture pin/current = seq %d/%d, want seq 5/7", pin.PolicySeq, p7.PolicySeq)
+	}
+	// A positive first: the fixture's valid immediate successor p8 seals and
+	// opens under the caller pin, so the negatives below are the same function
+	// rejecting only the two-step-ahead chain.
+	positive := fx.rotate(t)
+	clear(positive.vuk)
+	vukBefore := bytes.Clone(fx.vuk)
+
+	// The prefix the caller pin authenticates: the carried anchor p5, p6 and
+	// p7. The independent old-current checkpoint pins p7 through the public
+	// policy digest and the pin's original root, not the helper under test.
+	p5, p6 := fx.old.SignedPolicyProofs[0], fx.old.SignedPolicyProofs[1]
+	independent := &PolicyCheckpoint{
+		VaultID:            pin.VaultID,
+		OwnerRootKeyID:     pin.OwnerRootKeyID,
+		OwnerRootPublicKey: bytes.Clone(pin.OwnerRootPublicKey),
+		PolicySeq:          p7.PolicySeq,
+		PolicyDigest:       PolicyDigest(p7),
+	}
+
+	// p8 is the fixture's valid successor roster linked to p7; p9 continues it
+	// with the p8 epoch roster and is linked only by p8's exact policy digest,
+	// so both are structurally valid and root-signed.
+	p8Readers, p8Devices := rotationNextRoster(p7)
+	p8 := craftPolicy(t, p7, p7.PolicySeq+1, PolicyDigest(p7), p8Readers, p8Devices)
+	p9Readers, p9Devices := rotationNextRoster(p8)
+	p9 := craftPolicy(t, p8, p8.PolicySeq+1, PolicyDigest(p8), p9Readers, p9Devices)
+	if !bytes.Equal(p9.PrevPolicyDigest, policyDigestOf(p8)) {
+		t.Fatal("p9 does not link p8 by its exact policy digest")
+	}
+	chain := &craftedChain{fx: fx, proofs: []SignedPolicy{p5, p6, fx.old.SignedPolicyProofs[2]}}
+	chain.rootSign(p8)
+	chain.rootSign(p9)
+
+	// A valid positive chain: the contiguous prefix through p8 verifies from
+	// both pins, exactly as the fixture's own rotation does.
+	through8 := &craftedChain{fx: fx, proofs: slices.Clone(chain.proofs[:4])}
+	h8 := through8.build(t, fx.old).Header
+	for name, c := range map[string]*PolicyCheckpoint{"caller pin": pin, "old current": independent} {
+		cur, err := verifyPolicyChain(h8, through8.proofs, c)
+		if err != nil {
+			t.Fatalf("the contiguous p5..p8 chain does not verify from the %s: %v", name, err)
+		}
+		if cur.PolicySeq != p8.PolicySeq || !bytes.Equal(PolicyDigest(cur), policyDigestOf(p8)) {
+			t.Fatalf("the %s ends at seq %d, want seq %d", name, cur.PolicySeq, p8.PolicySeq)
+		}
+	}
+
+	// The contiguous p5..p9 chain verifies from both pins: verifyPolicyChain
+	// permits the multiple valid successors p8 and p9 after p7.
+	draft := chain.buildWithEpoch(t, fx.old, fx.old.Header.KeyEpoch+1)
+	if draft.Header.PolicySeq != p9.PolicySeq || !bytes.Equal(draft.Header.PolicyDigest, policyDigestOf(p9)) {
+		t.Fatalf("the draft header names seq %d, want p9 seq %d", draft.Header.PolicySeq, p9.PolicySeq)
+	}
+	for name, c := range map[string]*PolicyCheckpoint{"caller pin": pin, "old current": independent} {
+		cur, err := verifyPolicyChain(draft.Header, draft.SignedPolicyProofs, c)
+		if err != nil {
+			t.Fatalf("the contiguous p5..p9 chain does not verify from the %s: %v", name, err)
+		}
+		if cur.PolicySeq != p9.PolicySeq || !bytes.Equal(PolicyDigest(cur), policyDigestOf(p9)) {
+			t.Fatalf("the %s ends at seq %d, want seq %d", name, cur.PolicySeq, p9.PolicySeq)
+		}
+	}
+
+	// Replayed against the authenticated old file and against an old file
+	// whose KDBX ciphertext is tampered but which its valid old author
+	// re-signed, so a step-4 rejection shows the authorization finished before
+	// any KDBX decryption.
+	tampered := snapshotFile(fx.old)
+	if len(tampered.KDBXCiphertext) <= payloadFirstContentBlock {
+		t.Fatalf("old ciphertext of %d bytes has no first content block", len(tampered.KDBXCiphertext))
+	}
+	tampered.KDBXCiphertext[payloadFirstContentBlock] ^= 0x01
+	tamperedEnc := fx.resignOld(t, tampered)
+	if f, db, err := openVerifiedFile(tampered, p7, pin, "device-1", fx.dev1); f != nil || db != nil {
+		t.Fatalf("the tampered old payload returned file/database = %v/%v, want both nil", f, db)
+	} else {
+		wantCodeAt(t, err, CodeKDBXPayloadInvalid, "")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		old    *File
+		oldEnc []byte
+	}{
+		{"authenticated old file", fx.old, fx.oldEnc},
+		{"tampered old file", tampered, tamperedEnc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The exact old FileDigest is the content_seq 43 digest of the old
+			// fixture header; only policy_seq is two steps ahead.
+			d := chain.buildWithEpoch(t, tc.old, tc.old.Header.KeyEpoch+1)
+			if d.Header.KeyEpoch != tc.old.Header.KeyEpoch+1 || d.Header.ContentSeq != tc.old.Header.ContentSeq+1 ||
+				!bytes.Equal(d.Header.PrevDigest, mustDigest(t, tc.old)) || d.Header.OpID == tc.old.Header.OpID {
+				t.Fatal("the draft is not the valid content continuation of the old file")
+			}
+			before := snapshotFile(d)
+			out, vuk, err := RotateAuthenticatedFile(tc.oldEnc, pin, "device-1", fx.dev1, d, fx.keys.dev1Priv)
+			wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
+			if out != nil || vuk != nil {
+				t.Fatalf("rejected rotation returned encoding/VUK = %v/%v, want both nil", out, vuk)
+			}
+			fx.wantVUKUnchanged(t, vukBefore)
+			wantDraftUnchanged(t, before, d)
+		})
+	}
+
+	// And the fixture's real immediate successor still seals after the
+	// rejected two-step chain, so the rejection changed nothing global.
 	again := fx.rotate(t)
 	defer clear(again.vuk)
 	if _, _, err := OpenAuthenticatedFile(again.encoded, pin, "device-1", fx.dev1); err != nil {

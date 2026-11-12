@@ -176,11 +176,16 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     Both checks also reject a next header whose VaultID differs from the
 //     checkpoint: that is CodePolicyCheckpointFailed at "", and it is returned
 //     here by the caller-pin check first, before the explicit vault equality
-//     guard in step 4 ever runs. The author and source device lookups below use
-//     the policy returned by the old-current check; the two checks must agree
-//     on the current policy, because each ends at nextDraft.Header.PolicySeq
-//     and PolicyDigest, which step 4 ties to the old current policy. Then, in
-//     the authenticated next policy:
+//     guard in step 4 ever runs. Neither check makes the header end at
+//     old+1: verifyPolicyChain enforces contiguous, structurally valid and
+//     signature-verified policies from the relevant pin (or anchor), but it
+//     accepts any number of them, so a valid p9 over a valid p8 over the old
+//     current p7 authenticates from both pins. Step 4's explicit immediate-
+//     successor guard is what requires exactly one policy successor. The
+//     author and source device lookups below use the policy returned by the
+//     old-current check, the header's selected last policy; that is the only
+//     policy step 4 can tie to the old current policy, by rejecting the draft
+//     before any device lookup matters. Then, in the authenticated next policy:
 //     the author device must be a writer, admin or owner whose Ed25519 content
 //     signing key passes validatedAuthorKey with authorPrivateKey (otherwise
 //     CodeAuthorSigningKeyMismatch at "content_signature"); the source device
@@ -202,10 +207,13 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     policy: the header PolicySeq must be exactly old PolicySeq + 1 and the
 //     authenticated next policy's PrevPolicyDigest exactly the old header
 //     PolicyDigest, with no 64-bit wrap; any failure is CodePolicyCheckpointFailed
-//     at "". Step 3 has already established this for a verified chain; the
-//     guard states it explicitly so no rotation can accept another policy as
-//     the successor, and it is what makes the two step-3 checks, which both
-//     end at the header's policy, agree on the same next policy. This is an
+//     at "". This guard is necessary, not merely explicit: step 3's
+//     verifyPolicyChain requires contiguous valid policies from each pin, but
+//     it also accepts several, so without this guard a fully valid chain that
+//     runs the old current p7 into p8 and then p9 would be accepted as if p9
+//     were the immediate successor. With it, no rotation can accept another
+//     policy as the successor, and the two step-3 checks, which both end at
+//     the header's policy, are pinned to the same next policy. This is an
 //     exact immediate continuation in content_seq and policy sequence, not a
 //     freshness or compare-and-swap check against any server.
 //  5. Preconditions for the fresh baseline. nextDraft.Header.KeyEpoch must be
@@ -283,7 +291,10 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     pin's full proof chain (root-signed, or an authorized delegated
 //     InviteReaders transition; its carried current proof may be omitted only
 //     under the root-signed first-successor rule above, and still only when
-//     the omitted sequence is the caller pin's own).
+//     the omitted sequence is the caller pin's own). The immediate-successor
+//     requirement itself is step 4's explicit guard: verifyPolicyChain only
+//     proves a contiguous valid run from each pin, and it admits several
+//     successors.
 //     This function creates no policy, invitation, device key, device-key
 //     generation, restore root or delegation, and it does not implement an
 //     invitation, pairing, recovery or generic rekey workflow.
@@ -331,11 +342,12 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 	// pin, so the returned file stays openable under exactly the pin the
 	// caller supplied, and from the old file's own authenticated current
 	// policy, so the successor is bound to the state the old file attests.
-	// Both must pass before anything is decrypted, generated or sealed. The
-	// old-current check returns nextCurrent, whose author and source device
-	// are resolved below; the two checks must agree on the current policy,
-	// because each ends at nextDraft.Header.PolicySeq and PolicyDigest and
-	// step 4 binds that policy to the old current one.
+	// Both must pass before anything is decrypted, generated or sealed. Each
+	// accepts any number of contiguous valid policies after its pin, so
+	// neither proves the header ends at old+1; step 4's explicit guard does.
+	// The old-current check returns nextCurrent, the header's policy, whose
+	// author and source device are resolved below; step 4 binds that same
+	// policy to the old current one.
 	oldCurrentPin := oldCurrentCheckpoint(oldFile, checkpoint)
 	if _, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, checkpoint); err != nil {
 		return nil, nil, err
@@ -384,11 +396,12 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 		return nil, nil, Err("op_id", CodeInvalidValue)
 	}
 	// The policy must be the immediate successor of the policy that is
-	// authenticated in the old file. Step 3 already authenticated the next
-	// chain from an anchor at old.Header.PolicySeq with exactly
-	// old.Header.PolicyDigest, so a verified chain whose proofs continue after
-	// that sequence necessarily ends at old+1 naming that digest. This guard
-	// states the requirement explicitly and rejects an overflow.
+	// authenticated in the old file. Step 3 authenticated the next chain from
+	// anchors at old.Header.PolicySeq with exactly old.Header.PolicyDigest,
+	// but verifyPolicyChain permits several contiguous valid successors after
+	// an anchor, so a verified chain may end past old+1: the fixture's p5, p6,
+	// p7, p8, p9 chain is valid and ends at old+2. This guard is therefore
+	// what requires exactly one policy successor and rejects the overflow.
 	if old.PolicySeq == math.MaxUint64 || h.PolicySeq != old.PolicySeq+1 ||
 		!bytes.Equal(nextCurrent.PrevPolicyDigest, old.PolicyDigest) {
 		return nil, nil, Err("", CodePolicyCheckpointFailed)
