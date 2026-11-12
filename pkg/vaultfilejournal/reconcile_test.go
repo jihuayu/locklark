@@ -380,6 +380,129 @@ func replaceWithNestedBucket(t *testing.T, j *Journal, bucket, key string) {
 	}
 }
 
+// TestReconcileRebaseTargetAuditWithoutCommitReview leaves state exactly S with
+// no legacy or prepared record but plants a syntactically valid audit at the
+// target generation that differs from the candidate. The audit's presence alone
+// disproves NotApplied, so the result is Review, never NotApplied.
+func TestReconcileRebaseTargetAuditWithoutCommitReview(t *testing.T) {
+	other := func(t *testing.T, f *reconcileFixture) RebaseAudit {
+		t.Helper()
+		a := f.targetAudit()
+		a.Proposal = rebaseProposal(f.rev)
+		return a
+	}
+	cases := []struct {
+		name  string
+		audit func(t *testing.T, f *reconcileFixture) RebaseAudit
+	}{
+		{"other proposal", other},
+		{"other remote base", func(t *testing.T, f *reconcileFixture) RebaseAudit {
+			a := f.targetAudit()
+			a.RemoteBase = opaque(64, 246)
+			return a
+		}},
+		{"other remote revision", func(t *testing.T, f *reconcileFixture) RebaseAudit {
+			a := f.targetAudit()
+			a.RemoteRevision = vaultfilebackend.Revision(`"other-audit-rev"`)
+			a.Proposal.ExpectedRevision = a.RemoteRevision
+			return a
+		}},
+		{"other old state", func(t *testing.T, f *reconcileFixture) RebaseAudit {
+			a := f.targetAudit()
+			a.OldState = stateWithoutBase()
+			a.OldState.Generation = f.old.Generation
+			return a
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newReconcileFixture(t)
+			a := c.audit(t, f)
+			if !validRebaseAudit(a) {
+				t.Fatal("fixture audit is not syntactically valid")
+			}
+			// Plant only the target audit; the journal bucket already exists
+			// because the state was initialized.
+			writeRawAudit(t, f.j, auditKey(f.old.Generation+1), encodeRebaseAudit(a))
+			if s := mustLoadState(t, f.j); !sameState(s, f.old) {
+				t.Fatalf("fixture state moved from S: gen %d", s.Generation)
+			}
+			if _, err := f.j.LoadPrepared(); !errors.Is(err, ErrEmpty) {
+				t.Fatalf("fixture prepared record: %v", err)
+			}
+			if _, err := f.j.Load(); !errors.Is(err, ErrEmpty) {
+				t.Fatalf("fixture legacy record: %v", err)
+			}
+			got, err := f.reconcile()
+			wantOutcome(t, got, err, ReconcileReview)
+			if !errors.Is(err, ErrReconcileReview) || errors.Is(err, ErrCorrupt) {
+				t.Fatalf("target audit without commit = %v, want ErrReconcileReview", err)
+			}
+		})
+	}
+}
+
+// TestReconcileRebaseExtraRootBucketReview leaves state exactly S and plants an
+// extra top-level bucket beside the journal bucket. The root shape is checked in
+// the same View, so the result is Review, never NotApplied.
+func TestReconcileRebaseExtraRootBucketReview(t *testing.T) {
+	cases := []struct {
+		name  string
+		plant func(t *testing.T, j *Journal)
+	}{
+		{"extra bucket", func(t *testing.T, j *Journal) {
+			j.mu.Lock()
+			defer j.mu.Unlock()
+			if err := j.db.Update(func(tx *bolt.Tx) error {
+				_, err := tx.CreateBucket([]byte("intruder"))
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"extra bucket with child", func(t *testing.T, j *Journal) {
+			j.mu.Lock()
+			defer j.mu.Unlock()
+			if err := j.db.Update(func(tx *bolt.Tx) error {
+				b, err := tx.CreateBucket([]byte("intruder"))
+				if err != nil {
+					return err
+				}
+				return b.Put([]byte("child"), []byte("x"))
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newReconcileFixture(t)
+			c.plant(t, f.j)
+			if s := mustLoadState(t, f.j); !sameState(s, f.old) {
+				t.Fatalf("fixture state moved from S: gen %d", s.Generation)
+			}
+			got, err := f.reconcile()
+			wantOutcome(t, got, err, ReconcileReview)
+			if !errors.Is(err, ErrReconcileReview) || errors.Is(err, ErrCorrupt) {
+				t.Fatalf("%s = %v, want ErrReconcileReview", c.name, err)
+			}
+			// The extra root bucket must still be present: reconciliation
+			// never repairs or deletes.
+			j := f.j
+			j.mu.Lock()
+			defer j.mu.Unlock()
+			if err := j.db.View(func(tx *bolt.Tx) error {
+				if tx.Bucket([]byte("intruder")) == nil {
+					t.Fatal("reconciliation removed the extra root bucket")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // TestReconcileRebaseHistoricalAuditsTolerated shows that a well-formed audit at
 // the current state generation does not block the NotApplied classification.
 func TestReconcileRebaseHistoricalAuditsTolerated(t *testing.T) {

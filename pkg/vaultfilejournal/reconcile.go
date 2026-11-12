@@ -25,6 +25,9 @@ import (
 //   - ReconcileReview: anything else, including valid but different records
 //     and malformed records. A malformed shape is never read as "not applied".
 //
+// The database root may hold only the journal bucket, and the journal bucket
+// only its four known positions; anything else is Review, never NotApplied.
+//
 // Reconciliation is local only. It does not verify a remote publication, decrypt
 // bytes or contact a backend.
 
@@ -75,13 +78,17 @@ var ErrReconcileReview = errors.New("vault file journal: rebase outcome needs re
 // an error never includes their bytes, IDs or revisions.
 //
 // The call takes j.mu, then syncs the real bbolt database and, only if that
-// succeeds, reads one View snapshot for all checks. On a close, sync failure or
-// view failure it returns ReconcileUnknown with the cause. The implementation is an unexported seam so tests can inject a sync
+// succeeds, reads one View snapshot covering the database root shape, the
+// journal/audit shapes and every record. On a close, sync failure or any error
+// returned by db.View, it returns ReconcileUnknown with the cause; record
+// defects are carried in the snapshot itself and never surface as a View
+// error. The implementation is an unexported seam so tests can inject a sync
 // failure. A panic propagates and is never reported as ReconcileNotApplied.
 //
-// ReconcileApplied and ReconcileNotApplied carry a nil error. ReconcileReview carries an error identifying the
-// mismatch: a sentinel (for example ErrCorrupt) for malformed records, or an
-// error matching ErrReconcileReview for valid records that differ.
+// ReconcileApplied and ReconcileNotApplied carry a nil error. ReconcileReview
+// carries an error identifying the mismatch: a sentinel (for example
+// ErrCorrupt) for malformed records, or an error matching ErrReconcileReview
+// for well-formed records that differ.
 func (j *Journal) ReconcileRebaseAndPrepare(old State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal Proposal) (ReconcileOutcome, error) {
 	return j.reconcileRebaseAndPrepare(old, remoteBase, remoteRevision, proposal)
 }
@@ -146,12 +153,14 @@ func (j *Journal) reconcileRebaseAndPrepare(old State, remoteBase []byte, remote
 	if err := sync(); err != nil {
 		return ReconcileUnknown, fmt.Errorf("vault file journal: reconcile sync: %w", err)
 	}
-	// A malformed shape is classified from one snapshot and never guessed;
-	// any other View error leaves the outcome unknown.
+	// Record defects never escape the View as an error: they are stored in
+	// the snapshot for classification. Any error db.View itself returns, such
+	// as a transaction or iteration failure, leaves the outcome unknown.
 	var snap reconcileSnapshot
 	if err := j.db.View(func(tx *bolt.Tx) error {
-		return snap.read(tx, next)
-	}); err != nil && !errors.Is(err, ErrCorrupt) {
+		snap.read(tx, next)
+		return nil
+	}); err != nil {
 		return ReconcileUnknown, fmt.Errorf("vault file journal: reconcile read: %w", err)
 	}
 	return snap.outcome(old, target)
@@ -182,36 +191,47 @@ type reconcileSnapshot struct {
 	auditErr   error
 	// unknownKeys counts journal keys outside the four known positions.
 	unknownKeys int
+	// rootErr is set when the database has a top-level bucket or key other
+	// than the journal bucket.
+	rootErr bool
 }
 
 // read copies every record the decision needs from tx, a single snapshot. Every
 // raw value is decoded before the transaction ends so no returned slice aliases
-// transaction memory.
-func (s *reconcileSnapshot) read(tx *bolt.Tx, next uint64) error {
+// transaction memory. It returns no error: every defect is recorded in a field
+// so the classification never depends on where a scan stopped.
+func (s *reconcileSnapshot) read(tx *bolt.Tx, next uint64) {
+	// The database root may hold only the journal bucket; an extra top-level
+	// bucket or key is never ignored.
+	if err := tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+		if !bytes.Equal(name, []byte(bucketName)) {
+			s.rootErr = true
+		}
+		return nil
+	}); err != nil {
+		s.rootErr = true
+	}
 	tb := tx.Bucket([]byte(bucketName))
 	if tb == nil {
-		return nil
+		return
 	}
 	s.bucket = true
-	err := tb.ForEach(func(k, v []byte) error {
+	_ = tb.ForEach(func(k, v []byte) error {
 		switch string(k) {
 		case stateKey, preparedKey, auditBucketName:
 			return nil
 		case recordKey:
+			s.legacy = true
 			if v == nil {
 				s.legacyErr = ErrCorrupt
 			} else if _, err := decodeRecord(v); err != nil {
 				s.legacyErr = ErrCorrupt
 			}
-			s.legacy = true
 		default:
 			s.unknownKeys++
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
 	// Classify the shaped record positions only after the scan, so a nested
 	// bucket at a known key is never counted as an unknown key.
 	if s.state, s.stateFound, s.stateErr = readStateTx(tx); !s.stateFound && s.stateErr == nil {
@@ -220,7 +240,7 @@ func (s *reconcileSnapshot) read(tx *bolt.Tx, next uint64) error {
 	if s.prepared, s.prepFound, s.prepErr = readPreparedTx(tx); !s.prepFound && s.prepErr == nil {
 		s.prepErr = recordShapeErr(tb, preparedKey)
 	}
-	return s.readAudit(tb, next)
+	s.readAudit(tb, next)
 }
 
 // recordShapeErr reports ErrCorrupt when key holds a nested bucket rather than a
@@ -235,14 +255,14 @@ func recordShapeErr(tb *bolt.Bucket, key string) error {
 // readAudit validates the target-generation audit entry and checks that every
 // other entry is a well-formed historical record before the new generation.
 // Audits after the target generation, malformed or not, are left for review.
-func (s *reconcileSnapshot) readAudit(tb *bolt.Bucket, next uint64) error {
+func (s *reconcileSnapshot) readAudit(tb *bolt.Bucket, next uint64) {
 	if tb.Get([]byte(auditBucketName)) != nil {
 		s.auditErr = ErrCorrupt
-		return nil
+		return
 	}
 	ab := tb.Bucket([]byte(auditBucketName))
 	if ab == nil {
-		return nil
+		return
 	}
 	targetKey := auditKey(next)
 	if ab.Bucket(targetKey) != nil {
@@ -259,7 +279,7 @@ func (s *reconcileSnapshot) readAudit(tb *bolt.Bucket, next uint64) error {
 	}
 	// Record every defect rather than stopping, so the final classification
 	// never depends on key order.
-	err := ab.ForEach(func(k, v []byte) error {
+	_ = ab.ForEach(func(k, v []byte) error {
 		if len(k) == 8 && bytes.Equal(k, targetKey) {
 			return nil
 		}
@@ -273,10 +293,6 @@ func (s *reconcileSnapshot) readAudit(tb *bolt.Bucket, next uint64) error {
 		}
 		return nil
 	})
-	if s.auditErr != nil {
-		return nil
-	}
-	return err
 }
 
 // outcome classifies a fully read snapshot without guessing. A malformed record
@@ -287,6 +303,9 @@ func (s *reconcileSnapshot) outcome(old State, target reconcileTarget) (Reconcil
 	if s.stateErr != nil || s.prepErr != nil || s.legacyErr != nil || s.auditErr != nil {
 		return ReconcileReview, ErrCorrupt
 	}
+	if s.rootErr {
+		return ReconcileReview, fmt.Errorf("%w: an unknown database root bucket or key is present", ErrReconcileReview)
+	}
 	if sameState(s.state, target.state) &&
 		samePrepared(s.prepared, target.prepared) &&
 		sameState(s.audit.OldState, target.audit.OldState) &&
@@ -294,6 +313,7 @@ func (s *reconcileSnapshot) outcome(old State, target reconcileTarget) (Reconcil
 		s.audit.RemoteRevision == target.audit.RemoteRevision &&
 		s.audit.NewGeneration == target.audit.NewGeneration &&
 		sameProposal(s.audit.Proposal, target.audit.Proposal) &&
+		s.auditFound &&
 		!s.legacy &&
 		s.unknownKeys == 0 {
 		return ReconcileApplied, nil
@@ -307,6 +327,11 @@ func (s *reconcileSnapshot) outcome(old State, target reconcileTarget) (Reconcil
 		}
 		if s.unknownKeys != 0 {
 			return ReconcileReview, fmt.Errorf("%w: an unknown journal key is present", ErrReconcileReview)
+		}
+		// An audit already at the target generation, even a well-formed one
+		// that differs from the candidate, proves nothing was applied here.
+		if s.auditFound {
+			return ReconcileReview, fmt.Errorf("%w: an audit record is present at the target generation", ErrReconcileReview)
 		}
 		return ReconcileNotApplied, nil
 	}
