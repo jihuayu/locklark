@@ -133,8 +133,8 @@ type S3Config struct {
 // same-revision writers while refusing the other and a later stale write
 // (ErrConflict).
 //
-// The full shared RunConformance suite then ran every one of its 13 subtests
-// against the same instance, with no skips: 11 passed and 2 failed.
+// The shared RunConformance suite was then also run against that same
+// instance, and recorded these failures:
 //   - replace_if_version: ReplaceIfVersion for a missing name sent If-Match,
 //     and the service answered 200 and created the object instead of
 //     reporting a missing key, so the call succeeded where the contract
@@ -155,9 +155,10 @@ type S3Config struct {
 // temporary files. TestS3RustFSAllocatorSafetyTLSSmoke passed on it: a
 // missing-key If-Match write was rejected and left the key absent, an exact
 // create-read returned a strong revision, a same-revision race committed one
-// winner, and a stale write conflicted. TestS3RustFSTLSConformance ran every
-// one of the 13 shared subtests against the same instance with no skips and
-// passed all 13, including durability across reopen.
+// winner, and a stale write conflicted. TestS3RustFSTLSConformance ran all 14
+// top-level RunConformance cases against the same instance: each passed, with
+// no skips and exit status 0, including deadline_before_work and
+// durable_across_reopen.
 //
 // This is local candidate evidence only. It is not AWS account or provider
 // qualification and not production acceptance: the bridge is not wired to
