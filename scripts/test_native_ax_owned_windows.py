@@ -28,6 +28,7 @@ FORBIDDEN_CALLS = {"CGWindowListCopyWindowInfo", "CGWindowListCreateImage",
                    "CGEventPost", "CGGetActiveDisplayList"}
 # Marks a missing out-argument slot for the strict AXUIElementGetPid binding.
 _MISSING = object()
+HOSTILE_TEXT = "private tuple text /tmp/llcb-hostile"
 # Marks "no explicit AXWindows answer override" (None is itself a real answer).
 _DEFAULT = object()
 
@@ -341,6 +342,61 @@ class OwnedWindowsTests(unittest.TestCase):
         # Only the three documented binding entry points were called.
         self.assertEqual(set(guarded.names()), {"create", "copy", "getpid"})
         self.assertFalse([name for name in guarded.names() if name in FORBIDDEN_CALLS])
+
+    def test_hostile_tuple_answers_refuse_without_leaking(self):
+        handle = Handle()
+
+        class HostileLen(tuple):
+            def __len__(self):
+                raise RuntimeError(HOSTILE_TEXT)
+
+        class HostileIter(tuple):
+            def __iter__(self):
+                raise RuntimeError(HOSTILE_TEXT)
+
+        class HostileGetitem(tuple):
+            def __getitem__(self, index):
+                raise RuntimeError(HOSTILE_TEXT)
+
+        # A hostile AXWindows answer is decoded through the base tuple protocol
+        # (its overrides never raise out of the helper) ...
+        for hostile in (HostileLen, HostileIter, HostileGetitem):
+            with self.subTest(where="AXWindows", kind=hostile.__name__):
+                fake = FakeApplicationServices([handle],
+                                               windows_answer=hostile((0, [handle])))
+                self.assertEqual(api_for(fake).owned_windows(OWNED_PID), [handle])
+                self.assertEqual(fake.attributes(), [AX_WINDOWS])
+            with self.subTest(where="GetPid", kind=hostile.__name__):
+                fake = FakeApplicationServices(
+                    [handle], getpid={handle: hostile((KAX_ERROR_SUCCESS, OWNED_PID))})
+                self.assertEqual(api_for(fake).owned_windows(OWNED_PID), [handle])
+        # ... while a hostile answer of the wrong shape still refuses.
+        for hostile in (HostileLen, HostileIter, HostileGetitem):
+            with self.subTest(where="AXWindows-shape", kind=hostile.__name__):
+                fake = FakeApplicationServices([handle],
+                                               windows_answer=hostile((0,)))
+                self.assertRefused(fake)
+            with self.subTest(where="GetPid-shape", kind=hostile.__name__):
+                fake = FakeApplicationServices([handle], getpid={handle: hostile(())})
+                self.assertRefused(fake)
+            with self.subTest(where="GetPid-foreign", kind=hostile.__name__):
+                fake = FakeApplicationServices(
+                    [handle], getpid={handle: hostile((KAX_ERROR_SUCCESS, OTHER_PID))})
+                self.assertRefused(fake)
+
+    def test_hostile_answers_stay_sanitized(self):
+        # The refusal is ours alone: fixed message, empty guard, no raw text.
+        class HostileLen(tuple):
+            def __len__(self):
+                raise RuntimeError(HOSTILE_TEXT)
+
+        handle = Handle()
+        fake = FakeApplicationServices([handle], getpid={handle: HostileLen((0,))})
+        error = self.assertRefused(fake)
+        for text in (HOSTILE_TEXT, "RuntimeError", "Traceback"):
+            self.assertNotIn(text, str(error))
+            self.assertNotIn(text, repr(error.guard))
+        self.assertEqual(error.guard, {})
 
     def test_helper_is_additive_and_not_wired(self):
         # The helper exists but nothing in the module calls it yet.

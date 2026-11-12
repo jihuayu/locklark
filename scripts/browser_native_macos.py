@@ -261,10 +261,19 @@ def _ax_result(result):
     non-tuple or a tuple of another length is a malformed answer (None), never
     a success.
     """
-    if not isinstance(result, tuple) or len(result) != 2:
+    if not isinstance(result, tuple):
         return None
-    code, value = result
-    if not _exact_status(code):
+    # Read the two items through the base ``tuple`` protocol, never through an
+    # overridable ``len``/``__iter__``: a hostile tuple subclass can raise
+    # there, and its exception text must never surface. A tuple of any other
+    # length answers None for the missing item exactly like a shape refusal.
+    try:
+        code = tuple.__getitem__(result, 0)
+        value = tuple.__getitem__(result, 1)
+        size = tuple.__len__(result)
+    except Exception:
+        return None
+    if size != 2 or not _exact_status(code):
         return None
     return code, value
 
@@ -536,11 +545,16 @@ class QuartzApi:
         AXChildren do not accept it and every other status still refuses.
         The raw ``(AXError, value)`` answer is the exact one ``_ax_value_read``
         returns for one ``AXUIElementCopyAttributeValue`` call.
+
+        The documented ``kAXErrorNoValue`` constant is validated HERE, locally,
+        before any attribute is read: a missing or substituted constant refuses
+        with the sanitized refusal (no recorded error) and provably touches no
+        AX attribute at all.
         """
-        code, value = self._ax_value_read(element, name)
         status = _ax_status(self.ax)
         if status is None:
             raise _status_query(name)
+        code, value = self._ax_value_read(element, name)
         if code == status[1]:
             if value is None:
                 raise _status_query(name, code)
