@@ -3,7 +3,9 @@
 One JSON request arrives on stdin; one JSON result is written to stdout. Every
 failure is a single fixed-format line on stderr carrying a fixed error code.
 Requests are never echoed, control values/field text/clipboard are never read,
-and raw exceptions never reach output or argv.
+and raw exceptions never reach output or argv. An inspect result may also carry
+``ax``: only the fixed ``status-walk`` operation, the fixed attribute name and
+the allowlisted AXError integer (or ``other``) of the first failed query.
 
 The platform drivers (browser_native_windows.py, browser_native_macos.py) are
 ordinary external input agents: they observe public window/accessibility
@@ -146,6 +148,49 @@ def code_of(error):
     if type(error) is ContractError:
         return error.code
     return "unexpected"
+
+
+# The minimal fixed AX diagnostic of the FIRST failed status-walk query.
+# Callers attach only these three raw fields to an ``a11y-query`` ContractError;
+# ``ax_diagnostic`` copies them solely when each equals a fixed value here, so
+# no query value, label, title, path, element, traceback or message can pass.
+# The operation is always exactly "status-walk"; an attribute outside the walk's
+# three names becomes "other"; the AXError is reported as its fixed integer only
+# when it is an exact built-in int in the known-code table, else as "other".
+AX_OPERATION = "status-walk"
+AX_ATTRIBUTES = ("AXRole", "AXDescription", "AXChildren")
+AX_ERROR_CODES = (
+    0, -25200, -25201, -25202, -25203, -25204, -25205, -25206, -25207,
+    -25208, -25209, -25210, -25211, -25212, -25213, -25214,
+)
+AX_DIAGNOSTIC_OTHER = "other"
+
+
+def _ax_error_code(code):
+    """The exact built-in-int AXError when allowlisted, else "other"."""
+    if type(code) is int and code in AX_ERROR_CODES:
+        return code
+    return AX_DIAGNOSTIC_OTHER
+
+
+def ax_diagnostic(error):
+    """The allowlisted ``{operation, attribute, error}`` of one refusal, else None.
+
+    Only our own ``ContractError`` whose code is ``a11y-query`` is read, and
+    only the fixed values above can be copied out of it.
+    """
+    if type(error) is not ContractError or error.code != "a11y-query":
+        return None
+    guard = getattr(error, "guard", None)
+    if type(guard) is not dict:
+        return None
+    attribute = guard.get("attribute")
+    if guard.get("operation") != AX_OPERATION or not isinstance(attribute, str):
+        return None
+    if attribute not in AX_ATTRIBUTES:
+        attribute = AX_DIAGNOSTIC_OTHER
+    return {"operation": AX_OPERATION, "attribute": attribute,
+            "error": _ax_error_code(guard.get("error"))}
 
 
 def failure_line(error, action="setup", index=-1, platform="unknown"):
@@ -962,26 +1007,29 @@ def empty_status():
 
 
 def status_snapshot(adapter, window, controls):
-    """Optional adapter-only status snapshot, or None when unsupported.
+    """Optional status snapshot and its fixed AX diagnostic.
 
-    The controls snapshot is already safe and always returned to the caller.
-    This diagnostic is deliberately fail-closed: a missing/raising hook, a
-    malformed shape or any non-boolean field yields the fixed all-false object
-    and never fails the surrounding inspect snapshot. The adapter owns the
-    macOS-only accessibility reads; nothing here interprets or echoes them.
+    Returns ``(status, diagnostic)``: ``status`` is None when the adapter has
+    no status hook, else exactly the four built-in booleans; ``diagnostic`` is
+    the allowlisted ``ax_diagnostic`` of the FIRST failure or None. The
+    diagnostic is only carried, never interpreted, and a failure still yields
+    the fixed all-false status without failing the surfaces snapshot.
     """
     try:
         reader = getattr(adapter, "read_status", None)
-        if not callable(reader):
-            return None
-        value = reader(window, controls)
     except Exception:
-        return empty_status()
+        return empty_status(), None
+    if not callable(reader):
+        return None, None
+    try:
+        value = reader(window, controls)
+    except Exception as error:
+        return empty_status(), ax_diagnostic(error)
     if type(value) is not dict or set(value) != set(STATUS_FIELDS):
-        return empty_status()
+        return empty_status(), None
     if any(type(value[field]) is not bool for field in STATUS_FIELDS):
-        return empty_status()
-    return {field: value[field] for field in STATUS_FIELDS}
+        return empty_status(), None
+    return {field: value[field] for field in STATUS_FIELDS}, None
 
 
 def snapshot(adapter, window, budget):
@@ -1143,9 +1191,11 @@ def execute(plan, adapter):
     if plan["inspect"]:
         FAILURE_CONTEXT["action"] = "snapshot"
         result["controls"] = snapshot(adapter, window, budget)
-        status = status_snapshot(adapter, window, result["controls"])
+        status, diagnostic = status_snapshot(adapter, window, result["controls"])
         if status is not None:
             result["status"] = status
+            if diagnostic is not None:
+                result["ax"] = diagnostic
     return result
 
 

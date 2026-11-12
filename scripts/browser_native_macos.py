@@ -200,6 +200,30 @@ def _a11y_query():
     return contract.ContractError("a11y-query")
 
 
+def diagnostic_of(error):
+    """The fixed ``{operation, attribute, error}`` of our own status refusal.
+
+    ``QuartzApi.status`` re-raises the FIRST failed status-walk query as our
+    own ``a11y-query`` ``ContractError`` whose guard holds only the fixed
+    triple; this is the single sanitizer (``contract.ax_diagnostic``) of it,
+    shared by the adapter hook. Any other error yields None.
+    """
+    if type(error) is not contract.ContractError or error.code != "a11y-query":
+        return None
+    return contract.ax_diagnostic(error)
+
+
+def _status_query(attribute, error=None):
+    """The fixed status-walk refusal of one attribute (diagnostic only).
+
+    ``attribute`` is one of the allowlisted AX names the walk reads, and
+    ``error`` is the raw AXError (an exact built-in int when one was returned,
+    else None); the contract's ``ax_diagnostic`` decides what may be reported.
+    """
+    return contract.ContractError(
+        "a11y-query", {"operation": "status-walk", "attribute": attribute, "error": error})
+
+
 def _ax_status(ax):
     """``(kAXErrorNoValue, kAXErrorSuccess)`` read through the AX framework, or None.
 
@@ -458,25 +482,25 @@ class QuartzApi:
         """
         status = _ax_status(self.ax)
         if status is None:
-            raise _a11y_query()
+            raise _status_query(name)
         try:
             result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
         except contract.ContractError:
             raise
         except Exception:
-            raise _a11y_query()
+            raise _status_query(name)
         if not isinstance(result, tuple) or len(result) != 2:
-            raise _a11y_query()
+            raise _status_query(name)
         code, value = result
         if not _exact_status(code):
-            raise _a11y_query()
+            raise _status_query(name)
         if code == status[1]:
             if value is None:
-                raise _a11y_query()
+                raise _status_query(name, code)
             return value
         if code == status[0] and name in _STATUS_NO_VALUE_ATTRIBUTES:
             return _STATUS_NO_VALUE
-        raise _a11y_query()
+        raise _status_query(name, code)
 
     def _geometry(self, element, name, value_type, first, second):
         value = self.attribute(element, name)
@@ -658,15 +682,15 @@ class QuartzApi:
                 raise contract.ContractError("a11y-tree-limit")
             raw_role = self._status_attribute(element, "AXRole")
             if raw_role is _STATUS_NO_VALUE or not isinstance(raw_role, str):
-                raise contract.ContractError("a11y-query")
+                raise _status_query("AXRole")
             role = _native_text(raw_role)
             if not role:
-                raise contract.ContractError("a11y-query")
+                raise _status_query("AXRole")
             if role == "AXStaticText":
                 raw_label = self._status_attribute(element, "AXDescription")
                 if raw_label is not _STATUS_NO_VALUE:
                     if not isinstance(raw_label, str):
-                        raise contract.ContractError("a11y-query")
+                        raise _status_query("AXDescription")
                     label = _native_text(raw_label)
                     for field, text in STATUS_TEXT:
                         if label == text:
@@ -676,10 +700,10 @@ class QuartzApi:
                 return
             children = _sequence(raw_children)
             if children is None or isinstance(children, (str, bytes, bytearray)):
-                raise contract.ContractError("a11y-query")
+                raise _status_query("AXChildren")
             for child in children:
                 if child is None:
-                    raise contract.ContractError("a11y-query")
+                    raise _status_query("AXChildren")
                 walk(child, depth + 1)
 
         walk(target, 0)
@@ -695,14 +719,18 @@ class QuartzApi:
         overrun all return the same all-false object, so this diagnostic can
         never fail the already-safe controls snapshot.
         """
-        empty = _empty_status()
-        if not _locked_view(controls):
-            return empty
+        if type(controls) is not dict or not _locked_view(controls):
+            return _empty_status()
         try:
             target = self.window_element(window)
             found = self._status_matches(target)
-        except Exception:
-            return empty
+        except Exception as error:
+            # The FIRST failed query is reported once, as our own a11y-query
+            # refusal carrying only the fixed diagnostic triple; every other
+            # failure (and the refusal itself) leaves the all-false status.
+            if diagnostic_of(error) is not None:
+                raise
+            return _empty_status()
         result = _empty_status()
         result["available"] = True
         for field, _ in STATUS_TEXT:
@@ -1227,9 +1255,12 @@ class MacAdapter:
             if not callable(reader):
                 continue
             try:
-                return _status_shape(reader(window, controls))
-            except Exception:
-                return _empty_status()
+                result = _status_shape(reader(window, controls))
+            except Exception as error:
+                if diagnostic_of(error) is not None:
+                    raise
+                result = _empty_status()
+            return result
         return _empty_status()
 
     def focus_state(self, window=None):
