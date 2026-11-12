@@ -376,6 +376,55 @@ func TestConditionalUploaderBeginRejectsInvalidConfigurationAndPreflight(t *test
 		}
 	})
 
+	t.Run("dot-segment IDs", func(t *testing.T) {
+		for _, value := range []string{".", ".."} {
+			for _, field := range []string{"DriveID", "ItemID"} {
+				t.Run(field+"="+value, func(t *testing.T) {
+					tokens := &testTokenSource{token: uploadToken}
+					cfg := ConditionalUploaderConfig{
+						DriveID: uploadDriveID,
+						ItemID:  uploadItemID,
+						Tokens:  tokens,
+					}
+					if field == "DriveID" {
+						cfg.DriveID = value
+					} else {
+						cfg.ItemID = value
+					}
+
+					if _, err := NewConditionalUploader(cfg); !errors.Is(err, vaultfilebackend.ErrDenied) {
+						t.Fatalf("NewConditionalUploader error = %v, want ErrDenied", err)
+					}
+					if tokens.callCount() != 0 {
+						t.Errorf("token source calls after constructor = %d, want 0", tokens.callCount())
+					}
+
+					f := newUploadFixture(t)
+					endpoint, err := url.Parse(f.server.URL)
+					if err != nil {
+						t.Fatalf("parse fixture URL: %v", err)
+					}
+					u := &ConditionalUploader{
+						driveID:  cfg.DriveID,
+						itemID:   cfg.ItemID,
+						tokens:   tokens,
+						endpoint: endpoint,
+						client:   f.server.Client(),
+					}
+					if _, err := u.Begin(context.Background(), uploadETag); !errors.Is(err, vaultfilebackend.ErrDenied) {
+						t.Fatalf("Begin error = %v, want ErrDenied", err)
+					}
+					if tokens.callCount() != 0 {
+						t.Errorf("token source calls after preflight = %d, want 0", tokens.callCount())
+					}
+					if got := len(f.recordedRequests()); got != 0 {
+						t.Errorf("requests = %d, want 0", got)
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("fixed production endpoint", func(t *testing.T) {
 		u, err := NewConditionalUploader(ConditionalUploaderConfig{
 			DriveID: uploadDriveID,

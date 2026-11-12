@@ -397,9 +397,10 @@ func (u *ConditionalUploader) httpClient() *http.Client {
 // validUploadID bounds an explicit Graph drive or item ID and restricts it to
 // a conservative opaque path-segment alphabet. In particular a separator,
 // whitespace, percent, query or fragment character can never be part of the
-// fixed route.
+// fixed route, and the dot segments "." and ".." are rejected because
+// url.PathEscape leaves them unescaped.
 func validUploadID(s string) bool {
-	if s == "" || len(s) > maxItemIDSize || !utf8.ValidString(s) {
+	if s == "" || s == "." || s == ".." || len(s) > maxItemIDSize || !utf8.ValidString(s) {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
