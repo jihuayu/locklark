@@ -12,6 +12,13 @@ const SOURCE = readFileSync(
   new URL("./browser_native_acceptance.mjs", import.meta.url),
   "utf8",
 );
+// The CI contract reads the checked-in workflow itself, so a change to the
+// Chromium native step must update the workflow and this contract together.
+const WORKFLOW = readFileSync(
+  new URL("../.github/workflows/check.yml", import.meta.url),
+  "utf8",
+);
+const WORKFLOW_LINES = WORKFLOW.split(/\r?\n/);
 
 function countMatches(text, pattern) {
   return (text.match(pattern) || []).length;
@@ -1075,5 +1082,576 @@ test("the generated revoked expression fails any remaining title, field, copy, s
   assert.throws(
     () => new vm.Script("(" + expression + ")").runInContext(vm.createContext({})),
     /document is not defined/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// CI contract for the Chromium route + idle TTL checkpoint.
+//
+// The workflow is parsed by its fixed step/job indentation rather than by
+// global regular expressions, so an unrelated field, comment or trailing
+// whitespace cannot satisfy an assertion. Every deepEqual below names the
+// changed contract when it fails.
+// ---------------------------------------------------------------------------
+const CHROMIUM_NATIVE_STEP =
+  "Test native browser approval, popup editing, fill, save and OTP";
+const FIREFOX_NATIVE_STEP =
+  "Test Firefox native approval, fill, save, OTP and Passkey";
+const BROWSER_WRAPPER =
+  "dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24'";
+const ROUTE_FLAGS = Object.freeze([
+  "LOCKLARK_TEST_ROUTE_DETAIL_READ",
+  "LOCKLARK_TEST_ROUTE_IDLE_TTL",
+]);
+const NATIVE_COMMAND =
+  BROWSER_WRAPPER + " node scripts/browser_native_acceptance.mjs";
+const CHROMIUM_OTP_COMMAND =
+  BROWSER_WRAPPER + " python3 scripts/browser_otp_privacy_acceptance.py chromium";
+
+function indentation(line) {
+  return /^ */.exec(line)[0].length;
+}
+
+function isContent(line) {
+  const trimmed = line.trim();
+  return trimmed !== "" && !trimmed.startsWith("#");
+}
+
+function yamlScalar(value) {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+      (trimmed.startsWith('"') && trimmed.endsWith('"')))
+  )
+    return trimmed.slice(1, -1);
+  return trimmed;
+}
+
+function normalized(value) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+// Top-level jobs, keyed by their exact name, with their line ranges.
+function workflowJobs() {
+  const jobs = new Map();
+  const jobsAt = WORKFLOW_LINES.findIndex(
+    (line) => indentation(line) === 0 && /^jobs:\s*$/.test(line),
+  );
+  assert.ok(jobsAt >= 0, "check.yml must have a top-level jobs: block");
+  let current = null;
+  for (let index = jobsAt + 1; index < WORKFLOW_LINES.length; index++) {
+    const line = WORKFLOW_LINES[index];
+    if (!isContent(line)) continue;
+    if (indentation(line) > 2) continue;
+    if (current) {
+      current.end = index;
+      current = null;
+    }
+    const match = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
+    assert.ok(
+      match,
+      `check.yml must contain only job headers at the job level, found: ${line}`,
+    );
+    current = { name: match[1], start: index, end: WORKFLOW_LINES.length };
+    jobs.set(current.name, current);
+  }
+  return jobs;
+}
+
+// A scalar/list field at the job body's indent (four spaces).
+function jobField(job, key) {
+  const pattern = new RegExp("^ {4}" + key + ":\\s*(.*)$");
+  const matches = [];
+  for (let index = job.start + 1; index < job.end; index++)
+    if (isContent(WORKFLOW_LINES[index]) && pattern.test(WORKFLOW_LINES[index]))
+      matches.push(pattern.exec(WORKFLOW_LINES[index])[1].trim());
+  assert.equal(
+    matches.length,
+    1,
+    `job "${job.name}" must declare exactly one ${key}: field`,
+  );
+  return matches[0];
+}
+
+function parseInlineList(value, description) {
+  const match = /^\[(.*)\]$/.exec(value.trim());
+  assert.ok(
+    match,
+    `${description} must be a one-line flow list, got: ${JSON.stringify(value)}`,
+  );
+  return match[1]
+    .split(",")
+    .map((item) => yamlScalar(item))
+    .filter(Boolean);
+}
+
+// The step list items are exactly six spaces deep. Their bodies end where the
+// next list item starts or at the end of the job.
+function jobSteps(job) {
+  const starts = [];
+  for (let index = job.start + 1; index < job.end; index++)
+    if (/^ {6}-(?:\s|$)/.test(WORKFLOW_LINES[index])) starts.push(index);
+  return starts.map((start, order) => ({
+    start,
+    end: order + 1 < starts.length ? starts[order + 1] : job.end,
+  }));
+}
+
+// The fields at the step body's indent (eight spaces), including the fields on
+// the first "- name:" item line.
+function stepBody(step) {
+  return [
+    {
+      indent: 8,
+      text: WORKFLOW_LINES[step.start].replace(/^ {6}-(?:\s|$)/, ""),
+    },
+    ...WORKFLOW_LINES.slice(step.start + 1, step.end).map((text) => ({
+      indent: indentation(text),
+      text,
+    })),
+  ];
+}
+
+function stepBlock(step) {
+  return WORKFLOW_LINES.slice(step.start, step.end).join("\n");
+}
+
+function stepName(step) {
+  const entry = stepBody(step).find(
+    (line) => line.indent === 8 && /^\s*name:\s*(.*)$/.test(line.text),
+  );
+  return entry ? yamlScalar(/^\s*name:\s*(.*)$/.exec(entry.text)[1]) : null;
+}
+
+function stepDescription(step) {
+  return stepName(step) ?? `step at line ${step.start + 1}`;
+}
+
+function stepFieldCount(step, key) {
+  const pattern = new RegExp("^\\s*" + key + ":\\s*(.*)$");
+  return stepBody(step).filter(
+    (line) => line.indent === 8 && pattern.test(line.text),
+  ).length;
+}
+
+function stepField(step, key) {
+  const pattern = new RegExp("^\\s*" + key + ":\\s*(.*)$");
+  const matches = stepBody(step).filter(
+    (line) => line.indent === 8 && pattern.test(line.text),
+  );
+  assert.equal(
+    matches.length,
+    1,
+    `step "${stepDescription(step)}" must declare exactly one ${key}: field`,
+  );
+  return yamlScalar(pattern.exec(matches[0].text)[1]);
+}
+
+// A nested mapping (env/with) at ten spaces. Values are unquoted scalars.
+function stepMapping(step, key) {
+  const body = stepBody(step);
+  const at = body.findIndex(
+    (line) => line.indent === 8 && new RegExp("^\\s*" + key + ":\\s*$").test(line.text),
+  );
+  assert.ok(at >= 0, `step "${stepDescription(step)}" must declare ${key}:`);
+  const values = {};
+  for (let index = at + 1; index < body.length; index++) {
+    const line = body[index];
+    if (!isContent(line.text)) continue;
+    if (line.indent <= 8) break;
+    if (line.indent !== 10) continue;
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(line.text);
+    assert.ok(
+      match,
+      `step "${stepDescription(step)}" has an unsupported ${key} line: ${line.text}`,
+    );
+    assert.ok(
+      !(match[1] in values),
+      `step "${stepDescription(step)}" repeats ${key} key ${match[1]}`,
+    );
+    values[match[1]] = yamlScalar(match[2]);
+  }
+  return values;
+}
+
+function stepEnv(step) {
+  return stepMapping(step, "env");
+}
+
+function stepWith(step) {
+  return stepMapping(step, "with");
+}
+
+function stepUses(step) {
+  return stepField(step, "uses");
+}
+
+// The run block's logical shell lines, without YAML indentation, comments or
+// trailing whitespace. Internal shell spacing is preserved.
+function stepRun(step) {
+  const body = stepBody(step);
+  const at = body.findIndex(
+    (line) => line.indent === 8 && /^\s*run:\s*(.*)$/.test(line.text),
+  );
+  assert.ok(at >= 0, `step "${stepDescription(step)}" must declare run:`);
+  assert.equal(
+    stepFieldCount(step, "run"),
+    1,
+    `step "${stepDescription(step)}" must declare exactly one run: field`,
+  );
+  const value = yamlScalar(/^\s*run:\s*(.*)$/.exec(body[at].text)[1]);
+  if (!/^[|>][-+]?$/.test(value))
+    return value === "" ? [] : [value];
+  let contentIndent = Infinity;
+  const raw = [];
+  for (let index = at + 1; index < body.length; index++) {
+    const line = body[index];
+    if (line.text.trim() === "") {
+      raw.push("");
+      continue;
+    }
+    if (line.indent <= 8) break;
+    contentIndent = Math.min(contentIndent, line.indent);
+    raw.push(line.text);
+  }
+  assert.ok(
+    Number.isFinite(contentIndent),
+    `step "${stepDescription(step)}" has an empty run block`,
+  );
+  return raw
+    .map((line) => (line.trim() === "" ? "" : line.slice(contentIndent)))
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== "" && !line.trim().startsWith("#"));
+}
+
+function stepByName(steps, name) {
+  const found = steps.filter((step) => stepName(step) === name);
+  assert.equal(
+    found.length,
+    1,
+    `check.yml must contain exactly one "${name}" step, found ${found.length}`,
+  );
+  return found[0];
+}
+
+function stepLabel(step) {
+  const name = stepName(step);
+  if (name) return name;
+  const uses = stepBody(step).find(
+    (line) => line.indent === 8 && /^\s*uses:\s*(.*)$/.test(line.text),
+  );
+  if (uses)
+    return "uses:" + yamlScalar(/^\s*uses:\s*(.*)$/.exec(uses.text)[1]).split("@")[0];
+  const run = stepRun(step);
+  return "run:" + (run[0] ?? "");
+}
+
+function assertChromiumCondition(step, browser) {
+  const condition = normalized(stepField(step, "if"));
+  assert.match(
+    condition,
+    new RegExp(
+      "^\\$\\{\\{\\s*matrix\\.browser\\s*==\\s*'" + browser + "'\\s*\\}\\}$",
+    ),
+    `step "${stepDescription(step)}" must run only when matrix.browser == '${browser}'; got: ${condition}`,
+  );
+}
+
+// Parse the third command: the same wrapper, one shell env prefix, exactly the
+// two route opt-ins at exactly "1", and the same native acceptance script.
+function assertRouteCommand(command) {
+  const prefix = BROWSER_WRAPPER + " env ";
+  assert.ok(
+    command.startsWith(prefix),
+    `the route command must use the same X display/DBus wrapper and a shell env prefix; got: ${command}`,
+  );
+  const tokens = command.slice(prefix.length).split(/\s+/);
+  const cleared = [];
+  while (tokens[0] === "-u") {
+    tokens.shift();
+    cleared.push(tokens.shift());
+  }
+  const assignments = [];
+  for (;;) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(tokens[0] ?? "");
+    if (!match) break;
+    tokens.shift();
+    assignments.push([match[1], match[2]]);
+  }
+  assert.deepEqual(
+    cleared,
+    ["LOCKLARK_TEST_POPUP_VAULT"],
+    "the route command must clear only the step-level popup-vault override, which route mode refuses",
+  );
+  assert.deepEqual(
+    assignments.map(([name]) => name).sort(),
+    [...ROUTE_FLAGS].sort(),
+    "the route command must set exactly the route detail and idle TTL opt-ins",
+  );
+  for (const [name, value] of assignments)
+    assert.equal(
+      value,
+      "1",
+      `route opt-in ${name} must be exactly "1", got: ${JSON.stringify(value)}`,
+    );
+  assert.deepEqual(
+    tokens,
+    ["node", "scripts/browser_native_acceptance.mjs"],
+    `the route command must run the same native acceptance script; got: ${command}`,
+  );
+}
+
+test("CI runs the full Chromium route and idle TTL acceptance once, after the untouched native and OTP journeys", () => {
+  const jobs = workflowJobs();
+  assert.deepEqual(
+    [...jobs.keys()].sort(),
+    ["desktop-macos", "go", "linux-build", "web", "web-browsers", "web-core"].sort(),
+    "check.yml must keep exactly the existing jobs; a new or removed job changes the CI contract",
+  );
+  const browsers = jobs.get("web-browsers");
+  assert.ok(browsers, "check.yml must keep the web-browsers job");
+  assert.deepEqual(
+    parseInlineList(jobField(browsers, "needs"), "web-browsers needs"),
+    ["linux-build"],
+    "web-browsers must keep its existing linux-build dependency",
+  );
+  const steps = jobSteps(browsers);
+  // This also pins that no build, artifact download, browser install or secret
+  // step was added to the browser job.
+  assert.deepEqual(
+    steps.map(stepLabel),
+    [
+      "uses:actions/checkout",
+      "uses:actions/setup-go",
+      "uses:actions/setup-node",
+      "Download Linux primary binaries",
+      "Make Linux binaries executable",
+      "run:npm ci",
+      "Configure Ubuntu package downloads",
+      "Install Playwright browser and dependencies",
+      "Install native GUI acceptance tools",
+      "Install pinned geckodriver",
+      "Install independent WebAuthn verifier",
+      CHROMIUM_NATIVE_STEP,
+      "Test normal-runner checkout acceptance on Chromium",
+      "Preserve checkout acceptance report and evidence",
+      FIREFOX_NATIVE_STEP,
+      "Test shared desktop clipboard lease",
+    ],
+    "web-browsers must keep its existing step set; no new build, browser, artifact or secret step is allowed",
+  );
+  const native = stepByName(steps, CHROMIUM_NATIVE_STEP);
+  assertChromiumCondition(native, "chromium");
+
+  // The original step timeout is widened only enough for the idle TTL wait.
+  assert.equal(
+    stepFieldCount(native, "timeout-minutes"),
+    1,
+    `step "${CHROMIUM_NATIVE_STEP}" must declare exactly one timeout-minutes`,
+  );
+  const timeout = stepField(native, "timeout-minutes");
+  assert.match(timeout, /^\d+$/, `native step timeout must be an integer minute count, got: ${JSON.stringify(timeout)}`);
+  const minutes = Number(timeout);
+  assert.ok(
+    Number.isInteger(minutes) && Number.isFinite(minutes),
+    `native step timeout must be a finite integer, got: ${JSON.stringify(timeout)}`,
+  );
+  assert.equal(minutes, 15, `native step timeout must be 15 minutes, got: ${timeout}`);
+
+  // The original two commands survive verbatim and in order; the route run is
+  // the third and only additional command.
+  const commands = stepRun(native);
+  assert.deepEqual(
+    commands.slice(0, 2),
+    [NATIVE_COMMAND, CHROMIUM_OTP_COMMAND],
+    "the original Chromium native and OTP commands must stay first and unchanged",
+  );
+  assert.equal(
+    commands.length,
+    3,
+    `step "${CHROMIUM_NATIVE_STEP}" must contain exactly the two original commands and one route command; got ${commands.length} commands`,
+  );
+  assert.equal(
+    commands[0],
+    NATIVE_COMMAND,
+    "the ordinary Chromium native acceptance must stay first",
+  );
+  assert.equal(
+    commands[1],
+    CHROMIUM_OTP_COMMAND,
+    "the Chromium OTP acceptance must stay second",
+  );
+  assert.equal(
+    commands.filter((command) => command.includes("scripts/browser_native_acceptance.mjs")).length,
+    2,
+    "the native acceptance script must run in the ordinary journey and once for the route opt-in",
+  );
+  assert.equal(
+    commands.filter((command) => command.includes("LOCKLARK_TEST_ROUTE_")).length,
+    1,
+    "the route opt-ins must apply to exactly one command",
+  );
+  const routeCommands = commands.filter((command) =>
+    ROUTE_FLAGS.some((flag) => command.includes(flag)),
+  );
+  assert.equal(
+    routeCommands.length,
+    1,
+    "exactly one command may carry the route detail/idle TTL opt-ins",
+  );
+  assert.equal(routeCommands[0], commands[2], "the route command must follow the original native and OTP commands");
+  assertRouteCommand(commands[2]);
+
+  // The opt-ins are absent from step-level env and occur exactly once each, in
+  // the third command only, so they cannot replace the ordinary journeys.
+  const env = stepEnv(native);
+  for (const flag of ROUTE_FLAGS) {
+    assert.ok(!(flag in env), `${flag} must not be a step-level env value`);
+    assert.equal(
+      countMatches(stepBlock(native), new RegExp(flag, "g")),
+      1,
+      `${flag} must appear exactly once in the native step, on the route command`,
+    );
+    assert.ok(
+      commands[2].includes(`${flag}=1`),
+      `the route command must set ${flag}=1`,
+    );
+    assert.ok(
+      !commands[0].includes(flag) && !commands[1].includes(flag),
+      `${flag} must not change the original native or OTP command`,
+    );
+  }
+
+  // Existing step-level env, including the binary paths from the same
+  // downloaded artifact directory, still feeds all three commands.
+  const expectedEnv = {
+    LOCKLARK_TEST_PLAYWRIGHT:
+      "${{ github.workspace }}/web/node_modules/playwright",
+    LOCKLARK_GO: "go",
+    LOCKLARK_BROWSER_HOST:
+      "${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}",
+    LOCKLARK_BROWSER_REGISTER:
+      "${{ runner.temp }}/locklark-bin/locklark-browser-register",
+    LOCKLARK_BROWSER_FIXTURE:
+      "${{ runner.temp }}/locklark-bin/browser-acceptance-fixture",
+  };
+  for (const [name, value] of Object.entries(expectedEnv))
+    assert.equal(
+      env[name],
+      value,
+      `native step env ${name} must stay ${value}`,
+    );
+  for (const name of [
+    "LOCKLARK_BROWSER_HOST",
+    "LOCKLARK_BROWSER_REGISTER",
+    "LOCKLARK_BROWSER_FIXTURE",
+  ])
+    assert.ok(
+      env[name].startsWith("${{ runner.temp }}/locklark-bin/"),
+      `${name} must stay under the shared $RUNNER_TEMP/locklark-bin directory`,
+    );
+
+  // The shared binaries are downloaded before the native step in this job.
+  const download = stepByName(steps, "Download Linux primary binaries");
+  assert.ok(
+    steps.indexOf(download) < steps.indexOf(native),
+    "Download Linux primary binaries must precede the native Chromium step",
+  );
+  assert.match(
+    stepUses(download),
+    /^actions\/download-artifact@/,
+    "Download Linux primary binaries must stay an artifact download",
+  );
+  assert.deepEqual(
+    stepWith(download),
+    { name: "locklark-linux-bin", path: "${{ runner.temp }}/locklark-bin" },
+    "the native step's binaries must still come from the locklark-linux-bin artifact",
+  );
+  const downloads = steps.filter(
+    (step) =>
+      stepBody(step).some(
+        (line) => line.indent === 8 && /^\s*uses:/.test(line.text),
+      ) && /^actions\/download-artifact@/.test(stepUses(step)),
+  );
+  assert.deepEqual(
+    downloads,
+    [download],
+    "web-browsers must keep exactly one artifact download",
+  );
+  assert.ok(
+    !steps.some(
+      (step) =>
+        stepFieldCount(step, "run") > 0 &&
+        stepRun(step).some((line) => /(^|\s)go build(\s|$)/.test(line)),
+    ),
+    "web-browsers must not add a build command",
+  );
+
+  // The route checkpoint adds no secret, skip or failure degrade.
+  assert.doesNotMatch(
+    stepBlock(native),
+    /\bsecrets\./,
+    "the native step must not add a secret reference",
+  );
+  assert.doesNotMatch(
+    stepBlock(native),
+    /continue-on-error|continue_on_error|\|\|\s*true/,
+    "the native step must not swallow a route failure",
+  );
+
+  // Firefox keeps its original native/OTP scope and never receives the route
+  // opt-ins.
+  const firefox = stepByName(steps, FIREFOX_NATIVE_STEP);
+  assertChromiumCondition(firefox, "firefox");
+  assert.doesNotMatch(
+    stepBlock(firefox),
+    /LOCKLARK_TEST_ROUTE_(?:DETAIL_READ|IDLE_TTL)/,
+    "the Firefox native step must not carry the Chromium route opt-ins",
+  );
+  assert.deepEqual(
+    stepRun(firefox),
+    [
+      BROWSER_WRAPPER + " node scripts/browser_firefox_native_acceptance.mjs",
+      BROWSER_WRAPPER + " python3 scripts/browser_otp_privacy_acceptance.py firefox",
+    ],
+    "the Firefox native step must keep its original native and OTP commands",
+  );
+
+  // The strict Web aggregate still depends on both jobs and rejects anything
+  // other than two successes.
+  const web = jobs.get("web");
+  assert.ok(web, "check.yml must keep the web aggregate job");
+  assert.deepEqual(
+    parseInlineList(jobField(web, "needs"), "web needs").sort(),
+    ["web-browsers", "web-core"].sort(),
+    "the web aggregate must keep needing web-core and web-browsers",
+  );
+  assert.equal(
+    normalized(jobField(web, "if")),
+    "always()",
+    "the web aggregate must always evaluate its two dependency results",
+  );
+  const webSteps = jobSteps(web);
+  assert.equal(webSteps.length, 1, "the web aggregate must keep its single gate step");
+  const gate = webSteps[0];
+  assert.equal(stepName(gate), "Require every Web check to succeed");
+  assert.deepEqual(
+    stepEnv(gate),
+    {
+      WEB_CORE_RESULT: "${{ needs.web-core.result }}",
+      WEB_BROWSERS_RESULT: "${{ needs.web-browsers.result }}",
+    },
+    "the web gate must consume the exact web-core and web-browsers results",
+  );
+  assert.deepEqual(
+    stepRun(gate),
+    [
+      'if [ "$WEB_CORE_RESULT" != success ] || [ "$WEB_BROWSERS_RESULT" != success ]; then',
+      '  echo "web-core=$WEB_CORE_RESULT web-browsers=$WEB_BROWSERS_RESULT"',
+      "  exit 1",
+      "fi",
+    ],
+    "the web aggregate must fail unless both web-core and web-browsers succeeded",
   );
 });
