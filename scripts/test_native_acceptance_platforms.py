@@ -1371,6 +1371,9 @@ class MacInspectStatusTests(unittest.TestCase):
         return {"role": "AXWindow", "children": [
             {"role": "AXStaticText", "description": label} for label in labels]}
 
+    def node_count(self, graph):
+        return 1 + sum(self.node_count(child) for child in graph.get("children", ()))
+
     def inspect(self, api):
         return execute(macos.MacAdapter(api=api),
                        document(actions=[], inspect=True))
@@ -1426,39 +1429,68 @@ class MacInspectStatusTests(unittest.TestCase):
         expected = macos._empty_status()
         expected["available"] = True
         cases = (
-            ("description", {"role": "AXWindow", "children": [{"role": "AXStaticText"}]}),
-            ("children", {"role": "AXWindow"}),
+            ("description", {"role": "AXWindow", "children": [{"role": "AXStaticText"}]}, ()),
+            ("children", {"role": "AXWindow"}, ()),
+            # Childless elements are leaves: the walk must continue with their
+            # SIBLINGS rather than end the whole snapshot at the first one.
+            # A labelled leaf is still classified, and a childless element
+            # ahead of a labelled one, or before a labelled one nested in a
+            # group, never hides the later label.
+            ("labelled-leaf", {"role": "AXWindow", "children": [
+                {"role": "AXStaticText", "description": macos.STATUS_TEXT[0][1]}]},
+             (0,)),
+            ("childless-before-labelled-container", {"role": "AXWindow", "children": [
+                {"role": "AXImage"},
+                {"role": "AXGroup", "children": [
+                    {"role": "AXStaticText", "description": macos.STATUS_TEXT[2][1]}]}]},
+             (2,)),
+            ("childless-before-labelled-leaf", {"role": "AXWindow", "children": [
+                {"role": "AXStaticText"},
+                {"role": "AXStaticText", "description": macos.STATUS_TEXT[1][1]}]},
+             (1,)),
         )
-        for name, graph in cases:
+        for name, graph, labels in cases:
             with self.subTest(case=name):
                 api = StatusAxApi(graph, self.control_records())
                 result = self.inspect(api)
-                self.assertEqual(result["status"], expected)
+                case = dict(expected)
+                for index in labels:
+                    case[macos.STATUS_TEXT[index][0]] = True
+                self.assertEqual(result["status"], case)
                 self.assertEqual(api.bindings, [WINDOW_RAW["id"]])
-                if name == "description":
-                    self.assertIn("AXDescription", api.reads)
+                # Every node's children is queried, including every leaf.
+                self.assertEqual(api.reads.count("AXChildren"),
+                                 self.node_count(graph))
                 self.assertNotIn("AXLabel", api.reads)
                 self.assertNotIn("AXValue", api.reads)
                 self.assertNotIn("AXSelectedText", api.reads)
 
     def test_status_query_errors_fail_closed_to_all_false(self):
         graph = self.tree(macos.STATUS_TEXT[0][1])
+        # A childless-but-labelled child ahead of the failing one proves the
+        # refusal comes from the query error itself, not from a walk that
+        # stopped at the first childless element.
+        leaf_first = {"role": "AXWindow", "children": [
+            {"role": "AXImage"}, {"role": "AXStaticText"}]}
         cases = (
-            ("description-nonzero", {"AXDescription": (1, None)}),
-            ("description-other-no-value", {"AXDescription": (NO_VALUE - 1, None)}),
-            ("children-nonzero", {"AXChildren": (1, None)}),
-            ("description-boolean", {"AXDescription": (False, None)}),
-            ("children-boolean", {"AXChildren": (True, None)}),
-            ("description-success-none", {"AXDescription": (0, None)}),
-            ("children-success-none", {"AXChildren": (0, None)}),
-            ("role-malformed", {"AXRole": (0, 7)}),
-            ("role-no-value", {"AXRole": (NO_VALUE, None)}),
-            ("description-malformed-tuple", {"AXDescription": (0, None, 1)}),
-            ("children-non-tuple", {"AXChildren": "unreadable"}),
+            ("child-children-nonzero", leaf_first, {"AXChildren": (1, None)}),
+            ("child-role-nonzero", leaf_first, {"AXRole": (1, None)}),
+            ("child-description-nonzero", leaf_first, {"AXDescription": (1, None)}),
+            ("description-nonzero", graph, {"AXDescription": (1, None)}),
+            ("description-other-no-value", graph, {"AXDescription": (NO_VALUE - 1, None)}),
+            ("children-nonzero", graph, {"AXChildren": (1, None)}),
+            ("description-boolean", graph, {"AXDescription": (False, None)}),
+            ("children-boolean", graph, {"AXChildren": (True, None)}),
+            ("description-success-none", graph, {"AXDescription": (0, None)}),
+            ("children-success-none", graph, {"AXChildren": (0, None)}),
+            ("role-malformed", graph, {"AXRole": (0, 7)}),
+            ("role-no-value", graph, {"AXRole": (NO_VALUE, None)}),
+            ("description-malformed-tuple", graph, {"AXDescription": (0, None, 1)}),
+            ("children-non-tuple", graph, {"AXChildren": "unreadable"}),
         )
-        for name, statuses in cases:
+        for name, tree, statuses in cases:
             with self.subTest(case=name):
-                api = StatusAxApi(graph, self.control_records(), statuses=statuses)
+                api = StatusAxApi(tree, self.control_records(), statuses=statuses)
                 result = self.inspect(api)
                 self.assertEqual(result["status"], macos._empty_status())
                 self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]],

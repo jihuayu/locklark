@@ -251,7 +251,10 @@ def _empty_status():
 # Only these attributes may legitimately answer kAXErrorNoValue: a static text
 # without an AXDescription (the AX spelling of NSAccessibilityElement
 # accessibilityLabel) has no label, and a leaf has no children. AXRole must be
-# present, so its own no-value status is a failed query.
+# present, so its own no-value status is a failed query. A container that
+# exposes no AXChildren is an empty container, never a refused query: the
+# locked view is proved from the controls snapshot, and AppKit commonly omits
+# the empty AXChildren attribute, which must not turn the whole diagnostic off.
 _STATUS_NO_VALUE = object()
 _STATUS_NO_VALUE_ATTRIBUTES = frozenset(("AXDescription", "AXChildren"))
 
@@ -633,7 +636,8 @@ class QuartzApi:
         Only AXRole, AXChildren and AXDescription are read here (and never
         AXValue or AXSelectedText), through the strict status-only reader: a
         failed query refuses, a documented AXDescription no-value is a safe
-        absent label, and a documented AXChildren no-value is a leaf. The AX
+        absent label, and a documented AXChildren no-value is a leaf (an
+        element without children, never a read failure). The AX
         spelling matches the local SDK, where
         NSAccessibilityElement.accessibilityLabel is AXDescription (MyGo 0.7.4
         writes static-text labels with setAccessibilityLabel:). Every label is
