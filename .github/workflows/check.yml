@@ -501,10 +501,13 @@ jobs:
         run: npm install --prefix "$RUNNER_TEMP/locklark-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3
       - name: Test native browser approval, popup editing, fill, save and OTP
         if: ${{ matrix.browser == 'chromium' }}
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py chromium
+          # The route checkpoint is a separate mode that refuses the step-level
+          # popup-vault override, so clear only that override for this run.
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' env -u LOCKLARK_TEST_POPUP_VAULT LOCKLARK_TEST_ROUTE_DETAIL_READ=1 LOCKLARK_TEST_ROUTE_IDLE_TTL=1 node scripts/browser_native_acceptance.mjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
