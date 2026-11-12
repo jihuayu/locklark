@@ -607,9 +607,12 @@ test("the real popup adapter exposes CDP evaluation", () => {
 test("native absence probes preserve popup focus across the journey", () => {
   // Default callers ask for the plain inspect request, which raises and
   // focuses the native window. Every popup-stage probe must instead use the
-  // X11 helper's documented `preserve_focus` + `title_prefix` form: focusing
+  // X11 helper's documented preserve-focus read-only inspection: focusing
   // the native window closes the Chromium action popup that is still to be
   // clicked, which is exactly the "Popup control must be available" failure.
+  // That inspection matches the exact `title` and executable `input` supplies
+  // and must never carry `title_prefix`: the helper rejects the combination
+  // with "Exact read-only native inspection required" (`inspection-request`).
   const source = readFileSync(
     new URL("./browser_checkout_acceptance.mjs", import.meta.url),
     "utf8",
@@ -626,11 +629,13 @@ test("native absence probes preserve popup focus across the journey", () => {
     countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g),
   );
   assert.ok(countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g) >= 6);
+  // The popup-open probe is exact-title, focus-preserving and read-only.
   assert.match(
     source,
-    /title_prefix: NATIVE_TITLE_PREFIX,\n\s+preserve_focus: true,\n\s+inspect: true,/,
+    /\? input\(\[\], true, \{\n\s+preserve_focus: true,\n\s+inspect: true,\n\s+\}\)/,
   );
-  assert.match(source, /const NATIVE_TITLE_PREFIX = "Locklark";/);
+  // No probe request in this journey may name a prefix for that inspection.
+  assert.doesNotMatch(source, /NATIVE_TITLE_PREFIX|title_prefix\s*:/);
   // The journey never sends a physical Escape to its popup: closing the action
   // popup would leave the held CDP object disconnected.
   assert.doesNotMatch(journey, /pressEscape|checkout-picker-cancel:withdraw/);
@@ -692,9 +697,10 @@ test("native absence probes fail closed on an unavailable snapshot", async () =>
         }),
       ),
     (error) => {
+      // Exact read-only inspection: preserve focus, inspect, no actions, and
+      // no `title_prefix` (the helper rejects a prefix on this path).
       assert.deepEqual(probes, [
         {
-          title_prefix: "Locklark",
           preserve_focus: true,
           inspect: true,
         },

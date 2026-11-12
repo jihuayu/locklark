@@ -16,11 +16,10 @@ const CHECKOUT_HOSTS = new Set([
   CHECKOUT_CROSS_SITE_HOST,
   CHECKOUT_TOP_HOST,
 ]);
-// The real Chromium journey window is titled "Locklark · 浏览器原生确认". A
-// focused-preserving probe matches it by this product prefix instead of
-// raising and focusing it (which would close the open action popup); see
-// browser_native_x11.py.
-const NATIVE_TITLE_PREFIX = "Locklark";
+// The real Chromium journey window is titled "Locklark · 浏览器原生确认".
+// Focus-preserving probes match it by that exact title (and executable) only:
+// browser_native_x11.py rejects a `title_prefix` on its read-only inspection
+// path, and raising/focusing the window would close the open action popup.
 const CHECKOUT_APPROVE_LABEL = "批准本次跨源银行卡填充";
 const CHECKOUT_DENY_LABEL = "拒绝本次跨源银行卡填充";
 // A same-origin child is not a cross-origin proposal: the extension omits the
@@ -426,17 +425,20 @@ async function assertOnlyChildFilled(page, frameOrigin, fixture) {
 // still open and yet to be clicked.
 const POPUP_OPEN = Object.freeze({ popupOpen: true });
 
-// `options.popupOpen` requests the X11 helper's documented `preserve_focus` +
-// `title_prefix` form: it neither raises nor focuses the native window, which
-// would close a Chromium action popup the journey is still clicking. Other
-// callers keep the default probe. A probe error (unavailable, ambiguous or
-// unresponsive window, X11 query failure) propagates: a failed probe observed
-// no native UI and must never be read as "both controls absent".
+// `options.popupOpen` requests the X11 helper's documented exact read-only
+// inspection form (`preserve_focus` + `inspect`, no actions): it neither raises
+// nor focuses the native window, which would close a Chromium action popup the
+// journey is still clicking. It must not carry `title_prefix`: the helper
+// accepts only the exact `title` and executable `input` supplies for this path
+// and fails closed with "Exact read-only native inspection required"
+// otherwise. Other callers keep the default probe. A probe error (unavailable,
+// ambiguous or unresponsive window, X11 query failure) propagates: a failed
+// probe observed no native UI and must never be read as "both controls
+// absent".
 function nativeControls(input, options) {
   // Read-only probe: no input is emitted.
   const result = options?.popupOpen
     ? input([], true, {
-        title_prefix: NATIVE_TITLE_PREFIX,
         preserve_focus: true,
         inspect: true,
       })
