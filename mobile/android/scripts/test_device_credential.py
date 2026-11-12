@@ -518,8 +518,12 @@ class DeviceCredentialMainTests(unittest.TestCase):
         self.assertIn(value, auth.STAGES | {auth.NO_PRIMARY_FAILURE})
         return value
 
-    def run_main(self, clean_main, cleanup, scan=None):
-        """Run main() with the acceptance mocked; scan is None or raising."""
+    def run_main(self, clean_main, cleanup, scan=None, step=None):
+        """Run main() with the acceptance mocked; scan is None or raising.
+
+        step replaces the first main-flow step so a focused test can raise a
+        specific exception (or KeyboardInterrupt) from inside the main try.
+        """
         original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
         wrote = []
         source = Path("/tmp/private-run")  # never touched: private_file is mocked
@@ -535,7 +539,7 @@ class DeviceCredentialMainTests(unittest.TestCase):
         acceptance = SimpleNamespace(root="/tmp/private-run", source=source, source_hash=self.FIXTURE_DIGEST,
                                      private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
                                      checks=["owned_emulator"], key_level="tee",
-                                     setup_owned_emulator=mock.Mock(),
+                                     setup_owned_emulator=step or mock.Mock(),
                                      native_auth_flow=mock.Mock() if clean_main else failure_step,
                                      key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
                                      failure_metadata=mock.Mock(return_value=original),
@@ -547,13 +551,24 @@ class DeviceCredentialMainTests(unittest.TestCase):
              mock.patch.object(auth, "private_file", return_value=self.FIXTURE), \
              mock.patch("builtins.print") as printed:
             code = auth.main()
-        if not clean_main:
+        if not clean_main and step is None:
             failure_step.assert_called_once()
         output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
         self.assertEqual([name for name, _ in wrote], ["result.json"])
         self.assertNotIn("adb-clean", output)
         self.assertNotIn("private-exception-body", json.dumps(wrote[0][1]))
         return code, wrote[0][1], original, output, acceptance
+
+    def run_pre_acceptance_failure(self):
+        """Every prerequisite passes except the timeout bound, before acceptance."""
+        argv = self.ARGS + ["--timeout", "9"]
+        constructor = mock.Mock()
+        with mock.patch.object(__import__("sys"), "argv", argv), \
+             mock.patch.object(auth, "DeviceCredentialAcceptance", constructor), \
+             mock.patch("builtins.print") as printed:
+            code = auth.main()
+        constructor.assert_not_called()
+        return code, "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
 
     def test_main_failure_and_cleanup_failure_preserves_original_stage_and_diagnostic(self):
         def cleanup():
@@ -648,6 +663,91 @@ class DeviceCredentialMainTests(unittest.TestCase):
         self.assertIn("PASS: native OS credential opt-in", output)
         self.assertNotIn("FAIL: ", output)
         self.assertNotIn(self.PRIMARY, output)
+
+    def test_completed_main_flow_with_secondary_failure_uses_none_sentinel(self):
+        # Baseline for the interrupt tests: a returned main flow plus a cleanup
+        # fault is the no-primary sentinel, not "prerequisites".
+        def cleanup():
+            raise AcceptanceFailure()
+        code, result, _, output, _ = self.run_main(True, cleanup)
+        self.assertEqual(code, 1)
+        self.assertEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertEqual(self.primary_stage(output), auth.NO_PRIMARY_FAILURE)
+
+    def test_fault_after_success_assignment_in_main_flow_never_succeeds(self):
+        # The expected-private.json read is the digest guard's last main
+        # step. Raising there is caught by the main except clause with the
+        # mock's stage unadvanced, so it pins that a caught fault is never
+        # primary success and keeps the reported stage as-is.
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                def raise_it(path, exception=exception):
+                    raise exception
+                def run_main_with_bad_fixture():
+                    wrote = []
+                    acceptance = SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
+                                                 source_hash=self.FIXTURE_DIGEST, stage="key-policy",
+                                                 checks=[], key_level="tee", setup_owned_emulator=mock.Mock(),
+                                                 native_auth_flow=mock.Mock(), key_policy=mock.Mock(),
+                                                 copy_and_reinstall=mock.Mock(),
+                                                 failure_metadata=mock.Mock(return_value={}),
+                                                 cleanup_pin=mock.Mock(), close=mock.Mock(), scan=mock.Mock(),
+                                                 write_private=lambda name, value: wrote.append((name, value)))
+                    with mock.patch.object(__import__("sys"), "argv", self.ARGS), \
+                         mock.patch.object(auth, "validated_evidence", return_value=(acceptance.source, {}, [], self.FIXTURE_DIGEST)), \
+                         mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
+                         mock.patch.object(auth, "private_file", side_effect=raise_it), \
+                         mock.patch("builtins.print") as printed:
+                        code = auth.main()
+                    output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+                    return code, wrote[0][1], output, acceptance
+                code, result, output, acceptance = run_main_with_bad_fixture()
+                self.assertEqual(code, 1)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["original_failure_stage"], "key-policy")
+                self.assertEqual(self.primary_stage(output), "key-policy")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+                acceptance.cleanup_pin.assert_called_once()
+
+    def test_interrupt_inside_main_flow_with_cleanup_failure_exits_one(self):
+        def cleanup():
+            raise AcceptanceFailure()
+        step = mock.Mock(side_effect=KeyboardInterrupt())
+        code, result, _, output, _ = self.run_main(True, cleanup, step=step)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertTrue(result["cleanup_failed"])
+        self.assertNotEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertEqual(self.primary_stage(output), result["original_failure_stage"])
+
+    def test_fault_in_success_window_exactly_after_success_assignment(self):
+        # success = True has executed and the main try has not yet returned;
+        # a caught exception or KeyboardInterrupt here must still fail.
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                hook = mock.Mock(side_effect=exception)
+                with mock.patch.object(auth, "main_flow_step", hook):
+                    code, result, _, output, acceptance = self.run_main(True, mock.Mock())
+                hook.assert_called_once()
+                self.assertEqual(code, 1)
+                self.assertFalse(result["success"])
+                # Real acceptance reports its highest reached main stage; the
+                # harness mock reports "enable-prompt" for any main fault.
+                self.assertEqual(result["original_failure_stage"], "enable-prompt")
+                self.assertEqual(self.primary_stage(output), "enable-prompt")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+                acceptance.cleanup_pin.assert_called_once()
+
+    def test_pre_acceptance_prerequisite_failure_prints_prerequisites(self):
+        code, output = self.run_pre_acceptance_failure()
+        self.assertEqual(code, 1)
+        self.assertIn("acceptance at prerequisites", output)
+        self.assertEqual(self.primary_stage(output), "prerequisites")
+        self.assertNotIn("PASS: ", output)
+        self.assertNotIn("adb-clean", output)
 
 
 if __name__=="__main__":unittest.main()

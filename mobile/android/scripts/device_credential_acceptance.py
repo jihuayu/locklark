@@ -639,6 +639,16 @@ def parser():
     return result
 
 
+def main_flow_step(acceptance):
+    """One observable main-flow step; a test seam that can raise.
+
+    Kept as a tiny fixed no-op-side-effecting hook so an exception, including
+    KeyboardInterrupt, can be injected exactly after success = True, the only
+    window where a caught fault could otherwise be mistaken for success.
+    """
+    return None
+
+
 # Fixed sentinel for "the main flow completed" when a secondary stage alone
 # fails. It cannot collide with a real STAGES failure value or a stage name.
 NO_PRIMARY_FAILURE = "none"
@@ -649,11 +659,12 @@ def main():
     os.umask(0o077)
     acceptance = None
     success = False
+    faulted = False
     failure = "prerequisites"
     diagnostic = {}
-    primary_clean = False
     cleanup_failed = False
     scan_failed = False
+    stage = "prerequisites"
     try:
         require(args.authorize_device_pin_setup and bool(re.fullmatch(r"emulator-[0-9]+",args.serial)))
         require(10 <= args.timeout <= 180)
@@ -665,20 +676,24 @@ def main():
         acceptance.copy_and_reinstall()
         require(hashlib.sha256(private_file(acceptance.source / "expected-private.json")).hexdigest() == acceptance.source_hash)
         success = True
-        primary_clean = True
+        main_flow_step(acceptance)
     except (Exception,KeyboardInterrupt):
+        # Any caught main-flow fault, including an interrupt, wins: a later
+        # cleanup or scan cannot make this run succeed.
+        faulted = True
         failure = acceptance.stage if acceptance else "prerequisites"
         if acceptance:
             diagnostic = acceptance.failure_metadata()
     finally:
         # Own the primary outcome before cleanup: a cleanup fault must never
-        # overwrite the original stage or its sanitized diagnosis. Only a clean
-        # main flow yields the no-primary sentinel, never the "prerequisites"
-        # pre-validation default.
-        original_failure = failure if not primary_clean else NO_PRIMARY_FAILURE
+        # overwrite the original stage or its sanitized diagnosis. Only an
+        # uncaught main flow yields the no-primary sentinel; a caught fault
+        # keeps its real stage ("prerequisites" before acceptance exists).
+        original_failure = failure if faulted else NO_PRIMARY_FAILURE
         diagnostic = diagnostic.copy()
         if acceptance:
-            primary_success = success
+            # Clean main only: a caught fault is never primary success.
+            primary_success = success and not faulted
             try:
                 acceptance.cleanup_pin()
             except Exception:
@@ -703,9 +718,8 @@ def main():
     if not success:
         print("FAIL: Android OS credential acceptance at " + (stage if acceptance else original_failure))
         print("Android OS credential diagnostic: " + json.dumps(diagnostic, sort_keys=True))
-        if acceptance:
-            # Fixed enum only: a real stage, or the no-primary sentinel.
-            print("Android OS credential primary failure stage: " + original_failure)
+        # Fixed enum only: a real stage, "prerequisites", or the sentinel.
+        print("Android OS credential primary failure stage: " + original_failure)
         if cleanup_failed:
             print("FAIL: Android OS credential acceptance at pin-cleanup")
         if scan_failed:
