@@ -269,6 +269,13 @@ func (d *trackingBackend) lastRead() vaultfilebackend.ReadResult {
 	return d.last
 }
 
+// readPortable reads through the embedded untracked Backend, the portable
+// vaultfilebackend.Backend seam shared by the directory and Memory fixtures, so
+// tests need no platform-specific store handle.
+func (d *trackingBackend) readPortable(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
+	return d.Backend.Read(ctx, name)
+}
+
 // fixture is one written remote file served from the platform's remote test
 // backend and the caller's credentials.
 type fixture struct {

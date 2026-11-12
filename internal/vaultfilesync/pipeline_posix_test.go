@@ -453,14 +453,14 @@ func TestPipelinePublishIndependentRemoteBranch(t *testing.T) {
 	closeNow(t, rj)
 
 	// Commit R on the real directory from B's old revision.
-	if err := f.remote.Dir.ReplaceIfVersion(context.Background(), remoteName, b.rev, rws.WorkingBytes); err != nil {
+	if err := f.remote.ReplaceIfVersion(context.Background(), remoteName, b.rev, rws.WorkingBytes); err != nil {
 		t.Fatalf("ReplaceIfVersion: %v", err)
 	}
-	committed, err := f.remote.Dir.Read(context.Background(), remoteName)
+	committed, err := f.remote.readPortable(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("Read committed R: %v", err)
 	}
-	err = f.remote.Dir.ReplaceIfVersion(context.Background(), remoteName, b.rev, rws.WorkingBytes)
+	err = f.remote.ReplaceIfVersion(context.Background(), remoteName, b.rev, rws.WorkingBytes)
 	if !errors.Is(err, vaultfilebackend.ErrConflict) {
 		t.Fatalf("reusing B's old revision = %v, want ErrConflict", err)
 	}

@@ -145,7 +145,7 @@ func mergeCandidateAlternatePolicy(t *testing.T, p *vaultfile.Policy) *vaultfile
 // the recording adapter.
 func mergeCandidateUseRemote(t *testing.T, f *fixture, remote []byte) vaultfilebackend.ReadResult {
 	t.Helper()
-	cur, err := f.remote.Dir.Read(context.Background(), remoteName)
+	cur, err := f.remote.readPortable(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("read current fixture revision: %v", err)
 	}
@@ -155,7 +155,7 @@ func mergeCandidateUseRemote(t *testing.T, f *fixture, remote []byte) vaultfileb
 	f.bytes = remote
 	// Re-read only for the opaque revision, but return the exact bytes that
 	// were replaced so callers can bind fixture state to the served content.
-	res, err := f.remote.Dir.Read(context.Background(), remoteName)
+	res, err := f.remote.readPortable(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("read replaced remote: %v", err)
 	}
@@ -273,7 +273,7 @@ func mergeCandidateAssertJournalUnchanged(t *testing.T, j *vaultfilejournal.Jour
 
 func mergeCandidateReadBackend(t *testing.T, f *fixture) vaultfilebackend.ReadResult {
 	t.Helper()
-	res, err := f.remote.Dir.Read(context.Background(), remoteName)
+	res, err := f.remote.readPortable(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("backend Read: %v", err)
 	}
