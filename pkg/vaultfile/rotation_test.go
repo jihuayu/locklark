@@ -860,15 +860,17 @@ func TestRotateAuthenticatedFileRequiresOldCurrentSuccessor(t *testing.T) {
 	forkChain.rootSign(q7)
 	forkChain.rootSign(q8)
 
-	// The gap: p9 names the uncarried p8 and adds one invited reader and its
-	// device, so its policy and root signature are valid and only p8 is
-	// missing. This malformed sequence gap is rejected as CodePolicyCheckpointFailed
-	// during chain verification in step 3, from both the caller pin and the
-	// old-current checkpoint, before step 4's explicit immediate-successor
-	// guard is reached: it therefore proves nothing about that guard. Strike
-	// p8 raises p9 to p10, a valid two-step successor that reaches step 4;
-	// TestRotateAuthenticatedFileRequiresOnePolicySuccessor proves the guard
-	// against it.
+	// The gap: the carried chain is p5 followed by the root-signed p9, which
+	// adds one invited reader and its device and names fixture p8 by its
+	// policy digest. Each proof is well formed and root-signed, but p6, p7 and
+	// p8 are omitted, so the chain is broken by a sequence gap. It is rejected
+	// as CodePolicyCheckpointFailed during chain verification in step 3, from
+	// both the caller pin and the old-current checkpoint, before step 4's
+	// explicit immediate-successor guard is reached: it therefore proves
+	// nothing about that guard. The guard is proved separately by
+	// TestRotateAuthenticatedFileRequiresOnePolicySuccessor, which uses a
+	// valid p5 to p6 to p7 to p8 to p9 chain that passes chain verification
+	// and reaches the step-4 exact-successor guard.
 	zoeKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
