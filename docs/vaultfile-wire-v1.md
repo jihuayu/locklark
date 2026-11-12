@@ -1269,9 +1269,11 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    nextDraft.signed_policy_proofs, checkpoint)` authenticates the next chain
    under the same pin, so it must be root-signed or an authorized delegated
    `InviteReaders` transition from the checkpoint (see [Admin-delegated
-   InviteReaders](#admin-delegated-invitereaders-transitions)). The header,
-   content encoding and sealed-state shape of the draft are then checked with
-   the verifier's structural rules. In the authenticated next policy the
+   InviteReaders](#admin-delegated-invitereaders-transitions)). The draft is
+   not structurally validated as a sealed file: it has exactly the builder
+   contract of the `File` the seal takes, and its carried `vuk_device_slots`,
+   `cek_slot`, `kdbx_ciphertext`, `revision_id` and `content_signature` are
+   allowed to be nil or stale and are ignored. In the authenticated next policy the
    author device must be a writer, admin or owner whose Ed25519 content
    signing key matches `authorPrivateKey` (`author_signing_key_mismatch` at
    `content_signature`, the same check the seal performs); the
@@ -1291,8 +1293,10 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    ordered device, VUK, CEK and KDBX steps for `sourceDeviceID` and
    `sourceIdentity`; their errors are returned unchanged.
 7. **Fresh VUK.** A fresh random 32-byte epoch VUK is drawn with
-   `crypto/rand`.
-8. **Seal.** `SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK,
+   `crypto/rand`. Its package-owned buffer is cleared on every failure,
+   including a `crypto/rand` or seal failure, and only its exact buffer is
+   handed to the caller on successful sealed bytes.
+8. **Seal.** `SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK,
    authorPrivateKey)` seals the new baseline: it derives a VUK envelope for
    every read-capable device of the authenticated next policy only, generates
    a fresh per-snapshot CEK and a fresh CEK slot, encrypts the opened

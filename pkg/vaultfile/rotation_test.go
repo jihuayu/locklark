@@ -53,9 +53,7 @@ func newRotationFixture(t *testing.T) *rotationFixture {
 	p7.Devices[1].AgeEncryptionKey = fx.dev2.Recipient().String()
 	p7.Devices[2].AgeEncryptionKey = fx.dev3d.Recipient().String()
 	// The carried chain is exactly the caller's pinned anchor policy (seq 5),
-	// its seq 6 successor p6, and the seq 7 policy p7. The header, roster, CEK
-	// slot and ciphertext below are structurally valid placeholders that the
-	// seal under test overwrites.
+	// its seq 6 successor p6, and the seq 7 policy p7.
 	pin := clonePolicy(fx.initial)
 	p6 := clonePolicy(pin)
 	p6.PolicySeq = pin.PolicySeq + 1
@@ -151,16 +149,10 @@ func newRotationFixture(t *testing.T) *rotationFixture {
 		},
 		SignedPolicyProofs: c.f.SignedPolicyProofs,
 		ContentEncoding:    ContentEncoding,
-		// Carried builder state that is never trusted: placeholder envelopes,
-		// a stale CEK slot and a stale ciphertext, shaped only so the builder
-		// value validates. The seal overwrites every byte of it with envelopes
-		// derived from the authenticated next policy and a fresh CEK.
-		VUKDeviceSlots: []DeviceSlot{
-			{DeviceID: "device-1", Recipient: p8.Devices[0].AgeEncryptionKey, WrappedVUK: []byte("stale")},
-			{DeviceID: "device-2", Recipient: p8.Devices[1].AgeEncryptionKey, WrappedVUK: []byte("stale")},
-		},
-		CEKSlot:        CEKSlot{KeyEpoch: old.Header.KeyEpoch + 1, WrappedCEK: []byte("stale")},
-		KDBXCiphertext: []byte("stale"),
+		// The remaining derived wire state stays nil and zero: the draft is a
+		// builder value with exactly the seal's builder contract, and the seal
+		// derives the roster, CEK slot, ciphertext, revision id and content
+		// signature from the authenticated next policy and the database.
 	}
 	return &rotationFixture{
 		keys: fx.keys, chain: c, p7: p7, p8: p8, next: next,
@@ -412,11 +404,20 @@ func TestRotateAuthenticatedFileRoundTrip(t *testing.T) {
 	wantRotationContent(t, oldDB)
 
 	// That learned old VUK cannot open the successor CEK, which is the fresh
-	// epoch boundary; the returned new VUK can, as proven above. Nothing here
-	// reclaims the old plaintext the device already holds from old copies.
+	// epoch boundary; the returned new VUK can, as proven above. The negative
+	// is the exact crypto boundary: the long-lived learned old VUK against the
+	// successor's own header and CEK slot, so only the key epoch VUK fails
+	// authentication and nothing here is rejected for a wrong header, AAD or
+	// slot shape. Nothing reclaims the old plaintext the device already holds
+	// from old copies.
 	oldVUKForOldFile := fx.vuk
 	if !bytes.Equal(learned, oldVUKForOldFile) {
 		t.Fatal("the device did not learn the fixture's old VUK")
+	}
+	staleCEK, err := OpenCEK(learned, out.f.Header, out.f.CEKSlot)
+	wantCodeAt(t, err, CodeCEKEnvelopeFailed, "cek_slot")
+	if staleCEK != nil {
+		t.Fatalf("learned old VUK returned CEK bytes on failure: %x", staleCEK)
 	}
 	for name, vuk := range map[string][]byte{"fixture old VUK": fx.vuk, "learned old VUK": learned} {
 		if _, err := OpenCEK(vuk, out.f.Header, out.f.CEKSlot); err == nil {
@@ -578,15 +579,12 @@ func TestRotateAuthenticatedFileContinuation(t *testing.T) {
 		mutate func(*File)
 		path   string
 	}{
-		// Each case keeps the draft structurally valid by moving the carried
-		// CEK slot with the header epoch, so the named transition check, not
-		// structural validation, is the step that rejects it. Reusing the old
-		// epoch also fails as untagged invalid_value at "" in validateStructure;
-		// the seal's own key_epoch check would report the same input at
-		// key_epoch, so this primitive reports it there too.
-		{"stale epoch", func(f *File) { f.Header.KeyEpoch = fx.old.Header.KeyEpoch; f.CEKSlot.KeyEpoch = f.Header.KeyEpoch }, "key_epoch"},
-		{"skipped epoch", func(f *File) { f.Header.KeyEpoch = fx.old.Header.KeyEpoch + 2; f.CEKSlot.KeyEpoch = f.Header.KeyEpoch }, "key_epoch"},
-		{"epoch overflow", func(f *File) { f.Header.KeyEpoch = 0; f.CEKSlot.KeyEpoch = f.Header.KeyEpoch }, "key_epoch"},
+		// Each case keeps its derived CEK slot untouched, exactly as the
+		// minimal builder draft carries none, so the named transition check is
+		// the step that rejects it.
+		{"stale epoch", func(f *File) { f.Header.KeyEpoch = fx.old.Header.KeyEpoch }, "key_epoch"},
+		{"skipped epoch", func(f *File) { f.Header.KeyEpoch = fx.old.Header.KeyEpoch + 2 }, "key_epoch"},
+		{"epoch overflow", func(f *File) { f.Header.KeyEpoch = 0 }, "key_epoch"},
 		{"stale content seq", func(f *File) { f.Header.ContentSeq = fx.old.Header.ContentSeq }, "content_seq"},
 		{"skipped content seq", func(f *File) { f.Header.ContentSeq = fx.old.Header.ContentSeq + 2 }, "content_seq"},
 		{"content seq overflow", func(f *File) { f.Header.ContentSeq = 0; f.Header.PrevDigest = nil }, "content_seq"},

@@ -58,11 +58,13 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 //
 // oldEncoded is one complete sealed file. checkpoint is the caller's
 // already-trusted pin and the only trust anchor: every accepted policy here
-// continues it. nextDraft is a builder File exactly as SealAuthenticatedFile
-// takes it: protocol format and version, the header, and signed policy proofs
-// whose chain already continues the checkpoint (root-signed, or an authorized
-// delegated InviteReaders transition). Its carried roster, ciphertext, CEK
-// slot, revision id and content signature are never trust inputs.
+// continues it. nextDraft has exactly the builder contract of the File that
+// SealAuthenticatedFile takes: protocol format and version, the header, and
+// signed policy proofs whose chain already continues the checkpoint
+// (root-signed, or an authorized delegated InviteReaders transition). Its
+// carried VUKDeviceSlots, CEKSlot, KDBXCiphertext, revision id and content
+// signature are allowed to be nil or stale and are ignored: this function
+// never requires a structurally complete sealed file from the caller.
 // sourceDeviceID and sourceIdentity identify the rotating device, and
 // authorPrivateKey must be the content signing key the authenticated next
 // policy records for nextDraft's author device.
@@ -82,10 +84,9 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 //     before any of its fields are read as an input, and its carried roster is
 //     never a trust source.
 //  3. Next policy. verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
-//     checkpoint) authenticates the next chain against the same caller pin,
-//     and validateStructure nextDraft checks its format, version, header,
-//     content encoding and sealed-state CEK and roster shapes with the
-//     verifier's structural rules. Then, in the authenticated next policy:
+//     checkpoint) authenticates the next chain against the same caller pin;
+//     the draft is not structurally validated as a sealed file, because it is
+//     a builder value. Then, in the authenticated next policy:
 //     the author device must be a writer, admin or owner whose Ed25519 content
 //     signing key passes validatedAuthorKey with authorPrivateKey (otherwise
 //     CodeAuthorSigningKeyMismatch at "content_signature"); the source device
@@ -111,7 +112,7 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 //     opened, the CEK slot is opened and the KDBX payload is decrypted.
 //  7. Fresh VUK. 32 random bytes are drawn with crypto/rand. A crypto/rand
 //     failure is returned as its operational error with nil outputs.
-//  8. Seal. SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK,
+//  8. Seal. SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK,
 //     authorPrivateKey) authenticates the next chain again, derives every
 //     per-device VUK slot only from the authenticated next policy, generates
 //     a fresh per-snapshot CEK and its fresh slot, encrypts db and signs the
@@ -119,7 +120,8 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 //
 // On success newEncoded is the sealed successor and newVUK is the
 // caller-owned 32-byte epoch VUK the caller must clear after use. On every
-// error both are nil and the package-owned new VUK buffer is cleared.
+// error both are nil and the package-owned new VUK buffer is cleared, and on
+// success the package keeps no copy of the returned buffer.
 // nextDraft, oldEncoded, checkpoint, sourceIdentity and authorPrivateKey are
 // never modified and never retained.
 //
@@ -159,8 +161,8 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 //     and it is not a sync protocol.
 //
 // Errors are the unchanged structural and verification errors of the old
-// file, chain verification and structural validation errors of the next
-// draft, CodeAuthorSigningKeyMismatch for the author key, invalid_value at
+// file, the unchanged error of verifyPolicyChain for the next draft,
+// CodeAuthorSigningKeyMismatch for the author key, invalid_value at
 // the naming path for continuation and source-device failures, the unchanged
 // errors of the authenticated open, a crypto/rand operational error, and the
 // unchanged error of SealAuthenticatedFile. Every error returns nil, nil.
@@ -188,9 +190,6 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 	// device in the authenticated next policy.
 	nextCurrent, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, checkpoint)
 	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := validateStructure(nextDraft); err != nil {
 		return nil, nil, err
 	}
 	author := findDevice(nextCurrent, nextDraft.Header.AuthorDeviceID)
@@ -249,25 +248,25 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 	// content buffers are cleared after sealing on every path.
 	defer clearInnerHeaderBinaries(db)
 
-	// 7. A fresh epoch VUK. It stays package-owned and is cleared on every
-	// error path; only a successful seal hands it to the caller.
-	newVUK = make([]byte, CEKSize)
-	if _, err := rand.Read(newVUK); err != nil {
-		clear(newVUK)
-		return nil, nil, err
-	}
+	// 7. A fresh epoch VUK. freshVUK is the exact package-owned allocation
+	// below; this local, not the named result, is what the defer clears, so
+	// every return path after the allocation clears that buffer whoever wrote
+	// newVUK. Only the successful return below hands it to the caller.
+	freshVUK := make([]byte, CEKSize)
 	defer func() {
-		if err != nil {
-			clear(newVUK)
-			newVUK = nil
+		if err != nil || newEncoded == nil {
+			clear(freshVUK)
 		}
 	}()
+	if _, err := rand.Read(freshVUK); err != nil {
+		return nil, nil, err
+	}
 
 	// 8. The complete next-epoch baseline: fresh CEK, fresh per-device
 	// envelopes from the authenticated next policy, fresh signature.
-	encoded, err := SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK, authorPrivateKey)
+	encoded, err := SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK, authorPrivateKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	return encoded, newVUK, nil
+	return encoded, freshVUK, nil
 }
