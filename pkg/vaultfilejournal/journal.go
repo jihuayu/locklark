@@ -93,6 +93,20 @@ var (
 	// earlier base than the state's. The stored records are unchanged. The
 	// full detail is carried by an unexported error matching this sentinel.
 	ErrPreparedMismatch = errors.New("vault file journal: prepared proposal mismatch")
+	// ErrStateMismatch reports a RebaseAndPrepare whose expected state does
+	// not equal every stored state field exactly (base bytes, remote revision,
+	// working bytes and generation). The stored records are unchanged. It is
+	// a full-record compare-and-swap, not a generation-only check.
+	ErrStateMismatch = errors.New("vault file journal: stored state does not match the expected state")
+	// ErrPendingRecords reports a RebaseAndPrepare while a legacy proposal
+	// record or a prepared proposal record is present. Those records are
+	// pending work whose bytes this package must not read, rewrite or delete,
+	// so the rebase fails closed. The stored records are unchanged.
+	ErrPendingRecords = errors.New("vault file journal: pending proposal records")
+	// ErrAuditCollision reports a RebaseAndPrepare whose new generation already
+	// has an audit entry. An audit is append-only and is never overwritten or
+	// deleted. The stored records are unchanged.
+	ErrAuditCollision = errors.New("vault file journal: rebase audit already exists")
 	// ErrLocked reports that Open could not take the database's exclusive
 	// file lock within the lock timeout, for example because another
 	// process (or another Journal in this process) holds it. It also matches
