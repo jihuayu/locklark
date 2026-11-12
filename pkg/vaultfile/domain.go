@@ -21,7 +21,10 @@ import (
 // authenticating policy proofs or current authorization. VerifyPolicyCheckpoint is a separate checkpoint-scoped API:
 // it establishes checkpoint-scoped root continuation verification, the current
 // policy's author role requirement, and content signature verification under
-// the current policy's device key.
+// the current policy's device key. SealAuthenticatedFile composes the CEK and
+// VUK envelopes with that chain check for the full-file seal, and
+// OpenAuthenticatedFile composes them with VerifyPolicyCheckpoint for the
+// full-file open.
 const (
 	// Content signatures over ContentSigningBytes.
 	DomainContentSignature = "locklark.vault-file/v1/content-signature"

@@ -25,8 +25,9 @@ import (
 // root, revision or signature chain, and do not authenticate that the payload
 // belongs to any particular file or revision. OpenAuthenticatedFile is the
 // caller-pinned full-file open path that verifies the policy checkpoint before
-// VUK/CEK decryption and only then calls OpenKDBXPayload. See
-// docs/vaultfile-wire-v1.md.
+// VUK/CEK decryption and only then calls OpenKDBXPayload. SealAuthenticatedFile
+// is the matching seal, which authenticates the draft's chain before calling
+// SealKDBXPayload. See docs/vaultfile-wire-v1.md.
 
 // Error codes reported by SealKDBXPayload and OpenKDBXPayload. Like every
 // *Error in this package, the message never embeds input data or key bytes.
@@ -326,7 +327,8 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 // file: it does not pin caller trust, verify policy proofs or a policy chain,
 // VUK slots, a file revision or digest or any signature. Use
 // OpenAuthenticatedFile for the caller-pinned full-file path that
-// authenticates the file and its keys before calling this function.
+// authenticates the file and its keys before calling this function, and
+// SealAuthenticatedFile for the matching caller-pinned seal.
 //
 // Errors are fresh *Error values: CodeKDBXPayloadTooLarge for an input above
 // MaxKDBXCiphertextBytes or a decoded or expanded body above

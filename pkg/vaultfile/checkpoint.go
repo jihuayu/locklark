@@ -183,9 +183,9 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 // authenticated current policy: the policy named by header.PolicyDigest at
 // header.PolicySeq. It is the shared trust step behind
 // VerifyPolicyCheckpoint, whose content signature is then checked against
-// the returned policy, and a later high-level Seal, which authenticates the
-// draft's policy continuation and current reader roster before any encryption
-// or key-wrapping work.
+// the returned policy, and SealAuthenticatedFile, the high-level seal that
+// authenticates the draft's policy continuation and current reader roster
+// before any encryption or key-wrapping work.
 //
 // header and proofs are the caller-supplied draft state, which a direct caller
 // such as a Seal may pass before wrapping or KDF work. The helper therefore
