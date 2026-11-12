@@ -680,6 +680,21 @@ function sourcePageProbe(pathname) {
 function sourcePageIntact(value) {
   return value?.form === true && value?.path === true;
 }
+// Diagnostics only: the six fixed predicates of the idle stale-close wait's
+// latest poll. Null until the optional idle journey starts (and reset there),
+// then refreshed on every poll. Only the fixed booleans are stored and
+// reported; ids, URLs, titles, values, counts, text and canaries stay out.
+let routeIdleCloseStaleObservation = null;
+function sanitizeRouteIdleCloseStale(value) {
+  return {
+    staleIdAbsent: value?.staleIdAbsent === true,
+    routesAbsent: value?.routesAbsent === true,
+    popupAbsent: value?.popupAbsent === true,
+    sourceSame: value?.sourceSame === true,
+    sourceVisible: value?.sourceVisible === true,
+    sourceIntact: value?.sourceIntact === true,
+  };
+}
 // Optional idle-expiry journey (LOCKLARK_TEST_ROUTE_IDLE_TTL=1 in route detail
 // mode). It starts only after all of the default route switch/reload/
 // no-prompt/mouse-rejected assertions have passed, then runs one ordinary route
@@ -816,6 +831,7 @@ async function acceptRouteIdleExpiry(driver) {
   // ones below describe this journey alone and are sanitized at the boundary.
   routeLifecycleObservation = null;
   routeStatusTrace = null;
+  routeIdleCloseStaleObservation = null;
   // The controlled source page by reference only: never by URL, id or index.
   const sourcePath = new URL(origin).pathname;
   const sourcePage = context
@@ -860,16 +876,32 @@ async function acceptRouteIdleExpiry(driver) {
       const current = context
         .pages()
         .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
-      const state =
-        current === sourcePage
-          ? await current.evaluate(sourcePageProbe(sourcePath))
-          : null;
+      const sourceSame = current === sourcePage;
+      const state = sourceSame
+        ? await current.evaluate(sourcePageProbe(sourcePath))
+        : null;
+      const staleIdAbsent = !live.some(
+        (target) => target.id === staleRoute.id,
+      );
+      const routesAbsent = !live.some((target) => ROUTE_PAGE.test(target.url));
+      const popupAbsent = !live.some((target) => ACTION_POPUP.test(target.url));
+      const sourceVisible = state?.visible === true;
+      const sourceIntact = sourcePageIntact(state);
+      routeIdleCloseStaleObservation = sanitizeRouteIdleCloseStale({
+        staleIdAbsent,
+        routesAbsent,
+        popupAbsent,
+        sourceSame,
+        sourceVisible,
+        sourceIntact,
+      });
       return (
-        state?.visible === true &&
-        sourcePageIntact(state) &&
-        !live.some((target) => target.id === staleRoute.id) &&
-        !live.some((target) => ROUTE_PAGE.test(target.url)) &&
-        !live.some((target) => ACTION_POPUP.test(target.url))
+        staleIdAbsent &&
+        routesAbsent &&
+        popupAbsent &&
+        sourceSame &&
+        sourceVisible &&
+        sourceIntact
       );
     }, "Stale route tab was not closed");
   } finally {
@@ -2798,6 +2830,16 @@ try {
                   liveObserved: routeIdleObservation.liveObserved === true,
                   wipeCompleted: routeIdleObservation.wipeCompleted === true,
                 },
+              }
+            : {}),
+          // Present only once the idle stale-close wait polled: exactly the
+          // six fixed predicates, never an id, URL, title, value, count, text
+          // or canary. This identifies which close predicate failed.
+          ...(routeIdleCloseStaleObservation
+            ? {
+                routeIdleCloseStale: sanitizeRouteIdleCloseStale(
+                  routeIdleCloseStaleObservation,
+                ),
               }
             : {}),
         }

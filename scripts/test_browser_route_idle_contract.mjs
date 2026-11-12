@@ -304,6 +304,7 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     ROUTE_TITLE_PREFIX: "Locklark",
     ROUTE_IDLE_CLOSE_STALE: closeKey,
     routeIdleObservation: null,
+    routeIdleCloseStaleObservation: null,
     routeLifecycleObservation: null,
     routeStatusTrace: null,
   });
@@ -411,8 +412,9 @@ test("the idle journey closes only the stale route tab with one physical key", (
   for (const needle of [
     "sourcePageProbe(sourcePath)",
     "sourcePageIntact(state)",
-    "!live.some((target) => target.id === staleRoute.id)",
-    "!live.some((target) => ROUTE_PAGE.test(target.url))",
+    "const staleIdAbsent = !live.some(",
+    "const routesAbsent = !live.some((target) => ROUTE_PAGE.test(target.url));",
+    "const popupAbsent = !live.some((target) => ACTION_POPUP.test(target.url));",
     '"Stale route tab was not closed"',
   ])
     assert.ok(afterClose.includes(needle), needle);
@@ -424,6 +426,115 @@ test("the idle journey closes only the stale route tab with one physical key", (
   assert.match(
     SOURCE,
     /^function sourcePageIntact\(value\) \{\n\s+return value\?\.form === true && value\?\.path === true;\n\}$/m,
+  );
+});
+
+test("the idle stale-close wait computes exactly the six fixed diagnostic booleans", () => {
+  const body = idleHelper();
+  // The observation is nullable module state, reset when the idle journey
+  // starts, before the stale route is touched.
+  assert.match(SOURCE, /^let routeIdleCloseStaleObservation = null;$/m);
+  const reset = body.indexOf("routeIdleCloseStaleObservation = null;");
+  const closeMark = body.indexOf('mark("route:idle-close-stale")');
+  assert.ok(reset > 0 && closeMark > reset, "the observation must reset at idle start");
+  // The same bounded wait keeps its 10-second default budget.
+  assert.match(SOURCE, /^async function eventually\(check, message, limit = 10000\) \{$/m);
+  const pollStart = body.indexOf("const sourceSame = current === sourcePage;");
+  const pollStop = body.indexOf('"Stale route tab was not closed"', pollStart);
+  assert.ok(pollStart > 0 && pollStop > pollStart, "the stale-close wait must exist");
+  const poll = body.slice(pollStart, pollStop);
+  const compactPoll = poll.replace(/[\s,]+/g, "");
+  // Each fixed boolean is recomputed inside that poll from the same predicate.
+  const fields = [
+    ["staleIdAbsent", "!live.some((target) => target.id === staleRoute.id)"],
+    ["routesAbsent", "!live.some((target) => ROUTE_PAGE.test(target.url))"],
+    ["popupAbsent", "!live.some((target) => ACTION_POPUP.test(target.url))"],
+    ["sourceSame", "current === sourcePage"],
+    ["sourceVisible", "state?.visible === true"],
+    ["sourceIntact", "sourcePageIntact(state)"],
+  ];
+  for (const [name, expression] of fields)
+    assert.ok(
+      compactPoll.includes(
+        `const${name}=${expression.replace(/[\s,]+/g, "")};`,
+      ),
+      name,
+    );
+  // The pass condition is exactly their conjunction.
+  assert.ok(
+    compactPoll.includes(
+      "return(staleIdAbsent&&routesAbsent&&popupAbsent&&sourceSame&&sourceVisible&&sourceIntact);",
+    ),
+    "the pass condition must be the six-boolean conjunction",
+  );
+  // The observation is refreshed with exactly those six keys, in order.
+  const snapshot = poll.indexOf(
+    "routeIdleCloseStaleObservation = sanitizeRouteIdleCloseStale({",
+  );
+  assert.ok(snapshot > 0);
+  const keys = [...poll.slice(snapshot).matchAll(/\b(staleIdAbsent|routesAbsent|popupAbsent|sourceSame|sourceVisible|sourceIntact),/g)]
+    .map((match) => match[1]);
+  assert.deepEqual(keys, fields.map(([name]) => name));
+});
+
+test("the idle stale-close diagnostic serializes only the six strict booleans", () => {
+  const start = SOURCE.indexOf("function sanitizeRouteIdleCloseStale(value) {");
+  const stop = SOURCE.indexOf("\n}", start);
+  assert.ok(start > 0 && stop > start, "the sanitizer must exist");
+  const fields = [
+    "staleIdAbsent",
+    "routesAbsent",
+    "popupAbsent",
+    "sourceSame",
+    "sourceVisible",
+    "sourceIntact",
+  ];
+  const sanitized = SOURCE.slice(start, stop);
+  assert.deepEqual(
+    [...sanitized.matchAll(/^\s+([A-Za-z]+):/gm)].map((match) => match[1]),
+    fields,
+  );
+  const context = vm.createContext({});
+  vm.runInContext(
+    SOURCE.slice(start, stop + 2) +
+      "\nthis.sanitize = sanitizeRouteIdleCloseStale;",
+    context,
+  );
+  const all = Object.fromEntries(fields.map((name) => [name, true]));
+  const empty = Object.fromEntries(fields.map((name) => [name, false]));
+  // Raw target/page fields are dropped, never serialized.
+  assert.deepEqual(
+    {
+      ...context.sanitize({
+        ...all,
+        id: "synthetic-id",
+        url: "synthetic-url",
+        title: "synthetic-title",
+        value: "synthetic-value",
+        count: 1,
+      }),
+    },
+    all,
+  );
+  // A null or malformed record still yields exactly the six strict booleans.
+  assert.deepEqual({ ...context.sanitize(null) }, empty);
+  assert.deepEqual(
+    { ...context.sanitize({ staleIdAbsent: "true", routesAbsent: 1 }) },
+    empty,
+  );
+  // The failure report exposes only that sanitized observation under its own
+  // fixed key.
+  const reportAt = SOURCE.indexOf(
+    "routeIdleCloseStale: sanitizeRouteIdleCloseStale(",
+  );
+  assert.ok(reportAt > 0);
+  const reportStop = SOURCE.indexOf("),", reportAt);
+  assert.ok(reportStop > reportAt);
+  const reportBlock = SOURCE.slice(reportAt, reportStop);
+  assert.doesNotMatch(reportBlock, /\b(?:id|url|title|value|count)\b/i);
+  assert.match(
+    reportBlock.trimEnd(),
+    /^routeIdleCloseStale: sanitizeRouteIdleCloseStale\(\n\s+routeIdleCloseStaleObservation,$/,
   );
 });
 
