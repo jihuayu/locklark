@@ -73,7 +73,29 @@ func pipelineItems(t *testing.T, f *fixture, encoded []byte) []vault.Item {
 	return items
 }
 
-// pipelineEditedFixtureItems returns base with both fixture edits applied. The
+// pipelineOnlyItem returns the single index of id in items. It fails the test
+// when the fixture ID has drifted (no match) or is duplicated, so an edit can
+// never silently apply to zero or several items.
+func pipelineOnlyItem(t *testing.T, items []vault.Item, id string) int {
+	t.Helper()
+	found := -1
+	for i := range items {
+		if items[i].ID != id {
+			continue
+		}
+		if found >= 0 {
+			t.Fatalf("fixture ID %q appears more than once, want exactly one item", id)
+		}
+		found = i
+	}
+	if found < 0 {
+		t.Fatalf("fixture ID %q is absent, want exactly one item (fixture drift)", id)
+	}
+	return found
+}
+
+// pipelineEditedFixtureItems returns base with both fixture edits applied. Each
+// expected ID must match exactly one base item before its title changes. The
 // result is compared irrespective of order, because the merge emits a stable
 // order that is not required to be the base order.
 func pipelineEditedFixtureItems(t *testing.T, base []vault.Item) []vault.Item {
@@ -83,11 +105,7 @@ func pipelineEditedFixtureItems(t *testing.T, base []vault.Item) []vault.Item {
 		{"login-1", "Login edited offline"},
 		{"document-1", "Document edited offline"},
 	} {
-		for i := range out {
-			if out[i].ID == edit.id {
-				out[i].Title = edit.title
-			}
-		}
+		out[pipelineOnlyItem(t, out, edit.id)].Title = edit.title
 	}
 	return out
 }
@@ -105,14 +123,19 @@ func pipelineAssertItems(t *testing.T, label string, got, want []vault.Item) {
 	}
 }
 
-// pipelineReplace returns an edit that changes only the title of item id.
-func pipelineReplace(id, title string) func([]vault.Item) []vault.Item {
+// pipelineReplace returns an edit that changes only the title of item id,
+// after requiring exactly one matching item and that its title actually
+// changed, so a drifted or duplicated fixture ID fails instead of producing a
+// no-op edit.
+func pipelineReplace(t *testing.T, id, title string) func([]vault.Item) []vault.Item {
+	t.Helper()
 	return func(items []vault.Item) []vault.Item {
 		out := append([]vault.Item(nil), items...)
-		for i := range out {
-			if out[i].ID == id {
-				out[i].Title = title
-			}
+		i := pipelineOnlyItem(t, out, id)
+		before := out[i].Title
+		out[i].Title = title
+		if out[i].Title == before {
+			t.Fatalf("edit of %q did not change its title %q", id, before)
 		}
 		return out
 	}
@@ -353,8 +376,8 @@ func TestPipelinePublishUnchangedRemote(t *testing.T) {
 	b := bootstrapRef(t, f, j)
 
 	_, _, baseItems, _ := pipelineOpenPair(t, f, b.bytes, b.bytes)
-	pipelineEdit(t, f, j, pipelineReplace("login-1", "Login edited offline"))
-	pipelineEdit(t, f, j, pipelineReplace("document-1", "Document edited offline"))
+	pipelineEdit(t, f, j, pipelineReplace(t, "login-1", "Login edited offline"))
+	pipelineEdit(t, f, j, pipelineReplace(t, "document-1", "Document edited offline"))
 
 	src, err := j.LoadState()
 	if err != nil {
@@ -459,8 +482,8 @@ func TestPipelinePublishIndependentRemoteBranch(t *testing.T) {
 
 	// Two separate local offline edits on top of B.
 	_, _, baseItems, _ := pipelineOpenPair(t, f, b.bytes, b.bytes)
-	pipelineEdit(t, f, j, pipelineReplace("login-1", "Login edited offline"))
-	pipelineEdit(t, f, j, pipelineReplace("document-1", "Document edited offline"))
+	pipelineEdit(t, f, j, pipelineReplace(t, "login-1", "Login edited offline"))
+	pipelineEdit(t, f, j, pipelineReplace(t, "document-1", "Document edited offline"))
 
 	src, err := j.LoadState()
 	if err != nil {
