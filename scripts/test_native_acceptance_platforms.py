@@ -23,6 +23,9 @@ import native_acceptance_driver as driver
 
 LABEL = "确认连接此扩展"
 TITLE = "Locklark · 浏览器原生确认"
+# The exact Python int PyObjC's ApplicationServices exports as kAXErrorNoValue
+# (documented: no accessibility object at the specified position).
+NO_VALUE = -25212
 EXE = "C:/Program Files/Locklark test/browser.exe" if os.name == "nt" else "/opt/locklark/test-browser"
 WINDOW_RAW = {
     "id": 0x200003, "pid": 4242, "title": TITLE, "executable": EXE, "trusted": True,
@@ -1083,7 +1086,7 @@ class MacAdapterTests(unittest.TestCase):
             kCGWindowNumber="number", kCGWindowBounds="bounds", kCGWindowName="name",
             CGWindowListCopyWindowInfo=lambda options, identifier: [dict(cg_entry)])
         ax = types.SimpleNamespace(
-            kAXWindowsAttribute="AXWindows",
+            kAXWindowsAttribute="AXWindows", kAXErrorNoValue=NO_VALUE,
             AXUIElementCreateApplication=lambda pid: ax_window,
             AXUIElementCopyAttributeValue=copy_attribute)
         api = macos.QuartzApi(quartz=quartz, appkit=types.SimpleNamespace(), ax=ax)
@@ -1320,7 +1323,7 @@ class MacWindowIdentityTests(unittest.TestCase):
         # The public AXValue types only satisfy the real frame() signature;
         # no AXValue payload is ever produced or read by these fixtures.
         api.ax = types.SimpleNamespace(
-            kAXWindowsAttribute="AXWindows",
+            kAXWindowsAttribute="AXWindows", kAXErrorNoValue=NO_VALUE,
             kAXValueCGPointType="AXValueCGPointType",
             kAXValueCGSizeType="AXValueCGSizeType",
             AXIsProcessTrusted=lambda: True,
@@ -1872,7 +1875,7 @@ class MacControlIdentityTests(unittest.TestCase):
         tree["children"] = [] if extra is None else list(extra)
         tree["children"].insert(0, target)
         api.ax = types.SimpleNamespace(
-            kAXWindowsAttribute="AXWindows",
+            kAXWindowsAttribute="AXWindows", kAXErrorNoValue=NO_VALUE,
             AXUIElementCreateApplication=lambda pid: "application",
             AXUIElementCopyElementAtPosition=lambda app, x, y, out: (0, hit) if position is None else position,
             CFEqual=cf_equal if cf_equal is not None else (lambda left, right: left is right))
@@ -2096,7 +2099,7 @@ class MacFrameworkOwnershipTests(unittest.TestCase):
         calls = []
         ax = types.SimpleNamespace(
             AXUIElementCreateApplication=lambda pid: calls.append(pid) or {"pid": pid},
-            kAXWindowsAttribute="AXWindows",
+            kAXWindowsAttribute="AXWindows", kAXErrorNoValue=NO_VALUE,
             AXUIElementCopyAttributeValue=lambda element, name, out: (0, ["window"]))
         api = macos.QuartzApi(quartz=types.SimpleNamespace(),
                               appkit=types.SimpleNamespace(), ax=ax)
@@ -2311,6 +2314,15 @@ class MacDisplayMembershipTests(unittest.TestCase):
             with self.subTest(result=result):
                 self.refusal(result)
 
+    def test_bool_display_status_is_malformed_never_a_success(self):
+        # ``False == 0`` but a bool is not a CGError: the display query is
+        # unknown and refuses even though the list itself is well formed.
+        for error in (False, True):
+            with self.subTest(error=error):
+                self.refusal((error, [1], 1))
+        self.assertIs(self.api(result=(0, [1], 1), bounds=((0, 0), (1920, 1080))
+                               ).point_visible(None, 100, 100), True)
+
     def test_unreadable_display_bounds_is_a_query_refusal(self):
         for bounds in (RuntimeError("no bounds"), ("x", "y"), ("x", (0, 0)),
                        ((0, 0), (0, 0)), (None, (1920, 1080)),
@@ -2441,6 +2453,10 @@ class MacRootAtQueryTests(unittest.TestCase):
             if element in (window_element, other_window) and name in ("AXRole", "AXParent"):
                 return 0, "AXWindow" if name == "AXRole" else None
             value = values.get(name)
+            # An attributes entry may be the value itself or a full
+            # ``(AXError, value)`` result, so statuses are scripted per read.
+            if type(value) is tuple and len(value) == 2 and type(value[0]) in (int, bool):
+                return value
             return 0, (value(element) if callable(value) else value)
 
         def element_at(app, x, y, out):
@@ -2450,6 +2466,7 @@ class MacRootAtQueryTests(unittest.TestCase):
             AXUIElementCreateApplication=lambda pid: application,
             AXUIElementCopyElementAtPosition=element_at,
             AXUIElementCopyAttributeValue=copy_attribute,
+            kAXErrorNoValue=NO_VALUE,
             # Held on the instance: a class attribute would be a bound method.
             CFEqual=staticmethod(lambda left, right: left is right))
         api.identity = []
@@ -2512,6 +2529,62 @@ class MacRootAtQueryTests(unittest.TestCase):
         # A cyclic parent chain never reaches an AXWindow.
         self.refused(self.api(position=(0, "leaf"),
                               attributes={"AXParent": lambda element: element}))
+
+    def test_no_value_status_is_the_documented_no_object_miss(self):
+        # ApplicationServices.kAXErrorNoValue ("There is no accessibility
+        # object at the specified position") is a query that SUCCEEDED with no
+        # object: a miss the bounded candidate loop may skip, never an error.
+        self.assertEqual(macos._ax_status(types.SimpleNamespace(kAXErrorNoValue=NO_VALUE)),
+                         (NO_VALUE, 0))
+        self.assertIs(self.root(self.api(position=(NO_VALUE, None))), False)
+
+    def test_other_ax_statuses_stay_query_refusals(self):
+        for status in (-25200, -25201, -25202, -25203, -25204, -25205, -25206,
+                       -25208, 1, 7, -1):
+            with self.subTest(status=status):
+                self.refused(self.api(position=(status, None)))
+                self.refused(self.api(position=(status, "leaf")))
+                self.refused(self.api(position=(0, "leaf"),
+                                      attributes={"AXParent": (status, None)}))
+                self.refused(self.api(position=(0, "leaf"),
+                                      attributes={"AXRole": (status, "AXButton")}))
+
+    def test_parent_no_value_ends_the_chain_as_a_valid_false_hit(self):
+        # AXParent has no value: the chain ends before any AXWindow.
+        self.assertIs(self.root(self.api(position=(0, "leaf"),
+                                         attributes={"AXParent": (NO_VALUE, None)})), False)
+        # One step later it still ends before the bound AXWindow.
+        self.assertIs(self.root(self.api(position=(0, "group"),
+                                         attributes={"AXParent": (NO_VALUE, None)})), False)
+        # But a no-value AXRole is an unknown identity, not a miss.
+        self.refused(self.api(position=(0, "leaf"),
+                              attributes={"AXRole": (NO_VALUE, None)}))
+
+    def test_unavailable_no_value_constant_refuses(self):
+        for constant in (None, -25212.0, "-25212", True, -25211, -25213):
+            with self.subTest(constant=constant):
+                api = self.api(position=(0, "leaf"))
+                if constant is None:
+                    del api.ax.kAXErrorNoValue
+                else:
+                    api.ax.kAXErrorNoValue = constant
+                self.refused(api)
+
+    def test_position_and_attribute_bool_statuses_are_malformed(self):
+        # ``False == 0`` but a bool is not an AXError: it never proves a
+        # success and never classifies as a no-value miss.
+        for status in (False, True):
+            with self.subTest(status=status):
+                self.refused(self.api(position=(status, None)))
+                self.refused(self.api(position=(status, "leaf")))
+                self.refused(self.api(position=(status, "window"), parent="bound"))
+                self.refused(self.api(position=(0, "leaf"),
+                                      attributes={"AXRole": (status, "AXButton")}))
+                self.refused(self.api(position=(0, "leaf"),
+                                      attributes={"AXParent": (status, None)}))
+        self.assertIs(self.root(self.api(position=(0, "window"), parent="bound")), True)
+        self.assertIs(self.root(self.api(position=(0, "leaf"),
+                                         attributes={"AXParent": (0, None)})), False)
 
     def adapter_refusal(self, api):
         with self.assertRaises(contract.ContractError) as error:
@@ -3051,6 +3124,53 @@ class MacFractionalGeometryTests(unittest.TestCase):
         self.assertTrue(contract.rect_positive(FRACTIONAL_CONTROL))
         self.assertTrue(accepted[0] < FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"])
         self.assertTrue(accepted[1] < FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"])
+
+    def test_no_value_at_the_centre_misses_and_the_next_candidate_clicks(self):
+        # The real QuartzApi, through the real AX tree fixture and the real
+        # MacAdapter candidate search: the documented kAXErrorNoValue
+        # ("no accessibility object at the specified position") at the centre
+        # is a successful MISS, so the bounded loop tries the next in-bounds
+        # point, reaches the selected control there, re-proves the accepted
+        # point and clicks it exactly once - at that later exact point.
+        expected = macos_candidates(FRACTIONAL_CONTROL)
+        centre, later = expected[0], expected[1]
+        api = self.api(self.tree())
+        # A well-formed (kAXErrorNoValue, None) position result at the centre;
+        # every other point answers the glyph under the selected control.
+        position = api.ax.AXUIElementCopyElementAtPosition
+        no_value_at = []
+
+        def element_at(app, x, y, out):
+            if (x, y) == centre:
+                api.probed.append((x, y))
+                no_value_at.append((x, y))
+                return (api.ax.kAXErrorNoValue, None)
+            return position(app, x, y, out)
+
+        api.ax.AXUIElementCopyElementAtPosition = element_at
+        result = self.execute(api)
+        # Every AX position query on the centre was the no-object answer (the
+        # centre is then skipped, never clicked) and the later point was
+        # probed for its acceptance and again for the pre-click re-proof; the
+        # accepted point is never resumed with an alternate after re-proof.
+        self.assertEqual(no_value_at, [centre])
+        self.assertEqual(api.probed.count(centre), 1)
+        self.assertNotIn(centre, [event["point"] for event in api.quartz.posted])
+        self.assertGreaterEqual(api.probed.count(later), 2)
+        self.assertEqual(api.probed[-1], later)
+        self.assertNotIn(later, no_value_at)
+        self.assertEqual([event["point"] for event in api.quartz.posted], [later] * 3)
+        self.assertEqual([event["kind"] for event in api.quartz.posted],
+                         [FakeQuartzEvents.kCGEventMouseMoved,
+                          FakeQuartzEvents.kCGEventLeftMouseDown,
+                          FakeQuartzEvents.kCGEventLeftMouseUp])
+        recorded = result["clicks"][0]
+        self.assertEqual((recorded["x"], recorded["y"]), later)
+        self.assertNotEqual(later, centre)
+        self.assertEqual((type(recorded["x"]), type(recorded["y"])), (float, float))
+        self.assertEqual(recorded["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual(recorded["evidence"], "posted")
+        self.assertEqual(len(api.quartz.posted), 3)  # exactly one click batch
 
     def test_sibling_overlay_at_fractional_centre_refuses_before_input(self):
         # A transparent group drawn above the control at the same fractional

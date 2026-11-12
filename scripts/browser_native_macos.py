@@ -80,6 +80,13 @@ RECT_KEYS = ("x", "y", "width", "height")
 # first (MacAdapter.click_candidates), so adding the 50% column and row leaves
 # at most nine points, all strictly inside the authorising rectangle.
 CLICK_FRACTIONS = (0.2, 0.5, 0.8)
+# The AXUIElementCopyElementAtPosition status documented for "There is no
+# accessibility object at the specified position", and the AXUIElementCopyAttributeValue
+# status for an attribute that has no value.  Both are read from
+# ``ApplicationServices.kAXErrorNoValue`` through ``self.ax`` at the call site
+# (never a bare -25212); kAXErrorSuccess == 0 needs no lookup.  The expected
+# value guards against a substituted or absent constant.
+AX_ERROR_NO_VALUE_EXPECTED = -25212
 
 
 def _frame_relation(frame, bounds):
@@ -180,6 +187,28 @@ def _a11y_query():
     return contract.ContractError("a11y-query")
 
 
+def _ax_status(ax):
+    """``(kAXErrorNoValue, kAXErrorSuccess)`` read through the AX framework, or None.
+
+    ``kAXErrorNoValue`` comes from ``ax.kAXErrorNoValue`` (a plain Python int in
+    PyObjC) and must be exactly the documented -25212, so a missing or
+    substituted constant can never turn another status into a classification;
+    kAXErrorSuccess is the exact built-in ``int`` 0.
+    """
+    try:
+        no_value = ax.kAXErrorNoValue
+    except Exception:
+        return None
+    if type(no_value) is not int or no_value != AX_ERROR_NO_VALUE_EXPECTED:
+        return None
+    return no_value, 0
+
+
+def _exact_status(code):
+    """True only for an exact built-in ``int`` status (never ``bool``/subclass)."""
+    return type(code) is int
+
+
 def _sequence(value):
     """A readable ordered collection, or None.
 
@@ -200,13 +229,21 @@ def _sequence(value):
     return value
 
 
-def _ax_value(ax, element, name):
-    """One raw AX attribute read: the value, or ``None`` for a nil result.
+def _ax_value(ax, element, name, status=None):
+    """One raw AX attribute read: the value, or ``None`` for a missing value.
 
-    Only the documented ``(AXError, value)`` status tuple is unpacked; the
-    returned value itself (nil or not) is returned verbatim for the caller to
-    validate.  A raised call or a malformed result is an unknown query.
+    Only the documented ``(AXError, value)`` status tuple is unpacked, and its
+    status must be an exact built-in ``int``: kAXErrorSuccess (0) returns the
+    value verbatim (nil or not) for the caller to validate, and
+    ``ApplicationServices.kAXErrorNoValue`` means the attribute has no value (a
+    nil result).  Every other status - including ``False``, which equals 0 but
+    is not a status - is an unknown query, as is a raised call or a malformed
+    result.  A missing ``kAXErrorNoValue`` constant refuses rather than guessing.
     """
+    if status is None:
+        status = _ax_status(ax)
+        if status is None:
+            raise _a11y_query()
     try:
         result = ax.AXUIElementCopyAttributeValue(element, name, None)
     except contract.ContractError:
@@ -214,9 +251,16 @@ def _ax_value(ax, element, name):
     except Exception:
         raise _a11y_query()
     if isinstance(result, tuple):
-        if len(result) != 2 or result[0] != 0:
+        if len(result) != 2:
             raise _a11y_query()
-        return result[1]
+        code = result[0]
+        if not _exact_status(code):
+            raise _a11y_query()
+        if code == status[1]:
+            return result[1]
+        if code == status[0]:
+            return None
+        raise _a11y_query()
     return result
 
 
@@ -706,7 +750,9 @@ class QuartzApi:
         error = result[0]
         displays = result[1]
         count = result[2]
-        if error != 0:
+        # The status must be the exact built-in int 0: ``False`` equals 0 but is
+        # a malformed CoreGraphics status, never a success.
+        if not _exact_status(error) or error != 0:
             raise _a11y_query()
         if displays is None:
             raise _a11y_query()
@@ -763,11 +809,22 @@ class QuartzApi:
         as ``_identity_matches``; a duplicate same-title window refuses here
         too.  A succeeded query with no element, a chain that ends before any
         AXWindow or a bound AXWindow under another window are a legitimate
-        ``False`` miss.  An unavailable application, a raised AX query, a
-        non-zero error code, a malformed result or a bounded walk that never
+        ``False`` miss.  An unavailable application, a raised AX query, any
+        other non-zero status, a malformed result (a status that is not an
+        exact built-in int, including ``False``) or a bounded walk that never
         reaches an AXWindow is an unknown query state and refuses the fixed
         ``a11y-query``; it never looks like a skippable candidate miss.
+
+        ``ApplicationServices.kAXErrorNoValue`` is the documented status for
+        "There is no accessibility object at the specified position": the
+        query SUCCEEDED and the point holds no AX object, so it is a miss.
+        The same named status on an attribute read means AXRole is unknown
+        (refused, as above) and AXParent is absent (the chain ends before the
+        selected AXWindow - a valid ``False`` hit).
         """
+        status = _ax_status(self.ax)
+        if status is None:
+            raise contract.ContractError("a11y-query")
         try:
             application = self.application(window["pid"])
             available = application is not None
@@ -784,12 +841,16 @@ class QuartzApi:
             raise contract.ContractError("a11y-query")
         if isinstance(result, tuple) and len(result) == 2:
             code, element = result
+            if not _exact_status(code):
+                raise contract.ContractError("a11y-query")
         elif type(result) is tuple:
             raise contract.ContractError("a11y-query")
         else:
             # A native out-parameter may surface as the bare element.
-            code, element = 0, result
-        if code != 0:
+            code, element = status[1], result
+        if code == status[0]:
+            return False
+        if code != status[1]:
             raise contract.ContractError("a11y-query")
         if element is None:
             return False
@@ -798,12 +859,12 @@ class QuartzApi:
         # A raised read or an unreadable role/parent payload is an unknown
         # query and refuses; a walk that never ends refuses too.
         for _ in range(MAX_DEPTH + 1):
-            role = _ax_value(self.ax, element, "AXRole")
+            role = _ax_value(self.ax, element, "AXRole", status)
             if role is None or type(role) is not str:
                 raise contract.ContractError("a11y-query")
             if role == "AXWindow":
                 return self._identity_matches(element, window)
-            parent = _ax_value(self.ax, element, "AXParent")
+            parent = _ax_value(self.ax, element, "AXParent", status)
             if parent is None:
                 return False
             element = parent
