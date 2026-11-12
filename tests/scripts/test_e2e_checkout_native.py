@@ -1294,6 +1294,82 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
                 path.write_bytes(original)
 
 
+REPORT = {"stage": "fixture", "reason": "unclassified acceptance failure",
+          "native": None}
+PRIVATE_DIRECTORY = "/tmp/lk-diagnostics-CANARY-9f3a1c"
+
+
+class CheckoutFailureEvidenceEmissionTests(unittest.TestCase):
+    """The captured failure lines survive a failure.json write error."""
+
+    def _run(self, write: str) -> dict:
+        """Execute the real emitter with an injected writeFile; no UI or app."""
+
+        source = (ROOT / "scripts" / "browser_native_acceptance.mjs").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("function recordNativeFailure(")
+        end = source.index("\n}\n", start) + 3
+        # The writer is injected, so no real file, raw error text or canary
+        # escapes; stderr is ignored and only the fixed stdout is read.
+        script = "\n".join((
+            'const { join } = require("node:path");',
+            "const writes = new Map();",
+            "const lines = [];",
+            "console.error = (line) => lines.push(String(line));",
+            source[start:end],
+            f"const report = {json.dumps(REPORT)};",
+            f"const directory = {json.dumps(PRIVATE_DIRECTORY)};",
+            "let thrown = null;",
+            "try { recordNativeFailure((...args) => {",
+            "  writes.set(String(args[0]), "
+            f"{json.dumps(write)} === 'ok' ? args : ['attempted']);",
+            f"  if ({json.dumps(write)} === 'throw') "
+            "throw new Error('EACCES');",
+            "}, report, directory); } catch (error) { "
+            "thrown = String(error?.message); }",
+            "process.stdout.write(JSON.stringify("
+            "{lines, writes: [...writes.values()], thrown}));",
+        ))
+        result = subprocess.run(
+            ["node", "--input-type=commonjs", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr[-500:])
+        # Harness self-check: both cases run the extraction the test assumes.
+        self.assertIn("writeFile(join(diagnostics,", script)
+        return json.loads(result.stdout)
+
+    def test_one_report_and_private_write_are_emitted_on_success(self):
+        result = self._run("ok")
+        self.assertEqual(result["lines"], [
+            "Native browser diagnostic: "
+            + json.dumps(REPORT, separators=(",", ":")),
+            "Synthetic diagnostic directory: " + PRIVATE_DIRECTORY,
+        ])
+        self.assertIsNone(result["thrown"])
+        self.assertEqual(result["writes"], [[
+            PRIVATE_DIRECTORY + "/failure.json",
+            json.dumps(REPORT, indent=2) + "\n",
+            {"mode": 0o600},
+        ]])
+
+    def test_report_survives_a_failure_json_write_error(self):
+        result = self._run("throw")
+        self.assertEqual(result["lines"], [
+            "Native browser diagnostic: "
+            + json.dumps(REPORT, separators=(",", ":")),
+            "Synthetic diagnostic directory: " + PRIVATE_DIRECTORY,
+        ])
+        # The disk write was attempted once and its error never escapes the
+        # emitter as a different failure.
+        self.assertIsNone(result["thrown"])
+        self.assertEqual(result["writes"], [["attempted"]])
+
+
 class CheckoutRowRegistrationTests(unittest.TestCase):
     def test_functional_row_is_registered_and_old_components_are_preserved(self):
         from tests.e2e import tier2_f09_f17

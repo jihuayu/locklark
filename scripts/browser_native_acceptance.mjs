@@ -38,6 +38,19 @@ import {
   manifestExtensionId,
 } from "./browser_edge_install.mjs";
 
+// One failure record end to end: emit both fixed lines, then write
+// failure.json privately. A disk write error is swallowed here so it can never
+// replace the emitted report or the original failure the caller throws.
+function recordNativeFailure(writeFile, report, diagnostics) {
+  const json = JSON.stringify(report, null, 2) + "\n";
+  console.error("Native browser diagnostic: " + JSON.stringify(report));
+  console.error("Synthetic diagnostic directory: " + diagnostics);
+  try {
+    writeFile(join(diagnostics, "failure.json"), json, { mode: 0o600 });
+  } catch {}
+  return json;
+}
+
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
 // prefix and one fixed phase, printed only at its real launch boundary.
@@ -3557,13 +3570,9 @@ try {
         }
       } catch {}
     }
-    writeFileSync(
-      join(diagnostics, "failure.json"),
-      JSON.stringify(report, null, 2) + "\n",
-      { mode: 0o600 },
-    );
-    console.error("Native browser diagnostic: " + JSON.stringify(report));
-    console.error("Synthetic diagnostic directory: " + diagnostics);
+    // The fixed report is emitted before and independently of the disk write,
+    // so a failure.json write error never replaces it or the failure below.
+    recordNativeFailure(writeFileSync, report, diagnostics);
     throw Error("Native browser acceptance failed at " + stage);
   }
 } finally {
