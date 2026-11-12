@@ -2048,6 +2048,15 @@ class MacInputBuildingTests(unittest.TestCase):
         self.assertEqual(len(api.quartz.flagged), 4)
         self.assertEqual({flags for _event, flags in api.quartz.flagged}, {macos.FLAGS["Control_L"]})
 
+    def test_command_a_chord_posts_super_keycode_with_command_flag(self):
+        api = self.api()
+        api.press_chord(("Super_L", "a"))
+        posted = api.quartz.posted
+        self.assertEqual([event["code"] for event in posted], [0x37, 0x00, 0x00, 0x37])
+        self.assertEqual([event["down"] for event in posted], [True, True, False, False])
+        self.assertNotEqual(macos.FLAGS["Super_L"], macos.FLAGS["Control_L"])
+        self.assertEqual(api.quartz.flagged, [(event, macos.FLAGS["Super_L"]) for event in posted])
+
     def test_typing_posts_two_events_per_character(self):
         api = self.api()
         api.type_text("hi")
