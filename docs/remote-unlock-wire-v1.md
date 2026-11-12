@@ -1100,18 +1100,20 @@ safety, an unlock, or VUK delivery. Those remain separate checks.
 
 ### Synthetic consent vector
 
-Every key, binding and signature below is synthetic, with two strictly
-separated key roles; nothing was enrolled, no tenant, user, pair or challenge
+Every key, binding and signature below is synthetic, with two separately
+derived key roles; nothing was enrolled, no tenant, user, pair or challenge
 exists, and no human pairing ceremony or scan took place.
 
 - **Consent identity keys** sign the consent preimage only. Device a uses the
-  private seed bytes `0x40`..`0x5f`; device b uses `0x50`..`0x6f`. No seed span
-  is shared, so the two identity keys differ.
+  32-byte seed bytes `0x40`..`0x5f`; device b uses `0x50`..`0x6f`. The two seed
+  spans overlap at `0x50`..`0x5f`, but both complete 32-byte seeds and the
+  keypairs derived from them are distinct.
 - **Binding signing keys** sign the complete synthetic
   `DeviceTransportBinding` objects only. Each seed is the SHA-256 expansion of
   a fixed synthetic label (`pair-consent-binding-a`, `pair-consent-binding-b`),
-  not a seed span. No private seed or public key byte is shared with a consent
-  identity key, and neither is a vault-policy `ContentSigningKey`.
+  not a seed byte-value span, and neither is a vault-policy
+  `ContentSigningKey`. Their public keys are distinct from the consent
+  identity keys.
 
 The bindings are digested with `DeviceTransportBindingDigest`; the consent
 carries only their digests, never the binding key or the binding bytes.
@@ -1149,7 +1151,10 @@ Complete canonical consent (638 bytes):
 {"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}
 ```
 
-Both signatures verify over the preimage with the consent identity keys above; with
+Each binding's signature verifies only under its intended binding signing key
+above, and nowhere under a consent identity key; each consent signature verifies
+only under the registered consent identity keys above, and nowhere under a
+binding signing key. With
 `nowUnixMS = 1799999900000` the consent verifies, and with
 `nowUnixMS = 1800000000000` it is expired. The literals are pinned in the
 package tests.
