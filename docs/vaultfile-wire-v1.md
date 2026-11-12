@@ -1219,10 +1219,11 @@ rejected the input. The corresponding open path is
 [`OpenAuthenticatedFile`](#trusted-full-file-open).
 
 **VUK reuse after a device removal.** The API accepts a caller-supplied VUK
-and epoch and does not rotate them. Removing a device or slot from the
-authenticated current policy makes the current `OpenAuthenticatedFile` policy
-check reject that device (`invalid_value` at `device_id`), but it does not revoke
-a VUK that device already learned. If that same VUK is reused, the device can
+and epoch and does not rotate them. When the device is removed from the
+authenticated current policy, the newly sealed file omits its slot, and the
+current `OpenAuthenticatedFile` call rejects that unknown device with
+`invalid_value` at `device_id`; this does not revoke a VUK that device already
+learned. If that same VUK is reused, the device can
 still use the low-level [`OpenCEK`](#cek-sealing-and-opening) with the new
 `cek_slot` to recover the new per-snapshot CEK, and then
 [`OpenKDBXPayload`](#kdbx-payload-sealing-and-opening) to decrypt the new

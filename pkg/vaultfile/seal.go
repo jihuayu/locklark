@@ -105,9 +105,10 @@ const CodeAuthorSigningKeyMismatch = "author_signing_key_mismatch"
 // trust, and it performs no epoch or key rotation, invitation or rewrap flow.
 //
 // The API accepts a caller-supplied VUK and epoch and does not rotate them.
-// Removing a device or slot from a policy makes the current
-// OpenAuthenticatedFile policy check reject that device, but it does not
-// revoke a VUK that device already learned. If that same VUK is reused, the
+// When the device is removed from the authenticated current policy, the newly
+// sealed file omits its slot, and the current OpenAuthenticatedFile call
+// rejects that unknown device with an invalid_value at device_id. This does
+// not revoke a VUK that device already learned. If that same VUK is reused, the
 // device can still call the low-level OpenCEK with the new CEK slot and
 // OpenKDBXPayload to decrypt the new payload; this seal has no way to know
 // which devices hold the VUK it is given. Cryptographic reader revocation
