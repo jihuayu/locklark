@@ -487,6 +487,107 @@ class ActivationOrderTests(unittest.TestCase):
             instance.activation_request()
 
 
+class UnlockPlanTests(unittest.TestCase):
+    """The fixed nine unlock actions are split across fresh bounded requests."""
+
+    MASTER = "SyntheticMaster-" + "1" * 48
+    SECRET = "LL1-" + "A" * 26
+
+    def acceptance(self):
+        base = temporary_base(self)
+        args = __import__("argparse").Namespace(
+            cli="/build/locklark", desktop="/build/bin/locklark-desktop", timeout=240)
+        instance = acceptance.Acceptance(args)
+        instance.fixture = acceptance.Fixture(base)
+        self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
+        instance.desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance.master = self.MASTER
+        instance.secret = self.SECRET
+        return instance
+
+    def original_actions(self, instance):
+        """The pre-split nine-action sequence, written independently here."""
+        return [
+            {"click_label": "金库文件"},
+            {"key": "Control_L+a"},
+            {"text": str(instance.fixture.vault)},
+            {"click_label": "主密码"},
+            {"text": self.MASTER},
+            {"click_label": "Secret Key"},
+            {"text": self.SECRET},
+            {"click_label": "解锁"},
+            {"wait_label": "新建登录"},
+        ]
+
+    def expected_plans(self, instance):
+        return [
+            [
+                {"click_label": "金库文件"},
+                {"key": "Control_L+a"},
+                {"text": str(instance.fixture.vault)},
+            ],
+            [{"click_label": "主密码"}, {"text": self.MASTER}],
+            [{"click_label": "Secret Key"}, {"text": self.SECRET}],
+            [{"click_label": "解锁"}],
+            [{"wait_label": "新建登录"}],
+        ]
+
+    def test_flattened_plans_are_exactly_the_original_sequence(self):
+        instance = self.acceptance()
+        plans = acceptance.unlock_plans(
+            instance.fixture.vault, self.MASTER, self.SECRET)
+        self.assertEqual(plans, tuple(tuple(plan) for plan in self.expected_plans(instance)))
+        self.assertEqual([action for plan in plans for action in plan],
+                         self.original_actions(instance))
+        self.assertEqual(len(plans), 5)
+
+    def test_each_plan_is_one_fresh_exact_driver_request(self):
+        instance = self.acceptance()
+        expected_plans = self.expected_plans(instance)
+        requests = []
+
+        def run_driver(request):
+            requests.append(json.loads(request))
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()):
+            instance.unlock()
+
+        self.assertEqual(len(requests), len(expected_plans))
+        for request, plan in zip(requests, expected_plans):
+            with self.subTest(actions=plan):
+                self.assertEqual(set(request), {"title", "executable", "actions", "inspect"})
+                self.assertEqual(request["title"], acceptance.TITLE)
+                self.assertEqual(request["title"], "Locklark · 本地金库")
+                self.assertEqual(request["executable"], str(instance.desktop))
+                self.assertIs(request["inspect"], False)
+                self.assertEqual(request["actions"], plan)
+                self.assertIsInstance(request["actions"], list)
+        self.assertEqual([action for request in requests for action in request["actions"]],
+                         self.original_actions(instance))
+
+    def test_a_failed_plan_is_not_retried_and_later_actions_are_not_sent(self):
+        instance = self.acceptance()
+        expected_plans = self.expected_plans(instance)
+        requests = []
+
+        def run_driver(request):
+            requests.append(json.loads(request))
+            if len(requests) == 3:
+                raise acceptance.AcceptanceFailure()
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(acceptance.AcceptanceFailure):
+            instance.unlock()
+
+        self.assertEqual([request["actions"] for request in requests],
+                         expected_plans[:3])
+        self.assertNotIn("native_unlock_fields_and_button", instance.checks)
+
+
 class _FakePopen:
     pid = 54321
 

@@ -49,6 +49,23 @@ UNLOCK_FIELDS = ("金库文件", "主密码", "Secret Key")
 UNLOCK_LABEL = "解锁"
 UNLOCKED_LABEL = "新建登录"
 
+
+def unlock_plans(vault, master, secret):
+    """Fixed synthetic unlock actions split into bounded driver plans.
+
+    The order is the original nine-action sequence. Each plan is one fresh
+    request, so the per-request observation budget is never shared across the
+    whole unlock flow; a failing plan still stops the sequence.
+    """
+    return (
+        ({"click_label": "金库文件"}, {"key": "Control_L+a"}, {"text": str(vault)}),
+        ({"click_label": "主密码"}, {"text": master}),
+        ({"click_label": "Secret Key"}, {"text": secret}),
+        ({"click_label": UNLOCK_LABEL},),
+        ({"wait_label": UNLOCKED_LABEL},),
+    )
+
+
 TOOL = "synthetic-cli"
 TOKEN_ENV = "LOCKLARK_SYNTHETIC_TOKEN"
 CHILD_STDOUT = b"cli-broker-child-stdout\n"
@@ -783,18 +800,8 @@ class Acceptance:
 
     def unlock(self):
         self.stage_code("unlock")
-        actions = [
-            {"click_label": "金库文件"},
-            {"key": "Control_L+a"},
-            {"text": str(self.fixture.vault)},
-            {"click_label": "主密码"},
-            {"text": self.master},
-            {"click_label": "Secret Key"},
-            {"text": self.secret},
-            {"click_label": UNLOCK_LABEL},
-            {"wait_label": UNLOCKED_LABEL},
-        ]
-        self.driver(actions, "unlock")
+        for actions in unlock_plans(self.fixture.vault, self.master, self.secret):
+            self.driver(list(actions), "unlock")
         self.mark("native_unlock_fields_and_button")
 
     def approve(self):
