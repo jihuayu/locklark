@@ -33,6 +33,30 @@ func readCapableDevice(current *Policy, deviceID string) *Device {
 	return dev
 }
 
+// oldCurrentCheckpoint derives the internal checkpoint of a rotation's next
+// policy chain from the old file that verifyParsedAuthenticatedFile just
+// authenticated under the caller's pin, and from that pin's owner root. The
+// vault and the original trusted owner root (key id and public key) come from
+// the caller's checkpoint unchanged and byte-copied; the sequence and digest
+// are the authenticated old file's current policy: its header PolicySeq and the
+// current Header.PolicyDigest the verifier accepted, which the carried current
+// proof also carries because VerifyPolicyCheckpoint binds the header to it. No
+// trust is derived from the next draft or from any carried roster.
+//
+// The result is a new caller-owned value that shares no byte slice with c or
+// f: the owner root public key and the policy digest are copies, and the string
+// fields are copied by value. It is a PolicyCheckpoint only in shape; it is
+// internal to the rotation and is never returned to a caller.
+func oldCurrentCheckpoint(f *File, c *PolicyCheckpoint) *PolicyCheckpoint {
+	return &PolicyCheckpoint{
+		VaultID:            c.VaultID,
+		OwnerRootKeyID:     c.OwnerRootKeyID,
+		OwnerRootPublicKey: cloneBytes(c.OwnerRootPublicKey),
+		PolicySeq:          f.Header.PolicySeq,
+		PolicyDigest:       cloneBytes(f.Header.PolicyDigest),
+	}
+}
+
 // innerHeaderBinaryContents returns the content buffer of every binary the
 // database's InnerHeader carries, without copying the contents. It is the
 // capture step of the rotation's ownership of an opened database: the
@@ -77,23 +101,30 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 }
 
 // RotateAuthenticatedFile is the package's caller-pinned complete-file epoch
-// rotation primitive. It authenticates the caller's old file and an already
-// authorized next draft against the same PolicyCheckpoint, opens the old
-// full KDBX database through the authenticated open path, generates a fresh
-// random 32-byte epoch VUK and seals a complete next-epoch baseline of that
-// content under the next draft through SealAuthenticatedFile. The rotation
-// returns the sealed successor bytes and the new VUK only to the caller whose
-// source device remains read-capable in the authenticated next policy.
+// rotation primitive. It authenticates the caller's old file, authenticates an
+// already authorized next draft as the immediate policy successor of the
+// policy that is current in that old file, opens the old full KDBX database
+// through the authenticated open path, generates a fresh random 32-byte epoch
+// VUK and seals a complete next-epoch baseline of that content under the next
+// draft through SealAuthenticatedFile. The rotation returns the sealed
+// successor bytes and the new VUK only to the caller whose source device
+// remains read-capable in the authenticated next policy, and only after the
+// sealed bytes have themselves been parsed and verified under the caller's pin.
 //
 // oldEncoded is one complete sealed file. checkpoint is the caller's
-// already-trusted pin and the only trust anchor: every accepted policy here
-// continues it. nextDraft has exactly the builder contract of the File that
-// SealAuthenticatedFile takes: protocol format and version, the header, and
-// signed policy proofs whose chain already continues the checkpoint
-// (root-signed, or an authorized delegated InviteReaders transition). Its
+// already-trusted pin and the only trust anchor: the old file must continue it
+// and every accepted next policy must continue it, and every accepted next
+// policy must also continue the old file's own current policy, whose owner root
+// is the checkpoint's original root. nextDraft has exactly the builder contract
+// of the File that SealAuthenticatedFile takes: protocol format and version,
+// the header, and signed policy proofs whose chain continues the caller pin,
+// begins at the old file's current policy and immediately extends it
+// (root-signed, or an authorized delegated InviteReaders transition from that
+// policy). In practice this means the draft carries the pin's full intervening
+// proof chain, not only a suffix that starts after the old current policy. Its
 // carried VUKDeviceSlots, CEKSlot, KDBXCiphertext, revision id and content
-// signature are allowed to be nil or stale and are ignored: this function
-// never requires a structurally complete sealed file from the caller.
+// signature are allowed to be nil or stale and are ignored: this function never
+// requires a structurally complete sealed file from the caller.
 // sourceDeviceID and sourceIdentity identify the rotating device, and
 // authorPrivateKey must be the content signing key the authenticated next
 // policy records for nextDraft's author device.
@@ -112,13 +143,44 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     OpenAuthenticatedFile's order and errors. The old file is authenticated
 //     before any of its fields are read as an input, and its carried roster is
 //     never a trust source.
-//  3. Next policy. verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
-//     checkpoint) authenticates the next chain against the same caller pin;
-//     the draft is not structurally validated as a sealed file, because it is
-//     a builder value. It also rejects a next header whose VaultID differs
-//     from the checkpoint: that is CodePolicyCheckpointFailed at "", and it is
-//     returned here, before the explicit vault equality guard in step 4 ever
-//     runs. Then, in the authenticated next policy:
+//  3. Next policy, twice. From the authenticated old file, this step first
+//     derives an internal checkpoint (oldCurrentCheckpoint): the caller
+//     checkpoint's VaultID and original owner root key id and public key,
+//     byte-copied, with PolicySeq = old header PolicySeq and PolicyDigest = the
+//     authenticated old header PolicyDigest. No trust root is derived from
+//     nextDraft. Then the next chain is authenticated with the unchanged
+//     verifyPolicyChain twice, and both must pass, in this order, each before
+//     any KDBX decrypt in step 6:
+//     verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
+//     checkpoint) against the original caller pin, and
+//     verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
+//     oldCurrentCheckpoint) against the derived old-current pin. The draft is
+//     not structurally validated as a sealed file, because it is a builder
+//     value.
+//     The original pin stays the only trust anchor. The old-current check binds
+//     the successor to the old file state, and the internal checkpoint is not a
+//     new trust root: because it is the old current policy, a well-formed
+//     root-signed chain that merely continues the older caller pin on another
+//     branch, or skips the old current policy, is CodePolicyCheckpointFailed at
+//     "" there. When the carried old current proof itself is omitted, the
+//     internal checkpoint's sequence is absent from the chain, so the existing
+//     verifyPolicyChain rule applies unchanged: the first proof must be exactly
+//     old PolicySeq + 1, name the old current digest and be root-signed. The
+//     caller-pin check exists for the opposite gap: a correctly root-signed
+//     suffix that starts at old PolicySeq + 1 and links the old current digest
+//     can pass the old-current check while omitting the pin's intervening
+//     proofs (for example p6 and p7 under a seq 5 pin), and would then produce a
+//     file the caller could not open under its own pin. It is rejected by the
+//     caller-pin check as CodePolicyCheckpointFailed at "". Each error is
+//     returned unchanged.
+//     Both checks also reject a next header whose VaultID differs from the
+//     checkpoint: that is CodePolicyCheckpointFailed at "", and it is returned
+//     here by the caller-pin check first, before the explicit vault equality
+//     guard in step 4 ever runs. The author and source device lookups below use
+//     the policy returned by the old-current check; the two checks must agree
+//     on the current policy, because each ends at nextDraft.Header.PolicySeq
+//     and PolicyDigest, which step 4 ties to the old current policy. Then, in
+//     the authenticated next policy:
 //     the author device must be a writer, admin or owner whose Ed25519 content
 //     signing key passes validatedAuthorKey with authorPrivateKey (otherwise
 //     CodeAuthorSigningKeyMismatch at "content_signature"); the source device
@@ -135,9 +197,17 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     "content_seq"); its
 //     PrevDigest must equal the raw 32 FileDigest bytes of the authenticated
 //     old file ("prev_digest"); and its OpID must differ from the old op id
-//     ("op_id"). Every failure is invalid_value at the naming path. This is an
-//     exact immediate continuation in content_seq, not a freshness or
-//     compare-and-swap check against any server.
+//     ("op_id"). Every failure is invalid_value at the naming path. The next
+//     policy must be an immediate successor of the authenticated old current
+//     policy: the header PolicySeq must be exactly old PolicySeq + 1 and the
+//     authenticated next policy's PrevPolicyDigest exactly the old header
+//     PolicyDigest, with no 64-bit wrap; any failure is CodePolicyCheckpointFailed
+//     at "". Step 3 has already established this for a verified chain; the
+//     guard states it explicitly so no rotation can accept another policy as
+//     the successor, and it is what makes the two step-3 checks, which both
+//     end at the header's policy, agree on the same next policy. This is an
+//     exact immediate continuation in content_seq and policy sequence, not a
+//     freshness or compare-and-swap check against any server.
 //  5. Preconditions for the fresh baseline. nextDraft.Header.KeyEpoch must be
 //     positive ("key_epoch"), so SealAuthenticatedFile can bind it into the
 //     new envelopes and CEK slot.
@@ -148,15 +218,26 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //  7. Fresh VUK. 32 random bytes are drawn with crypto/rand. A crypto/rand
 //     failure is returned as its operational error with nil outputs.
 //  8. Seal. SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK,
-//     authorPrivateKey) authenticates the next chain again, derives every
-//     per-device VUK slot only from the authenticated next policy, generates
-//     a fresh per-snapshot CEK and its fresh slot, encrypts db and signs the
-//     content. Its error is returned unchanged.
+//     authorPrivateKey) authenticates the next chain again from the original
+//     caller checkpoint, so the sealed successor is openable under exactly the
+//     pin supplied to this function, and never from the internal old-current
+//     checkpoint alone. It derives every per-device VUK slot only from the
+//     authenticated next policy, generates a fresh per-snapshot CEK and its
+//     fresh slot, encrypts db and signs the content. Its error is returned
+//     unchanged.
+//  9. Final output. ParseFile(encoded) and VerifyPolicyCheckpoint(parsed,
+//     checkpoint) run on the sealed bytes under the original caller pin before
+//     success is returned. Either error is returned unchanged with nil, nil;
+//     the parsed file is not returned. Success therefore yields a complete
+//     file that parses, is structurally valid, is signed by the authenticated
+//     next policy's author, and verifies under the exact caller pin.
 //
-// On success newEncoded is the sealed successor and newVUK is the
-// caller-owned 32-byte epoch VUK the caller must clear after use. On every
-// error both are nil and the package-owned new VUK buffer is cleared, and on
-// success the package keeps no copy of the returned buffer.
+// On success newEncoded is the sealed successor, already verified under
+// checkpoint, and newVUK is the caller-owned 32-byte epoch VUK the caller must
+// clear after use. On every error, including the step 8 seal error and the
+// step 9 parse or verification error, both are nil and the package-owned new
+// VUK buffer is cleared, and on success the package keeps no copy of the
+// returned buffer.
 // nextDraft, oldEncoded, checkpoint, sourceIdentity and authorPrivateKey are
 // never modified and never retained.
 //
@@ -185,28 +266,47 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //
 // Trust limits:
 //   - The checkpoint is the only trust anchor; it is scope only. Freshness,
-//     provenance and CAS are not checked. Content-seq + 1 and prev_digest are
-//     enforced against the specified old file only, so no server or replica is
-//     known to hold the same baseline, and nothing prevents two callers from
-//     rotating the same old file into two different successors.
-//   - The next policy chain must already be authorized (root-signed, or an
-//     authorized delegated InviteReaders transition) under the same
-//     checkpoint. This function creates no policy, invitation, device key,
-//     device-key generation, restore root or delegation.
+//     provenance and CAS are not checked. The next chain is validated twice,
+//     against the original caller pin and against the derived old-current pin,
+//     and, after sealing under the original caller pin, the sealed output is
+//     parsed and verified once more, by VerifyPolicyCheckpoint under that same
+//     caller pin. The old-current pin
+//     is not a new trust root: it is derived only from the old file the caller
+//     pin authenticated and from the pin's original owner root, and it only
+//     binds the successor to the old current state.
+//     Content-seq + 1, policy sequence + 1 and prev_digest are enforced against
+//     the specified old file only, so no server or replica is known to hold the
+//     same baseline, and nothing prevents two callers from rotating the same
+//     old file into two different successors.
+//   - The next policy must be already authorized as the immediate successor of
+//     the old file's authenticated current policy and must continue the caller
+//     pin's full proof chain (root-signed, or an authorized delegated
+//     InviteReaders transition; its carried current proof may be omitted only
+//     under the root-signed first-successor rule above, and still only when
+//     the omitted sequence is the caller pin's own).
+//     This function creates no policy, invitation, device key, device-key
+//     generation, restore root or delegation, and it does not implement an
+//     invitation, pairing, recovery or generic rekey workflow.
 //   - It recovers no old plaintext beyond the KDBX content the caller can
 //     already open, and it cannot recall or revoke an old VUK a removed device
 //     already learned. Rotation is performed by a device that stays
 //     authorized; a device removed by this rotation is rejected by the next
-//     policy and receives no new VUK.
+//     policy and receives no new VUK. It does not erase prior plaintext from
+//     copies a removed device already holds, so it is not complete revocation.
 //   - It does not bump generation counters, timestamps or backend revisions,
 //     and it is not a sync protocol.
 //
 // Errors are the unchanged structural and verification errors of the old
-// file, the unchanged error of verifyPolicyChain for the next draft,
+// file, the unchanged error of verifyPolicyChain for the next draft from the
+// original caller checkpoint or from the old-current checkpoint (whichever
+// fails first, caller pin first), CodePolicyCheckpointFailed at "" for a next
+// policy that is not the immediate successor of the old current policy,
 // CodeAuthorSigningKeyMismatch for the author key, invalid_value at
 // the naming path for continuation and source-device failures, the unchanged
-// errors of the authenticated open, a crypto/rand operational error, and the
-// unchanged error of SealAuthenticatedFile. Every error returns nil, nil.
+// errors of the authenticated open, a crypto/rand operational error, the
+// unchanged error of SealAuthenticatedFile, and the unchanged errors of
+// ParseFile and VerifyPolicyCheckpoint under the caller checkpoint for the
+// sealed output. Every error returns nil, nil.
 func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, sourceDeviceID string, sourceIdentity *age.X25519Identity, nextDraft *File, authorPrivateKey ed25519.PrivateKey) (newEncoded []byte, newVUK []byte, err error) {
 	// 1. Basic inputs.
 	if nextDraft == nil || checkpoint == nil || sourceIdentity == nil || sourceIdentity.Recipient() == nil ||
@@ -227,9 +327,20 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 		return nil, nil, err
 	}
 
-	// 3. The next policy chain under the same pin, and its author and source
-	// device in the authenticated next policy.
-	nextCurrent, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, checkpoint)
+	// 3. The next policy chain, authenticated twice: from the original caller
+	// pin, so the returned file stays openable under exactly the pin the
+	// caller supplied, and from the old file's own authenticated current
+	// policy, so the successor is bound to the state the old file attests.
+	// Both must pass before anything is decrypted, generated or sealed. The
+	// old-current check returns nextCurrent, whose author and source device
+	// are resolved below; the two checks must agree on the current policy,
+	// because each ends at nextDraft.Header.PolicySeq and PolicyDigest and
+	// step 4 binds that policy to the old current one.
+	oldCurrentPin := oldCurrentCheckpoint(oldFile, checkpoint)
+	if _, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, checkpoint); err != nil {
+		return nil, nil, err
+	}
+	nextCurrent, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, oldCurrentPin)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -272,6 +383,16 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 	if h.OpID == old.OpID {
 		return nil, nil, Err("op_id", CodeInvalidValue)
 	}
+	// The policy must be the immediate successor of the policy that is
+	// authenticated in the old file. Step 3 already authenticated the next
+	// chain from an anchor at old.Header.PolicySeq with exactly
+	// old.Header.PolicyDigest, so a verified chain whose proofs continue after
+	// that sequence necessarily ends at old+1 naming that digest. This guard
+	// states the requirement explicitly and rejects an overflow.
+	if old.PolicySeq == math.MaxUint64 || h.PolicySeq != old.PolicySeq+1 ||
+		!bytes.Equal(nextCurrent.PrevPolicyDigest, old.PolicyDigest) {
+		return nil, nil, Err("", CodePolicyCheckpointFailed)
+	}
 
 	// 5. The successor epoch must be sealable. ContentEncoding was already
 	// constrained in step 1, so no successor with a foreign encoding reaches
@@ -306,9 +427,25 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 	}
 
 	// 8. The complete next-epoch baseline: fresh CEK, fresh per-device
-	// envelopes from the authenticated next policy, fresh signature.
+	// envelopes from the authenticated next policy, fresh signature. The seal
+	// authenticates the same next chain from the original caller checkpoint,
+	// so the returned file is independently openable under exactly the pin
+	// the caller supplied, not only under the internal old-current one.
 	encoded, err := SealAuthenticatedFile(nextDraft, db, checkpoint, freshVUK, authorPrivateKey)
 	if err != nil {
+		return nil, nil, err
+	}
+
+	// 9. The encoded output must parse and verify as one complete file under
+	// the original caller pin, so success never returns bytes the caller's
+	// own checkpoint would reject. The parsed file is not returned. These
+	// error paths still have err set and newEncoded nil, so the deferred clear
+	// of freshVUK above fires exactly as on every other error path.
+	parsed, err := ParseFile(encoded)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := VerifyPolicyCheckpoint(parsed, checkpoint); err != nil {
 		return nil, nil, err
 	}
 	return encoded, freshVUK, nil
