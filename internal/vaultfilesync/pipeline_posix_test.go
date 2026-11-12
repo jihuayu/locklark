@@ -248,14 +248,21 @@ func pipelinePublish(t *testing.T, f *fixture, j *vaultfilejournal.Journal, c Me
 	if err != nil {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
-	base, reads := pipelinePull(t, f)
-	if reads != 1 || base.rev != r.rev || !bytes.Equal(base.bytes, r.bytes) || base.rev != c.RemoteRevision {
-		t.Fatalf("current remote is not the exact candidate R at Rrev (reads=%d)", reads)
-	}
-	anyPull := func(context.Context, []byte, vaultfilebackend.Revision) error { return nil }
-	pulled, err := vaultfilepublish.ReadPulled(context.Background(), f.remote, remoteName, anyPull)
+	// Exactly one authenticated pull of the current remote. That same
+	// verified Pulled is compared with the intended R/Rrev and the candidate,
+	// then handed to ResumePrepared; it is never re-read into a second,
+	// unverified value.
+	reads := f.remote.readCount()
+	pulled, err := vaultfilepublish.ReadPulled(context.Background(), f.remote, remoteName, pipelinePullVerifier(t, f))
 	if err != nil {
 		t.Fatalf("ReadPulled: %v", err)
+	}
+	if got := f.remote.readCount() - reads; got != 1 {
+		t.Fatalf("authenticated pull of the current remote performed %d backend reads, want 1", got)
+	}
+	if pulled.Revision() != r.rev || !bytes.Equal(pulled.Bytes(), r.bytes) ||
+		pulled.Revision() != c.RemoteRevision || !bytes.Equal(pulled.Bytes(), c.RemoteBytes) {
+		t.Fatal("authenticated pull is not the exact candidate R at Rrev")
 	}
 	if err := coord.ResumePrepared(context.Background(), pulled, pipelinePullVerifier(t, f)); err != nil {
 		t.Fatalf("ResumePrepared: %v", err)
