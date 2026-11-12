@@ -115,6 +115,47 @@ class StatusDiagnosticTests(unittest.TestCase):
             self.assertNotIn(TITLE, text)
         self.assertEqual(fake.requests.count("AXChildren"), 2)
 
+    def test_unsupported_description_is_an_absent_label(self):
+        first = element("AXStaticText", AXDescription=macos.STATUS_TEXT[0][1])
+        second = element("AXStaticText", AXDescription=macos.STATUS_TEXT[1][1])
+        root = element("AXWindow", [first, second], AXTitle=TITLE)
+        status, diagnostic, fake = self.probe(
+            root, {(second, "AXDescription"): (UNSUPPORTED, None)})
+        self.assertIsNone(diagnostic)
+        self.assertEqual(status, {"available": True, "generic_unlock_error": True,
+                                  "secret_key_format_error": False, "processing": False})
+        self.assertEqual(fake.requests.count("AXDescription"), 2)
+        self.assertNotIn("AXValue", fake.requests)
+
+    def test_unsupported_description_on_every_static_text_keeps_walk(self):
+        leaf = element("AXStaticText", AXDescription="ignored")
+        root = element("AXWindow", [leaf], AXTitle=TITLE)
+        status, diagnostic, fake = self.probe(root, {(leaf, "AXDescription"): (UNSUPPORTED, None)})
+        self.assertIsNone(diagnostic)
+        self.assertEqual(status, {"available": True, "generic_unlock_error": False,
+                                  "secret_key_format_error": False, "processing": False})
+        self.assertEqual(fake.requests.count("AXChildren"), 2)
+
+    def test_other_description_errors_still_refuse(self):
+        leaf = element("AXStaticText", AXDescription=macos.STATUS_TEXT[2][1])
+        root = element("AXWindow", [leaf], AXTitle=TITLE)
+        for reply in ((-25204, None), (UNKNOWN, None), (-25206, None), (True, None)):
+            with self.subTest(reply=reply):
+                status, diagnostic, _ = self.probe(root, {(leaf, "AXDescription"): reply})
+                self.assertEqual(status, macos._empty_status())
+                self.assertEqual(diagnostic["operation"], "status-walk")
+                self.assertEqual(diagnostic["attribute"], "AXDescription")
+
+    def test_unsupported_is_not_accepted_for_role_or_other_errors(self):
+        leaf = element("AXStaticText", AXDescription=macos.STATUS_TEXT[2][1])
+        root = element("AXWindow", [leaf], AXTitle=TITLE)
+        for node, name in ((root, "AXRole"), (leaf, "AXRole"), (leaf, "AXChildren")):
+            with self.subTest(attribute=name):
+                status, diagnostic, _ = self.probe(root, {(node, name): (UNSUPPORTED, None)})
+                self.assertEqual(status, macos._empty_status())
+                self.assertEqual(diagnostic, {"operation": "status-walk", "attribute": name,
+                                              "error": UNSUPPORTED})
+
     def test_sanitizer_allowlists_codes_and_keeps_four_field_lines(self):
         record = lambda attribute, error: contract.ax_diagnostic(contract.ContractError(
             "a11y-query", {"operation": "status-walk", "attribute": attribute,

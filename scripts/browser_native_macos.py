@@ -281,6 +281,13 @@ def _empty_status():
 # the empty AXChildren attribute, which must not turn the whole diagnostic off.
 _STATUS_NO_VALUE = object()
 _STATUS_NO_VALUE_ATTRIBUTES = frozenset(("AXDescription", "AXChildren"))
+# The built-in AXError kAXErrorAttributeUnsupported (-25205) is also accepted
+# for AXDescription only: a static text whose accessibility label is simply not
+# exposed answers unsupported rather than no-value, and is read as an absent
+# label.  Any other AXDescription error still refuses, and AXRole/AXChildren
+# never accept it.
+AX_ERROR_ATTRIBUTE_UNSUPPORTED_EXPECTED = -25205
+_STATUS_UNSUPPORTED_ATTRIBUTES = frozenset(("AXDescription",))
 
 
 def _status_shape(value):
@@ -479,6 +486,9 @@ class QuartzApi:
         AXDescription/AXChildren may answer no-value (safe absent label / leaf);
         every other status - including ``False``, a malformed tuple, a raised
         call, a success carrying ``None``, or no-value on AXRole - refuses.
+        AXDescription may also answer the built-in kAXErrorAttributeUnsupported
+        (-25205), which is likewise read as an absent label; AXRole and
+        AXChildren do not accept it and every other status still refuses.
         """
         status = _ax_status(self.ax)
         if status is None:
@@ -499,6 +509,9 @@ class QuartzApi:
                 raise _status_query(name, code)
             return value
         if code == status[0] and name in _STATUS_NO_VALUE_ATTRIBUTES:
+            return _STATUS_NO_VALUE
+        if (code == AX_ERROR_ATTRIBUTE_UNSUPPORTED_EXPECTED
+                and name in _STATUS_UNSUPPORTED_ATTRIBUTES):
             return _STATUS_NO_VALUE
         raise _status_query(name, code)
 
@@ -659,8 +672,9 @@ class QuartzApi:
 
         Only AXRole, AXChildren and AXDescription are read here (and never
         AXValue or AXSelectedText), through the strict status-only reader: a
-        failed query refuses, a documented AXDescription no-value is a safe
-        absent label, and a documented AXChildren no-value is a leaf (an
+        failed query refuses, a documented AXDescription no-value (or the
+        built-in kAXErrorAttributeUnsupported) is a safe absent label, and a
+        documented AXChildren no-value is a leaf (an
         element without children, never a read failure). The AX
         spelling matches the local SDK, where
         NSAccessibilityElement.accessibilityLabel is AXDescription (MyGo 0.7.4
