@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -342,6 +344,58 @@ func writeBodyResponse(w http.ResponseWriter, body []byte, declared int64) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// cancelAtEOFBody is a deterministic response body for the cancellation
+// regression: it yields short bytes first, then cancels the real request
+// context and returns io.EOF on the next Read. The body therefore ends
+// normally, with no read error, just as a context cancelled at the end of a
+// short body does.
+type cancelAtEOFBody struct {
+	cancel context.CancelFunc
+	data   []byte
+	offset int
+	reads  int
+}
+
+func (b *cancelAtEOFBody) Read(p []byte) (int, error) {
+	b.reads++
+	if b.reads == 1 {
+		n := copy(p, b.data)
+		b.offset = n
+		return n, nil
+	}
+	b.cancel()
+	return 0, io.EOF
+}
+
+func (b *cancelAtEOFBody) Close() error { return nil }
+
+func TestReadContentResponseCancelledAtEOFIsDeniedNotCorrupt(t *testing.T) {
+	// The body is genuinely truncated: fewer bytes are yielded than the
+	// metadata size, so without the cancellation check the length mismatch
+	// would be classified as ErrCorrupt.
+	const expectedSize = 16
+	data := []byte("shortbod")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	response := &http.Response{
+		StatusCode:    http.StatusOK,
+		ContentLength: -1,
+		Body:          &cancelAtEOFBody{cancel: cancel, data: data},
+	}
+
+	got, err := readContentResponse(ctx, response, expectedSize)
+	if got != nil {
+		t.Fatalf("bytes = %d, want nil on cancellation", len(got))
+	}
+	assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
+	if errors.Is(err, vaultfilebackend.ErrCorrupt) {
+		t.Errorf("cancellation was classified as corrupt: %v", err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Errorf("request context was not cancelled: %v", ctx.Err())
+	}
 }
 
 func assertErrorIs(t *testing.T, err error, want ...error) {
@@ -983,8 +1037,14 @@ func TestFetchCandidateHonoursCancellation(t *testing.T) {
 			<-started
 			cancel()
 		}()
-		_, err := f.reader(t, nil).FetchCandidate(ctx)
+		candidate, err := f.reader(t, nil).FetchCandidate(ctx)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
+		if errors.Is(err, vaultfilebackend.ErrCorrupt) {
+			t.Errorf("cancellation was classified as corrupt: %v", err)
+		}
+		if !reflect.DeepEqual(candidate, FetchCandidate{}) {
+			t.Errorf("candidate = %+v, want the zero value on cancellation", candidate)
+		}
 	})
 }
 

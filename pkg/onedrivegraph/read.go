@@ -437,6 +437,12 @@ func readContentResponse(ctx context.Context, resp *http.Response, expectedSize 
 		}
 		return nil, fmt.Errorf("%w: content body could not be read", vaultfilebackend.ErrCorrupt)
 	}
+	// A context cancelled at the end of a short body makes the next read
+	// return io.EOF. That is cancellation, not a malformed body, so it is
+	// checked before the length is classified.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, deniedContext(ctxErr)
+	}
 	if int64(len(data)) != expectedSize {
 		return nil, fmt.Errorf("%w: content length does not match metadata", vaultfilebackend.ErrCorrupt)
 	}
