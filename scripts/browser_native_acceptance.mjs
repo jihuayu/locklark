@@ -28,6 +28,16 @@ import {
   PrivateClipboard,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
+import {
+  EDGE_BACKGROUND_URL,
+  EDGE_EXTENSION_ID,
+  EDGE_INSTALL_PASS,
+  EdgeInstallError,
+  assertEdgeLaunchArguments,
+  installEdgeExtensionThroughManager,
+  manifestExtensionId,
+} from "./browser_edge_install.mjs";
+
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // Explicit opt-in: a QuickFill=false action row opens one persistent route tab
 // and its native per-operation approval, instead of the long default journeys.
@@ -51,6 +61,7 @@ function routeModeCompatible() {
     off("LOCKLARK_TEST_CHECKOUT_FRAMES") &&
     off("LOCKLARK_TEST_BROWSER_PARITY") &&
     off("LOCKLARK_TEST_FAILURE_STAGE") &&
+    off("LOCKLARK_TEST_EDGE_INSTALL_ONLY") &&
     (process.env.LOCKLARK_TEST_BROWSER === undefined ||
       process.env.LOCKLARK_TEST_BROWSER === "chromium")
   );
@@ -73,11 +84,40 @@ const register = process.env.LOCKLARK_BROWSER_REGISTER
   : null;
 const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chromium";
 const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
+// Explicit external install-only mode, not a product test switch: real Edge
+// installs the built package through the visible edge://extensions manager,
+// proves the fixed extension ID and its background.js worker, and stops
+// before any pairing. Every other mode is unchanged.
+const edgeInstallOnly = process.env.LOCKLARK_TEST_EDGE_INSTALL_ONLY === "1";
+// Fixed install-only success signal: it carries no page text, title, path,
+// PID or driver output and is recognised only by identity.
+const EDGE_INSTALL_COMPLETE = Object.freeze({ edgeInstallComplete: true });
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
 if (routeDetailRead) {
   assert(routeModeCompatible(), "Route detail mode is incompatible");
   assert(browserName === "chromium", "Route detail mode requires Chromium");
+}
+if (edgeInstallOnly) {
+  assert(browserName === "edge", "Edge install-only requires LOCKLARK_TEST_BROWSER=edge");
+  // A real value would select another (full) journey; workflows may
+  // materialize optional variables as "" or "0".
+  for (const name of [
+    "LOCKLARK_TEST_CHECKOUT_FRAMES",
+    "LOCKLARK_TEST_SHARED_CLIPBOARD",
+    "LOCKLARK_TEST_POPUP_VAULT",
+    "LOCKLARK_TEST_FAILURE_STAGE",
+    "LOCKLARK_TEST_BROWSER_PARITY",
+    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
+    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
+    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
+    "LOCKLARK_TEST_OTHER_PROVIDER",
+    "LOCKLARK_TEST_PASSKEY_SIGNALS",
+  ])
+    assert(
+      [undefined, "", "0"].includes(process.env[name]),
+      "Edge install-only cannot be combined with another acceptance mode",
+    );
 }
 if (register)
   assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
@@ -625,9 +665,19 @@ function routePasswordRowProbe(password) {
     return {masked:!!value&&/^[\u2022\u25cf*]+$/.test(String(value.textContent||"").trim()),leaked:!!document.body&&String(document.body.innerText).includes(${JSON.stringify(password)})};
   })()`;
 }
+// Install-only exposes only these fixed labels; never a selector, title, path,
+// PID or raw stage string.
+const EDGE_INSTALL_STAGES = new Set([
+  "fixture", "edge-launch", "edge-manager", "edge-developer-mode",
+  "edge-load-unpacked", "edge-chooser", "edge-activate", "edge-installed",
+  "edge-service-worker", "continue",
+]);
 function phase(value) {
   stage = value;
-  console.log("Native browser stage: " + value);
+  console.log(
+    "Native browser stage: " +
+      (edgeInstallOnly && !EDGE_INSTALL_STAGES.has(value) ? "edge-install" : value),
+  );
 }
 const key = join(state, "tls.key"),
   cert = join(state, "tls.crt");
@@ -709,6 +759,7 @@ async function eventually(check, message, limit = 10000) {
   }
   throw Error(message);
 }
+if (edgeInstallOnly) phase("fixture");
 try {
   // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
@@ -746,27 +797,81 @@ try {
     cwd: root,
   });
   const extension = join(root, "browser-extension/dist/chromium");
+  // Edge ignores the deprecated extension switches: install-only never passes
+  // them and loads the package only through the visible manager UI.
+  if (edgeInstallOnly)
+    assert.equal(manifestExtensionId(extension), EDGE_EXTENSION_ID,
+      "The built package must carry the fixed Locklark identity");
+  const launchArguments = [
+    "--no-sandbox",
+    ...(edgeInstallOnly
+      ? []
+      : ["--disable-extensions-except=" + extension, "--load-extension=" + extension]),
+    checkoutFrames
+      ? "--host-resolver-rules=MAP login.locklark.test 127.0.0.1,MAP checkout.locklark.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
+      : "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
+    "--no-proxy-server",
+    "--ignore-certificate-errors-spki-list=" + spki,
+    "--window-size=1200,850",
+    "--remote-debugging-port=0",
+  ];
+  if (edgeInstallOnly) {
+    assertEdgeLaunchArguments(launchArguments);
+    phase("edge-launch");
+  }
   browser = await chromium.launchPersistentContext(profile, {
     headless: false,
+    // Playwright injects --disable-extensions, which disables the extension
+    // system itself. Install-only drops that one default so the visible
+    // manager UI can install the package; no load switch is added.
+    ...(edgeInstallOnly ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
     channel: browserName === "edge" ? undefined : "chromium",
     ...(browserExecutable ? { executablePath: browserExecutable } : {}),
-    viewport: { width: 1100, height: 700 },
+    // Edge 157 lays the manager view out at zero size when Playwright
+    // overrides the viewport, so install-only uses the real window size.
+    ...(edgeInstallOnly ? {} : { viewport: { width: 1100, height: 700 } }),
     ...(sharedEnvironment ? { env: sharedEnvironment } : {}),
-    args: [
-      "--no-sandbox",
-      "--disable-extensions-except=" + extension,
-      "--load-extension=" + extension,
-      checkoutFrames
-        ? "--host-resolver-rules=MAP login.locklark.test 127.0.0.1,MAP checkout.locklark.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
-        : "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
-      "--no-proxy-server",
-      "--ignore-certificate-errors-spki-list=" + spki,
-      "--window-size=1200,850",
-      "--remote-debugging-port=0",
-    ],
+    args: launchArguments,
   });
   browser.on("console", (msg) => logs.push(msg.text()));
   const page = browser.pages()[0] || (await browser.newPage());
+  if (edgeInstallOnly) {
+    // Visible manager UI only. The driver waits for the owned native chooser
+    // before any XTest input; failures stay fixed classes.
+    let identity = null;
+    try {
+      identity = await installEdgeExtensionThroughManager({
+        browser,
+        page,
+        extensionDir: extension,
+        edgeExecutable: browserExecutable,
+        profile,
+        origin,
+        inputRequest: (request) => JSON.parse(
+          execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
+            input: JSON.stringify(request),
+            env,
+          }).toString(),
+        ),
+        openPopup,
+        eventually,
+        phase,
+      });
+    } catch (error) {
+      throw error instanceof EdgeInstallError
+        ? error
+        : new EdgeInstallError(String(stage));
+    }
+    // Manifest-derived ID and exactly the actual background.js worker.
+    assert.deepEqual(identity, {
+      extensionId: EDGE_EXTENSION_ID,
+      workerUrl: EDGE_BACKGROUND_URL,
+    }, "edge-service-worker");
+    assert.equal(browser.serviceWorkers().length, 1, "edge-service-worker");
+    // The ordinary journey never starts; the fixed success signal passes
+    // through the failure handler (no diagnostic) into the existing finally.
+    throw EDGE_INSTALL_COMPLETE;
+  }
   await page.goto(origin + "/login");
   const worker =
     browser.serviceWorkers()[0] ||
@@ -794,6 +899,9 @@ try {
       }).toString(),
     );
   }
+  // Raw JSON to the guarded X11 driver, for requests that are not native
+  // accessibility actions (the Edge directory chooser, which stays a typed
+  // XTest input). The single action array goes to the driver's top level.
   nativeInput = input;
   // Browser-tab keys are real XTest input to the exact Chromium window. The
   // realpath comes from the launched browser, never from an environment
@@ -2122,217 +2230,227 @@ try {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
-  // The route page contributes only its fixed view/status enums and booleans.
-  const safeReasons = [
-    "Action popup did not open",
-    "Previous action popup did not close",
-    "Action popup is not visible and focused",
-    "AbortSignal not honored",
-    "Popup CDP failed",
-    "Popup CDP closed",
-    "Popup CDP timed out",
-    "Popup control must be available",
-    "Inline control unavailable",
-    "Synthetic secret found in browser console output",
-    "Popup inspection failed",
-    "Popup CDP connection failed",
-    "Popup CDP connection timed out",
-    "Action popup must be unique",
-    "Shared native clipboard acceptance failed",
-    "Shared clipboard mode must be requested explicitly",
-    "Shared desktop host must be an absolute executable path",
-    "Synthetic fixture vault path is required",
-    "Synthetic fixture password is required",
-    "Checkout card filter unavailable",
-    "Synthetic checkout card missing from the vault",
-    "Checkout card revision mismatch",
-    "Checkout card category mismatch",
-    "Synthetic checkout card detail did not open",
-    "Checkout form picker control unavailable",
-    "Checkout form picker label missing",
-    "Checkout origin picker missing",
-    "Checkout origin picker is incomplete",
-    "Expected exactly one explicit checkout child origin",
-    "Checkout popup is not connected",
-    "Checkout card frame did not load",
-    "Top checkout card fields must be visible",
-    "Checkout card frame fields must be visible",
-    "Approved checkout fill did not reach the child frame",
-    "Checkout picker cancel did not close",
-    "Checkout native approval must not be available",
-    "Cross-site checkout forms must stay blank",
-    "Cross-site checkout refusal did not finish",
-    "Cross-site checkout received a value without approval",
-    "Excluded checkout origin must not be auto-selected",
-    "Excluded cross-site checkout wrote a value",
-    "Checkout sandboxed child must be excluded from the picker",
-    "Sandboxed checkout picker request did not finish",
-    "Sandboxed checkout forms must stay blank",
-    "Sandboxed checkout received a value without approval",
-    "Checkout child document identity missing",
-    "Checkout child document was not replaced",
-    "Changed checkout document did not finish",
-    "Changed checkout document received a value",
-    "Native checkout review must be visible before lock",
-    "Checkout forms changed before native lock",
-    "Native checkout review still available after lock",
-    "Native checkout review did not finish after lock",
-    "Locked host still allowed matching",
-    "Lock status missing",
-    "Locked checkout approval received a value",
-    "Route detail mode is incompatible",
-    "Route detail mode requires Chromium",
-    "Paired popup not ready",
-    "Exact-origin match missing",
-    "Vault rows missing",
-    "Exact synthetic vault row missing",
-    "Synthetic seed item identity missing",
-    "Synthetic fixture title missing",
-    "Route page did not open",
-    "Route page must be unique",
-    "Action popup stayed open",
-    "Action popup target stayed open",
-    "Unexpected page opened",
-    "Route page did not load",
-    "Route detail did not render",
-    "Native route approval label missing",
-    "Route detail did not survive native approval",
-    "Route target was replaced",
-    "Action popup reopened",
-    "route-detail-view-missing",
-    "route-detail-title-mismatch",
-    "route-concealed-control-missing",
-    "route-password-rendered",
-    "Route page did not return to the foreground",
-    "Route password copy control missing",
-    "Route password is not concealed",
-    "Route displayed the password",
-    "Native field disclosure did not appear",
-    "Native field disclosure did not follow its review",
-    "Route copy feedback missing",
-    "OS clipboard did not receive the approved field",
-    "Original source tab missing",
-    "Route tab is not the active tab",
-    "Source tab did not become visible",
-    "Background revocation did not wipe the route detail",
-    "Route page was replaced",
-    "Route page did not return to the foreground",
-    "Returned route page kept its detail",
-    "Stale route fragment did not fail closed",
-    "Stale route page rendered a copy control",
-    "Native no-prompt window unavailable",
-    "Native route prompt is still present",
-    "Stale route detail opened after reload",
-    "Mouse wrapper dispatched input",
-  ];
-  const report = {
-    reason: safeReasons.includes(error?.message)
-      ? error.message
-      : "unclassified acceptance failure",
-    frames:
-      typeof error?.stack === "string"
-        ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
-        : [],
-    stage,
-    // Latest fixed-enum route-page observation from the bounded native-label
-    // wait, plus its bounded state-transition history where consecutive
-    // entries differ. Both only ever contain the four sanitized fields.
-    ...(routeDetailRead
-      ? {
-          routePage: sanitizeRouteObservation(lastRouteObservation),
-          routeHistory: routeObservationHistory.map(sanitizeRouteObservation),
-          // Present only once the post-popup-close snapshot was taken, and only
-          // for route-detail failures; same four sanitized fields.
-          ...(routeAfterPopupClose
-            ? {
-                routeAfterPopupClose: sanitizeRouteObservation(
-                  routeAfterPopupClose,
-                ),
-              }
-            : {}),
-          // Present only once the post-popup-close target checkpoint was read;
-          // two fixed booleans, never an id, URL, fragment, token or count.
-          ...(routeTargetAfterPopupClose
-            ? {
-                routeTargetAfterPopupClose: {
-                  routeTargetExists:
-                    routeTargetAfterPopupClose.routeTargetExists === true,
-                  routeTargetStillRoute:
-                    routeTargetAfterPopupClose.routeTargetStillRoute === true,
-                },
-              }
-            : {}),
-          // Present only once the visible-DOM status trace recorded at least
-          // one entry: fixed channel/value enums only, at most eight entries.
-          ...(routeStatusTrace
-            ? { routeStatusTrace: sanitizeRouteStatusTrace(routeStatusTrace) }
-            : {}),
-          // Present only once the direct route-target observer connected or
-          // saw a main-frame event; fixed booleans and capped per-kind counts
-          // only, never an id, URL, fragment, token, text, value or protocol
-          // payload.
-          ...(routeLifecycleObservation
-            ? {
-                routeTargetLifecycle: sanitizeRouteLifecycle(
-                  routeLifecycleObservation,
-                ),
-              }
-            : {}),
-          // Present only once the physical mouse wrapper was run against the
-          // absent Copy selector: one fixed boolean.
-          ...(routeMouseRejected
-            ? {
-                routeMouseRejected: {
-                  rejected: routeMouseRejected.rejected === true,
-                },
-              }
-            : {}),
-        }
-      : {}),
-    popup: { available: false },
-    native: { available: false },
-  };
-  if (lastPopup) {
-    try {
-      report.popup = {
-        available: true,
-        status: popupStatusKind(await lastPopup.text("#status")),
-        refreshDisabled: await lastPopup.disabled("#refresh"),
-        candidates: await lastPopup.count("#candidates button"),
-      };
-    } catch {}
-  }
-  try {
-    if (lastPopup && browserScreenshotsAllowed(stage)) {
-      const text = String((await lastPopup.text("body")) || "");
-      if (!privacyValues.some((value) => text.includes(value)))
-        await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
+  // Install-only success: no diagnostic is written; finally still closes the
+  // browser, checks private artifacts and scans controller output.
+  if (!(edgeInstallOnly && error === EDGE_INSTALL_COMPLETE)) {
+    // The route page contributes only its fixed view/status enums and booleans.
+    const safeReasons = [
+      "Action popup did not open",
+      "Previous action popup did not close",
+      "Action popup is not visible and focused",
+      "AbortSignal not honored",
+      "Popup CDP failed",
+      "Popup CDP closed",
+      "Popup CDP timed out",
+      "Popup control must be available",
+      "Inline control unavailable",
+      "Synthetic secret found in browser console output",
+      "Popup inspection failed",
+      "Popup CDP connection failed",
+      "Popup CDP connection timed out",
+      "Action popup must be unique",
+      "Shared native clipboard acceptance failed",
+      "Shared clipboard mode must be requested explicitly",
+      "Shared desktop host must be an absolute executable path",
+      "Synthetic fixture vault path is required",
+      "Synthetic fixture password is required",
+      "Checkout card filter unavailable",
+      "Synthetic checkout card missing from the vault",
+      "Checkout card revision mismatch",
+      "Checkout card category mismatch",
+      "Synthetic checkout card detail did not open",
+      "Checkout form picker control unavailable",
+      "Checkout form picker label missing",
+      "Checkout origin picker missing",
+      "Checkout origin picker is incomplete",
+      "Expected exactly one explicit checkout child origin",
+      "Checkout popup is not connected",
+      "Checkout card frame did not load",
+      "Top checkout card fields must be visible",
+      "Checkout card frame fields must be visible",
+      "Approved checkout fill did not reach the child frame",
+      "Checkout picker cancel did not close",
+      "Checkout native approval must not be available",
+      "Cross-site checkout forms must stay blank",
+      "Cross-site checkout refusal did not finish",
+      "Cross-site checkout received a value without approval",
+      "Excluded checkout origin must not be auto-selected",
+      "Excluded cross-site checkout wrote a value",
+      "Checkout sandboxed child must be excluded from the picker",
+      "Sandboxed checkout picker request did not finish",
+      "Sandboxed checkout forms must stay blank",
+      "Sandboxed checkout received a value without approval",
+      "Checkout child document identity missing",
+      "Checkout child document was not replaced",
+      "Changed checkout document did not finish",
+      "Changed checkout document received a value",
+      "Native checkout review must be visible before lock",
+      "Checkout forms changed before native lock",
+      "Native checkout review still available after lock",
+      "Native checkout review did not finish after lock",
+      "Locked host still allowed matching",
+      "Lock status missing",
+      "Locked checkout approval received a value",
+      "Route detail mode is incompatible",
+      "Route detail mode requires Chromium",
+      "Paired popup not ready",
+      "Exact-origin match missing",
+      "Vault rows missing",
+      "Exact synthetic vault row missing",
+      "Synthetic seed item identity missing",
+      "Synthetic fixture title missing",
+      "Route page did not open",
+      "Route page must be unique",
+      "Action popup stayed open",
+      "Action popup target stayed open",
+      "Unexpected page opened",
+      "Route page did not load",
+      "Route detail did not render",
+      "Native route approval label missing",
+      "Route detail did not survive native approval",
+      "Route target was replaced",
+      "Action popup reopened",
+      "route-detail-view-missing",
+      "route-detail-title-mismatch",
+      "route-concealed-control-missing",
+      "route-password-rendered",
+      "Route page did not return to the foreground",
+      "Route password copy control missing",
+      "Route password is not concealed",
+      "Route displayed the password",
+      "Native field disclosure did not appear",
+      "Native field disclosure did not follow its review",
+      "Route copy feedback missing",
+      "OS clipboard did not receive the approved field",
+      "Original source tab missing",
+      "Route tab is not the active tab",
+      "Source tab did not become visible",
+      "Background revocation did not wipe the route detail",
+      "Route page was replaced",
+      "Route page did not return to the foreground",
+      "Returned route page kept its detail",
+      "Stale route fragment did not fail closed",
+      "Stale route page rendered a copy control",
+      "Native no-prompt window unavailable",
+      "Native route prompt is still present",
+      "Stale route detail opened after reload",
+      "Mouse wrapper dispatched input",
+    ];
+    const report = {
+      reason: safeReasons.includes(error?.message)
+        ? error.message
+        : "unclassified acceptance failure",
+      frames:
+        typeof error?.stack === "string"
+          ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
+          : [],
+      stage,
+      // Latest fixed-enum route-page observation from the bounded native-label
+      // wait, plus its bounded state-transition history where consecutive
+      // entries differ. Both only ever contain the four sanitized fields.
+      ...(routeDetailRead
+        ? {
+            routePage: sanitizeRouteObservation(lastRouteObservation),
+            routeHistory: routeObservationHistory.map(sanitizeRouteObservation),
+            // Present only once the post-popup-close snapshot was taken, and only
+            // for route-detail failures; same four sanitized fields.
+            ...(routeAfterPopupClose
+              ? {
+                  routeAfterPopupClose: sanitizeRouteObservation(
+                    routeAfterPopupClose,
+                  ),
+                }
+              : {}),
+            // Present only once the post-popup-close target checkpoint was read;
+            // two fixed booleans, never an id, URL, fragment, token or count.
+            ...(routeTargetAfterPopupClose
+              ? {
+                  routeTargetAfterPopupClose: {
+                    routeTargetExists:
+                      routeTargetAfterPopupClose.routeTargetExists === true,
+                    routeTargetStillRoute:
+                      routeTargetAfterPopupClose.routeTargetStillRoute === true,
+                  },
+                }
+              : {}),
+            // Present only once the visible-DOM status trace recorded at least
+            // one entry: fixed channel/value enums only, at most eight entries.
+            ...(routeStatusTrace
+              ? { routeStatusTrace: sanitizeRouteStatusTrace(routeStatusTrace) }
+              : {}),
+            // Present only once the direct route-target observer connected or
+            // saw a main-frame event; fixed booleans and capped per-kind counts
+            // only, never an id, URL, fragment, token, text, value or protocol
+            // payload.
+            ...(routeLifecycleObservation
+              ? {
+                  routeTargetLifecycle: sanitizeRouteLifecycle(
+                    routeLifecycleObservation,
+                  ),
+                }
+              : {}),
+            // Present only once the physical mouse wrapper was run against the
+            // absent Copy selector: one fixed boolean.
+            ...(routeMouseRejected
+              ? {
+                  routeMouseRejected: {
+                    rejected: routeMouseRejected.rejected === true,
+                  },
+                }
+              : {}),
+          }
+        : {}),
+      popup: { available: false },
+      native: { available: false },
+    };
+    // Edge install-only classifies only through a fixed literal; no page text,
+    // selector error, window title, path, PID or driver output is echoed.
+    if (edgeInstallOnly)
+      report.classification = error instanceof EdgeInstallError
+        ? error.message
+        : "edge-install-unclassified";
+    if (lastPopup) {
+      try {
+        report.popup = {
+          available: true,
+          status: popupStatusKind(await lastPopup.text("#status")),
+          refreshDisabled: await lastPopup.disabled("#refresh"),
+          candidates: await lastPopup.count("#candidates button"),
+        };
+      } catch {}
     }
-  } catch {}
-  if (nativeInput) {
     try {
-      report.native = { available: true, ...nativeInput([], true, true) };
-      if (browserScreenshotsAllowed(stage)) {
-        execFileSync(
-          "import",
-          [
-            "-window",
-            String(report.native.window),
-            join(diagnostics, "failure-native.png"),
-          ],
-          { env, stdio: "ignore" },
-        );
+      if (lastPopup && browserScreenshotsAllowed(stage)) {
+        const text = String((await lastPopup.text("body")) || "");
+        if (!privacyValues.some((value) => text.includes(value)))
+          await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
       }
     } catch {}
+    if (nativeInput) {
+      try {
+        report.native = { available: true, ...nativeInput([], true, true) };
+        if (browserScreenshotsAllowed(stage)) {
+          execFileSync(
+            "import",
+            [
+              "-window",
+              String(report.native.window),
+              join(diagnostics, "failure-native.png"),
+            ],
+            { env, stdio: "ignore" },
+          );
+        }
+      } catch {}
+    }
+    writeFileSync(
+      join(diagnostics, "failure.json"),
+      JSON.stringify(report, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+    console.error("Native browser diagnostic: " + JSON.stringify(report));
+    console.error("Synthetic diagnostic directory: " + diagnostics);
+    throw Error("Native browser acceptance failed at " + stage);
   }
-  writeFileSync(
-    join(diagnostics, "failure.json"),
-    JSON.stringify(report, null, 2) + "\n",
-    { mode: 0o600 },
-  );
-  console.error("Native browser diagnostic: " + JSON.stringify(report));
-  console.error("Synthetic diagnostic directory: " + diagnostics);
-  throw Error("Native browser acceptance failed at " + stage);
 } finally {
   if (browser) await browser.close();
   await new Promise((r) => server.close(r));
@@ -2341,17 +2459,23 @@ try {
     scanController(observedFixture);
   }
 }
-console.log(
-  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
-    : checkoutFrames
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
-    : routeDetailRead
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
-    : process.env.LOCKLARK_TEST_BROWSER_PARITY
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
-    : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
-);
+// Install-only ends here with its own fixed label; the ordinary journeys'
+// labels are never printed in that mode.
+if (edgeInstallOnly) {
+  console.log(EDGE_INSTALL_PASS);
+} else {
+  console.log(
+    process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
+      : checkoutFrames
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
+      : routeDetailRead
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
+      : process.env.LOCKLARK_TEST_BROWSER_PARITY
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
+      : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
+  );
+}
 console.log("Private synthetic artifacts: " + state);
 
 if (observedFixture) scanController(observedFixture);
