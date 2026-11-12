@@ -90,11 +90,11 @@ def _pass_stdout(
     return "\n".join(lines) + "\n"
 
 # Independent of production's own line splitting: a diagnostic is present when
-# ANY stderr line starts with the fixed prefix (Str.splitlines boundaries).
-def _diagnostic_present(stderr: str) -> bool:
+# ANY line of stdout or stderr starts with the fixed prefix (Str.splitlines).
+def _diagnostic_present(stdout: str, stderr: str) -> bool:
     return any(
         line.startswith(support._CHECKOUT_DIAGNOSTIC_PREFIX)
-        for line in str(stderr or "").splitlines()
+        for line in (str(stdout or "") + "\n" + str(stderr or "")).splitlines()
     )
 
 
@@ -492,14 +492,14 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertNotIn("forged-stage", message)
         self.assertNotIn(support.CHECKOUT_PASS_SUMMARY, message)
 
-    def _nonzero(self, stderr: str) -> tuple[dict, str]:
+    def _nonzero(self, stderr: str, stdout: str = "") -> tuple[dict, str]:
         os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
         support._CHECKOUT_JOURNEY_CACHE.clear()
         ctx = self._ctx()
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
-            return_value=(7, "", stderr),
+            return_value=(7, stdout, stderr),
         ):
             with self.assertRaises(AssertionError) as raised:
                 support.checkout_native_acceptance(ctx)
@@ -609,7 +609,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             "wrapperFamily": "unknown",
         }
         for stderr in cases():
-            state = "rejected" if _diagnostic_present(stderr) else "absent"
+            state = "rejected" if _diagnostic_present("", stderr) else "absent"
             with self.subTest(stderr=stderr[:40]):
                 record, message = self._nonzero(stderr)
                 self._assert_no_canary(record, message)
@@ -696,12 +696,12 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             # An oversized prefixed line never leaves the block accepted.
             if oversized_marker(stdout):
                 self.assertEqual(phase, "unknown")
-            # Accepted/rejected/absent must match any-line presence independently.
-            if state == "accepted":
-                self.assertTrue(_diagnostic_present(stderr))
+            # Detection needs no exact state mirror: accepted is present and
+            # rejected is never absent; only a prefix-free capture is absent.
+            if state == "absent":
+                self.assertFalse(_diagnostic_present(stdout, stderr))
             else:
-                self.assertEqual(state, "rejected" if _diagnostic_present(stderr)
-                                 else "absent")
+                self.assertTrue(_diagnostic_present(stdout, stderr))
             with self.subTest(case=stdout[-20:] + stderr[:20]):
                 os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
                 ctx = self._ctx()
@@ -734,6 +734,41 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                     (("fixture", "acceptance-failure", None) if state == "accepted"
                      else ("unclassified", "unclassified", None)),
                 )
+
+    def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
+        prefix = support._CHECKOUT_STARTUP_PREFIX
+        diag = support._CHECKOUT_DIAGNOSTIC_PREFIX
+        last = support._CHECKOUT_STARTUP_PHASES[-2]
+
+        def line(stage):
+            return diag + json.dumps({"stage": stage, "reason": "CANARY-9f3a1c"})
+
+        def expected(stage, kind, state):
+            return {"stage": stage, "kind": kind, "native": None,
+                    "startupPhase": last, "failureRecordState": state,
+                    "wrapperFamily": "unknown", "exit": "exited 7"}
+
+        startup = prefix + last + "\n"
+        accepted = expected("fixture", "acceptance-failure", "accepted")
+        rejected = expected("unclassified", "unclassified", "rejected")
+        # (stdout, stderr, expected fixed record); the same line on either
+        # stream, or a malformed/duplicate/oversized line on either, is held
+        # to the one combined rule.
+        cases = (
+            (startup + line("fixture"), "private body", accepted),
+            (startup, line("fixture"), accepted),
+            (startup + line("fixture"), line("fixture"), rejected),
+            (startup + line("fixture"), diag + "{not json", rejected),
+            (startup + diag + "{not json", line("fixture"), rejected),
+            (startup + line("fixture") + " " * 9000, "", rejected),
+            (startup, line("fixture") + " " * 9000, rejected),
+            (startup, line("fixture") + "\n" + line("native-pair"), rejected),
+        )
+        for stdout, stderr, want in cases:
+            with self.subTest(case=stdout[-40:] + stderr[:20]):
+                record, message = self._nonzero(stderr, stdout)
+                self._assert_no_canary(record, message)
+                self.assertEqual(record, want)
 
     def _cross_site_recorded(self, evidence: dict) -> list[str]:
         case = next(
