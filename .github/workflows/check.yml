@@ -18,12 +18,18 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Build CLI and primary artifacts once
+      - name: Build CLI once before primary artifacts
         timeout-minutes: 10
         run: |
           bin="$RUNNER_TEMP/locklark-bin"
           mkdir -p "$bin"
           go build -trimpath -o "$bin/locklark" ./cmd/locklark
+      - name: Smoke test real CLI before acceptance
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Build remaining primary artifacts once
+        timeout-minutes: 10
+        run: |
+          bin="$RUNNER_TEMP/locklark-bin"
           go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
           go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
           go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
@@ -31,8 +37,6 @@ jobs:
           go build -trimpath -o "$bin/locklark-team-sync" ./cmd/locklark-team-sync
           go build -trimpath -o "$bin/desktop-acceptance-fixture" ./scripts/desktop_acceptance_fixture
           go build -trimpath -o "$bin/browser-acceptance-fixture" ./scripts/browser_acceptance_fixture
-      - name: Smoke test real CLI before acceptance
-        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test smoke failure paths
         run: python3 -m unittest discover -s scripts -p test_cli_smoke.py
       - name: Preserve Linux primary binaries
