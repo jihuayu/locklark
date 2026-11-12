@@ -3,19 +3,24 @@
 One JSON request arrives on stdin; one JSON result is written to stdout. Every
 failure is a single fixed-format line on stderr carrying a fixed error code.
 Requests are never echoed, control values/field text/clipboard are never read,
-and raw exceptions never reach output or argv.
+and raw exceptions never reach output or argv. An inspect result may also carry
+``ax``: only the fixed ``status-walk`` operation, the fixed attribute name and
+the allowlisted AXError integer (or ``other``) of the first failed query.
 
 The platform drivers (browser_native_windows.py, browser_native_macos.py) are
 ordinary external input agents: they observe public window/accessibility
 metadata, then emit ONE physical pointer/keyboard batch through the OS input
 queue. They never use product hooks, accessibility value/invoke patterns or
-approval injection.
+approval injection. A disjoint request form carries no title and no action: it
+only asks the adapter to activate ONE exact (pid, executable) process after its
+own identity proof, and observes no window and emits no input.
 
 Importing this module must not initialise X11, COM, UIA or AppKit. Only the
 existing X11 driver's literal label tuple is imported; that module defines
 constants and classes at import time and opens a display only inside main().
 """
 import json
+import math
 import os
 import re
 import sys
@@ -39,9 +44,15 @@ CONTROL_ROLES = frozenset({"push button", "button", "text", "password text", "en
 # clipboard and invoke accessors are deliberately absent from the protocol.
 WIDGET_FIELDS = ("role", "name", "enabled", "visible", "bounds")
 
+# Optional macOS-only inspect diagnostic. It carries exactly these built-in
+# booleans and no accessibility text; a platform without the optional hook
+# keeps its existing inspect result unchanged.
+STATUS_FIELDS = ("available", "generic_unlock_error",
+                 "secret_key_format_error", "processing")
+
 PLATFORMS = ("linux", "windows", "macos", "unknown")
 ACTIONS = ("setup", "discover", "reference", "label-click", "label-wait",
-           "text-entry", "key", "pointer", "snapshot", "absence")
+           "text-entry", "key", "pointer", "snapshot", "absence", "activate")
 
 MAX_REQUEST_BYTES = 65536
 MAX_ACTIONS = 64
@@ -52,15 +63,27 @@ MAX_CHORD_PARTS = 4
 MAX_WINDOWS = 512
 MAX_CONTROLS = 4096
 MAX_OBSERVATIONS = 240
+MAX_CLICK_CANDIDATES = 9
 CLICK_LIMIT = 100000
 DISCOVER_TIMEOUT = 5.0
 CONTROL_TIMEOUT = 10.0
 POLL = 0.05
 
+# Optional process scope on a NORMAL request: the exact Popen PID of the product
+# this caller launched. When present, every window observation (discovery,
+# absence, re-observation, focus, controls) is restricted to that owned process
+# through the adapter's owned-AX path and never the CoreGraphics inventory.
+SCOPE_KEY = "owned_pid"
 REQUEST_KEYS = frozenset({"title", "title_prefix", "executable", "actions",
                           "inspect", "wait_absent", "preserve_focus"})
 ACTION_KEYS = frozenset({"click_label", "wait_label", "click", "text", "key"})
-ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent"})
+# An absence check may also be scoped to an owned process: it then observes
+# only that process's AX windows. The absence form still forbids actions and
+# inspect, and still requires the exact title and canonical executable.
+ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent", SCOPE_KEY})
+# Activation-only form: exact {pid, executable} and nothing else. It is disjoint
+# from every normal request above and authorises no observation or input.
+ACTIVATION_KEYS = frozenset({"activate_pid", "executable"})
 
 # Fixed code -> fixed message. Nothing here is ever formatted with request data.
 ERROR_MESSAGES = {
@@ -70,6 +93,8 @@ ERROR_MESSAGES = {
     "a11y-tree-limit": "Native accessibility tree limit",
     "a11y-unavailable": "Native accessibility unavailable",
     "absence-invalid": "Exact native-window absence request required",
+    "activation-invalid": "Exact native-process activation request required",
+    "activation-failed": "Native process activation not proved",
     "activation-unsupported": "Native window activation unsupported",
     "action-invalid": "Native acceptance action invalid",
     "action-unsupported": "Native acceptance action unsupported",
@@ -131,6 +156,49 @@ def code_of(error):
     if type(error) is ContractError:
         return error.code
     return "unexpected"
+
+
+# The minimal fixed AX diagnostic of the FIRST failed status-walk query.
+# Callers attach only these three raw fields to an ``a11y-query`` ContractError;
+# ``ax_diagnostic`` copies them solely when each equals a fixed value here, so
+# no query value, label, title, path, element, traceback or message can pass.
+# The operation is always exactly "status-walk"; an attribute outside the walk's
+# three names becomes "other"; the AXError is reported as its fixed integer only
+# when it is an exact built-in int in the known-code table, else as "other".
+AX_OPERATION = "status-walk"
+AX_ATTRIBUTES = ("AXRole", "AXDescription", "AXChildren")
+AX_ERROR_CODES = (
+    0, -25200, -25201, -25202, -25203, -25204, -25205, -25206, -25207,
+    -25208, -25209, -25210, -25211, -25212, -25213, -25214,
+)
+AX_DIAGNOSTIC_OTHER = "other"
+
+
+def _ax_error_code(code):
+    """The exact built-in-int AXError when allowlisted, else "other"."""
+    if type(code) is int and code in AX_ERROR_CODES:
+        return code
+    return AX_DIAGNOSTIC_OTHER
+
+
+def ax_diagnostic(error):
+    """The allowlisted ``{operation, attribute, error}`` of one refusal, else None.
+
+    Only our own ``ContractError`` whose code is ``a11y-query`` is read, and
+    only the fixed values above can be copied out of it.
+    """
+    if type(error) is not ContractError or error.code != "a11y-query":
+        return None
+    guard = getattr(error, "guard", None)
+    if type(guard) is not dict:
+        return None
+    attribute = guard.get("attribute")
+    if guard.get("operation") != AX_OPERATION or not isinstance(attribute, str):
+        return None
+    if attribute not in AX_ATTRIBUTES:
+        attribute = AX_DIAGNOSTIC_OTHER
+    return {"operation": AX_OPERATION, "attribute": attribute,
+            "error": _ax_error_code(guard.get("error"))}
 
 
 def failure_line(error, action="setup", index=-1, platform="unknown"):
@@ -217,6 +285,21 @@ def _action(index, value):
     return action
 
 
+def _activation_plan(document):
+    """Exactly {activate_pid: positive plain int, executable: absolute path}."""
+    if set(document) != ACTIVATION_KEYS:
+        raise ContractError("activation-invalid")
+    pid = document["activate_pid"]
+    if type(pid) is not int or pid <= 0:
+        raise ContractError("activation-invalid")
+    if not _absolute_path(document["executable"]):
+        raise ContractError("executable-invalid")
+    return {"activation": {"pid": pid, "executable": document["executable"]},
+            "title": None, "title_prefix": None, "executable": None, "actions": (),
+            "inspect": False, "wait_absent": False, "preserve_focus": False,
+            "owned_pid": None}
+
+
 def parse_request(raw):
     """Strictly validate one bounded request document; return a normalised plan."""
     if type(raw) is str:
@@ -233,8 +316,15 @@ def parse_request(raw):
         raise ContractError("request-invalid")
     if type(document) is not dict:
         raise ContractError("request-invalid")
-    if [key for key in document if key not in REQUEST_KEYS]:
+    if "activate_pid" in document:
+        return _activation_plan(document)
+    if [key for key in document if key not in REQUEST_KEYS | {SCOPE_KEY}]:
         raise ContractError("request-unknown-key")
+    # An owned-PID scope is validated BEFORE anything else can touch AX.
+    if SCOPE_KEY in document:
+        pid = document[SCOPE_KEY]
+        if type(pid) is not int or pid <= 0:
+            raise ContractError("request-invalid", {"field": SCOPE_KEY})
     plan = {
         "title": None, "title_prefix": None, "executable": None, "actions": [],
         "inspect": False, "wait_absent": False, "preserve_focus": False,
@@ -273,6 +363,13 @@ def parse_request(raw):
         if (plan["title"] is None or plan["executable"] is None or
                 "title_prefix" in document or plan["actions"]):
             raise ContractError("request-invalid", {"field": "inspect"})
+    # A process scope narrows discovery; the exact fixture title and canonical
+    # executable stay mandatory (never waived). An absence check reads every
+    # owned window's title, so it stays the exact-title form too.
+    if SCOPE_KEY in document and (plan["title"] is None
+                                  or plan["executable"] is None):
+        raise ContractError("request-invalid", {"field": SCOPE_KEY})
+    plan["owned_pid"] = document.get(SCOPE_KEY)
     return plan
 
 # --------------------------------------------------------------- observation --
@@ -297,6 +394,12 @@ def evidence_kind(adapter):
     if type(kind) is str and kind in EVIDENCE_KINDS:
         return kind
     raise ContractError("input-unsupported")
+
+
+# Adapters that may offer an exact centre point and, only when that centre is
+# covered by another element, a few exact in-rect alternates. Every other
+# adapter keeps the single integer centre and its strictly refusing hook.
+CANDIDATE_PLATFORMS = frozenset({"macos"})
 PROVISIONAL = frozenset({"control-missing", "control-disabled", "control-hidden"})
 
 
@@ -309,6 +412,14 @@ class Budget:
 
     def __init__(self):
         self.counts = {"windows": 0, "controls": 0, "observations": 0}
+        # Distinct (pid, window id) identities observed so far in this request.
+        # OS int ids dedup on their exact (pid, int) pair. Opaque handles are
+        # RETAINED here and deduped only through the trusted adapter's semantic
+        # identity (``identity_equal``), never through Python hash/``id``: the
+        # strong reference keeps every handle alive for the whole request, so
+        # a recycled ``id()`` can never merge two different windows.
+        self.identities = set()
+        self.opaque_identities = []
 
     def charge(self, kind, amount=1, code="observe-overrun"):
         self.counts["observations"] += 1
@@ -320,6 +431,59 @@ class Budget:
         if self.counts["observations"] > MAX_OBSERVATIONS:
             raise ContractError("observe-overrun", dict(self.counts))
         del code
+
+    def charge_windows(self, windows, adapter=None):
+        """Charge one window snapshot against both hard window limits.
+
+        Each individual snapshot is bounded by MAX_WINDOWS.  Separately, the
+        distinct (pid, window id) identities observed across the request are
+        bounded by MAX_WINDOWS, but an identity already observed is not
+        counted again: fast polling of a stable desktop must not exhaust the
+        shared cap before the discovery timeout.  The ``windows`` count is the
+        larger of the current snapshot size and the distinct identity total,
+        so a genuinely churning set of windows still refuses.
+
+        An OS int id dedups on the exact historical ``(pid, int)`` pair. An
+        opaque handle dedups ONLY through the trusted adapter identity
+        (``identity_equal``, e.g. native ``CFEqual``), so two distinct wrapper
+        objects naming the same OS window count once while genuinely different
+        windows never merge. The ``(pid, handle)`` pairs are retained for the
+        whole request so an unhashable handle can never be recycled into a
+        different window's identity.
+        """
+        size = _size(windows)
+        if size > MAX_WINDOWS:
+            raise ContractError("window-overrun", {"windows": size})
+        self.counts["observations"] += 1
+        for window in windows:
+            pid = window.get("pid") if type(window) is dict else None
+            identity = window_identity(window)
+            if identity is None:
+                continue
+            if identity[0] == "id":
+                self.identities.add((pid, identity[1]))
+            else:
+                self.observe_handle(pid, identity[1], adapter)
+        self.counts["windows"] = max(size, len(self.identities),
+                                     len(self.identities) + len(self.opaque_identities))
+        if self.counts["windows"] > MAX_WINDOWS:
+            raise ContractError("window-overrun", dict(self.counts))
+        if self.counts["observations"] > MAX_OBSERVATIONS:
+            raise ContractError("observe-overrun", dict(self.counts))
+
+    def observe_handle(self, pid, handle, adapter):
+        """Record one opaque ``(pid, handle)`` identity; dedup by trusted equality.
+
+        The handle is stored (retained) whether or not it is new. Two handles
+        are the same window only when the trusted adapter answers an exact
+        ``True`` under the same pid; a different window is a separate identity,
+        and an unprovable verdict (``window-changed``) fails the whole
+        observation closed instead of guessing.
+        """
+        for kept_pid, kept in self.opaque_identities:
+            if kept_pid == pid and identity_equal(adapter, kept, handle):
+                return  # the same window: already counted once
+        self.opaque_identities.append((pid, handle))
 
 
 def canonical_path(value, platform="linux"):
@@ -337,10 +501,132 @@ def same_executable(requested, observed, platform="linux"):
     return left == right
 
 
+def geometry_value(value):
+    """The plain int or finite built-in float this coordinate denotes, else None.
+
+    A plain ``int`` is kept as is.  A genuine built-in ``float`` must be finite;
+    it is preserved exactly so a fractional macOS (CGFloat) coordinate is never
+    truncated into a near match.  The built-in type check is exact: ``bool``,
+    every ``int``/``float`` subclass (whose comparison, addition or conversion
+    overrides could run later in ``rect_within`` or the click paths), strings
+    and non-numeric values are not geometry, and no method on them is called.
+    """
+    kind = type(value)
+    if kind is int:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    return None
+
+
+def _geometry(rect):
+    """The four geometry values of a rectangle dict, else None."""
+    if type(rect) is not dict:
+        return None
+    return tuple(geometry_value(rect.get(key)) for key in ("x", "y", "width", "height"))
+
+
+# ----------------------------------------------------------------- identity ---
+
+def window_identity(window):
+    """Classify a window's ``id``: ``("id", int)``, ``("opaque", handle)`` or None.
+
+    Two identity kinds are accepted for a top-level window:
+
+    * a genuine OS window id: an exact built-in positive ``int`` (Windows HWND,
+      X11 window, and every existing adapter). Its receipts stay ``"0x..."``.
+    * an opaque per-request adapter handle: a real object the TRUSTED adapter
+      produced for this observation (a native AXUIElement, a test object), and
+      never a ``str``/``bytes``/``bool``/number. It is compared ONLY by
+      trusted adapter equality, is never serialized, and is reported in
+      receipts as no window number.
+
+    Anything else - a missing id, ``None``, a float, a string, a bool, a
+    non-positive int - is not an identity and is refused by every caller.
+    """
+    if type(window) is not dict:
+        return None
+    identifier = window.get("id")
+    if type(identifier) is int:
+        return ("id", identifier) if identifier > 0 else None
+    if identifier is None or isinstance(identifier, (str, bytes, bytearray, int, float, bool)):
+        return None
+    return ("opaque", identifier)
+
+
+def identity_equal(adapter, first, second):
+    """The trusted adapter's equality verdict for two handles.
+
+    The adapter owns equality of the objects it produced. It may supply an
+    ``identity_equal(first, second)`` hook (native ``CFEqual`` for AX
+    elements); without one, only the very same object is the same window, so a
+    distinct object with an equal-looking value is never accepted. A hook that
+    raises, is not callable, or answers anything but an exact built-in
+    ``bool`` is not proof: it refuses the fixed ``window-changed`` rather than
+    being read as "different".
+    """
+    equals = getattr(adapter, "identity_equal", None)
+    if equals is None:
+        verdict = first is second
+    else:
+        if not callable(equals):
+            raise ContractError("window-changed")
+        try:
+            verdict = equals(first, second)
+        except ContractError:
+            raise
+        except Exception:
+            raise ContractError("window-changed")
+    if type(verdict) is not bool:
+        raise ContractError("window-changed")
+    return verdict
+
+
+def same_identity(adapter, first, second):
+    """Proof that two handles are the SAME window, or refuse ``window-changed``.
+
+    Used where identity must be proven (re-observation, focus): a trusted
+    ``False`` verdict means the window changed, and every other unprovable
+    verdict refuses too.
+    """
+    if identity_equal(adapter, first, second) is not True:
+        raise ContractError("window-changed")
+    return True
+
+
+def _receipt_window(identity):
+    """The receipt window field: ``"0x..."`` for an OS id, ``None`` for a handle."""
+    return hex(identity[1]) if identity[0] == "id" else None
+
+
 def rect_positive(rect):
-    return (type(rect) is dict and
-            all(type(rect.get(key)) is int for key in ("x", "y", "width", "height")) and
-            rect["width"] > 0 and rect["height"] > 0)
+    """True only for a rectangle of four plain ints/finite floats with positive extents."""
+    values = _geometry(rect)
+    if values is None or not all(type(value) in (int, float) for value in values):
+        return False
+    return values[2] > 0 and values[3] > 0
+
+
+def integer_rect(rect):
+    """The same rectangle as exact plain ``int`` values, else None.
+
+    Used only to hand geometry to APIs that require integers.  Every field must
+    be an exact built-in ``int`` or an integral finite built-in ``float``; a
+    fractional float is REFUSED (None) and is never truncated into a near match.
+    """
+    values = _geometry(rect)
+    if values is None or not all(type(value) in (int, float) for value in values):
+        return None
+    if values[2] <= 0 or values[3] <= 0:
+        return None
+    result = {}
+    for key, value in zip(("x", "y", "width", "height"), values):
+        if type(value) is float:
+            if not value.is_integer():
+                return None
+            value = int(value)
+        result[key] = value
+    return result
 
 
 def rect_within(inner, outer):
@@ -381,17 +667,29 @@ def check_window(plan, window, platform="linux"):
     return window
 
 
+def window_candidate(plan, window, platform="linux"):
+    """A title match that also belongs to the requested executable, when given."""
+    if not title_matches(plan, window):
+        return False
+    if plan["executable"] is None:
+        return True
+    return same_executable(plan["executable"], window.get("executable"), platform)
+
+
 def find_window(plan, adapter, budget):
     """Bounded discovery of exactly one visible, on-screen, canonical window."""
     deadline = monotonic() + DISCOVER_TIMEOUT
     while True:
         windows = adapter.list_windows()
-        budget.charge("windows", _size(windows))
-        matches = [window for window in windows if title_matches(plan, window)]
+        budget.charge_windows(windows, adapter)
+        matches = [window for window in windows
+                   if window_candidate(plan, window, adapter.platform)]
         if len(matches) > 1:
             raise ContractError("window-ambiguous", {"matches": len(matches)})
         if matches:
             window = check_window(plan, matches[0], adapter.platform)
+            if window_identity(window) is None:
+                raise ContractError("window-changed")
             if monotonic() > deadline:
                 raise ContractError("window-timeout")
             return window
@@ -401,13 +699,31 @@ def find_window(plan, adapter, budget):
 
 
 def reobserve_window(plan, adapter, window, budget):
+    """Re-observe the SAME window: same PID and the same trusted identity.
+
+    An OS window id is matched exactly as before. An opaque per-request handle
+    is matched only through trusted adapter equality (``same_identity``), so a
+    different object of the same process - even one with the same PID - is a
+    changed window and refuses.
+    """
     budget.charge("observations")
-    fresh = adapter.read_window(window["id"])
+    identity = window_identity(window)
+    if identity is None:
+        raise ContractError("window-changed")
+    fresh = adapter.read_window(identity[1])
     if type(fresh) is not dict:
         raise ContractError("window-changed")
     check_window(plan, fresh, adapter.platform)
-    if fresh["id"] != window["id"] or fresh["pid"] != window["pid"]:
+    fresh_identity = window_identity(fresh)
+    if fresh_identity is None or fresh_identity[0] != identity[0]:
         raise ContractError("window-changed")
+    if fresh["pid"] != window["pid"]:
+        raise ContractError("window-changed")
+    if identity[0] == "id":
+        if fresh_identity[1] != identity[1]:
+            raise ContractError("window-changed")
+    else:
+        same_identity(adapter, identity[1], fresh_identity[1])
     return fresh
 
 
@@ -438,6 +754,9 @@ def select_control(adapter, window, label, budget):
     if control.get("visible") is not True:
         raise ContractError("control-hidden")
     rect = control.get("bounds")
+    # The authorising rectangle carries only plain ints or finite built-in
+    # floats (rect_positive is exact-type), whose values feed the click-point
+    # arithmetic and the receipt.
     if not rect_positive(rect):
         raise ContractError("control-geometry")
     frame = window.get("client") if rect_positive(window.get("client")) else window.get("bounds")
@@ -485,8 +804,20 @@ def focus_matches(adapter, window, budget):
         return False
     if not exact:
         return True
+    identity = window_identity(window)
+    if identity is None:
+        return False
     identifier = state.get("window")
-    return type(identifier) is int and identifier > 0 and identifier == window["id"]
+    if identity[0] == "id":
+        return type(identifier) is int and identifier > 0 and identifier == identity[1]
+    # Opaque handle: a missing checker is a malformed state, never a match.
+    try:
+        checked = getattr(adapter, "focus_identity", None)
+        if not callable(checked):
+            return False
+        return checked(window, state) is True
+    except Exception:
+        return False
 
 
 def screen_bounds(adapter):
@@ -499,7 +830,11 @@ def screen_bounds(adapter):
 
 
 def check_point(adapter, window, x, y):
-    """Refuse any point outside the virtual screen or the selected window."""
+    """Refuse any point outside the virtual screen or the selected window.
+
+    A display/root query error (``a11y-query``) always propagates, while only
+    a successful ``False`` verdict becomes the skippable ``control-offscreen``.
+    """
     screen = screen_bounds(adapter)
     if screen is not None and not (screen["x"] <= x < screen["x"] + screen["width"] and
                                    screen["y"] <= y < screen["y"] + screen["height"]):
@@ -510,15 +845,57 @@ def check_point(adapter, window, x, y):
     if not (frame["x"] <= x < frame["x"] + frame["width"] and
             frame["y"] <= y < frame["y"] + frame["height"]):
         raise ContractError("control-offscreen")
-    hit = getattr(adapter, "hit_test", None)
-    if hit is not None and hit(window, x, y) is not True:
+    if point_hit(adapter, window, x, y) is not True:
         raise ContractError("control-offscreen")
-    visible = getattr(adapter, "point_visible", None)
-    if visible is not None and visible(window, x, y) is not True:
-        # A hidden display, an unreadable display list or any non-True verdict
-        # fails closed: permission to inject is never inferred from silence.
+    if point_visible(adapter, window, x, y) is not True:
         raise ContractError("control-offscreen")
     return x, y
+
+
+def point_hit(adapter, window, x, y):
+    """The window-root verdict for one point; a miss is False, never unknown.
+
+    Only a successful ``True`` (the point resolves to the selected window) or
+    a successful ``False`` (no window root or a bound window under the point)
+    is a verdict.  A raised error, a non-boolean answer, a missing hook or any
+    other value is an unknown query state and refuses ``a11y-query`` before a
+    caller can mistake it for a skippable candidate miss.
+    """
+    hit = getattr(adapter, "hit_test", None)
+    if hit is None:
+        return True
+    try:
+        verdict = hit(window, x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if verdict is not True and verdict is not False:
+        raise ContractError("a11y-query")
+    return verdict
+
+
+def point_visible(adapter, window, x, y):
+    """The active-display verdict for one point; a miss is False, never unknown.
+
+    Only a successful ``True`` (inside an active display) or a successful
+    ``False`` (outside every active display) is a verdict.  A raised error, a
+    non-boolean answer, a missing hook or any other value is an unknown query
+    state and refuses ``a11y-query``; permission to inject is never inferred
+    from silence, and an unknown state is never a skippable miss.
+    """
+    visible = getattr(adapter, "point_visible", None)
+    if visible is None:
+        return True
+    try:
+        verdict = visible(window, x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if verdict is not True and verdict is not False:
+        raise ContractError("a11y-query")
+    return verdict
 
 
 def confirm_control_hit(adapter, window, label, rect, x, y):
@@ -548,6 +925,165 @@ def confirm_control_hit(adapter, window, label, rect, x, y):
     if verdict is not True:
         raise ContractError("control-hit")
     return x, y
+
+
+def probe_control_hit(adapter, window, label, rect, x, y):
+    """The strict hook's literal verdict; anything not ``True`` is False.
+
+    Same hook and same fail-closed rules as ``confirm_control_hit`` (a missing
+    hook, a non-``True`` verdict, a changed rectangle or a raised error never
+    authorise input), but a non-``True`` verdict is returned instead of raised
+    so the macOS candidate search can tell "this point does not reach the
+    selected control" from "the query itself failed".  A missing hook raises
+    ``control-hit``; any raised error still refuses ``a11y-query``.
+    """
+    probe = getattr(adapter, "hit_test_control", None)
+    if probe is None:
+        raise ContractError("control-hit")
+    try:
+        verdict = probe(window, label, dict(rect), x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    return verdict is True
+
+
+def _candidate_shape(candidate):
+    """True for one opaque, exactly shaped click-candidate record.
+
+    A candidate is the adapter's named pair ``x``/``y``; nothing else is read
+    from it.  The object is inspected with ``type(...) is dict`` (never
+    ``isinstance``), so an object with overridden attribute access can neither
+    answer for the shape nor run code while the contract looks at it.
+    """
+    if type(candidate) is not dict or set(candidate) != {"x", "y"}:
+        return False
+    return all(type(candidate[key]) in (int, float) and geometry_value(candidate[key]) is not None
+               for key in ("x", "y"))
+
+
+def control_candidates(adapter, rect):
+    """The adapter's bounded exact-point list for one validated control rect.
+
+    The list is queried once and must be an exact-list.  Every entry must pass
+    ``_candidate_shape`` and be an exact int/finite float pair inside ``rect``;
+    a non-candidate entry, an overrun, a non-callable hook or a raised query
+    refuses ``control-hit`` before any input.  Only the two coordinates are
+    ever copied out of a candidate.
+    """
+    if not rect_positive(rect):
+        raise ContractError("control-hit")
+    producer = getattr(adapter, "click_candidates", None)
+    if not callable(producer):
+        raise ContractError("control-hit")
+    try:
+        listed = producer(dict(rect))
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if type(listed) is not list or not 1 <= len(listed) <= MAX_CLICK_CANDIDATES:
+        raise ContractError("control-hit")
+    points = []
+    for candidate in listed:
+        if not _candidate_shape(candidate):
+            raise ContractError("control-hit")
+        # Copied out once, as the exact built-in value geometry_value returns.
+        values = geometry_value(candidate["x"]), geometry_value(candidate["y"])
+        if not (rect["x"] <= values[0] < rect["x"] + rect["width"] and
+                rect["y"] <= values[1] < rect["y"] + rect["height"]):
+            raise ContractError("control-hit")
+        points.append(values)
+    return points
+
+
+def candidate_hits_control(adapter, window, label, rect, points):
+    """One candidate's full identity check; True only if every gate passes.
+
+    The point must lie inside the exact selected window, inside one active
+    display and on the selected window root exactly as ``check_point`` demands.
+    Only a successful ``False`` display/window-root verdict is a miss that
+    moves on to the next candidate; a query error refuses ``a11y-query`` for
+    the whole search and an off-window point refuses ``control-offscreen``.
+    It must then resolve, under the strict hook without ``control-hit``, to the
+    same freshly selected control: the unique selected label re-resolved in
+    this same ``window`` at its exact current rectangle, reached from the
+    element under the point.  The caller re-proves window, rect and foreground
+    after every probe.  Physical input is never attempted here.
+    """
+    try:
+        check_point(adapter, window, *points)
+    except ContractError as error:
+        if error.code != "control-offscreen":
+            raise
+        return False
+    return probe_control_hit(adapter, window, label, rect, *points)
+
+
+def _candidate_still_authorised(plan, adapter, window, label, rect, budget):
+    """Re-prove window, control rect and foreground after one candidate probe.
+
+    A changed rect refuses ``control-hit``; a control that is gone, disabled,
+    hidden, duplicated or no longer enabled/visible raises its own fixed code;
+    a changed window or lost foreground has the codes ``authorize`` uses.
+    Returns the fresh window, which the next probe is made against.
+    """
+    fresh = reobserve_window(plan, adapter, window, budget)
+    current = select_control(adapter, fresh, label, budget)
+    if any(current.get(key) != rect.get(key) for key in ("x", "y", "width", "height")):
+        raise ContractError("control-hit")
+    if not focus_matches(adapter, fresh, budget):
+        raise ContractError("focus-lost")
+    return fresh
+
+
+def first_hit_control(plan, adapter, window, label, rect, points, budget):
+    """The first exact point whose full identity checks pass; else refuse.
+
+    Each point already passed the adapter's shape and in-rect validation; they
+    are tried in order.  A successful ``False`` display/window-root verdict is
+    the only skippable miss; a query error aborts the whole search.  After a
+    point passes its initial proof, the exact window, the unique current
+    control rect and the focus are re-observed once more, and the COMPLETE
+    point/root/display/control proof runs again on that SAME accepted point
+    and the returned fresh window; a valid miss or query error then refuses
+    before input instead of resuming the candidate search.  No point is ever
+    clicked here, so a refused search emits no input at all and a failed or
+    unknown physical click can never cause another point to be tried.
+
+    Returns ``(fresh_window, point)``: the fresh window the accepted point was
+    finally proved on and the exact ``(x, y)`` pair.  The caller uses that same
+    window for the input receipt and the next action; no state is kept here.
+    """
+    current = window
+    for point in points:
+        if candidate_hits_control(adapter, current, label, rect, point):
+            fresh = _candidate_still_authorised(plan, adapter, current, label, rect, budget)
+            if not candidate_hits_control(adapter, fresh, label, rect, point):
+                raise ContractError("control-hit")
+            return fresh, point
+        current = _candidate_still_authorised(plan, adapter, current, label, rect, budget)
+    raise ContractError("control-hit")
+
+
+def accepted_candidate(result):
+    """The exact ``(fresh_window, (x, y))`` pair; any other shape refuses.
+
+    ``first_hit_control`` returns the fresh window the accepted point was
+    finally proved on and that point.  A hook that answers anything else never
+    authorises input, and is refused here instead of failing while unpacking.
+    """
+    try:
+        fresh, point = result
+    except Exception:
+        raise ContractError("control-hit")
+    if type(fresh) is not dict or type(point) is not tuple or len(point) != 2:
+        raise ContractError("control-hit")
+    if not all(type(value) in (int, float) and geometry_value(value) is not None
+               for value in point):
+        raise ContractError("control-hit")
+    return fresh, point
 
 
 def ensure_focus(plan, adapter, window, budget):
@@ -582,11 +1118,11 @@ def authorize(plan, adapter, window, budget, label=None):
 def _window_record(window, plan):
     """Safe window evidence only: no request title, prefix or text."""
     del plan
-    identifier = window.get("id")
-    if type(identifier) is not int or identifier <= 0:
+    identity = window_identity(window)
+    if identity is None:
         raise ContractError("window-changed")
     return {
-        "window": hex(identifier),
+        "window": _receipt_window(identity),
         "pid": window["pid"],
         "x": window["bounds"]["x"],
         "y": window["bounds"]["y"],
@@ -597,16 +1133,150 @@ def _window_record(window, plan):
 
 
 
-def click_record(window, label, x, y, ack, kind="accepted"):
+def _clicked(rect, x, y):
+    """The point as handed to the click call, or None unless it is inside.
+
+    Integer adapters (Windows, X11) only ever produce ints here and keep them.
+    A macOS fractional point must be reported exactly as it was passed to
+    Quartz, so geometry values are preserved and never int-cast; a point that
+    is not a finite number inside the freshly observed rectangle cannot be
+    proved to be the one the adapter received and is refused.
+    """
+    if rect_positive(rect):
+        for key, value in (("x", x), ("y", y)):
+            if type(value) not in (int, float):
+                return None
+            inside = rect[key] <= value < rect[key] + rect["width" if key == "x" else "height"]
+            if not inside:
+                return None
+    elif type(x) is not int or type(y) is not int:
+        return None
+    return x, y
+
+
+def _click_window(window):
+    """``"0x..."`` for a genuine OS id, ``None`` for a handle, ``"0x0"`` if none."""
+    identity = window_identity(window)
+    if identity is None:
+        return "0x0"
+    return _receipt_window(identity)
+
+
+def click_record(window, label, x, y, ack, kind="accepted", rect=None):
+    point = _clicked(rect, x, y)
+    if point is None:
+        raise ContractError("control-hit")
     return {
         "label": label if label in _LABELS else "pointer",
-        "window": hex(window["id"]) if type(window.get("id")) is int else "0x0",
-        "x": int(x),
-        "y": int(y),
+        "window": _click_window(window),
+        "x": point[0],
+        "y": point[1],
         "before": {"focus_matches_target": True},
         "evidence": kind if kind in EVIDENCE_KINDS else "posted",
         "ack": {key: (type(ack) is dict and ack.get(key) is True) for key in ACK_KEYS},
     }
+
+
+def empty_status():
+    """The fixed all-false diagnostic: exactly four built-in booleans."""
+    return {field: False for field in STATUS_FIELDS}
+
+
+def status_snapshot(adapter, window, controls):
+    """Optional status snapshot and its fixed AX diagnostic.
+
+    Returns ``(status, diagnostic)``: ``status`` is None when the adapter has
+    no status hook, else exactly the four built-in booleans; ``diagnostic`` is
+    the allowlisted ``ax_diagnostic`` of the FIRST failure or None. The
+    diagnostic is only carried, never interpreted, and a failure still yields
+    the fixed all-false status without failing the surfaces snapshot.
+
+    The hook receives an explicit per-call ``_AxCall`` result so a sanitized
+    refusal is reported for exactly THIS call; the shipped hooks record it and
+    still return the non-raising all-false status. Any hook that raises is also
+    fail-closed and its sanitized refusal is reported in the same per-call
+    result. No state is kept between calls or in any global.
+    """
+    try:
+        reader = getattr(adapter, "read_status", None)
+    except Exception:
+        return empty_status(), None
+    if not callable(reader):
+        return None, None
+    call = _AxCall()
+    try:
+        value = reader(window, controls, call)
+    except TypeError:
+        # A TypeError is never a contract refusal (ContractError derives from
+        # RuntimeError), so it only signals an older two-argument hook; that
+        # hook is retried without the per-call result and a refusal it still
+        # raises is reported for this call.
+        try:
+            value = reader(window, controls)
+        except Exception as error:
+            return empty_status(), call.failed(error)
+    except Exception as error:
+        return empty_status(), call.failed(error)
+    return call.accept(value), call.recorded()
+
+
+class _AxCall:
+    """The explicit per-call result of one ``read_status`` call.
+
+    A status hook that refuses a query records it with ``record`` and still
+    returns its ordinary non-raising answer (the fixed all-false status), so
+    the sanitized diagnostic belongs to exactly this call. Nothing is stored
+    outside this instance: a later call that fails nowhere never sees an
+    earlier failure.
+    """
+
+    __slots__ = ("status", "_diagnostic")
+
+    def __init__(self):
+        self.status = None
+        self._diagnostic = None
+
+    def report(self, diagnostic):
+        """Record an already-sanitized ``{operation, attribute, error}`` once.
+
+        Only an exact three-key allowlisted triple is kept (re-sanitized through
+        ``ax_diagnostic`` so nothing else can ride along); later reports for the
+        same call are ignored.
+        """
+        if self._diagnostic is not None or type(diagnostic) is not dict:
+            return
+        self._diagnostic = ax_diagnostic(ContractError("a11y-query", diagnostic))
+
+    def record(self, error):
+        """Record the first ``a11y-query`` refusal; later ones are ignored.
+
+        A hook may also hand back its already sanitized refusal mapping (see
+        ``report``) instead of raising a ``ContractError`` to be caught.
+        """
+        if self._diagnostic is not None:
+            return
+        if type(error) is dict:
+            self.report(error)
+            return
+        self._diagnostic = ax_diagnostic(error)
+
+    def recorded(self):
+        """This call's sanitized diagnostic, or None when it recorded none."""
+        return self._diagnostic
+
+    def failed(self, error):
+        """The diagnostic of a call that raised ``error``; always fail-closed."""
+        self.record(error)
+        self.status = empty_status()
+        return self._diagnostic
+
+    def accept(self, value):
+        """The exact four-built-in-bool answer, else the fixed all-false one."""
+        if (type(value) is not dict or set(value) != set(STATUS_FIELDS)
+                or any(type(value[field]) is not bool for field in STATUS_FIELDS)):
+            value = empty_status()
+        self.status = {field: value[field] for field in STATUS_FIELDS}
+        return self.status
 
 
 def snapshot(adapter, window, budget):
@@ -625,22 +1295,91 @@ def snapshot(adapter, window, budget):
 # ----------------------------------------------------------------- absence ----
 
 def await_absent(plan, adapter, budget):
+    """Bounded absence wait: the owned path only when the plan IS scoped.
+
+    A plan carrying ``owned_pid`` is observed exclusively through the adapter's
+    ``owned_absence`` hook (owned AX windows only); if that hook is missing or
+    fails, the request refuses - it NEVER falls back to the CoreGraphics
+    inventory. Any other plan keeps the original unscoped CG semantics
+    unchanged.
+
+    Both paths keep the fixed result: ``{"absent": True}`` as soon as the
+    exact-title window is not present, else ``window-changed`` at the unchanged
+    CONTROL_TIMEOUT.
+    """
     deadline = monotonic() + CONTROL_TIMEOUT
+    scoped = plan.get("owned_pid") is not None
+    probe = getattr(adapter, "owned_absence", None) if scoped else None
     while True:
-        windows = adapter.list_windows()
-        budget.charge("windows", _size(windows))
-        if not [w for w in windows
-                if title_matches(plan, w) and same_executable(plan["executable"], w.get("executable"), adapter.platform)]:
+        if scoped:
+            if not callable(probe):
+                raise ContractError("a11y-query")
+            state = probe(plan)
+            if type(state) is not dict or type(state.get("present")) is not bool:
+                raise ContractError("a11y-query")
+            # One window observation, charged exactly like the unscoped loop.
+            budget.charge_windows([{"pid": state.get("pid"),
+                                    "id": state.get("id")}])
+            present = state["present"]
+        else:
+            windows = adapter.list_windows()
+            budget.charge_windows(windows, adapter)
+            present = bool([w for w in windows
+                            if title_matches(plan, w) and same_executable(
+                                plan["executable"], w.get("executable"), adapter.platform)])
+        if not present:
             return {"absent": True}
         if monotonic() >= deadline:
             raise ContractError("window-changed", {"present": 1})
         sleep(POLL)
 
 
+# -------------------------------------------------------------- activation ----
+
+# The only result an activation-only request can produce. It claims nothing
+# about windows, focus, foreground content or product effect.
+ACTIVATION_RESULT = {"activated": True}
+FAILURE_CONTEXT = {"action": "setup", "index": -1}
+
+
+def execute_activation(plan, adapter):
+    """One identity-proved NSRunningApplication activation; no observation.
+
+    The adapter's ``activate_process(pid, executable)`` must itself prove the
+    exact pid/executable/uid identity and perform exactly one OS activation.
+    It returns the literal ``True`` only after that one call reported success.
+    Any other verdict, a raised error or a missing hook fails closed; nothing
+    is retried, no window is listed and no input is emitted.
+    """
+    FAILURE_CONTEXT["action"], FAILURE_CONTEXT["index"] = "activate", -1
+    request = plan["activation"]
+    hook = getattr(adapter, "activate_process", None)
+    if hook is None or getattr(adapter, "supports_activation", False) is not True:
+        raise ContractError("activation-unsupported")
+    try:
+        verdict = hook(request["pid"], request["executable"])
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("activation-failed")
+    if verdict is not True:
+        raise ContractError("activation-failed")
+    return dict(ACTIVATION_RESULT)
+
+
 # ----------------------------------------------------------------- execute ----
 
 def _center(rect):
-    return rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2
+    """Exact geometric centre of a validated control rectangle.
+
+    With only integer geometry this is the historical floor centre, unchanged.
+    A fractional macOS control bound is centred by true division: neither the
+    origin nor the half-extent is floored or truncated, so the point stays the
+    actual geometric centre of the control.
+    """
+    if all(type(rect[key]) is int for key in ("x", "y", "width", "height")):
+        return rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2
+    return rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2
 
 
 def _offset_click(fresh, point):
@@ -652,19 +1391,37 @@ def _offset_click(fresh, point):
     return x, y
 
 
-FAILURE_CONTEXT = {"action": "setup", "index": -1}
-
-
 def execute(plan, adapter):
     """Run one validated plan against a platform adapter and return safe JSON."""
     budget = Budget()
     check = getattr(adapter, "check_capability", None)
+    if plan.get("activation") is not None:
+        # Activation-only: no capability prompt and no accessibility query.
+        return execute_activation(plan, adapter)
+    # An owned-PID scope is installed BEFORE capability/observe/discovery, so
+    # no CG inventory or other scope can be observed in between. The release it
+    # returns is kept on THIS plan and always run by run_stdin's finally.
+    plan["releases"] = []
+    scope = plan.get("owned_pid")
+    if scope is not None:
+        scoper = getattr(adapter, "scope_owned_process", None)
+        if not callable(scoper):
+            raise ContractError("a11y-query")
+        release = scoper(scope)
+        if not callable(release):
+            raise ContractError("a11y-query")
+        plan["releases"].append(release)
     if check is not None:
         check()
     if plan["wait_absent"]:
         FAILURE_CONTEXT["action"] = "absence"
         return await_absent(plan, adapter, budget)
     FAILURE_CONTEXT["action"] = "discover"
+    # Platforms scoped to one owned process need the exact requested title to
+    # match the owned AX window; nothing else about the plan is shared.
+    observe = getattr(adapter, "observe_plan", None)
+    if callable(observe):
+        observe(plan)
     window = find_window(plan, adapter, budget)
     clicks = []
     for index, action in enumerate(plan["actions"]):
@@ -677,24 +1434,37 @@ def execute(plan, adapter):
         if "click_label" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, rect = authorize(plan, adapter, window, budget, action["click_label"])
-            x, y = check_point(adapter, fresh, *_center(rect))
-            # The window-root hit test above cannot see a sibling or
-            # transparent overlay: re-prove that the point resolves to the
-            # uniquely selected control itself before the single click.
-            confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
+            if getattr(adapter, "platform", None) in CANDIDATE_PLATFORMS:
+                # macOS only: the exact centre first, then at most eight more
+                # exact in-rect fractions. Each needs the same fresh window,
+                # display, selected control rectangle/identity and foreground;
+                # the first one that passes all of them twice - initially and
+                # again on the same point and fresh window immediately before
+                # input - is the single point clicked; anything else refuses.
+                fresh, (x, y) = accepted_candidate(first_hit_control(
+                    plan, adapter, fresh, action["click_label"], rect,
+                    control_candidates(adapter, rect), budget))
+            else:
+                x, y = check_point(adapter, fresh, *_center(rect))
+                # The window-root hit test above cannot see a sibling or
+                # transparent overlay: re-prove that the point resolves to the
+                # uniquely selected control itself before the single click.
+                confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
+            # The receipt names the window the point was finally proved on.
             clicks.append(click_record(fresh, action["click_label"], x, y,
-                                       ack, kind))
+                                       ack, kind, rect))
             window = fresh
         elif "click" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, _ = authorize(plan, adapter, window, budget)
             point = _offset_click(fresh, action["click"])
             x, y = check_point(adapter, fresh, point[0], point[1])
+            frame = fresh.get("client") if rect_positive(fresh.get("client")) else fresh["bounds"]
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)
-            clicks.append(click_record(fresh, "pointer", x, y, ack, kind))
+            clicks.append(click_record(fresh, "pointer", x, y, ack, kind, frame))
             window = fresh
         elif "wait_label" in action:
             await_control(plan, adapter, window, action["wait_label"], budget)
@@ -713,17 +1483,29 @@ def execute(plan, adapter):
     if plan["inspect"]:
         FAILURE_CONTEXT["action"] = "snapshot"
         result["controls"] = snapshot(adapter, window, budget)
+        status, diagnostic = status_snapshot(adapter, window, result["controls"])
+        if status is not None:
+            result["status"] = status
+            if diagnostic is not None:
+                result["ax"] = diagnostic
     return result
 
 
 def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
-    """Read one request, execute it, and emit either safe JSON or one fixed line."""
+    """Read one request, execute it, and emit either safe JSON or one fixed line.
+
+    Whatever happens - a parse failure, a refusal, an unexpected exception or a
+    timeout - the releases recorded on the parsed plan always run in
+    ``finally``, so an owned-PID scope never outlives this one request.
+    """
     stdin = sys.stdin.buffer if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     FAILURE_CONTEXT["action"], FAILURE_CONTEXT["index"] = "setup", -1
+    plan = None
     try:
-        result = execute(parse_request(stdin.read(MAX_REQUEST_BYTES + 1)), adapter)
+        plan = parse_request(stdin.read(MAX_REQUEST_BYTES + 1))
+        result = execute(plan, adapter)
     except ContractError as error:
         stderr.write(failure_line(error, FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
@@ -732,5 +1514,11 @@ def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
         stderr.write(failure_line(ContractError("unexpected"), FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
         return 1
+    finally:
+        for release in (plan or {}).get("releases", ()):
+            try:
+                release()
+            except Exception:
+                pass
     stdout.write(json.dumps(result) + "\n")
     return 0
