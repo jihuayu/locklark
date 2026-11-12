@@ -2136,5 +2136,301 @@ class ChooserOwnershipRecordTests(unittest.TestCase):
                 self.assertIsNone(native.safe_owner_record(record))
 
 
+class WindowTreeRaceTests(unittest.TestCase):
+    """Whole-root discovery restarts only for a proven transient X race.
+
+    Every case drives the production `recover_window_tree()` over a fake
+    window tree whose `scan()` is one whole `find(root)` traversal. The lists
+    passed in are the X error handler's live records and the diagnostic codes
+    it appends, exactly as `main()` passes them. No X server, XID or input.
+    """
+
+    ROOT = 77
+
+    def tree(self, scans):
+        """A fake window tree; each entry of `scans` is one root traversal.
+
+        "refuse" is the exact `RuntimeError("X window query refused")`. A
+        list is one traversal: its int items become matches, and its records
+        are observed X errors through the real handler shape (record into
+        `errors`, code into the diagnostic list). A code-3 record on a child
+        refuses exactly, as its vanished child's XQueryTree would.
+        """
+        errors, codes, started = [], [], []
+
+        def handler(record):
+            errors.append(record)
+            code = record[0]
+            if code not in codes:
+                codes.append(int(code))
+
+        def scan():
+            index = len(started)
+            if index >= len(scans):
+                # The plan never allows more traversals than it lists.
+                raise AssertionError("scan beyond the planned traversals")
+            events = scans[index]
+            started.append(index)
+            found = []
+            for event in events if type(events) is list else []:
+                if type(event) is tuple:
+                    handler(event)
+                    if event[0] == 3 and event[1] != self.ROOT:
+                        # The vanished child refused its own XQueryTree.
+                        raise RuntimeError("X window query refused")
+                else:
+                    found.append(event)
+            if type(events) is str:
+                raise RuntimeError("X window query refused")
+            return found
+
+        return scan, errors, codes, started
+
+    def fails_closed(self, call):
+        """The call fails with exactly the fixed discovery failure."""
+        try:
+            call()
+        except RuntimeError as error:
+            self.assertNotIsInstance(error, native.AccessibilityQueryUnavailable)
+            self.assertEqual(error.args, ("X window query refused",))
+            return error
+        self.fail("discovery did not fail closed")
+
+    def recover(self, scans, deadline=float("inf"), **kwargs):
+        scan, errors, codes, started = self.tree(scans)
+        with patch.object(native.time, "monotonic", return_value=0):
+            result = native.recover_window_tree(
+                scan, errors, codes, self.ROOT, deadline, **kwargs)
+        return result, len(started), errors, codes
+
+    # The actual resource-aware predicate.
+
+    def test_predicate_accepts_only_bad_window_on_a_live_non_root_window(self):
+        race = native.transient_window_race
+        self.assertTrue(race([(3, 78)], self.ROOT))
+        self.assertTrue(race([(3, 78), (3, 79)], self.ROOT))
+        self.assertTrue(race([(3, 0x7FFFFFFF)], self.ROOT))
+        rejected = [
+            [], None, "x", [(3, 78), None],
+            # Malformed records.
+            [(3,)], [(3, 78, 1)], [[3, 78]], [(3, "78")], [(True, 78)],
+            [(3, 78.0)], [("3", 78)], [(3, None)], [(None, 78)],
+            # Not a BadWindow, or a mix that includes one.
+            [(2, 78)], [(8, 78)], [(0, 78)], [(3, 78), (8, 78)],
+            # The root itself, or a non-positive resource.
+            [(3, self.ROOT)], [(3, 78), (3, self.ROOT)], [(3, 0)], [(3, -1)],
+            [(3, True)], [(3, False)],
+        ]
+        for observed in rejected:
+            with self.subTest(observed=observed):
+                self.assertFalse(race(observed, self.ROOT))
+        for root in (0, -1, None, True, "77", 78.0):
+            with self.subTest(root=root):
+                self.assertFalse(race([(3, 79)], root))
+
+    # One clean scan returns its full matches.
+
+    def test_clean_scan_returns_every_match_without_a_restart(self):
+        result, scans, errors, codes = self.recover([[78, 79]])
+        self.assertEqual((result, scans, errors, codes), ([78, 79], 1, [], []))
+        result, scans, _, _ = self.recover([[]])
+        self.assertEqual((result, scans), ([], 1))
+
+    # A failed scan is restarted only for the exact refusal with the proof.
+
+    def test_refused_scan_with_transient_error_restarts_the_whole_tree(self):
+        result, scans, errors, codes = self.recover(
+            [[(3, 78), 91, "refuse"], [91]])
+        self.assertEqual((result, scans, errors, codes), ([91], 2, [], []))
+        # A completed scan that saw two transient errors is fully discarded:
+        # none of its partial matches (91) is returned, only the restart's.
+        result, scans, errors, codes = self.recover(
+            [[91, (3, 78), (3, 79)], [92, 93]])
+        self.assertEqual((result, scans, errors, codes),
+                         ([92, 93], 2, [], []))
+
+    def test_refused_scan_without_a_transient_proof_fails_closed(self):
+        # A refused scan with no error record has no proof of a race.
+        self.fails_closed(lambda: self.recover(["refuse", [91]]))
+        # A root resource, another code, a non-positive resource or a
+        # malformed record is not transient: even the exact refusal fails
+        # closed without a restart and without the tape's later scan.
+        for record in ((3, self.ROOT), (8, 78), (1, 79), (3, 0), (3, -1),
+                       (3, "78"), None, [3, 78]):
+            with self.subTest(record=record):
+                scan, errors, codes, started = self.tree([[], [93]])
+
+                def refusing(record=record):
+                    # The live handler shape appends, then the query refuses.
+                    started.append(1)
+                    errors.append(record)
+                    codes.append(3)
+                    raise RuntimeError("X window query refused")
+                self.fails_closed(lambda: native.recover_window_tree(
+                    refusing, errors, codes, self.ROOT, float("inf")))
+                self.assertEqual(len(started), 1)
+
+    def test_completed_scan_with_any_error_is_discarded(self):
+        # A completed scan that saw only a transient error is still discarded:
+        # its partial matches (91) are never returned, only the restart's.
+        result, scans, errors, codes = self.recover(
+            [[91, (3, 78), 92], [93]])
+        self.assertEqual((result, scans, errors, codes), ([93], 2, [], []))
+        # Even one non-transient error rejects a completed scan unchanged.
+        for record in ((8, 78), (3, self.ROOT), (1, 79), (3, 0), (3, "78")):
+            with self.subTest(record=record):
+                scan, errors, codes, started = self.tree([])
+
+                def tainted(record=record):
+                    started.append(1)
+                    if len(started) == 1:
+                        errors.append(record)
+                        codes.append(3)
+                        return [91]
+                    return [93]
+                self.fails_closed(lambda: native.recover_window_tree(
+                    tainted, errors, codes, self.ROOT, float("inf")))
+                self.assertEqual(len(started), 1)
+
+    def test_retained_error_records_never_taint_the_restart(self):
+        # The first scan leaves a code-3 record in the live handler list; if
+        # it were retained the clean second scan would look tainted. A clean
+        # restart must still be accepted, and a clean result when no second
+        # record arrives must be returned, not discarded.
+        scan, errors, codes, started = self.tree(
+            [[(3, 78), 91, "refuse"], [92]])
+        with patch.object(native.time, "monotonic", return_value=0):
+            result = native.recover_window_tree(
+                scan, errors, codes, self.ROOT, float("inf"))
+        self.assertEqual((result, len(started), errors, codes), ([92], 2, [], []))
+        # The diagnostic codes carry the same proof. A retained code from the
+        # previous scan is not accepted as the next scan's proof either: a
+        # restart that refuses without its own error fails closed.
+        with self.assertRaises(RuntimeError) as raised:
+            self.recover([[(3, 78), "refuse"], "refuse", [92]])
+        self.assertEqual(raised.exception.args, ("X window query refused",))
+        # An unrelated error still in the handler list after a clean scan
+        # means the completed scan is tainted, and the restarted scan is not.
+        result, scans, errors, codes = self.recover(
+            [[(3, 78), 91], [(3, 78), "refuse"], [92]])
+        self.assertEqual((result, scans, errors, codes), ([92], 3, [], []))
+
+    # Only a clean retry result is returned.
+
+    def test_only_the_clean_retry_result_is_returned(self):
+        result, scans, _, _ = self.recover(
+            [[91, (3, 78), "refuse"], [92, (3, 79)], [93]])
+        self.assertEqual((result, scans), ([93], 3))
+
+    # Unrelated failures keep their identity and are never retried.
+
+    def test_unrelated_exception_identity_is_preserved(self):
+        original = RuntimeError("Native acceptance X query failed")
+        errors, codes, started = [(3, 78)], [3], []
+
+        def scan():
+            started.append(1)
+            raise original
+        try:
+            native.recover_window_tree(scan, errors, codes, self.ROOT,
+                                       float("inf"))
+        except RuntimeError as error:
+            self.assertIs(error, original)
+        else:
+            self.fail("the unrelated failure was swallowed")
+        self.assertEqual(len(started), 1)
+        # Another RuntimeError with the same text but extra arguments, and a
+        # subclass, are not the exact refusal either; both keep identity.
+        self.assertTrue(issubclass(native.AccessibilityQueryUnavailable,
+                                   RuntimeError))
+        for failure in (RuntimeError("X window query refused", 1),
+                        native.AccessibilityQueryUnavailable("other failure")):
+            started = []
+
+            def scan(failure=failure):
+                started.append(1)
+                raise failure
+            try:
+                native.recover_window_tree(scan, [(3, 78)], [3], self.ROOT,
+                                           float("inf"))
+            except RuntimeError as error:
+                self.assertIs(error, failure)
+            else:
+                self.fail("the unrelated failure was swallowed")
+            self.assertEqual(len(started), 1)
+
+    def test_malformed_recovery_arguments_fail_closed(self):
+        scan = Mock(return_value=[91])
+        for errors, codes, root in (((), [], self.ROOT), ([], None, self.ROOT),
+                                    ([], [], True), ([], [], "77")):
+            with self.subTest(errors=errors, codes=codes, root=root):
+                self.fails_closed(lambda: native.recover_window_tree(
+                    scan, errors, codes, root, float("inf")))
+        scan.assert_not_called()
+
+    # The retry bound is fixed and small.
+
+    def test_retry_bound_is_fixed(self):
+        self.assertEqual(native.WINDOW_TREE_RESTARTS, 3)
+        # A permanent race stops after the first scan plus the fixed bound,
+        # whether each scan refuses or completes with a transient error.
+        for scans in ([[(3, 78), "refuse"]] * 16, [[(3, 78), 91]] * 16):
+            with self.subTest(scans=scans[0]):
+                scan, errors, codes, started = self.tree(scans)
+                with patch.object(native.time, "monotonic", return_value=0):
+                    self.fails_closed(lambda: native.recover_window_tree(
+                        scan, errors, codes, self.ROOT, float("inf")))
+                self.assertEqual(len(started),
+                                 native.WINDOW_TREE_RESTARTS + 1)
+        # A smaller bound is honoured; the fixed default is never larger.
+        self.assertLessEqual(native.WINDOW_TREE_RESTARTS, 3)
+        self.fails_closed(lambda: self.recover(
+            [[(3, 78), 91]] * 5, restarts=1))
+        self.assertEqual(self.recover([[(3, 78), 91], [91]])[1], 2)
+        for restarts in (-1, 1.0, True, None):
+            with self.subTest(restarts=restarts):
+                self.fails_closed(lambda: self.recover(
+                    [[91]], restarts=restarts))
+
+    # The caller's one deadline is never extended.
+
+    def test_one_caller_deadline_is_never_extended(self):
+        def run(scans, deadline, clock):
+            scan, errors, codes, started = self.tree(scans)
+            with patch.object(native.time, "monotonic", side_effect=clock), \
+                    patch.object(native.time, "sleep") as sleep:
+                sleep.assert_not_called()
+                try:
+                    return native.recover_window_tree(
+                        scan, errors, codes, self.ROOT, deadline), started
+                except RuntimeError as error:
+                    return error, started
+
+        # A proven race at or past the caller's deadline is not restarted,
+        # even with restart budget left.
+        for now in (5, 6):
+            with self.subTest(now=now):
+                error, started = run([[(3, 78), "refuse"], [91]], 5,
+                                     lambda: now)
+                self.assertEqual(error.args, ("X window query refused",))
+                self.assertNotIsInstance(error,
+                                         native.AccessibilityQueryUnavailable)
+                self.assertEqual(len(started), 1)
+        # The clock is read only after a scan and compared with exactly the
+        # caller's deadline: an extended "deadline + retry" would need a
+        # third reading, which does not exist. Two races are restarted, the
+        # third fails closed (the bound is reached first), between 4.5 and
+        # the original 5, never beyond it.
+        readings = [4.5, 4.6, 4.7]
+        error, started = run([[(3, 78), "refuse"]] * 4, 5,
+                             lambda: readings.pop(0))
+        self.assertEqual(error.args, ("X window query refused",))
+        self.assertEqual(readings, [])
+        self.assertEqual(len(started), 4)  # one scan plus three restarts
+        # A restart that finishes inside the same deadline is returned.
+        result, started = run([[(3, 78), "refuse"], [91]], 5, lambda: 4.0)
+        self.assertEqual((result, len(started)), ([91], 2))
+
+
 if __name__ == "__main__":
     unittest.main()

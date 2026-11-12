@@ -681,6 +681,93 @@ def query_children(x, display, parent):
 VIEWABLE_TREE_VISITS = 1024
 VIEWABLE_TREE_DEPTH = 12
 
+# A complete native-window discovery that observed only transient BadWindow
+# (code 3) errors on live, non-root XIDs is discarded and restarted from the
+# root, within the caller's unchanged deadline and this fixed retry bound.
+WINDOW_TREE_RESTARTS = 3
+# The only exception one whole-root discovery scan is ever retried for.
+WINDOW_QUERY_REFUSED = "X window query refused"
+
+
+def transient_window_race(observed, root):
+    """True only if `observed` proves a transient window-tree race.
+
+    `observed` holds the (code, resource) records of the errors that arrived
+    during one scan that really started at the root. At least one record must
+    exist and every record must be numeric BadWindow (code 3) on a positive
+    non-root resource: a child window destroyed while the tree was traversed.
+    No record, a malformed one, another code, a non-positive resource or the
+    root itself is never transient. Resource IDs are only compared here and
+    are never returned or formatted.
+    """
+    if type(observed) is not list or not observed:
+        return False
+    if type(root) is not int or root <= 0:
+        return False
+    for record in observed:
+        if type(record) is not tuple or len(record) != 2:
+            return False
+        code, resource = record
+        if type(code) is not int or type(resource) is not int:
+            return False
+        if code != 3 or resource <= 0 or resource == root:
+            return False
+    return True
+
+
+def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
+                        restarts=WINDOW_TREE_RESTARTS):
+    """The matches of one clean complete whole-root scan, or a fixed failure.
+
+    `scan()` runs one entire `find(root)` traversal and returns its matches or
+    raises. `errors` is the X error handler's live list of (code, resource)
+    records; `diagnostic_codes` is the live list of diagnostic codes that
+    handler appends the same errors to. Both are replaced by `scan()`, so they
+    are cleared before a restart and any settled record past that point
+    belongs to the next scan. A restart is made only when the scan raised the
+    exact `RuntimeError(WINDOW_QUERY_REFUSED)` or completed, and the records it
+    left prove `transient_window_race()`; every one of its results is then
+    discarded and its records and diagnostic codes are cleared before the walk
+    restarts from the root. A clean, complete scan returns its full matches.
+    Any other failure is re-raised unchanged; a scan with errors that are not
+    transient, or a completed scan with any error at all, fails closed with
+    the fixed `RuntimeError(WINDOW_QUERY_REFUSED)`. Restarts are bounded by
+    `restarts` and only ever read the caller's unchanged `deadline`.
+    """
+    if not callable(scan) or type(errors) is not list or \
+            type(diagnostic_codes) is not list or type(root) is not int:
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    if type(restarts) is not int or restarts < 0:
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    restarted = 0
+    while True:
+        del errors[:]
+        del diagnostic_codes[:]
+        try:
+            found = scan()
+        except RuntimeError as error:
+            if error.args != (WINDOW_QUERY_REFUSED,):
+                raise
+            refused = True
+        else:
+            refused = False
+        if not errors:
+            # Only a completed scan may be accepted. The records are dropped
+            # here only to prove them; a failed scan has no result to accept.
+            if refused:
+                raise RuntimeError(WINDOW_QUERY_REFUSED)
+            del errors[:]
+            return found
+        if not transient_window_race(errors, root):
+            raise RuntimeError(WINDOW_QUERY_REFUSED)
+        # Proven transient: discard this scan's partial or completed result
+        # and its raw records, including their diagnostic codes.
+        if restarted >= restarts or time.monotonic() >= deadline:
+            raise RuntimeError(WINDOW_QUERY_REFUSED)
+        del errors[:]
+        del diagnostic_codes[:]
+        restarted += 1
+
 
 def bounded_viewable_tree(children, viewable, root,
                           budget=VIEWABLE_TREE_VISITS, depth=VIEWABLE_TREE_DEPTH):
@@ -1541,6 +1628,14 @@ def main():
             time.sleep(0.05)
         raise RuntimeError("Previous native acceptance window did not close")
 
+    def scan_root():
+        """One entire `find(root)` tree scan; an exact refusal still raises.
+
+        A scan that raises has no result, so a later restart traverses the
+        root again from scratch instead of reusing any partial matches.
+        """
+        return find(root)
+
     target = None
     discovery_deadline = time.monotonic()+5
     while time.monotonic() < discovery_deadline:
@@ -1550,7 +1645,14 @@ def main():
             matches = [candidate for candidate in collect_titles(owner["chooser_title_prefix"])
                        if normal_viewable(candidate)]
         else:
-            matches=find(root)
+            # Firefox may destroy a child between two queries of one pre-action
+            # discovery. Only a transient BadWindow race on non-root windows
+            # discards that whole scan's partial result and repeats it from the
+            # root, inside this discovery loop's one original deadline and the
+            # fixed restart bound. No physical input happens before a clean scan.
+            matches = recover_window_tree(
+                scan_root, errors, FAILURE_CONTEXT["x_codes"], root,
+                discovery_deadline)
         if len(matches)>1:
             raise RuntimeError("Native acceptance window must be unique")
         if matches:
