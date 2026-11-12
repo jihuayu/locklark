@@ -414,8 +414,9 @@ class Budget:
         self.counts["observations"] += 1
         for window in windows:
             pid = window.get("pid") if type(window) is dict else None
-            identifier = window.get("id") if type(window) is dict else None
-            self.identities.add((pid, identifier))
+            identity = window_identity(window)
+            if identity is not None:
+                self.identities.add((pid, identity_key(identity)))
         self.counts["windows"] = max(size, len(self.identities))
         if self.counts["windows"] > MAX_WINDOWS:
             raise ContractError("window-overrun", dict(self.counts))
@@ -461,6 +462,84 @@ def _geometry(rect):
     if type(rect) is not dict:
         return None
     return tuple(geometry_value(rect.get(key)) for key in ("x", "y", "width", "height"))
+
+
+# ----------------------------------------------------------------- identity ---
+
+def window_identity(window):
+    """Classify a window's ``id``: ``("id", int)``, ``("opaque", handle)`` or None.
+
+    Two identity kinds are accepted for a top-level window:
+
+    * a genuine OS window id: an exact built-in positive ``int`` (Windows HWND,
+      X11 window, and every existing adapter). Its receipts stay ``"0x..."``.
+    * an opaque per-request adapter handle: a real object the TRUSTED adapter
+      produced for this observation (a native AXUIElement, a test object), and
+      never a ``str``/``bytes``/``bool``/number. It is compared ONLY by
+      trusted adapter equality, is never serialized, and is reported in
+      receipts as no window number.
+
+    Anything else - a missing id, ``None``, a float, a string, a bool, a
+    non-positive int - is not an identity and is refused by every caller.
+    """
+    if type(window) is not dict:
+        return None
+    identifier = window.get("id")
+    if type(identifier) is int:
+        return ("id", identifier) if identifier > 0 else None
+    if identifier is None or isinstance(identifier, (str, bytes, bytearray, int, float, bool)):
+        return None
+    return ("opaque", identifier)
+
+
+def same_identity(adapter, first, second):
+    """Trusted adapter equality of two opaque handles; never value equality.
+
+    The adapter owns equality of the objects it produced. It may supply an
+    ``identity_equal(first, second)`` hook (native ``CFEqual`` for AX
+    elements); without one, only the very same object is the same window, so a
+    distinct object with an equal-looking value is never accepted. A hook that
+    raises or answers anything but the exact built-in ``True`` is not proof
+    and refuses the fixed ``window-changed``.
+    """
+    equals = getattr(adapter, "identity_equal", None)
+    if equals is None:
+        verdict = first is second
+    else:
+        if not callable(equals):
+            raise ContractError("window-changed")
+        try:
+            verdict = equals(first, second)
+        except ContractError:
+            raise
+        except Exception:
+            raise ContractError("window-changed")
+    if type(verdict) is not bool or verdict is not True:
+        raise ContractError("window-changed")
+    return True
+
+
+def identity_key(identity):
+    """The budget-dedup key of a real identity; never a serialized handle.
+
+    An OS id keeps the exact historical ``(pid, int)`` budget identity. An
+    opaque handle dedups on the handle OBJECT: a hashable one is keyed by the
+    handle, and an unhashable one by its object identity, so two distinct
+    objects never merge into one identity and no handle is ever stringified.
+    """
+    if identity[0] == "id":
+        return identity[1]
+    handle = identity[1]
+    try:
+        hash(handle)
+    except Exception:
+        return ("opaque-object", id(handle))
+    return ("opaque", handle)
+
+
+def _receipt_window(identity):
+    """The receipt window field: ``"0x..."`` for an OS id, ``None`` for a handle."""
+    return hex(identity[1]) if identity[0] == "id" else None
 
 
 def rect_positive(rect):
@@ -552,6 +631,8 @@ def find_window(plan, adapter, budget):
             raise ContractError("window-ambiguous", {"matches": len(matches)})
         if matches:
             window = check_window(plan, matches[0], adapter.platform)
+            if window_identity(window) is None:
+                raise ContractError("window-changed")
             if monotonic() > deadline:
                 raise ContractError("window-timeout")
             return window
@@ -561,13 +642,31 @@ def find_window(plan, adapter, budget):
 
 
 def reobserve_window(plan, adapter, window, budget):
+    """Re-observe the SAME window: same PID and the same trusted identity.
+
+    An OS window id is matched exactly as before. An opaque per-request handle
+    is matched only through trusted adapter equality (``same_identity``), so a
+    different object of the same process - even one with the same PID - is a
+    changed window and refuses.
+    """
     budget.charge("observations")
-    fresh = adapter.read_window(window["id"])
+    identity = window_identity(window)
+    if identity is None:
+        raise ContractError("window-changed")
+    fresh = adapter.read_window(identity[1])
     if type(fresh) is not dict:
         raise ContractError("window-changed")
     check_window(plan, fresh, adapter.platform)
-    if fresh["id"] != window["id"] or fresh["pid"] != window["pid"]:
+    fresh_identity = window_identity(fresh)
+    if fresh_identity is None or fresh_identity[0] != identity[0]:
         raise ContractError("window-changed")
+    if fresh["pid"] != window["pid"]:
+        raise ContractError("window-changed")
+    if identity[0] == "id":
+        if fresh_identity[1] != identity[1]:
+            raise ContractError("window-changed")
+    else:
+        same_identity(adapter, identity[1], fresh_identity[1])
     return fresh
 
 
@@ -648,8 +747,20 @@ def focus_matches(adapter, window, budget):
         return False
     if not exact:
         return True
+    identity = window_identity(window)
+    if identity is None:
+        return False
     identifier = state.get("window")
-    return type(identifier) is int and identifier > 0 and identifier == window["id"]
+    if identity[0] == "id":
+        return type(identifier) is int and identifier > 0 and identifier == identity[1]
+    # Opaque handle: a missing checker is a malformed state, never a match.
+    try:
+        checked = getattr(adapter, "focus_identity", None)
+        if not callable(checked):
+            return False
+        return checked(window, state) is True
+    except Exception:
+        return False
 
 
 def screen_bounds(adapter):
@@ -950,11 +1061,11 @@ def authorize(plan, adapter, window, budget, label=None):
 def _window_record(window, plan):
     """Safe window evidence only: no request title, prefix or text."""
     del plan
-    identifier = window.get("id")
-    if type(identifier) is not int or identifier <= 0:
+    identity = window_identity(window)
+    if identity is None:
         raise ContractError("window-changed")
     return {
-        "window": hex(identifier),
+        "window": _receipt_window(identity),
         "pid": window["pid"],
         "x": window["bounds"]["x"],
         "y": window["bounds"]["y"],
@@ -986,13 +1097,21 @@ def _clicked(rect, x, y):
     return x, y
 
 
+def _click_window(window):
+    """``"0x..."`` for a genuine OS id, ``None`` for a handle, ``"0x0"`` if none."""
+    identity = window_identity(window)
+    if identity is None:
+        return "0x0"
+    return _receipt_window(identity)
+
+
 def click_record(window, label, x, y, ack, kind="accepted", rect=None):
     point = _clicked(rect, x, y)
     if point is None:
         raise ContractError("control-hit")
     return {
         "label": label if label in _LABELS else "pointer",
-        "window": hex(window["id"]) if type(window.get("id")) is int else "0x0",
+        "window": _click_window(window),
         "x": point[0],
         "y": point[1],
         "before": {"focus_matches_target": True},
