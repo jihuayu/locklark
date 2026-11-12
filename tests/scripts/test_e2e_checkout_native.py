@@ -578,13 +578,14 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             yield line("checkout-stale:navigation CANARY-9f3a1c", None)
             yield line("passkey-get", None)
             # Non-allowlisted action and code, out-of-range x_codes and index,
-            # and non-string values fail closed.
+            # a missing index and non-string values fail closed.
             yield line("fixture", valid_native(action="CANARY-9f3a1c"))
             yield line("fixture", valid_native(code="window-frozen"))
             yield line("fixture", {"code": "window-timeout", "action": "label-wait",
-                                   "x_codes": [3, 0]})
+                                   "index": 0, "x_codes": [3, 0]})
             yield line("fixture", {"code": "window-timeout", "action": "label-wait",
                                    "index": -2})
+            yield line("fixture", {"code": "window-timeout", "action": "label-wait"})
             yield line("fixture", {"code": "window-timeout", "action": "label-wait",
                                    "index": 256})
             yield line("fixture", {"code": ["window-timeout"], "action": "label-wait"})
@@ -655,12 +656,16 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "dbus"),
             (https, "SyntaxError: Cannot use import statement CANARY-9f3a1c",
              "https-ready", "absent", "node-loader"),
-            # Per-line startup limit: the longest accepted marker line is
-            # accepted, one more character rejects the whole block.
-            (https + prefix + "module-ready" + " " * 127, "", "unknown",
+            # Per-line startup limit: the exact marker line is accepted, and
+            # a prefixed line longer than 128 characters rejects the block.
+            (https + prefix + "module-ready\n", "", "module-ready", "absent",
+             "unknown"),
+            (https + " " * (8 * 1024) + "\n" + prefix + "module-ready\n", "",
+             "module-ready", "absent", "unknown"),
+            (https + prefix + "module-ready" + " " * 100 + "\n", "", "unknown",
              "absent", "unknown"),
-            (https + prefix + "module-ready" + " " * 128, "", "unknown",
-             "absent", "unknown"),
+            (https + prefix + "\\" * 127 + "\n", "", "unknown", "absent",
+             "unknown"),
             # Every marker line is read and only the last valid phase is
             # projected: an exact repeat keeps it, a repeated invalid value
             # rejects the whole block, and a different valid line wins.
@@ -676,7 +681,21 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "accepted", "unknown"),
             (https, not_first, "https-ready", "rejected", "unknown"),
         )
+        def oversized_marker(stdout):
+            """Some prefixed line exceeds 128 characters."""
+
+            return any(
+                len(text.rstrip("\r")) > 128
+                for text in stdout.splitlines()
+                if text.startswith(prefix)
+            )
+
+        self.assertTrue(oversized_marker(prefix + "module-ready" + " " * 100))
+        self.assertFalse(oversized_marker(prefix + "module-ready"))
         for stdout, stderr, phase, state, family in cases:
+            # An oversized prefixed line never leaves the block accepted.
+            if oversized_marker(stdout):
+                self.assertEqual(phase, "unknown")
             # Accepted/rejected/absent must match any-line presence independently.
             if state == "accepted":
                 self.assertTrue(_diagnostic_present(stderr))
