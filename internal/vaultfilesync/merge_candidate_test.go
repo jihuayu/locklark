@@ -727,6 +727,51 @@ func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 		}
 	})
 
+	t.Run("local rollback rejected", func(t *testing.T) {
+		f := newFixture(t)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-local-0004", mergeCandidatePrevious(4), vuk, localItems)
+		backendBefore := mergeCandidateUseRemote(t, f, base)
+		// The fixtures themselves are authentic under the caller pin; the
+		// rejection below must come from the sequence guard, not a bad signature.
+		openWorkingState(t, base, f.pin, f.id)
+		openWorkingState(t, local, f.pin, f.id)
+		openWorkingState(t, backendBefore.Bytes, f.pin, f.id)
+		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
+		mergeCandidateSavePending(t, j, state)
+		journalBefore := mergeCandidateSnapshotJournal(t, j)
+
+		candidate, err := BuildMergeCandidate(context.Background(), f.remote, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+		if !errors.Is(err, ErrMergeCandidateVerify) {
+			t.Fatalf("local rollback = %v, want ErrMergeCandidateVerify", err)
+		}
+		mergeCandidateAssertZero(t, candidate)
+		mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
+		mergeCandidateAssertBackendUnchanged(t, f, backendBefore)
+	})
+
+	t.Run("equal sequence local fork rejected", func(t *testing.T) {
+		f := newFixture(t)
+		forkItems := []vault.Item{mergeCandidateLogin("item-a", "A local fork")}
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-local-fork-0005", mergeCandidatePrevious(5), vuk, forkItems)
+		backendBefore := mergeCandidateUseRemote(t, f, base)
+		openWorkingState(t, base, f.pin, f.id)
+		openWorkingState(t, local, f.pin, f.id)
+		openWorkingState(t, backendBefore.Bytes, f.pin, f.id)
+		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
+		mergeCandidateSavePending(t, j, state)
+		journalBefore := mergeCandidateSnapshotJournal(t, j)
+
+		candidate, err := BuildMergeCandidate(context.Background(), f.remote, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+		if !errors.Is(err, ErrMergeCandidateVerify) {
+			t.Fatalf("equal-sequence local fork = %v, want ErrMergeCandidateVerify", err)
+		}
+		mergeCandidateAssertZero(t, candidate)
+		mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
+		mergeCandidateAssertBackendUnchanged(t, f, backendBefore)
+	})
+
 	t.Run("max uint64 rejected", func(t *testing.T) {
 		f := newFixture(t)
 		base := mergeCandidateSeal(t, f.pin, policy, 1, 1, "op-base-0001", mergeCandidatePrevious(1), vuk, baseItems)

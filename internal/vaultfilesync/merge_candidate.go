@@ -198,9 +198,14 @@ func (c *MergeCandidate) Clear() {
 // Rollback protection. R.ContentSeq < B.ContentSeq is rejected. Equal sequences
 // are accepted only when vaultfile.FileDigest(R) equals vaultfile.FileDigest(B),
 // so an equal-sequence fork is rejected. R.ContentSeq == math.MaxUint64 is
-// rejected before any increment. R may have a lower sequence than L: local
-// offline edits are allowed to be newer. Being ahead of B is not proof of an
-// authenticated remote history; see the package note above.
+// rejected before any increment. The local branch is held to the same rule
+// before merging: L.ContentSeq < B.ContentSeq is rejected, and an equal local
+// sequence is accepted only when vaultfile.FileDigest(L) equals
+// vaultfile.FileDigest(B). L.ContentSeq > B.ContentSeq is allowed, including
+// L.ContentSeq > R.ContentSeq, because local offline edits may be newer. In
+// particular, when R equals B the merge must not select an older L and roll the
+// base backward. Being ahead of B is not proof of an authenticated remote
+// history; see the package note above.
 //
 // Merge and sealing. Only items are merged, with B as the common base, L as the
 // local side and R as the remote side, at the authenticated common KeyEpoch.
@@ -425,6 +430,28 @@ func BuildMergeCandidate(
 	}
 	if remoteSeq == math.MaxUint64 {
 		return MergeCandidate{}, fmt.Errorf("%w: remote content sequence cannot be incremented", ErrMergeCandidateVerify)
+	}
+
+	// Apply the same conservative rule to L before merging. If R equals B, the
+	// three-way R == B rule would otherwise select an older L and roll base data
+	// backward. L may be newer than B, including newer than R; only a rollback or
+	// an equal-sequence fork is rejected.
+	localSeq := localFile.Header.ContentSeq
+	if localSeq < baseSeq {
+		return MergeCandidate{}, fmt.Errorf("%w: local working file is a rollback below the local base", ErrMergeCandidateVerify)
+	}
+	if localSeq == baseSeq {
+		localDigest, digestErr := vaultfile.FileDigest(localFile)
+		if digestErr != nil {
+			return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, digestErr)
+		}
+		baseDigest, digestErr := vaultfile.FileDigest(baseFile)
+		if digestErr != nil {
+			return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, digestErr)
+		}
+		if localDigest != baseDigest {
+			return MergeCandidate{}, fmt.Errorf("%w: equal-sequence local file is not the exact base", ErrMergeCandidateVerify)
+		}
 	}
 	if err = mergeCandidateContextError(ctx); err != nil {
 		return MergeCandidate{}, err
