@@ -505,22 +505,22 @@ func TestSealAuthenticatedFileWrongPin(t *testing.T) {
 	})
 
 	t.Run("rotated carried roster", func(t *testing.T) {
-		// The successor's devices are replaced on the caller's side only; the
-		// root signature still covers the original bytes, so the chain must
-		// reject the edited proof rather than accept the new roster.
+		// The successor's devices are replaced on the caller's side only, while
+		// that signed policy's canonical Document keeps the original roster.
+		// validateSignedPolicy must reject exactly this policy/document
+		// mismatch rather than accept the new roster.
 		fx := newSealFixture(t)
 		sealPositive(t, fx)
 
+		db, cred := malformedDB(t)
 		draft := fx.draft()
 		draft.SignedPolicyProofs = append([]SignedPolicy(nil), draft.SignedPolicyProofs...)
 		last := &draft.SignedPolicyProofs[len(draft.SignedPolicyProofs)-1]
 		last.Policy.Devices = last.Policy.Devices[:2]
-		db, cred := malformedDB(t)
+		before := deepCopyFile(draft)
 		out, err := SealAuthenticatedFile(draft, db, fx.chain.anchor, fx.vuk, fx.keys.dev1Priv)
-		if out != nil || err == nil {
-			t.Fatalf("edited-roster seal = %d bytes, %v; want nil bytes and an error", len(out), err)
-		}
-		wantCredsRestored(t, db, cred)
+		wantCodeAt(t, err, CodePolicyMismatch, "")
+		wantRejected(t, out, err, before, draft, db, cred)
 		if reachedKDBX(db) {
 			t.Fatal("verifyPolicyChain did not precede SealKDBXPayload")
 		}
