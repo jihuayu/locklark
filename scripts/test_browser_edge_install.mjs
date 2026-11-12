@@ -33,6 +33,7 @@ import {
   edgeChooserNavigateRequest,
   edgeChooserOpenRequest,
   edgeChooserX11Request,
+  extensionTargets,
   extensionWorkerIdentity,
   installEdgeExtensionThroughManager,
   isEdgeChooserActionOutput,
@@ -383,10 +384,12 @@ test("both actions carry exactly the caller's one profile and Edge image", () =>
   );
 });
 
-// Synthetic manager page and browser for the sequencing contract: the
+// Synthetic manager page and BrowserContext for the sequencing contract: the
 // Developer mode switch already reports true, the Load unpacked click needs no
-// state and the page title is the exact observed manager title. No browser, X
-// server or UI is started.
+// state and the page title is the exact observed manager title. `browser` is
+// the Playwright BrowserContext returned by chromium.launchPersistentContext(),
+// not a Browser: it has pages()/newCDPSession()/serviceWorkers() and no
+// contexts(). No browser, X server or UI is started.
 function installHarness() {
   const shown = [];
   const locator = {
@@ -411,14 +414,16 @@ function installHarness() {
       }),
     },
     // No extension target and no worker: installation is never assumed.
+    // `contexts()` throws: a Browser shape must never be queried here.
     browser: {
-      contexts: () => [{
-        pages: () => [{ url: () => "http://127.0.0.1/" }],
-        newCDPSession: async () => ({
-          send: async () => ({ targetInfos: [] }),
-          detach: async () => {},
-        }),
-      }],
+      contexts: () => {
+        throw Error("edge-targets: supplied BrowserContext has no contexts()");
+      },
+      pages: () => [{ url: () => "http://127.0.0.1/" }],
+      newCDPSession: async () => ({
+        send: async () => ({ targetInfos: [] }),
+        detach: async () => {},
+      }),
       serviceWorkers: () => [],
       waitForEvent: async () => {},
     },
@@ -654,6 +659,67 @@ test("an Open answer that is not its fixed acknowledgement stops the flow", asyn
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("extension targets are queried from the supplied BrowserContext", async () => {
+  const targetInfos = [{
+    targetId: "synthetic-target",
+    type: "service_worker",
+    url: EDGE_BACKGROUND_URL,
+  }];
+  const calls = [];
+  const context = {
+    // A real BrowserContext has no contexts(); calling it must fail the test.
+    contexts: () => {
+      calls.push("contexts");
+      throw Error("BrowserContext has no contexts()");
+    },
+    pages: () => {
+      calls.push("pages");
+      return [
+        { url: () => "edge://extensions/" },
+        { url: () => "http://127.0.0.1/" },
+      ];
+    },
+    newCDPSession: async (page) => {
+      calls.push("newCDPSession");
+      return {
+        send: async (method) => {
+          calls.push(method);
+          assert.equal(method, "Target.getTargets");
+          return { targetInfos };
+        },
+        detach: async () => {
+          calls.push("detach");
+        },
+      };
+    },
+  };
+  // The attached page is the regular http page, not the manager page.
+  const sessionPage = [];
+  context.newCDPSession = async (page) => {
+    calls.push("newCDPSession");
+    sessionPage.push(page.url());
+    return {
+      send: async () => ({ targetInfos }),
+      detach: async () => {},
+    };
+  };
+  assert.deepEqual(await extensionTargets(context), targetInfos);
+  assert.deepEqual(sessionPage, ["http://127.0.0.1/"]);
+  assert.equal(calls.includes("contexts"), false);
+  // The returned data is exactly what CDP reported, never synthesized.
+  assert.deepEqual(calls.slice(0, 2), ["pages", "newCDPSession"]);
+  // No page in the context is a fixed failure, not fabricated targets.
+  await assert.rejects(
+    extensionTargets({
+      pages: () => [],
+      newCDPSession: async () => {
+        throw Error("unexpected newCDPSession");
+      },
+    }),
+    (error) => error.message === "edge-targets",
+  );
 });
 
 test("exactly the expected background.js worker is accepted", () => {

@@ -517,12 +517,13 @@ export function extensionWorkerIdentity(workers) {
 }
 
 // Real CDP target list; used to prove the manager finished installing the
-// fixed extension origin before any product journey starts. Attached to a
-// regular page when one exists (the extension's own pages are not targets of
-// this context session).
-export async function extensionTargets(browser) {
-  const context = browser.contexts()[0];
-  const pages = context?.pages() || [];
+// fixed extension origin before any product journey starts. The supplied
+// object is the Playwright BrowserContext returned by
+// chromium.launchPersistentContext(), so it is queried directly: it has no
+// contexts(). Attached to a regular page when one exists (the extension's own
+// pages are not targets of this context session).
+export async function extensionTargets(context) {
+  const pages = context.pages();
   const page = pages.find((candidate) => candidate.url().startsWith("http")) ||
     pages[0];
   if (!page) throw Error("edge-targets");
