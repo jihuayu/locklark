@@ -649,8 +649,9 @@ class Acceptance:
         require(self.display(otp=True, expected=[self.otp(window)])["matches"] == [True])
         copied = time.time()
         self.click("复制验证码")
-        if getattr(self, "otp_copy", None) is None:
-            self.otp_copy = (window, copied)
+        # Every attempt replaces the record, so a failure always reports this
+        # copy and never an earlier one. Both values stay internal.
+        self.otp_copy = (window, copied)
         try:
             self.eventually(lambda: self.clipboard([self.otp(window)])["matches"] == [True])
         except AcceptanceFailure:

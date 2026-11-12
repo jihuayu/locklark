@@ -519,6 +519,29 @@ class SimulatedClock:
         return self.now
 
 
+class SequenceClock:
+    """Wall time is read-only and advances only on each real poll sleep.
+
+    Real polling finishes when wall time passes ``end``; its 10-second
+    monotonic deadline ticks 0.25s per read and is never reached.
+    """
+
+    def __init__(self, start, end, step=0.5):
+        self.wall, self.end, self.step = start, end, step
+        self.monotonic_now, self.sleeps = 0.0, 0
+
+    def time(self):
+        return self.wall
+
+    def monotonic(self):
+        self.monotonic_now += 0.25
+        return self.monotonic_now
+
+    def sleep(self, _seconds):
+        self.wall += self.step
+        self.sleeps += 1
+
+
 class OtpCopyFlowIntegrationTests(unittest.TestCase):
     """show_copy_otp keeps the original flow and records only on failure."""
 
@@ -586,6 +609,74 @@ class OtpCopyFlowIntegrationTests(unittest.TestCase):
             acceptance.show_copy_otp()
         self.assertIsNone(acceptance.otp_diagnostic)
         self.assertEqual(acceptance.otp_copy, (1005 * 20 + 0.5, 1005 * 20 + 1.0))
+
+    def test_success_then_failure_diagnoses_current_attempt(self):
+        # Real show_copy_otp and real eventually(): a first copy succeeds, then
+        # a later copy in another window fails. The record must describe the
+        # current attempt, never the earlier one, and keep the failure intact.
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.stage, acceptance.reason, acceptance.native_action = (
+            "otp-page-clears", "acceptance", "click:复制验证码")
+        acceptance.otp_copy, acceptance.otp_diagnostic, acceptance.output_lines = None, None, []
+        acceptance.fixture = {"OTPSeed": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"}
+        acceptance.wait, acceptance.click = Mock(), Mock()
+        acceptance.display = Mock(return_value={"matches": [True]})
+        acceptance.otp = Mock(return_value=self.CODE)
+        # An earlier attempt left its record behind, as any prior success
+        # does. It would diagnose the failure as three windows, not one.
+        acceptance.otp_copy = (1004 * 20 + 0.5, 1004 * 20 + 1.0)
+        # Attempt 1 is accepted and copied in window 1005. Attempt 2 is
+        # accepted and copied in window 1006 and fails as window 1007 opens.
+        outcomes = [{"matches": [True]}, {"matches": [False]}]
+        samples = [1005 * 20 + 0.5, 1006 * 20 + 0.5]
+        attempt, reads, polls = 0, [], []
+        clock = SequenceClock(start=1005 * 20 + 0.5, end=1006 * 20 + 20)
+
+        def next_attempt(*args, **kwargs):
+            nonlocal attempt
+            sample = samples[attempt]
+            # The wait returns as soon as its window opens, before any copy.
+            clock.wall = sample
+            attempt += 1
+            return sample
+        acceptance.await_new_otp_window = Mock(side_effect=next_attempt)
+        # Every read of the wall clock (raw or internal) is the polling clock.
+        acceptance.otp_window = lambda now: int(now) // 20
+
+        def clipboard(expected=None):
+            if expected is None:
+                reads.append("probe")
+                return {"empty": False}
+            polls.append((attempt, clock.wall))
+            return outcomes[attempt - 1]
+        acceptance.clipboard = Mock(side_effect=clipboard)
+        with patch.object(desktop.time, "time", clock.time), \
+             patch.object(desktop.time, "monotonic", clock.monotonic), \
+             patch.object(desktop.time, "sleep", clock.sleep), \
+             patch("builtins.print") as output:
+            acceptance.show_copy_otp()  # attempt 1 succeeds on its first check
+            self.assertIsNone(acceptance.otp_diagnostic)
+            with self.assertRaises(AcceptanceFailure):
+                acceptance.show_copy_otp()  # attempt 2 never settles before 1007
+        self.assertEqual(acceptance.click.call_args_list,
+                         [call("显示验证码"), call("复制验证码"), call("显示验证码"), call("复制验证码")])
+        self.assertEqual(acceptance.wait.call_args_list.count(call("显示验证码")), 2)
+        self.assertEqual(reads, ["probe"])  # exactly one read, from attempt 2
+        self.assertEqual(polls[0][0], 1)  # attempt 1 checked in its own window
+        self.assertGreater(sum(1 for item in polls if item[0] == 2), 1)  # retried
+        # Attempt 2 retried on the real poll schedule (0.05s), then gave up.
+        self.assertEqual(polls[-1][0], 2)
+        self.assertGreaterEqual(clock.sleeps, 14)
+        # Attempt 2's copy and failure are one window apart; the earlier or
+        # the first attempt would report two or three, so this proves the
+        # record follows the current attempt.
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":1, "clipboard_empty":False})
+        self.assertEqual((acceptance.stage, acceptance.reason, acceptance.native_action),
+                         ("otp-page-clears", "acceptance", "click:复制验证码"))
+        self.assertNotIn(self.CODE, acceptance.otp_diagnostic)
+        self.assertNotIn("20120.5", acceptance.otp_diagnostic)  # no raw time
+        output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
 
     def test_probe_failure_keeps_original_exception_and_emits_no_code(self):
         acceptance = self.acceptance([{"matches": [False]}, AcceptanceFailure()])
