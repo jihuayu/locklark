@@ -247,6 +247,14 @@ def _empty_status():
     return {field: False for field in STATUS_FIELDS}
 
 
+# The status walk distinguishes a documented missing value from a failed query.
+# Only these attributes may legitimately answer kAXErrorNoValue: a static text
+# without an AXLabel has no label, and a leaf has no children. AXRole must be
+# present, so its own no-value status is a failed query.
+_STATUS_NO_VALUE = object()
+_STATUS_NO_VALUE_ATTRIBUTES = frozenset(("AXLabel", "AXChildren"))
+
+
 def _status_shape(value):
     """The exact four-built-in-bool status object, else the all-false one."""
     empty = _empty_status()
@@ -261,15 +269,19 @@ def _locked_view(controls):
     """True only for the exact already-read locked controls snapshot.
 
     This reads the existing safe ``{present, enabled, showing}`` mapping and
-    never touches AX. ``present`` must be the exact built-in ``True`` for all
-    four locked controls and the exact built-in ``False`` for the new-login
-    control; any missing/malformed record proves nothing and refuses.
+    never touches AX. ``present`` AND ``showing`` must both be the exact
+    built-in ``True`` for all four locked controls, and ``present`` must be the
+    exact built-in ``False`` for the new-login control; ``enabled`` is
+    deliberately ignored (a busy control may be disabled while the locked view
+    still holds). Any missing/malformed record proves nothing and refuses.
     """
     if type(controls) is not dict:
         return False
     for label in LOCKED_CONTROLS:
         record = controls.get(label)
-        if type(record) is not dict or record.get("present") is not True:
+        if type(record) is not dict:
+            return False
+        if record.get("present") is not True or record.get("showing") is not True:
             return False
     record = controls.get(LOCKED_VIEW_ABSENT)
     return type(record) is dict and record.get("present") is False
@@ -427,6 +439,41 @@ class QuartzApi:
             return None
         return value
 
+    def _status_attribute(self, element, name):
+        """Strict status-walk AX read: success, documented no-value, or refuse.
+
+        The generic ``attribute()`` helper above intentionally collapses every
+        nonzero status (and ``False``) to ``None``, so it cannot tell an absent
+        attribute from a failed query and is never used here. This reader
+        requires the documented ``(AXError, value)`` tuple with an exact
+        built-in ``int`` status; exact 0 is success, and the only accepted
+        missing-value status is the validated ``self.ax.kAXErrorNoValue``. Only
+        AXLabel/AXChildren may answer no-value (safe absent label / leaf);
+        every other status - including ``False``, a malformed tuple, a raised
+        call, a success carrying ``None``, or no-value on AXRole - refuses.
+        """
+        status = _ax_status(self.ax)
+        if status is None:
+            raise _a11y_query()
+        try:
+            result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise _a11y_query()
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise _a11y_query()
+        code, value = result
+        if not _exact_status(code):
+            raise _a11y_query()
+        if code == status[1]:
+            if value is None:
+                raise _a11y_query()
+            return value
+        if code == status[0] and name in _STATUS_NO_VALUE_ATTRIBUTES:
+            return _STATUS_NO_VALUE
+        raise _a11y_query()
+
     def _geometry(self, element, name, value_type, first, second):
         value = self.attribute(element, name)
         if value is None:
@@ -583,12 +630,14 @@ class QuartzApi:
         """Bounded static-text AXLabel comparison for the proved locked view.
 
         Only AXRole, AXChildren and AXLabel are read here (and never AXValue or
-        AXSelectedText). Every label is compared internally with the fixed
-        STATUS_TEXT strings; an unknown or empty label is discarded and no
-        text is retained, returned or formatted anywhere. The existing
-        MAX_NODES/MAX_DEPTH bounds still refuse rather than truncate, and the
-        caller converts every query/shape refusal to the fixed all-false
-        object.
+        AXSelectedText), through the strict status-only reader: a failed query
+        refuses, a documented AXLabel no-value is a safe absent label, and a
+        documented AXChildren no-value is a leaf. Every label is compared
+        internally with the fixed STATUS_TEXT strings; an unknown or empty label
+        is discarded and no text is retained, returned or formatted anywhere.
+        The existing MAX_NODES/MAX_DEPTH bounds still refuse rather than
+        truncate, and the caller converts every query/shape refusal to the
+        fixed all-false object.
         """
         found = {field: False for field, _ in STATUS_TEXT}
         nodes = [0]
@@ -599,23 +648,23 @@ class QuartzApi:
                 raise contract.ContractError("a11y-overrun")
             if depth > MAX_DEPTH:
                 raise contract.ContractError("a11y-tree-limit")
-            raw_role = self.attribute(element, "AXRole")
-            if not isinstance(raw_role, str):
+            raw_role = self._status_attribute(element, "AXRole")
+            if raw_role is _STATUS_NO_VALUE or not isinstance(raw_role, str):
                 raise contract.ContractError("a11y-query")
             role = _native_text(raw_role)
             if not role:
                 raise contract.ContractError("a11y-query")
             if role == "AXStaticText":
-                raw_label = self.attribute(element, "AXLabel")
-                if raw_label is not None:
+                raw_label = self._status_attribute(element, "AXLabel")
+                if raw_label is not _STATUS_NO_VALUE:
                     if not isinstance(raw_label, str):
                         raise contract.ContractError("a11y-query")
                     label = _native_text(raw_label)
                     for field, text in STATUS_TEXT:
                         if label == text:
                             found[field] = True
-            raw_children = self.attribute(element, "AXChildren")
-            if raw_children is None:
+            raw_children = self._status_attribute(element, "AXChildren")
+            if raw_children is _STATUS_NO_VALUE:
                 return
             children = _sequence(raw_children)
             if children is None or isinstance(children, (str, bytes, bytearray)):
