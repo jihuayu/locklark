@@ -249,10 +249,11 @@ def _empty_status():
 
 # The status walk distinguishes a documented missing value from a failed query.
 # Only these attributes may legitimately answer kAXErrorNoValue: a static text
-# without an AXLabel has no label, and a leaf has no children. AXRole must be
+# without an AXDescription (the AX spelling of NSAccessibilityElement
+# accessibilityLabel) has no label, and a leaf has no children. AXRole must be
 # present, so its own no-value status is a failed query.
 _STATUS_NO_VALUE = object()
-_STATUS_NO_VALUE_ATTRIBUTES = frozenset(("AXLabel", "AXChildren"))
+_STATUS_NO_VALUE_ATTRIBUTES = frozenset(("AXDescription", "AXChildren"))
 
 
 def _status_shape(value):
@@ -448,7 +449,7 @@ class QuartzApi:
         requires the documented ``(AXError, value)`` tuple with an exact
         built-in ``int`` status; exact 0 is success, and the only accepted
         missing-value status is the validated ``self.ax.kAXErrorNoValue``. Only
-        AXLabel/AXChildren may answer no-value (safe absent label / leaf);
+        AXDescription/AXChildren may answer no-value (safe absent label / leaf);
         every other status - including ``False``, a malformed tuple, a raised
         call, a success carrying ``None``, or no-value on AXRole - refuses.
         """
@@ -627,16 +628,19 @@ class QuartzApi:
         return [record for _, record in self._labeled(window)]
 
     def _status_matches(self, target):
-        """Bounded static-text AXLabel comparison for the proved locked view.
+        """Bounded static-text AXDescription comparison for the proved locked view.
 
-        Only AXRole, AXChildren and AXLabel are read here (and never AXValue or
-        AXSelectedText), through the strict status-only reader: a failed query
-        refuses, a documented AXLabel no-value is a safe absent label, and a
-        documented AXChildren no-value is a leaf. Every label is compared
-        internally with the fixed STATUS_TEXT strings; an unknown or empty label
-        is discarded and no text is retained, returned or formatted anywhere.
-        The existing MAX_NODES/MAX_DEPTH bounds still refuse rather than
-        truncate, and the caller converts every query/shape refusal to the
+        Only AXRole, AXChildren and AXDescription are read here (and never
+        AXValue or AXSelectedText), through the strict status-only reader: a
+        failed query refuses, a documented AXDescription no-value is a safe
+        absent label, and a documented AXChildren no-value is a leaf. The AX
+        spelling matches the local SDK, where
+        NSAccessibilityElement.accessibilityLabel is AXDescription (MyGo 0.7.4
+        writes static-text labels with setAccessibilityLabel:). Every label is
+        compared internally with the fixed STATUS_TEXT strings; an unknown or
+        empty label is discarded and no text is retained, returned or formatted
+        anywhere. The existing MAX_NODES/MAX_DEPTH bounds still refuse rather
+        than truncate, and the caller converts every query/shape refusal to the
         fixed all-false object.
         """
         found = {field: False for field, _ in STATUS_TEXT}
@@ -655,7 +659,7 @@ class QuartzApi:
             if not role:
                 raise contract.ContractError("a11y-query")
             if role == "AXStaticText":
-                raw_label = self._status_attribute(element, "AXLabel")
+                raw_label = self._status_attribute(element, "AXDescription")
                 if raw_label is not _STATUS_NO_VALUE:
                     if not isinstance(raw_label, str):
                         raise contract.ContractError("a11y-query")
@@ -682,7 +686,7 @@ class QuartzApi:
 
         The existing controls snapshot is proved locked first, before any AX
         binding or label read. Only then is the exact already-bound AX window
-        walked and its AXLabel values compared internally. A false/incomplete
+        walked and its AXDescription values compared internally. A false/incomplete
         proof, an unavailable binding, any query/shape error and any traversal
         overrun all return the same all-false object, so this diagnostic can
         never fail the already-safe controls snapshot.

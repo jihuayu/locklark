@@ -1288,13 +1288,13 @@ class MacAxWalkTests(unittest.TestCase):
 class StatusAxApi(FakeMacApi):
     """Real QuartzApi.status over a tiny synthetic AX tree and safe controls.
 
-    Only AXRole/AXChildren (and AXLabel for static text) are served through the
-    status-only strict reader; AXValue and AXSelectedText are hard failures, so
-    the fixture proves the classifier never requests either. A missing attribute
-    answers the documented kAXErrorNoValue; ``statuses`` can substitute any raw
-    ``(status, value)`` tuple to exercise query failures. The binding is the
-    already-selected opaque window element, and every attribute name is
-    recorded.
+    Only AXRole/AXChildren (and AXDescription for static text) are served
+    through the status-only strict reader; AXLabel, AXValue and AXSelectedText
+    are hard failures, so the fixture proves the classifier never requests any
+    of them. A missing attribute answers the documented kAXErrorNoValue;
+    ``statuses`` can substitute any raw ``(status, value)`` tuple to exercise
+    query failures. The binding is the already-selected opaque window element,
+    and every attribute name is recorded.
     """
 
     _status_attribute = macos.QuartzApi._status_attribute
@@ -1321,7 +1321,7 @@ class StatusAxApi(FakeMacApi):
 
     def copy_attribute(self, element, name, out):
         self.reads.append(name)
-        if name in ("AXValue", "AXSelectedText"):
+        if name in ("AXLabel", "AXValue", "AXSelectedText"):
             raise AssertionError("forbidden accessibility attribute requested: " + name)
         if self.failure == "attribute":
             raise OSError("synthetic attribute failure")
@@ -1331,7 +1331,7 @@ class StatusAxApi(FakeMacApi):
             raise AssertionError("unbound AX element requested")
         if name in self.statuses:
             return self.statuses[name]
-        key = {"AXRole": "role", "AXLabel": "label",
+        key = {"AXRole": "role", "AXDescription": "description",
                "AXChildren": "children"}.get(name)
         if key is None or key not in element:
             return NO_VALUE, None
@@ -1369,7 +1369,7 @@ class MacInspectStatusTests(unittest.TestCase):
 
     def tree(self, *labels):
         return {"role": "AXWindow", "children": [
-            {"role": "AXStaticText", "label": label} for label in labels]}
+            {"role": "AXStaticText", "description": label} for label in labels]}
 
     def inspect(self, api):
         return execute(macos.MacAdapter(api=api),
@@ -1426,7 +1426,7 @@ class MacInspectStatusTests(unittest.TestCase):
         expected = macos._empty_status()
         expected["available"] = True
         cases = (
-            ("label", {"role": "AXWindow", "children": [{"role": "AXStaticText"}]}),
+            ("description", {"role": "AXWindow", "children": [{"role": "AXStaticText"}]}),
             ("children", {"role": "AXWindow"}),
         )
         for name, graph in cases:
@@ -1435,22 +1435,25 @@ class MacInspectStatusTests(unittest.TestCase):
                 result = self.inspect(api)
                 self.assertEqual(result["status"], expected)
                 self.assertEqual(api.bindings, [WINDOW_RAW["id"]])
+                if name == "description":
+                    self.assertIn("AXDescription", api.reads)
+                self.assertNotIn("AXLabel", api.reads)
                 self.assertNotIn("AXValue", api.reads)
                 self.assertNotIn("AXSelectedText", api.reads)
 
     def test_status_query_errors_fail_closed_to_all_false(self):
         graph = self.tree(macos.STATUS_TEXT[0][1])
         cases = (
-            ("label-nonzero", {"AXLabel": (1, None)}),
-            ("label-other-no-value", {"AXLabel": (NO_VALUE - 1, None)}),
+            ("description-nonzero", {"AXDescription": (1, None)}),
+            ("description-other-no-value", {"AXDescription": (NO_VALUE - 1, None)}),
             ("children-nonzero", {"AXChildren": (1, None)}),
-            ("label-boolean", {"AXLabel": (False, None)}),
+            ("description-boolean", {"AXDescription": (False, None)}),
             ("children-boolean", {"AXChildren": (True, None)}),
-            ("label-success-none", {"AXLabel": (0, None)}),
+            ("description-success-none", {"AXDescription": (0, None)}),
             ("children-success-none", {"AXChildren": (0, None)}),
             ("role-malformed", {"AXRole": (0, 7)}),
             ("role-no-value", {"AXRole": (NO_VALUE, None)}),
-            ("label-malformed-tuple", {"AXLabel": (0, None, 1)}),
+            ("description-malformed-tuple", {"AXDescription": (0, None, 1)}),
             ("children-non-tuple", {"AXChildren": "unreadable"}),
         )
         for name, statuses in cases:
@@ -1460,6 +1463,7 @@ class MacInspectStatusTests(unittest.TestCase):
                 self.assertEqual(result["status"], macos._empty_status())
                 self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]],
                                  {"present": True, "enabled": True, "showing": True})
+                self.assertNotIn("AXLabel", api.reads)
                 self.assertNotIn("AXValue", api.reads)
                 self.assertNotIn("AXSelectedText", api.reads)
 
@@ -1479,12 +1483,12 @@ class MacInspectStatusTests(unittest.TestCase):
 
     def test_query_shape_and_bound_errors_fail_closed_but_keep_controls(self):
         malformed_children = {"role": "AXWindow", "children": 7}
-        malformed_label = {"role": "AXWindow", "children": [
-            {"role": "AXStaticText", "label": 7}]}
+        malformed_description = {"role": "AXWindow", "children": [
+            {"role": "AXStaticText", "description": 7}]}
         cases = (("binding", self.tree(macos.STATUS_TEXT[0][1]), "binding"),
                  ("attribute", self.tree(macos.STATUS_TEXT[0][1]), "attribute"),
                  ("children", malformed_children, None),
-                 ("label", malformed_label, None))
+                 ("description", malformed_description, None))
         for name, graph, failure in cases:
             with self.subTest(case=name):
                 api = StatusAxApi(graph, self.control_records(), failure=failure)
@@ -1516,7 +1520,9 @@ class MacInspectStatusTests(unittest.TestCase):
         payload = json.dumps(result, ensure_ascii=False)
         self.assertFalse(any(text in payload for _, text in macos.STATUS_TEXT),
                          "AX status text leaked into result")
-        self.assertEqual(set(api.reads), {"AXRole", "AXChildren", "AXLabel"})
+        self.assertEqual(set(api.reads), {"AXRole", "AXChildren", "AXDescription"})
+        self.assertIn("AXDescription", api.reads)
+        self.assertNotIn("AXLabel", api.reads)
         self.assertNotIn("AXValue", api.reads)
         self.assertNotIn("AXSelectedText", api.reads)
 
