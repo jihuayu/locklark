@@ -520,7 +520,6 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         diagnostic = {
             "stage": "checkout-stale:navigation",
             "reason": "Native route approval label missing CANARY-9f3a1c",
-            "frames": ["CANARY-9f3a1c"],
             "ignored": "https://leak.example",
             "nativeError": {
                 "code": "window-timeout",
@@ -737,6 +736,80 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                     (("fixture", "acceptance-failure", None) if state == "accepted"
                      else ("unclassified", "unclassified", None)),
                 )
+
+    def test_source_frames_are_optional_fixed_basename_frames(self):
+        names = support._CHECKOUT_SOURCE_FILES
+        self.assertEqual(len(names), 5)
+        native = {"code": "window-timeout", "action": "label-wait", "index": 0}
+        base = {"stage": "fixture", "kind": "acceptance-failure", "native": None,
+                "exit": "exited 7", "startupPhase": "unknown",
+                "failureRecordState": "accepted", "wrapperFamily": "unknown"}
+
+        def diagnostic(**fields):
+            payload = {"stage": "fixture",
+                       "reason": "CANARY-9f3a1c /home/runner/x", **fields}
+            return support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(payload)
+
+        frames = [f"{names[1]}:12:3", f"{names[0]}:5:40"]
+        expect_frames = [
+            {"file": names[1], "line": 12, "column": 3},
+            {"file": names[0], "line": 5, "column": 40},
+        ]
+        cases = (
+            # Missing, null and empty leave the existing projection.
+            (diagnostic(), base),
+            (diagnostic(frames=None), base),
+            (diagnostic(frames=[]), base),
+            (diagnostic(frames=frames), {**base, "sourceFrames": expect_frames}),
+            # A helper failure keeps its allowlisted fields and frames.
+            (diagnostic(nativeError=native, frames=[f"{names[2]}:1:1"]),
+             {"stage": "fixture", "kind": "native-helper",
+              "native": {**native, "x_codes": []},
+              "sourceFrames": [{"file": names[2], "line": 1, "column": 1}],
+              "exit": "exited 7", "startupPhase": "unknown",
+              "failureRecordState": "accepted", "wrapperFamily": "unknown"}),
+            # Unknown basenames, paths, zero and out-of-bound positions,
+            # oversized lists, non-string entries and canary text reject the
+            # whole record conservatively; nothing raw is copied.
+            (diagnostic(frames=["app.js:1:1"]), None),
+            (diagnostic(frames=["browser_native_acceptance.mjs.bak:1:1"]), None),
+            (diagnostic(frames=["src/browser_native_acceptance.mjs:1:1"]), None),
+            (diagnostic(frames=["/x/browser_native_acceptance.mjs:1:1"]), None),
+            (diagnostic(frames=[f"{names[0]}:0:1"]), None),
+            (diagnostic(frames=[f"{names[0]}:1:0"]), None),
+            (diagnostic(frames=[f"{names[0]}:1000000:1"]), None),
+            (diagnostic(frames=[f"{names[0]}:1:65536"]), None),
+            (diagnostic(frames=[f"{names[0]}:12"]), None),
+            (diagnostic(frames=[f"{names[0]}:12:3\nCANARY-9f3a1c"]), None),
+            (diagnostic(frames=[names[0] + ":12:3"] * 17), None),
+            (diagnostic(frames=[1]), None),
+            (diagnostic(frames={"file": names[0]}), None),
+            (diagnostic(frames="browser_native_acceptance.mjs:1:1"), None),
+            (diagnostic(frames=["CANARY-9f3a1c"]), None),
+        )
+        for stderr, expected in cases:
+            with self.subTest(frames=stderr[-60:]):
+                record, message = self._nonzero(stderr)
+                self._assert_no_canary(record, message)
+                if expected is None:
+                    self.assertEqual(
+                        record,
+                        {"stage": "unclassified", "kind": "unclassified",
+                         "native": None, "exit": "exited 7",
+                         "startupPhase": "unknown",
+                         "failureRecordState": "rejected",
+                         "wrapperFamily": "unknown"},
+                    )
+                    self.assertEqual(
+                        message,
+                        "native checkout acceptance exited with status 7",
+                    )
+                else:
+                    self.assertEqual(record, expected)
+        # Exactly the maximum number of valid frames is still accepted.
+        record, _ = self._nonzero(
+            diagnostic(frames=[f"{names[0]}:1:1"] * 16))
+        self.assertEqual(len(record["sourceFrames"]), 16)
 
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX

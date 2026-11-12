@@ -2391,6 +2391,20 @@ _CHECKOUT_WRAPPER_SIGNATURES = (
     ("node-loader", ("SyntaxError: Cannot use import statement",
                      "ERR_MODULE_NOT_FOUND", "ERR_REQUIRE_ESM")),
 )
+# The five journey modules whose basenames the script's own stack-frame regex
+# keeps; one frame is "<basename>:line:column", nothing else is ever accepted.
+_CHECKOUT_SOURCE_FILES = (
+    "browser_native_acceptance.mjs",
+    "browser_checkout_acceptance.mjs",
+    "browser_passkey_management_acceptance.mjs",
+    "browser_conditional_passkey_acceptance.mjs",
+    "browser_passkey_acceptance.mjs",
+)
+_CHECKOUT_SOURCE_FRAMES_MAX = 16
+_CHECKOUT_SOURCE_FRAME = re.compile(
+    r"(" + "|".join(re.escape(name) for name in _CHECKOUT_SOURCE_FILES) + r")"
+    r":[0-9]{1,6}:[0-9]{1,5}"
+)
 _CHECKOUT_FAILED_STAGES = frozenset(_CHECKOUT_STAGE_LABELS) | {
     "approved-fill:approve",
     "driver-arguments-failure",
@@ -3027,6 +3041,34 @@ def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
     }
 
 
+def _checkout_source_frames(value: Any) -> list[dict[str, Any]] | None:
+    """The optional fixed source frames, or ``None`` if malformed/oversized.
+
+    Missing, null and empty means no frames and never rejects; anything else
+    must be a bounded list of exact known-basename frames so no path, raw
+    text or arbitrary value is ever copied.
+    """
+
+    if value is None or value == []:
+        return None
+    if not isinstance(value, list) or len(value) > _CHECKOUT_SOURCE_FRAMES_MAX:
+        return None
+    frames: list[dict[str, Any]] = []
+    for entry in value:
+        if not isinstance(entry, str):
+            return None
+        match = _CHECKOUT_SOURCE_FRAME.fullmatch(entry)
+        if match is None:
+            return None
+        line, column = _checkout_bounded(
+            int(entry.rsplit(":", 2)[1]), 1, 999999
+        ), _checkout_bounded(int(entry.rsplit(":", 2)[2]), 1, 65535)
+        if line is None or column is None:
+            return None
+        frames.append({"file": match.group(1), "line": line, "column": column})
+    return frames
+
+
 def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
     """Reduce the diagnostic line on stderr to fixed fields; ``None`` if unusable."""
 
@@ -3077,19 +3119,30 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     if not found:
         return None
     diagnostic = found[0]
+    # Validated before any other field: a malformed frame list rejects the
+    # whole record, while an absent one keeps the existing projection.
+    absent_frames = diagnostic.get("frames") in (None, [], ())
+    source_frames = _checkout_source_frames(diagnostic.get("frames"))
+    if not absent_frames and source_frames is None:
+        return None
     native = _checkout_failed_native(diagnostic.get("nativeError"))
     # The human "reason" text is never copied; it only selects a fixed kind
     # for an allowlisted stage. A stage outside the allowlist is unclassified.
     stage = diagnostic.get("stage")
     if not isinstance(stage, str) or stage not in _CHECKOUT_FAILED_STAGES:
         return {"stage": "unclassified", "kind": "unclassified", "native": None}
+    optional = {"sourceFrames": source_frames} if source_frames else {}
     if native is not None:
-        return {"stage": stage, "kind": "native-helper", "native": native}
+        return {
+            "stage": stage, "kind": "native-helper", "native": native,
+            **optional,
+        }
     if "nativeError" in diagnostic or not isinstance(
         diagnostic.get("reason"), str
     ):
         return {"stage": "unclassified", "kind": "unclassified", "native": None}
-    return {"stage": stage, "kind": "acceptance-failure", "native": None}
+    return {"stage": stage, "kind": "acceptance-failure", "native": None,
+            **optional}
 
 
 def _record_checkout_failure(
