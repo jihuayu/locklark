@@ -212,26 +212,140 @@ func (fx *fileSealFixture) wantHeaderUnchanged(t *testing.T, f *File) {
 	}
 }
 
+// credsSnapshot is the caller's ownership record for db.Credentials: the
+// exact *kdbx.DBCredentials pointer the caller installed and an independent
+// copy of every credential byte slice it held before the call.
+type credsSnapshot struct {
+	original   *kdbx.DBCredentials
+	passphrase []byte
+	key        []byte
+	windows    []byte
+}
+
 // dbWithCredentials attaches a distinctive password credential to a fresh
-// unlocked payload fixture database and returns it together with the
-// credential bytes to compare against. The bytes are a clone: the vendored
-// encoder's cleanup may rehash a credential slice in place, so only a copy
-// taken before the call can tell a restored value from a rewritten one.
-func dbWithCredentials(t *testing.T) (*kdbx.Database, []byte) {
+// unlocked payload fixture database and returns it with the record of that
+// caller-owned pointer. The recorded bytes are clones: the vendored encoder's
+// cleanup may rehash a credential slice in place, so only a copy taken before
+// the call can tell a restored value from a rewritten one, and a non-nil
+// pointer alone does not prove the caller's own pointer came back.
+func dbWithCredentials(t *testing.T) (*kdbx.Database, *credsSnapshot) {
 	t.Helper()
 	db := payloadFixtureDB(t)
 	cred := kdbx.NewPasswordCredentials("prior passphrase")
 	db.Credentials = cred
-	return db, bytes.Clone(cred.Passphrase)
+	return db, snapshotCreds(cred)
 }
 
-// wantCredsRestored checks that db still carries exactly the pointer it had
-// and credential bytes equal to want.
-func wantCredsRestored(t *testing.T, db *kdbx.Database, want []byte) {
-	t.Helper()
-	if db.Credentials == nil || !bytes.Equal(db.Credentials.Passphrase, want) {
-		t.Fatal("db.Credentials was not restored to the caller's prior value")
+// snapshotCreds records original and clones its credential bytes.
+func snapshotCreds(original *kdbx.DBCredentials) *credsSnapshot {
+	return &credsSnapshot{
+		original:   original,
+		passphrase: bytes.Clone(original.Passphrase),
+		key:        bytes.Clone(original.Key),
+		windows:    bytes.Clone(original.Windows),
 	}
+}
+
+// wantCredsRestored checks that db carries exactly the caller's original
+// pointer, not merely an equal one, and that every credential byte slice it
+// holds still equals the independent pre-call snapshot. Bytes are compared
+// separately from pointer identity so a restored pointer whose buffers were
+// rewritten in place is caught too.
+func wantCredsRestored(t *testing.T, db *kdbx.Database, want *credsSnapshot) {
+	t.Helper()
+	if db.Credentials != want.original {
+		t.Fatalf("db.Credentials = %p, want the caller's exact pointer %p", db.Credentials, want.original)
+	}
+	if !bytes.Equal(db.Credentials.Passphrase, want.passphrase) {
+		t.Fatal("db.Credentials.Passphrase was rewritten, not restored to the caller's prior bytes")
+	}
+	if !bytes.Equal(db.Credentials.Key, want.key) {
+		t.Fatal("db.Credentials.Key was rewritten, not restored to the caller's prior bytes")
+	}
+	if !bytes.Equal(db.Credentials.Windows, want.windows) {
+		t.Fatal("db.Credentials.Windows was rewritten, not restored to the caller's prior bytes")
+	}
+}
+
+// snapshotPolicy clones p for a before-snapshot with clonePolicy, then
+// rebuilds every element slice from by-value copies of its elements so the
+// clone matches p exactly. clonePolicy copies elements but not their nil-ness,
+// and a non-nil empty slice (or an empty slice of zero-size elements) could
+// otherwise come back nil and reflect.DeepEqual would report a change the seal
+// never made. The rebuilt lists share no storage with p; the Members and
+// AdminDelegations elements hold only strings, Device and PublicKey bytes are
+// cloned below, and a non-nil PolicySigningKey is copied with its PublicKey.
+func snapshotPolicy(p *Policy) *Policy {
+	q := clonePolicy(p)
+	q.OwnerRoot.Owners = copySlice(p.OwnerRoot.Owners)
+	q.Readers = copySlice(p.Readers)
+	q.Writers = copySlice(p.Writers)
+	q.Admins = copySlice(p.Admins)
+	q.Owners = copySlice(p.Owners)
+	q.AdminDelegations = copySlice(p.AdminDelegations)
+	q.Devices = copySlice(p.Devices)
+	for i := range q.Devices {
+		q.Devices[i].ContentSigningKey.PublicKey = bytes.Clone(p.Devices[i].ContentSigningKey.PublicKey)
+		if k := p.Devices[i].PolicySigningKey; k != nil {
+			kc := *k
+			kc.PublicKey = bytes.Clone(k.PublicKey)
+			q.Devices[i].PolicySigningKey = &kc
+		}
+	}
+	return q
+}
+
+// copySlice returns a copy of s whose nil-ness, length and element values
+// match s exactly.
+func copySlice[S ~[]E, E any](s S) S {
+	if s == nil {
+		return nil
+	}
+	c := make(S, len(s))
+	for i := range s {
+		c[i] = s[i]
+	}
+	return c
+}
+
+// snapshotFile returns a fully independent copy of f for an immutable
+// before-snapshot. Unlike deepCopyFile, it shares no mutable storage at any
+// depth: every nested policy is cloned with the existing clonePolicy (and
+// snapshotPolicy's exact nil-ness), every proof Document and Sig and every
+// VUKDeviceSlot.WrappedVUK byte slice is copied, and every other reference
+// (header digests, ciphertext, CEK slot, content signature) is cloned too. An
+// in-place mutation of any of them therefore shows up as a difference from the
+// snapshot.
+func snapshotFile(f *File) *File {
+	g := *f
+	g.Header.PrevDigest = bytes.Clone(f.Header.PrevDigest)
+	g.Header.PolicyDigest = bytes.Clone(f.Header.PolicyDigest)
+	g.KDBXCiphertext = bytes.Clone(f.KDBXCiphertext)
+	g.ContentSignature.Sig = bytes.Clone(f.ContentSignature.Sig)
+	g.CEKSlot.WrappedCEK = bytes.Clone(f.CEKSlot.WrappedCEK)
+	if f.SignedPolicyProofs != nil {
+		g.SignedPolicyProofs = make([]SignedPolicy, len(f.SignedPolicyProofs))
+		for i, sp := range f.SignedPolicyProofs {
+			g.SignedPolicyProofs[i] = SignedPolicy{
+				Policy:   *snapshotPolicy(&sp.Policy),
+				Document: bytes.Clone(sp.Document),
+				SignerID: sp.SignerID,
+				Alg:      sp.Alg,
+				Sig:      bytes.Clone(sp.Sig),
+			}
+		}
+	}
+	if f.VUKDeviceSlots != nil {
+		g.VUKDeviceSlots = make([]DeviceSlot, len(f.VUKDeviceSlots))
+		for i, s := range f.VUKDeviceSlots {
+			g.VUKDeviceSlots[i] = DeviceSlot{
+				DeviceID:   s.DeviceID,
+				Recipient:  s.Recipient,
+				WrappedVUK: bytes.Clone(s.WrappedVUK),
+			}
+		}
+	}
+	return &g
 }
 
 // reachedKDBX reports whether SealKDBXPayload's fixed profile was installed
@@ -246,7 +360,7 @@ func reachedKDBX(db *kdbx.Database) bool {
 // SealKDBXPayload: nil Header makes SealKDBXPayload, and every precheck before
 // it, report CodeKDBXPayloadInvalid without installing the profile, reading a
 // credential or running the KDF.
-func malformedDB(t *testing.T) (*kdbx.Database, []byte) {
+func malformedDB(t *testing.T) (*kdbx.Database, *credsSnapshot) {
 	t.Helper()
 	db, cred := dbWithCredentials(t)
 	db.Header = nil
@@ -257,7 +371,7 @@ func malformedDB(t *testing.T) (*kdbx.Database, []byte) {
 // SealKDBXPayload: an otherwise valid database whose cipher is one the
 // vendored encoder does not support is rejected there as
 // CodeKDBXPayloadInvalid, so the KDBX code identifies the step that caught it.
-func sentinelDB(t *testing.T) (*kdbx.Database, []byte) {
+func sentinelDB(t *testing.T) (*kdbx.Database, *credsSnapshot) {
 	t.Helper()
 	db, cred := dbWithCredentials(t)
 	db.Header.FileHeaders.CipherID = []byte{0xde, 0xad, 0xbe, 0xef}
@@ -266,7 +380,7 @@ func sentinelDB(t *testing.T) (*kdbx.Database, []byte) {
 
 // wantRejected checks that a rejected seal returned no bytes, that the draft
 // is unchanged and that the database's prior credentials are restored.
-func wantRejected(t *testing.T, out []byte, err error, before, draft *File, db *kdbx.Database, cred []byte) {
+func wantRejected(t *testing.T, out []byte, err error, before, draft *File, db *kdbx.Database, cred *credsSnapshot) {
 	t.Helper()
 	if out != nil {
 		t.Fatal("rejected SealAuthenticatedFile returned bytes")
@@ -311,7 +425,7 @@ func wantVUKSlots(t *testing.T, encoded []byte, pin *PolicyCheckpoint, want map[
 func TestSealAuthenticatedFileRoundTrip(t *testing.T) {
 	fx := newSealFixture(t)
 	draft := fx.draft()
-	draftBefore := deepCopyFile(draft)
+	draftBefore := snapshotFile(draft)
 	vukBefore := bytes.Clone(fx.vuk)
 	db, cred := dbWithCredentials(t)
 
@@ -430,7 +544,7 @@ func TestSealAuthenticatedFileRejectsBasicInputs(t *testing.T) {
 			}
 			var before *File
 			if in.draft != nil {
-				before = deepCopyFile(in.draft)
+				before = snapshotFile(in.draft)
 			}
 			out, err := SealAuthenticatedFile(in.draft, in.db, in.pin, in.vuk, fx.keys.dev1Priv)
 			if out != nil {
@@ -479,7 +593,7 @@ func TestSealAuthenticatedFileWrongPin(t *testing.T) {
 		pin.PolicyDigest[0] ^= 0xff
 		db, cred := malformedDB(t)
 		draft := fx.draft()
-		before := deepCopyFile(draft)
+		before := snapshotFile(draft)
 		out, err := SealAuthenticatedFile(draft, db, &pin, fx.vuk, fx.keys.dev1Priv)
 		wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
 		wantRejected(t, out, err, before, draft, db, cred)
@@ -496,7 +610,7 @@ func TestSealAuthenticatedFileWrongPin(t *testing.T) {
 		pin.PolicyDigest = digest("some-other-policy")
 		db, cred := malformedDB(t)
 		draft := fx.draft()
-		before := deepCopyFile(draft)
+		before := snapshotFile(draft)
 		out, err := SealAuthenticatedFile(draft, db, &pin, fx.vuk, fx.keys.dev1Priv)
 		wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
 		wantRejected(t, out, err, before, draft, db, cred)
@@ -518,7 +632,7 @@ func TestSealAuthenticatedFileWrongPin(t *testing.T) {
 		draft.SignedPolicyProofs = append([]SignedPolicy(nil), draft.SignedPolicyProofs...)
 		last := &draft.SignedPolicyProofs[len(draft.SignedPolicyProofs)-1]
 		last.Policy.Devices = last.Policy.Devices[:2]
-		before := deepCopyFile(draft)
+		before := snapshotFile(draft)
 		out, err := SealAuthenticatedFile(draft, db, fx.chain.anchor, fx.vuk, fx.keys.dev1Priv)
 		wantCodeAt(t, err, CodePolicyMismatch, "")
 		wantRejected(t, out, err, before, draft, db, cred)
@@ -561,7 +675,7 @@ func TestSealAuthenticatedFileWrongAuthorKey(t *testing.T) {
 			sealPositive(t, fx)
 			db, cred := sentinelDB(t)
 			draft := fx.draft()
-			before := deepCopyFile(draft)
+			before := snapshotFile(draft)
 			// The caller's key is an input like the draft and VUK: the seal
 			// must not modify it, whatever it decides about it.
 			keyBefore := bytes.Clone(key)
@@ -720,7 +834,7 @@ func TestSealAuthenticatedFileRevokedPriorReader(t *testing.T) {
 	}}
 	draft.CEKSlot = CEKSlot{KeyEpoch: draft.Header.KeyEpoch, WrappedCEK: []byte("stale")}
 	draft.KDBXCiphertext = []byte("stale")
-	draftBefore := deepCopyFile(draft)
+	draftBefore := snapshotFile(draft)
 	// The seal is given the same VUK and epoch dave learned: nothing rotates.
 	vukBefore := bytes.Clone(fx.vuk)
 	db, cred := dbWithCredentials(t)
