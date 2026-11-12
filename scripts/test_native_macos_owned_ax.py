@@ -285,12 +285,13 @@ class ScopedDiscoveryTests(unittest.TestCase):
         self.assertEqual(len([r for r in frameworks.requests if r[0] == "getpid"]),
                          len(api.owned_windows(OWNED_PID)))
 
-    def test_title_mismatch_refuses_at_discovery(self):
+    def test_initial_wrong_title_is_not_ready_and_never_adopted(self):
+        # Initial discovery polls: a not-yet-correct title is not-ready, not a
+        # hard failure, and the wrong window is never accepted or retained.
         window, _ = owned_window(title=OTHER_TITLE)
         api, _ = scoped([window])
-        with self.assertRaises(contract.ContractError) as error:
-            api.owned_discovery(TITLE)
-        self.assertEqual(error.exception.code, "window-changed")
+        self.assertEqual(api.owned_discovery(TITLE), ([], False))
+        self.assertIsNone(api._retained_handle())
 
     def test_foreign_window_never_satisfies_the_owned_pid(self):
         window, _ = owned_window(pid=OTHER_PID)
@@ -581,6 +582,126 @@ class ScopedContractFlowTests(unittest.TestCase):
         payload = json.dumps(result)
         self.assertNotIn("Node", payload)
         self.assertEqual(api.owned_pid_scope(), None)
+
+
+class _Clock:
+    """Deterministic monotonic/sleep for the real discovery deadline loop."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class OwnedDiscoveryContractTests(unittest.TestCase):
+    """The REAL contract discovery loop over owned-AX fakes."""
+
+    def run_plan(self, api, clock, actions=None, inspect=False):
+        adapter = macos.MacAdapter(api=api)
+        release = adapter.scope_owned_process(OWNED_PID)
+        plan = {"title": TITLE, "title_prefix": None, "executable": EXE,
+                "actions": tuple(actions or ()), "inspect": inspect,
+                "wait_absent": False, "preserve_focus": False,
+                "activation": None, "owned_pid": None}
+        try:
+            with unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
+                    unittest.mock.patch.object(contract, "sleep", clock.sleep):
+                adapter.observe_plan(plan)
+                return contract.execute(plan, adapter)
+        finally:
+            release()
+
+    def test_wrong_title_polls_until_exact_title_before_the_deadline(self):
+        window, _ = owned_window(title=OTHER_TITLE)
+        api, frameworks = scoped([window])
+        clock = _Clock()
+        # The owned window is renamed to the EXACT fixture title only after
+        # five not-ready polls - still well before DISCOVER_TIMEOUT.
+        original_discovery = api.owned_discovery
+
+        def discovery(title):
+            result = original_discovery(title)
+            if len(clock.sleeps) == 5:
+                window.attributes["AXTitle"] = TITLE
+            return result
+
+        api.owned_discovery = discovery
+        result = self.run_plan(api, clock)
+        self.assertIsNone(result["window"])       # opaque handle: no window number
+        self.assertEqual(result["pid"], OWNED_PID)
+        self.assertEqual(result["x"], WINDOW_FRAME["x"])
+        # Exactly the unchanged poll interval was slept, under the deadline.
+        self.assertEqual(set(clock.sleeps), {contract.POLL})
+        self.assertLess(clock.now, contract.DISCOVER_TIMEOUT)
+
+    def test_wrong_title_is_never_accepted_and_times_out_at_the_deadline(self):
+        window, _ = owned_window(title=OTHER_TITLE)
+        api, frameworks = scoped([window])
+        clock = _Clock()
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(api, clock)
+        self.assertEqual(error.exception.code, "window-timeout")
+        # The deadline is the unchanged DISCOVER_TIMEOUT, not an early refusal.
+        self.assertGreaterEqual(clock.now, contract.DISCOVER_TIMEOUT)
+        self.assertLess(clock.now, contract.DISCOVER_TIMEOUT + contract.POLL)
+        # The wrong-title window was never accepted, adopted or used.
+        self.assertIsNone(api._retained_handle())
+        self.assertFalse([r for r in frameworks.requests if r[0] == "at"])
+
+    def test_title_change_after_binding_still_refuses_immediately(self):
+        window, control = owned_window()
+        api, frameworks = scoped([window], focused=window, hit=control)
+        clock = _Clock()
+        adapter = macos.MacAdapter(api=api)
+        release = adapter.scope_owned_process(OWNED_PID)
+        plan = {"title": TITLE, "title_prefix": None, "executable": EXE,
+                "actions": ({"click_label": LABEL},), "inspect": False,
+                "wait_absent": False, "preserve_focus": False,
+                "activation": None, "owned_pid": None}
+        try:
+            with unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
+                    unittest.mock.patch.object(contract, "sleep", clock.sleep):
+                adapter.observe_plan(plan)
+                budget = contract.Budget()
+                bound = contract.find_window(plan, adapter, budget)
+                self.assertIs(bound["id"], window)
+                self.assertIs(api._retained_handle(), window)
+                # The title changes only AFTER the window was accepted.
+                window.attributes["AXTitle"] = OTHER_TITLE
+                for name, path in (
+                        ("reobserve", lambda: contract.reobserve_window(
+                            plan, adapter, bound, budget)),
+                        ("authorize", lambda: contract.authorize(
+                            plan, adapter, bound, budget, LABEL))):
+                    with self.subTest(path=name):
+                        with self.assertRaises(contract.ContractError) as error:
+                            path()
+                        self.assertEqual(error.exception.code, "window-changed")
+        finally:
+            release()
+        # The refusal was immediate: no poll after binding, no input attempted.
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual([r for r in frameworks.requests if r[0] == "at"], [])
+
+    def test_ambiguity_and_foreign_pid_still_refuse(self):
+        first, _ = owned_window()
+        second, _ = owned_window(title=OTHER_TITLE)
+        api, _ = scoped([first, second])
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(api, _Clock())
+        self.assertEqual(error.exception.code, "window-ambiguous")
+
+        foreign, _ = owned_window(pid=OTHER_PID)
+        api, _ = scoped([foreign])
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(api, _Clock())
+        self.assertEqual(error.exception.code, "window-timeout")
 
 
 class UnscopedPathTests(unittest.TestCase):

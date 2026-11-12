@@ -753,8 +753,15 @@ class QuartzApi:
         is proven with GetPid FIRST, then the list must hold exactly one, then
         that window must equal the requested retained handle under CFEqual and
         carry exactly the requested title, and only then are its frame and
-        process identity read. Returns the public record, or None when the
-        owned process simply has no window yet (never a refusal).
+        process identity read.
+
+        Returns the public record, or None when this observation is simply not
+        ready: the owned process has no window yet, OR (only for the INITIAL
+        discovery, ``expect is None``) its single window does not carry the
+        exact requested title yet. The caller then keeps polling within the
+        original discovery deadline instead of treating a not-yet-renamed
+        window as a hard failure. Once a window was accepted (``expect`` is
+        bound), a title change is an immediate ``window-changed`` refusal.
         """
         pid = self.owned_pid_scope()
         if pid is None:
@@ -774,6 +781,10 @@ class QuartzApi:
             raise contract.ContractError("window-changed")
         name = self.title(element)
         if not name or name != title:
+            if expect is None:
+                # Initial discovery: a wrong title is not-ready, never an
+                # accepted (or wrong) window, and never a hard refusal.
+                return None
             raise contract.ContractError("window-changed")
         try:
             bounds = self.frame(element)
