@@ -3,7 +3,6 @@ package vaultcreationauth
 import (
 	"crypto/ed25519"
 	"encoding/hex"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -383,27 +382,26 @@ func TestVerifyBindsCreationPlanDigest(t *testing.T) {
 
 func TestCreationPlanDigestDoesNotAllocatePreimage(t *testing.T) {
 	// A 32 MiB genesis costs no proportional allocations: the digest is fed
-	// the caller's slice directly, field by field. Measured as total allocated
-	// bytes around one call, so a single preimage-sized allocation is caught
-	// even though it is only one allocation event.
+	// the caller's slice directly, field by field. Measured as allocated bytes
+	// per operation by a serial benchmark, so a preimage-sized allocation is
+	// caught however few allocation events it takes.
 	plan := mutatePlan(basePlan(), func(p *CreationPlan) { p.GenesisBytes = make([]byte, vaultfile.MaxFileBytes) })
-	digestOne := func() {
-		if _, err := CreationPlanDigest(plan); err != nil {
-			t.Fatalf("at-cap plan: %v", err)
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if _, err := CreationPlanDigest(plan); err != nil {
+				b.Fatalf("at-cap plan: %v", err)
+			}
 		}
-	}
-	digestOne() // Warm up: package-level and runtime state is paid here.
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	digestOne()
-	runtime.ReadMemStats(&after)
-	// TotalAlloc counts bytes only: unlike heap stats it cannot move down
-	// when deferred frees run, and no other goroutine of this test package
-	// (the test is not parallel) allocates concurrently. 1 MiB is far below
-	// one preimage at the genesis cap and far above the digest's own slices.
-	const maxAllocatedBytes = 1 << 20
-	if used := after.TotalAlloc - before.TotalAlloc; used > maxAllocatedBytes {
-		t.Fatalf("CreationPlanDigest at the genesis cap allocated %d bytes, want at most %d: a preimage-sized allocation", used, maxAllocatedBytes)
+	})
+	// AllocedBytesPerOp accumulates runtime.MemStats.TotalAlloc deltas over
+	// the timed loop only: the genesis and every other fixture allocation
+	// happen before the timer starts and once per run, never per iteration.
+	// 1 MiB/op is far below one preimage at the genesis cap and far above the
+	// digest's own per-call slices.
+	const maxBytesPerOp = 1 << 20
+	if got := res.AllocedBytesPerOp(); got > maxBytesPerOp {
+		t.Fatalf("CreationPlanDigest at the genesis cap allocated %d bytes/op over %d ops, want at most %d: a preimage-sized allocation", got, res.N, maxBytesPerOp)
 	}
 }
