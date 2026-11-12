@@ -68,6 +68,9 @@ func newJournalDir(t *testing.T) string {
 	if err := sd.SetDACL(acl, true, false); err != nil {
 		t.Fatalf("set private DACL: %v", err)
 	}
+	if err := sd.SetOwner(user.User.Sid, false); err != nil {
+		t.Fatalf("set private owner: %v", err)
+	}
 	if err := sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		t.Fatalf("protect private DACL: %v", err)
 	}

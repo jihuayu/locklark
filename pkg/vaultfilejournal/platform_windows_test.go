@@ -23,7 +23,7 @@ func privateDir(t *testing.T) string {
 	owner, trusted := journalTestPrincipals(t)
 	attributes := windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: journalTestDirectorySecurity(t, trusted),
+		SecurityDescriptor: journalTestDirectorySecurity(t, owner, trusted),
 	}
 	for attempt := 0; attempt < 16; attempt++ {
 		var suffix [12]byte
@@ -77,10 +77,10 @@ func journalTestPrincipals(t *testing.T) (*windows.SID, []*windows.SID) {
 	return user.User.Sid, trusted
 }
 
-// journalTestDirectorySecurity builds an absolute descriptor granting
-// journalTestDirectoryRights to each of trusted and nothing else, with no
-// inherited entries.
-func journalTestDirectorySecurity(t *testing.T, trusted []*windows.SID) *windows.SECURITY_DESCRIPTOR {
+// journalTestDirectorySecurity builds an absolute descriptor owned by owner
+// and granting journalTestDirectoryRights to each of trusted and nothing else,
+// with no inherited entries.
+func journalTestDirectorySecurity(t *testing.T, owner *windows.SID, trusted []*windows.SID) *windows.SECURITY_DESCRIPTOR {
 	t.Helper()
 	entries := make([]windows.EXPLICIT_ACCESS, len(trusted))
 	for i, sid := range trusted {
@@ -105,6 +105,9 @@ func journalTestDirectorySecurity(t *testing.T, trusted []*windows.SID) *windows
 	}
 	if err := sd.SetDACL(acl, true, false); err != nil {
 		t.Fatalf("set private DACL: %v", err)
+	}
+	if err := sd.SetOwner(owner, false); err != nil {
+		t.Fatalf("set private owner: %v", err)
 	}
 	if err := sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		t.Fatalf("protect private DACL: %v", err)
