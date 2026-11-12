@@ -791,6 +791,70 @@ const ROUTE_IDLE_TTL = 120000;
 // Bounded overall wipe window, measured from that same physical row click.
 const ROUTE_IDLE_WIPE_LIMIT = 150000;
 const ROUTE_IDLE_POLL = 2000;
+// The native X11 helper's one failure line (browser_native_x11.py __main__):
+// its reason code, request action, action index and X error x_codes. Only an
+// exact whole line is matched, and only its fixed-contract fields are kept for
+// the private failure.json; no other helper stderr, path or message is read.
+const NATIVE_HELPER_FAILURE =
+  /^Native acceptance input failed \[([a-z][a-z0-9-]{0,63}) action=([a-z][a-z0-9-]{0,63}) index=(-?[0-9]{1,4})\](?: x_codes=([0-9]{1,3}(?:,[0-9]{1,3}){0,7}))?$/;
+// The same finite checkout code allowlist tests/e2e/support.py validates.
+const NATIVE_HELPER_CODES = new Set([
+  "a11y-query",
+  "a11y-unavailable",
+  "chooser-owner",
+  "chooser-owner-ambiguous",
+  "control-missing",
+  "control-ready-timeout",
+  "inspection-request",
+  "label-not-allowed",
+  "shortcut-mapping",
+  "unexpected",
+  "window-ambiguous",
+  "window-close-timeout",
+  "window-timeout",
+  "window-viewable-timeout",
+  "x-input",
+  "x-query",
+  "x-target",
+]);
+const NATIVE_HELPER_ACTIONS = new Set([
+  "chooser-navigate",
+  "chooser-open",
+  "key",
+  "label-click",
+  "label-wait",
+  "pointer",
+  "setup",
+  "snapshot",
+  "text-entry",
+]);
+let nativeHelperError = null;
+function projectNativeHelperError(error) {
+  // execFileSync reports a failed helper in error.stderr as a Buffer. Bound
+  // the raw bytes before decoding; a string path is bounded by its UTF-8 bytes.
+  const raw = error?.stderr;
+  if (Buffer.isBuffer(raw) ? raw.length > 8192 : typeof raw !== "string") return;
+  const stderr = Buffer.isBuffer(raw) ? raw.toString("utf8") : raw;
+  if (Buffer.byteLength(stderr, "utf8") > 8192) return;
+  for (const raw of stderr.split("\n")) {
+    const match = NATIVE_HELPER_FAILURE.exec(raw.replace(/\r$/, ""));
+    if (!match) continue;
+    const [, code, action, indexText, codesText] = match;
+    const index = Number(indexText);
+    const x_codes = codesText === undefined ? [] : codesText.split(",").map(Number);
+    if (
+      !NATIVE_HELPER_CODES.has(code) ||
+      !NATIVE_HELPER_ACTIONS.has(action) ||
+      index < -1 ||
+      index > 255 ||
+      !x_codes.every((value) => value >= 1 && value <= 255) ||
+      new Set(x_codes).size !== x_codes.length
+    )
+      return;
+    nativeHelperError = { code, action, index, ...(x_codes.length ? { x_codes } : {}) };
+    return;
+  }
+}
 function phase(value) {
   stage = value;
   console.log(
@@ -2983,6 +3047,9 @@ try {
   // Install-only success: no diagnostic is written; finally still closes the
   // browser, checks private artifacts and scans controller output.
   if (!(edgeInstallOnly && error === EDGE_INSTALL_COMPLETE)) {
+    // Classify the original failing helper call from this error only, before
+    // any diagnostic snapshot below can throw a different one.
+    projectNativeHelperError(error);
     // The route page contributes only its fixed view/status enums and booleans.
     const safeReasons = [
       "Action popup did not open",
@@ -3110,6 +3177,8 @@ try {
           ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
           : [],
       stage,
+      // Only the last helper call's fixed contract fields, never raw stderr.
+      ...(nativeHelperError ? { nativeError: nativeHelperError } : {}),
       // Latest fixed-enum route-page observation from the bounded native-label
       // wait, plus its bounded state-transition history where consecutive
       // entries differ. Both only ever contain the four sanitized fields.

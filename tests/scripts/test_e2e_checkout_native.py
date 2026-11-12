@@ -484,6 +484,117 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertNotIn("forged-stage", message)
         self.assertNotIn(support.CHECKOUT_PASS_SUMMARY, message)
 
+    def _nonzero(self, stderr: str) -> tuple[dict, str]:
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        support._CHECKOUT_JOURNEY_CACHE.clear()
+        ctx = self._ctx()
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            return_value=(7, "", stderr),
+        ):
+            with self.assertRaises(AssertionError) as raised:
+                support.checkout_native_acceptance(ctx)
+        self.assertEqual(
+            str(raised.exception), "native checkout acceptance exited with status 7"
+        )
+        self.assertEqual(set(ctx.evidence), {support.CHECKOUT_FAILURE_EVIDENCE_KEY})
+        return ctx.evidence[support.CHECKOUT_FAILURE_EVIDENCE_KEY], str(
+            raised.exception
+        )
+
+    def _assert_no_canary(self, value, message: str) -> None:
+        text = json.dumps(value) + message
+        for canary in ("CANARY-9f3a1c", "/home/runner/x", "https://leak.example"):
+            self.assertNotIn(canary, text)
+
+    def test_nonzero_run_records_only_the_fixed_checkout_failure(self):
+        diagnostic = {
+            "stage": "checkout-stale:navigation",
+            "reason": "Native route approval label missing CANARY-9f3a1c",
+            "frames": ["CANARY-9f3a1c"],
+            "ignored": "https://leak.example",
+            "nativeError": {
+                "code": "window-timeout",
+                "action": "label-wait",
+                "index": 2,
+                "x_codes": [3, 170],
+                "message": "CANARY-9f3a1c",
+            },
+        }
+        stderr = (
+            "CANARY-9f3a1c /home/runner/x\nNative browser diagnostic: "
+            + json.dumps(diagnostic)
+        )
+        record, message = self._nonzero(stderr)
+        self._assert_no_canary(record, message)
+        self.assertEqual(
+            record,
+            {
+                "stage": "checkout-stale:navigation",
+                "kind": "native-helper",
+                "native": {
+                    "code": "window-timeout",
+                    "action": "label-wait",
+                    "index": 2,
+                    "x_codes": [3, 170],
+                },
+                "exit": "exited 7",
+            },
+        )
+        stage = self._nonzero(
+            "Native browser diagnostic: "
+            + json.dumps({"stage": "native-unlock", "reason": "Paired popup not ready"})
+        )[0]
+        self.assertEqual(
+            stage,
+            {"stage": "native-unlock", "kind": "acceptance-failure",
+             "native": None, "exit": "exited 7"},
+        )
+
+    def test_invalid_checkout_diagnostics_are_unclassified(self):
+        def line(stage, native):
+            payload = {"stage": stage, "reason": "CANARY-9f3a1c"}
+            if native is not None:
+                payload["nativeError"] = native
+            return "Native browser diagnostic: " + json.dumps(payload)
+
+        cases = (
+            line("checkout-stale:navigation CANARY-9f3a1c", None),
+            line("passkey-get", None),
+            line("fixture", {"code": "setup", "action": "label-wait"}),
+            line("fixture", {"code": "window-timeout", "action": "CANARY"}),
+            line("fixture", {"code": "window-timeout", "action": "label-wait",
+                             "x_codes": [3, 0]}),
+            line("fixture", {"code": "window-timeout", "action": "label-wait",
+                             "index": 256}),
+            # Unhashable, non-string and merely regex-shaped values fail closed.
+            line("fixture", {"code": ["window-timeout"], "action": "label-wait"}),
+            line("fixture", {"code": "window-timeout", "action": {"x": 1}}),
+            line("fixture", {"code": "window-frozen", "action": "label-wait"}),
+            line("fixture", {"code": "window-timeout", "action": "label-wait",
+                             "index": -2}),
+            line("fixture", {"code": "window-timeout", "action": "label-wait"}),
+            # Oversized and repeated (even identical) lines are ambiguous.
+            line("fixture", None) + " " * 9000,
+            line("fixture", None) + "\n" + line("fixture", None),
+            "Native browser diagnostic: {not json",
+            "Native browser diagnostic: {not json" + "\n" + line("fixture", None),
+            line("fixture", None) + "\n" + line("native-pair", None),
+            line("fixture", None).replace("Native browser diagnostic:", " x"),
+        )
+        expected = {
+            "stage": "unclassified",
+            "kind": "unclassified",
+            "native": None,
+            "exit": "exited 7",
+        }
+        for stderr in cases:
+            with self.subTest(stderr=stderr[:40]):
+                record, message = self._nonzero(stderr)
+                self._assert_no_canary(record, message)
+                self.assertEqual(record, expected)
+
     def _cross_site_recorded(self, evidence: dict) -> list[str]:
         case = next(
             entry

@@ -2260,6 +2260,8 @@ def sha256_file(path: Path) -> str:
 CHECKOUT_EVIDENCE_SCHEMA = "locklark.e2e.checkout-native"
 CHECKOUT_EVIDENCE_VERSION = 1
 CHECKOUT_JOURNEY_ID = "chromium-native-checkout"
+# Report key attached only when a native journey run exits nonzero.
+CHECKOUT_FAILURE_EVIDENCE_KEY = "checkoutNativeFailure"
 
 # Each stable case ID maps to the fixed stage labels the existing native script
 # emits for that case.  The script remains the source of truth; this allowlist
@@ -2367,6 +2369,73 @@ CHECKOUT_REQUIRED_STAGES = tuple(
 # included.  The parser allowlists these and nothing else.
 _CHECKOUT_STAGE_LABELS = CHECKOUT_REQUIRED_STAGES + CHECKOUT_OPTIONAL_STAGES
 _CHECKOUT_STAGE_PREFIX = "Native browser stage: "
+# The one sanitized line the native script already prints on a failed journey.
+# A nonzero checkout run copies only its fixed stage, kind and helper error
+# into the report; the rest of the captured output never leaves memory.
+_CHECKOUT_DIAGNOSTIC_PREFIX = "Native browser diagnostic: "
+_CHECKOUT_DIAGNOSTIC_MAX_BYTES = 64 * 1024
+_CHECKOUT_DIAGNOSTIC_MAX_LINE = 8 * 1024
+_CHECKOUT_FAILED_STAGES = frozenset(_CHECKOUT_STAGE_LABELS) | {
+    "approved-fill:approve",
+    "driver-arguments-failure",
+    "fixture",
+    "native-connect",
+    "native-disconnect",
+    "native-pair",
+    "native-reconnect",
+    "native-unlock",
+    "post-repair:route-attached",
+    "post-repair:route-click",
+    "post-repair:route-close",
+    "post-repair:route-match",
+    "post-repair:route-native",
+    "post-repair:route-observe",
+    "post-repair:route-open",
+    "post-repair:route-popup-closed",
+    "post-repair:route-refetched",
+    "post-repair:route-refused",
+    "post-repair:route-reject",
+    "save-new:control",
+} | {
+    f"{case_id}:{step}"
+    for case_id in CHECKOUT_CASE_IDS
+    for step in ("popup", "native-confirmation")
+}
+_CHECKOUT_FAILED_CODES = frozenset(
+    {
+        "a11y-query",
+        "a11y-unavailable",
+        "chooser-owner",
+        "chooser-owner-ambiguous",
+        "control-missing",
+        "control-ready-timeout",
+        "inspection-request",
+        "label-not-allowed",
+        "shortcut-mapping",
+        "unexpected",
+        "window-ambiguous",
+        "window-close-timeout",
+        "window-timeout",
+        "window-viewable-timeout",
+        "x-input",
+        "x-query",
+        "x-target",
+    }
+)
+# The native helper's fixed FAILURE_CONTEXT action enum (browser_native_x11.py).
+_CHECKOUT_HELPER_ACTIONS = frozenset(
+    {
+        "chooser-navigate",
+        "chooser-open",
+        "key",
+        "label-click",
+        "label-wait",
+        "pointer",
+        "setup",
+        "snapshot",
+        "text-entry",
+    }
+)
 CHECKOUT_PASS_SUMMARY = (
     "PASS: real Chromium checkout same-origin child approval (profile review) "
     "and picker cancellation, cross-origin approval/refusal, cross-site, "
@@ -2865,6 +2934,99 @@ def _parse_checkout_stdout(stdout: str) -> tuple[set[str], bool]:
     return stages, summary
 
 
+def _checkout_bounded(value: Any, low: int, high: int) -> int | None:
+    if type(value) is not int or not low <= value <= high:
+        return None
+    return value
+
+
+def _checkout_failed_native(value: Any) -> dict[str, Any] | None:
+    """The helper error, only when every copied field passes its allowlist."""
+
+    if not isinstance(value, dict):
+        return None
+    code, action = value.get("code"), value.get("action")
+    if (
+        not isinstance(code, str)
+        or code not in _CHECKOUT_FAILED_CODES
+        or not isinstance(action, str)
+        or action not in _CHECKOUT_HELPER_ACTIONS
+    ):
+        return None
+    native: dict[str, Any] = {"code": code, "action": action}
+    # ``index`` is part of every helper failure line; a missing one is
+    # malformed like any other refused field.
+    index = _checkout_bounded(value.get("index"), -1, 255)
+    if index is None:
+        return None
+    native["index"] = index
+    codes = value.get("x_codes", [])
+    if not isinstance(codes, list) or len(codes) > 8:
+        return None
+    checked = [_checkout_bounded(entry, 1, 255) for entry in codes]
+    if None in checked or len(set(checked)) != len(checked):
+        return None
+    native["x_codes"] = checked
+    return native
+
+
+def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
+    """Reduce the diagnostic line to fixed fields; ``None`` if unusable."""
+
+    text = str(stderr or "")
+    if len(text.encode("utf-8", "replace")) > _CHECKOUT_DIAGNOSTIC_MAX_BYTES:
+        return None
+    found: list[dict[str, Any]] = []
+    # Counted before parsing, so a malformed first prefix line still makes
+    # any second prefix line ambiguous.
+    seen = False
+    for raw in text.splitlines():
+        line = raw.rstrip("\r")
+        if not line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX):
+            continue
+        if seen or len(line.encode("utf-8", "replace")) > _CHECKOUT_DIAGNOSTIC_MAX_LINE:
+            return None
+        seen = True
+        try:
+            payload = json.loads(line[len(_CHECKOUT_DIAGNOSTIC_PREFIX) :])
+        except (ValueError, TypeError, RecursionError):
+            continue
+        if isinstance(payload, dict):
+            found.append(payload)
+    if not found:
+        return None
+    diagnostic = found[0]
+    native = _checkout_failed_native(diagnostic.get("nativeError"))
+    # The human "reason" text is never copied; it only selects a fixed kind
+    # for an allowlisted stage. A stage outside the allowlist is unclassified.
+    stage = diagnostic.get("stage")
+    if not isinstance(stage, str) or stage not in _CHECKOUT_FAILED_STAGES:
+        return {"stage": "unclassified", "kind": "unclassified", "native": None}
+    if native is not None:
+        return {"stage": stage, "kind": "native-helper", "native": native}
+    if "nativeError" in diagnostic or not isinstance(
+        diagnostic.get("reason"), str
+    ):
+        return {"stage": "unclassified", "kind": "unclassified", "native": None}
+    return {"stage": stage, "kind": "acceptance-failure", "native": None}
+
+
+def _record_checkout_failure(
+    ctx: E2EContext, stderr: str, returncode: int
+) -> None:
+    """Attach the fixed failure record before the existing generic assertion."""
+
+    record = _parse_checkout_failure(stderr) or {
+        "stage": "unclassified",
+        "kind": "unclassified",
+        "native": None,
+    }
+    record["exit"] = (
+        f"exited {returncode}" if _checkout_bounded(returncode, 1, 255) else "exited"
+    )
+    ctx.record_evidence({CHECKOUT_FAILURE_EVIDENCE_KEY: record})
+
+
 def _checkout_child_umask() -> None:
     os.umask(0o077)
 
@@ -2961,7 +3123,7 @@ def _checkout_run(
             "scripts/browser_native_acceptance.mjs",
         ]
         try:
-            returncode, stdout, _stderr = _invoke_checkout_journey(
+            returncode, stdout, stderr = _invoke_checkout_journey(
                 command,
                 env=env,
                 cwd=Path(ctx.repo_root),
@@ -2972,6 +3134,7 @@ def _checkout_run(
                 "native checkout acceptance timed out"
             ) from None
         if returncode != 0:
+            _record_checkout_failure(ctx, stderr, returncode)
             raise AssertionError(
                 f"native checkout acceptance exited with status {returncode}"
             )
