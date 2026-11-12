@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -36,6 +37,46 @@ const maxUploadAcknowledgementJSONSize = 64 << 10
 // request over, and no later or concurrent call may do so again.
 type uploadSessionState struct {
 	attempted atomic.Bool
+}
+
+// borrowedUploadBody is a request body that reads directly from the caller's
+// sealed slice without copying it. It is synchronized because net/http may
+// close the request body asynchronously after Client.Do returns, while
+// UploadBytes closes it synchronously as soon as Do returns.
+//
+// Close releases the slice reference so that neither this body nor a late
+// transport close can retain the caller's payload after UploadBytes returns.
+// Close is idempotent, and a read after Close never returns payload bytes.
+type borrowedUploadBody struct {
+	mu     sync.Mutex
+	sealed []byte
+	offset int
+	closed bool
+}
+
+// newBorrowedUploadBody returns a ReadCloser borrowing sealed in place.
+func newBorrowedUploadBody(sealed []byte) *borrowedUploadBody {
+	return &borrowedUploadBody{sealed: sealed}
+}
+
+func (b *borrowedUploadBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.offset >= len(b.sealed) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.sealed[b.offset:])
+	b.offset += n
+	return n, nil
+}
+
+func (b *borrowedUploadBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sealed = nil
+	b.offset = 0
+	b.closed = true
+	return nil
 }
 
 // UploadAcknowledgement is the validated body of exactly one HTTP 202 upload
@@ -111,17 +152,21 @@ func (u *ConditionalUploader) UploadBytes(ctx context.Context, session *UploadSe
 	defer cancel()
 
 	length := len(sealed)
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodPut, session.uploadURL, bytes.NewReader(sealed))
+	requestBody := newBorrowedUploadBody(sealed)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPut, session.uploadURL, requestBody)
 	if err != nil {
+		_ = requestBody.Close()
 		return ack, fmt.Errorf("%w: upload request could not be constructed", vaultfilebackend.ErrDenied)
 	}
-	// bytes.NewReader borrows the caller's slice. GetBody would retain that
-	// slice and could also let net/http replay the PUT; neither is allowed.
+	// The body borrows the caller's slice and is closed by UploadBytes itself
+	// as soon as Do returns. GetBody would retain that slice and could also
+	// let net/http replay the PUT; neither is allowed.
 	req.GetBody = nil
 	req.ContentLength = int64(length)
 	req.Header.Set("Content-Range", "bytes 0-"+strconv.Itoa(length-1)+"/"+strconv.Itoa(length))
 
 	if err := checkContext(requestCtx); err != nil {
+		_ = requestBody.Close()
 		return ack, err
 	}
 	client := u.httpClient()
@@ -129,13 +174,19 @@ func (u *ConditionalUploader) UploadBytes(ctx context.Context, session *UploadSe
 	// marked attempted under synchronization immediately before Do, so no
 	// concurrent copy or later retry can hand off a second request.
 	if !time.Now().Before(session.expiresAt) {
+		_ = requestBody.Close()
 		return ack, fmt.Errorf("%w: upload session has expired", vaultfilebackend.ErrDenied)
 	}
 	if !session.state.attempted.CompareAndSwap(false, true) {
+		_ = requestBody.Close()
 		return ack, fmt.Errorf("%w: upload session was already used", vaultfilebackend.ErrDenied)
 	}
 
 	resp, err := client.Do(req)
+	// The transport may close the body asynchronously after Do returns, and it
+	// may not close it at all. Close synchronously here, on success and error
+	// alike, so the request body never outlives this call with the payload.
+	_ = requestBody.Close()
 	if err != nil {
 		if resp != nil {
 			_ = resp.Body.Close()

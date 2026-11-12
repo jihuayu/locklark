@@ -303,6 +303,61 @@ func TestConditionalUploaderUploadBytesContract(t *testing.T) {
 	}
 }
 
+func TestConditionalUploaderUploadBytesBorrowedBody(t *testing.T) {
+	payload := []byte{0x00, 0x01, 0x7f, 0x80, 0xff, 'x'}
+	original := append([]byte(nil), payload...)
+	body := newBorrowedUploadBody(payload)
+
+	// The body must alias the caller's slice rather than copy it.
+	body.mu.Lock()
+	aliasesCaller := len(body.sealed) == len(payload) && &body.sealed[0] == &payload[0]
+	body.mu.Unlock()
+	if !aliasesCaller {
+		t.Errorf("borrowed body did not alias the caller's slice")
+	}
+
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read borrowed body: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Errorf("borrowed body bytes = %x, want exact %x", got, original)
+	}
+	if !bytes.Equal(payload, original) {
+		t.Errorf("reading the borrowed body mutated the caller's slice")
+	}
+
+	if err := body.Close(); err != nil {
+		t.Errorf("close borrowed body: %v", err)
+	}
+	body.mu.Lock()
+	retained := body.sealed
+	body.mu.Unlock()
+	if retained != nil {
+		t.Errorf("closed borrowed body still retains the caller's slice")
+	}
+
+	buffer := make([]byte, len(original))
+	n, err := body.Read(buffer)
+	if n != 0 {
+		t.Errorf("read after Close returned %d payload bytes", n)
+	}
+	if err != io.EOF {
+		t.Errorf("read after Close error = %v, want io.EOF", err)
+	}
+
+	// Cleanup stays safe and idempotent after the first Close.
+	if err := body.Close(); err != nil {
+		t.Errorf("second close borrowed body: %v", err)
+	}
+	body.mu.Lock()
+	retained = body.sealed
+	body.mu.Unlock()
+	if retained != nil {
+		t.Errorf("re-closed borrowed body retains the caller's slice")
+	}
+}
+
 func slicesEqualStrings(got, want []string) bool {
 	if len(got) != len(want) {
 		return false
