@@ -71,13 +71,9 @@ func newJournalDir(t *testing.T) string {
 	if err := sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		t.Fatalf("protect private DACL: %v", err)
 	}
-	absolute, err := sd.ToAbsolute()
-	if err != nil {
-		t.Fatalf("absolute security descriptor: %v", err)
-	}
 	attributes := windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		SecurityDescriptor: absolute,
+		SecurityDescriptor: sd,
 	}
 	var dir string
 	for attempt := 0; attempt < 16; attempt++ {

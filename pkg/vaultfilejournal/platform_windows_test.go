@@ -109,11 +109,7 @@ func journalTestDirectorySecurity(t *testing.T, trusted []*windows.SID) *windows
 	if err := sd.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
 		t.Fatalf("protect private DACL: %v", err)
 	}
-	absolute, err := sd.ToAbsolute()
-	if err != nil {
-		t.Fatalf("absolute security descriptor: %v", err)
-	}
-	return absolute
+	return sd
 }
 
 // verifyJournalTestDirectory reads dir's security back and requires owner as
