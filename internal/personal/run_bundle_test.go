@@ -1304,7 +1304,7 @@ func TestPrepareBrokeredRunCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if receipt, values, err := s.PrepareBrokeredRun(ctx, bundleTestTargets(f), request, root); !errors.Is(err, ErrRunCancelled) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
-		t.Fatalf("cancelled: %v %#v %+v", err, values, receipt)
+		t.Fatalf("cancelled: cancelled:%t nil_values:%t empty_receipt:%t", errors.Is(err, ErrRunCancelled), values == nil, receipt == (RunBundlePreparationReceipt{}))
 	}
 	if after := len(brokeredRunIntents(t, s)); after != before {
 		t.Fatalf("cancelled preparation recorded an intent: %d -> %d", before, after)
