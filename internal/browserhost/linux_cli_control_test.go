@@ -95,7 +95,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	receipt := cliRunReceiptFromFixture(t)
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
-	var preEOFOK, preEOFContextDone, challengePairOK, challengeFailureOK atomic.Bool
+	var preEOFOK, preEOFContextDone, challengePairOK, challengeFailureOK, entropyRawOK atomic.Bool
 	var count atomic.Int32
 	var failChallenge atomic.Bool
 	var controlFrames atomic.Int32
@@ -289,6 +289,10 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	run("challenge-refused", strings.Repeat("c4", 32))
 	failChallenge.Store(false)
 	challengeFailureOK.Store(true)
+	failChallenge.Store(true)
+	entropyEvent, _, _, entropyClosed := runEvent("entropy-raw", strings.Repeat("d5", 32), false)
+	failChallenge.Store(false)
+	entropyRawOK.Store(entropyEvent == 'T' && entropyClosed)
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -341,6 +345,10 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !challengeFailureOK.Load() {
 		stage = "S-assert-challenge-failure"
+		fail()
+	}
+	if !entropyRawOK.Load() {
+		stage = "S-assert-entropy-raw"
 		fail()
 	}
 	if controlFrames.Load() != 1 {
@@ -488,6 +496,45 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		if !errors.Is(err, ErrCLIRunRefused) || control != nil {
 			os.Exit(2)
 		}
+	case "entropy-raw":
+		endpoint, err := DefaultBrokerEndpoint()
+		if err != nil {
+			os.Exit(2)
+		}
+		conn, err := dialLocal(ctx, endpoint)
+		if err != nil {
+			os.Exit(2)
+		}
+		hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
+		if err := writeFrame(conn, hello); err != nil {
+			clear(hello)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(hello)
+		req.DeliveryControl = true
+		rawReq, _ := json.Marshal(req)
+		if err := writeFrame(conn, rawReq); err != nil {
+			clear(rawReq)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(rawReq)
+		rawReply, err := readFrame(conn, MaxOutput)
+		if err != nil || string(rawReply) != `{"v":1,"error":"refused"}` {
+			clear(rawReply)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(rawReply)
+		rawReady, err := readFrame(conn, MaxOutput)
+		clear(rawReady)
+		if err == nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		signal('T')
+		_ = conn.Close()
 	case "default-hold":
 		endpoint, err := DefaultBrokerEndpoint()
 		if err != nil {
@@ -689,9 +736,16 @@ func TestCLIRunControlReadyContract(t *testing.T) {
 		ok   bool
 	}{
 		{"ready", ready(challenge), true},
+		{"crlf", ready(challenge) + "\r\n", true},
 		{"old-missing-challenge", `{"v":1,"delivery_control":true}`, false},
 		{"wrong-v", `{"v":2,"delivery_control":true,"challenge":"` + challenge + `"}`, false},
+		{"null-v", `{"v":null,"delivery_control":true,"challenge":"` + challenge + `"}`, false},
+		{"wrong-type-v", `{"v":"1","delivery_control":true,"challenge":"` + challenge + `"}`, false},
 		{"false", `{"v":1,"delivery_control":false,"challenge":"` + challenge + `"}`, false},
+		{"null-delivery", `{"v":1,"delivery_control":null,"challenge":"` + challenge + `"}`, false},
+		{"wrong-type-delivery", `{"v":1,"delivery_control":1,"challenge":"` + challenge + `"}`, false},
+		{"null-challenge", `{"v":1,"delivery_control":true,"challenge":null}`, false},
+		{"wrong-type-challenge", `{"v":1,"delivery_control":true,"challenge":123}`, false},
 		{"short-challenge", ready(challenge[:len(challenge)-1]), false},
 		{"noncanonical-challenge", ready(challenge[:len(challenge)-1] + "A"), false},
 		{"duplicate-challenge", `{"v":1,"delivery_control":true,"challenge":"` + challenge + `","challenge":"` + challenge + `"}`, false},
