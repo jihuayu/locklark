@@ -3,6 +3,7 @@
 package browserhost
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -12,24 +13,43 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
-	linuxPeerAssocModeEnv    = "LOCKLARK_LINUX_PEER_ASSOC_MODE"
-	linuxPeerAssocSocketEnv  = "LOCKLARK_LINUX_PEER_ASSOC_SOCKET"
-	linuxPeerAssocNonceEnv   = "LOCKLARK_LINUX_PEER_ASSOC_NONCE"
-	linuxPeerAssocBroker     = "broker"
-	linuxPeerAssocPeer       = "peer"
-	linuxPeerAssocResultFD   = 4
-	linuxPeerAssocResultGood = "1\n"
+	linuxPeerAssocModeEnv             = "LOCKLARK_LINUX_PEER_ASSOC_MODE"
+	linuxPeerAssocSocketEnv           = "LOCKLARK_LINUX_PEER_ASSOC_SOCKET"
+	linuxPeerAssocNonceEnv            = "LOCKLARK_LINUX_PEER_ASSOC_NONCE"
+	linuxPeerAssocBroker              = "broker"
+	linuxPeerAssocPeer                = "peer"
+	linuxPeerAssocDifferentCTTYBroker = "broker-different-ctty"
+	linuxPeerAssocDifferentCTTYPeer   = "peer-own-ctty"
+	linuxPeerAssocDetachBroker        = "broker-detach"
+	linuxPeerAssocDetachPeer          = "peer-detach"
+	linuxPeerAssocResultFD            = 4
+	linuxPeerAssocResultGood          = "1\n"
+	linuxPeerAssocDetachByte          = 'D'
 )
 
-// TestLinuxPeerCTTYAssociationRealSameSession is the single positive CP2b
-// fixture. The outer test gives the broker helper a private PTY as its
-// controlling terminal. The broker helper then starts a same-session peer with
-// pipe stdio, accepts its real Unix-socket credentials, and runs the qualified
-// association. It does not use a SID/PID/TTY seam or a callback.
 func TestLinuxPeerCTTYAssociationRealSameSession(t *testing.T) {
+	linuxPeerAssocOuter(t, linuxPeerAssocBroker)
+}
+
+func TestLinuxPeerCTTYAssociationRejectsDifferentPeerCTTY(t *testing.T) {
+	linuxPeerAssocOuter(t, linuxPeerAssocDifferentCTTYBroker)
+}
+
+func TestLinuxPeerCTTYAssociationGoesStaleAfterPeerSetsid(t *testing.T) {
+	linuxPeerAssocOuter(t, linuxPeerAssocDetachBroker)
+}
+
+// linuxPeerAssocOuter starts one broker helper with a private PTY as its
+// controlling terminal and a fixed result pipe. The broker helper owns the
+// actual peer process and socket; this outer process only checks the fixed
+// success byte.
+func linuxPeerAssocOuter(t *testing.T, brokerMode string) {
+	t.Helper()
 	master, slave, _, _ := linuxPeerProofPTY(t)
 	_ = master
 	defer slave.Close()
@@ -49,7 +69,7 @@ func TestLinuxPeerCTTYAssociationRealSameSession(t *testing.T) {
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLinuxPeerCTTYAssociationBrokerHelper$", "-test.count=1")
 	cmd.Env = append(os.Environ(),
-		linuxPeerAssocModeEnv+"="+linuxPeerAssocBroker,
+		linuxPeerAssocModeEnv+"="+brokerMode,
 		linuxPeerAssocSocketEnv+"="+endpoint,
 		linuxPeerAssocNonceEnv+"="+linuxPeerProofFixedNonce,
 	)
@@ -66,12 +86,15 @@ func TestLinuxPeerCTTYAssociationRealSameSession(t *testing.T) {
 	waitErr := cmd.Wait()
 	result, err := io.ReadAll(resultR)
 	if err != nil || waitErr != nil || string(result) != linuxPeerAssocResultGood {
-		t.Fatal("same-session association positive failed")
+		t.Fatal("peer CTTY association fixture failed")
 	}
 }
 
 func TestLinuxPeerCTTYAssociationBrokerHelper(t *testing.T) {
-	if os.Getenv(linuxPeerAssocModeEnv) != linuxPeerAssocBroker {
+	brokerMode := os.Getenv(linuxPeerAssocModeEnv)
+	switch brokerMode {
+	case linuxPeerAssocBroker, linuxPeerAssocDifferentCTTYBroker, linuxPeerAssocDetachBroker:
+	default:
 		return
 	}
 	result := os.NewFile(linuxPeerAssocResultFD, "locklark-linux-peer-assoc-result")
@@ -92,6 +115,17 @@ func TestLinuxPeerCTTYAssociationBrokerHelper(t *testing.T) {
 	if !ok {
 		fail()
 	}
+	heldDev := held.identity.dev
+	brokerSID, err := unix.Getsid(os.Getpid())
+	if err != nil || brokerSID <= 0 || !held.valid() {
+		_ = held.Close()
+		fail()
+	}
+	heldSID, ok := held.sessionID()
+	if !ok || heldSID != brokerSID {
+		_ = held.Close()
+		fail()
+	}
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
 	if err != nil {
 		_ = held.Close()
@@ -102,9 +136,16 @@ func TestLinuxPeerCTTYAssociationBrokerHelper(t *testing.T) {
 		_ = listener.Close()
 		fail()
 	}
+	peerMode := linuxPeerAssocPeer
+	switch brokerMode {
+	case linuxPeerAssocDifferentCTTYBroker:
+		peerMode = linuxPeerAssocDifferentCTTYPeer
+	case linuxPeerAssocDetachBroker:
+		peerMode = linuxPeerAssocDetachPeer
+	}
 	peer := exec.Command(os.Args[0], "-test.run=^TestLinuxPeerCTTYAssociationPeerHelper$", "-test.count=1")
 	peer.Env = append(os.Environ(),
-		linuxPeerAssocModeEnv+"="+linuxPeerAssocPeer,
+		linuxPeerAssocModeEnv+"="+peerMode,
 		linuxPeerAssocSocketEnv+"="+endpoint,
 		linuxPeerAssocNonceEnv+"="+nonce,
 	)
@@ -138,41 +179,121 @@ func TestLinuxPeerCTTYAssociationBrokerHelper(t *testing.T) {
 		_ = peer.Wait()
 		fail()
 	}
-	assoc, err := newLinuxPeerCTTYAssociation(conn, held)
-	if err != nil {
-		_ = conn.Close()
-		_ = peer.Wait()
-		fail()
+	assoc, assocErr := newLinuxPeerCTTYAssociation(conn, held)
+	ack := func(b byte) bool {
+		_, err := conn.Write([]byte{b})
+		return err == nil
 	}
-	if assoc.proof.pid != peer.Process.Pid || !assoc.live() {
-		_ = assoc.Close()
-		_ = conn.Close()
-		_ = peer.Wait()
-		fail()
-	}
-	if _, err := conn.Write([]byte{1}); err != nil {
-		_ = assoc.Close()
-		_ = conn.Close()
-		_ = peer.Wait()
-		fail()
+	switch brokerMode {
+	case linuxPeerAssocBroker:
+		if assocErr != nil || assoc == nil || assoc.proof.pid != peer.Process.Pid || !assoc.live() {
+			if assoc != nil {
+				_ = assoc.Close()
+			}
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if !ack(1) {
+			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+	case linuxPeerAssocDifferentCTTYBroker:
+		if assoc != nil || !errors.Is(assocErr, errLinuxPeerCTTYUnavailable) {
+			if assoc != nil {
+				_ = assoc.Close()
+			}
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		peerSID, err := unix.Getsid(peer.Process.Pid)
+		_, peerDev, _, peerTTY := peerControllingTerminal(peer.Process.Pid)
+		if err != nil || peerSID <= 0 || peerSID == brokerSID || !peerTTY || peerDev == heldDev {
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if !ack(1) {
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+	case linuxPeerAssocDetachBroker:
+		if assocErr != nil || assoc == nil || assoc.proof.pid != peer.Process.Pid || !assoc.live() {
+			if assoc != nil {
+				_ = assoc.Close()
+			}
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if !ack(1) {
+			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		var detached [1]byte
+		if _, err := io.ReadFull(conn, detached[:]); err != nil || detached[0] != linuxPeerAssocDetachByte {
+			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		peerSID, sidErr := unix.Getsid(peer.Process.Pid)
+		_, _, _, peerTTY := peerControllingTerminal(peer.Process.Pid)
+		if sidErr != nil || peerSID <= 0 || peerSID == brokerSID || assoc.live() || !assoc.proof.pidfd.live() || !assoc.held.valid() || peerTTY {
+			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if !ack(2) {
+			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
 	}
 	_ = conn.Close()
 	if err := peer.Wait(); err != nil {
-		_ = assoc.Close()
+		if assoc != nil {
+			_ = assoc.Close()
+		}
 		fail()
 	}
 	if _, err := result.WriteString(linuxPeerAssocResultGood); err != nil {
-		_ = assoc.Close()
+		if assoc != nil {
+			_ = assoc.Close()
+		}
 		fail()
 	}
 	_ = result.Close()
-	_ = assoc.Close()
+	if assoc != nil {
+		_ = assoc.Close()
+	}
 	os.Exit(0)
 }
 
 func TestLinuxPeerCTTYAssociationPeerHelper(t *testing.T) {
-	if os.Getenv(linuxPeerAssocModeEnv) != linuxPeerAssocPeer {
+	peerMode := os.Getenv(linuxPeerAssocModeEnv)
+	switch peerMode {
+	case linuxPeerAssocPeer, linuxPeerAssocDifferentCTTYPeer, linuxPeerAssocDetachPeer:
+	default:
 		return
+	}
+	if peerMode == linuxPeerAssocDifferentCTTYPeer {
+		master, slave, _, _ := linuxPeerProofPTY(t)
+		_ = master
+		if _, err := unix.Setsid(); err != nil {
+			os.Exit(2)
+		}
+		if err := unix.IoctlSetInt(int(slave.Fd()), unix.TIOCSCTTY, 0); err != nil {
+			os.Exit(2)
+		}
 	}
 	endpoint := os.Getenv(linuxPeerAssocSocketEnv)
 	nonce := os.Getenv(linuxPeerAssocNonceEnv)
@@ -189,6 +310,20 @@ func TestLinuxPeerCTTYAssociationPeerHelper(t *testing.T) {
 	if _, err := io.ReadFull(conn, ack[:]); err != nil {
 		_ = conn.Close()
 		os.Exit(2)
+	}
+	if peerMode == linuxPeerAssocDetachPeer {
+		if _, err := unix.Setsid(); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if _, err := conn.Write([]byte{linuxPeerAssocDetachByte}); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if _, err := io.ReadFull(conn, ack[:]); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
 	}
 	_ = conn.Close()
 	os.Exit(0)
