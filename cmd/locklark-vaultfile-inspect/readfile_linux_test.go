@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -67,9 +68,33 @@ func TestReadRegularLinuxCharDeviceNoCTTYChild(t *testing.T) {
 
 func noCTTY() bool {
 	f, err := os.Open("/dev/tty")
-	if err != nil {
-		return true
+	if err == nil {
+		_ = f.Close()
+		return false
 	}
-	_ = f.Close()
-	return false
+	return controllingTerminalAbsent(err)
+}
+
+func controllingTerminalAbsent(err error) bool {
+	return errors.Is(err, unix.ENXIO)
+}
+
+func TestNoCTTYOnlyENXIO(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"enxio", unix.ENXIO, true},
+		{"eacces", unix.EACCES, false},
+		{"eperm", unix.EPERM, false},
+		{"enoent", unix.ENOENT, false},
+		{"etimedout", unix.ETIMEDOUT, false},
+		{"other", errors.New("other"), false},
+		{"nil", nil, false},
+	} {
+		if got := controllingTerminalAbsent(tc.err); got != tc.want {
+			t.Fatalf("no-CTTY classification mismatch for %s", tc.name)
+		}
+	}
 }

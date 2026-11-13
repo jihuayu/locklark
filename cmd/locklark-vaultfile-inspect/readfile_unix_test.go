@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,4 +68,36 @@ func TestReadRegularRejectsSymlinkAndFIFO(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("FIFO input blocked")
 	}
+}
+
+func TestReadRegularObserverProvesFDClosed(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "regular")
+	if err := os.WriteFile(regular, []byte("four"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oversize := filepath.Join(dir, "oversize")
+	if err := os.WriteFile(oversize, []byte("fives"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := unix.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertClosed := func(fd int) {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			t.Fatalf("opened descriptor was not closed")
+		}
+	}
+	read := func(path string, max int64, wantErr bool) {
+		var fds []int
+		_, err := readRegularWithObserver(path, max, func(fd int) { fds = append(fds, fd) })
+		if (err != nil) != wantErr || len(fds) != 1 {
+			t.Fatalf("observer result mismatch for %s", path)
+		}
+		assertClosed(fds[0])
+	}
+	read(regular, 4, false)
+	read(fifo, 4, true)
+	read(oversize, 4, true)
 }
