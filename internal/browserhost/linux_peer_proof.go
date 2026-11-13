@@ -190,8 +190,8 @@ func (p *linuxOwnedTTY) sessionID() (int, bool) {
 	return sid, true
 }
 
-// valid rechecks only this fd's local object and current path. A matching
-// dev_t/inode is not proof that the peer holds or originated this TTY.
+// linuxTTYBindingIdentity is the local fstat identity used by the binding and
+// lease anchor. It is not by itself proof of peer/terminal origin.
 type linuxTTYBindingIdentity struct {
 	dev  uint64
 	rdev uint64
@@ -224,6 +224,42 @@ func (p *linuxOwnedTTY) bindingIdentity() (linuxTTYBindingIdentity, bool) {
 	}, true
 }
 
+// duplicateForAnchor duplicates this held TTY fd under the same lock as Close
+// and returns the caller-owned duplicate, local identity, and session id.
+func (p *linuxOwnedTTY) duplicateForAnchor() (int, linuxTTYBindingIdentity, int, bool) {
+	if p == nil {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil || !trustedTTYDevice(p.identity.path) {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(int(p.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, p.identity.dev, p.identity.uid) {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	if uint64(opened.Rdev) != p.identity.dev || uint64(opened.Ino) != p.identity.ino ||
+		opened.Uid != p.identity.uid || opened.Gid != p.identity.gid || opened.Mode != p.identity.mode {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	sid, err := unix.IoctlGetInt(int(p.file.Fd()), unix.TIOCGSID)
+	if err != nil || sid <= 0 {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	fd, err := unix.Dup(int(p.file.Fd()))
+	if err != nil || fd < 0 {
+		return 0, linuxTTYBindingIdentity{}, 0, false
+	}
+	unix.CloseOnExec(fd)
+	return fd, linuxTTYBindingIdentity{
+		dev: uint64(opened.Dev), rdev: uint64(opened.Rdev), ino: uint64(opened.Ino),
+		uid: opened.Uid, gid: opened.Gid, mode: opened.Mode,
+	}, sid, true
+}
+
+// valid rechecks only this fd's local object and current path. A matching
+// dev_t/inode is not proof that the peer holds or originated this TTY.
 func (p *linuxOwnedTTY) valid() bool {
 	if p == nil {
 		return false

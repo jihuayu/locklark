@@ -136,6 +136,100 @@ func linuxTerminalBindingDigest(sid int, tty linuxTTYBindingIdentity, nsDev, nsI
 	return CLIRunTerminalBinding{digest: digest}
 }
 
+// linuxLeaseAnchor owns an independent duplicate of the associated terminal
+// fd plus the captured session and namespace identity. It survives the original
+// proof/CLI connection.
+type linuxLeaseAnchor struct {
+	mu       sync.Mutex
+	file     *os.File
+	identity linuxTTYBindingIdentity
+	sid      int
+	nsDev    uint64
+	nsIno    uint64
+	binding  CLIRunTerminalBinding
+	closed   bool
+}
+
+func newLinuxLeaseAnchor(a *linuxPeerCTTYAssociation) (*linuxLeaseAnchor, bool) {
+	if a == nil {
+		return nil, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil, false
+	}
+	current, ok := a.snapshotLocked()
+	if !ok || current != a.snapshot {
+		return nil, false
+	}
+	fd, tty, sid, ok := a.held.duplicateForAnchor()
+	if !ok {
+		return nil, false
+	}
+	nsDev, nsIno, ok := linuxMountNamespaceIdentity()
+	if !ok {
+		_ = unix.Close(fd)
+		return nil, false
+	}
+	file := os.NewFile(uintptr(fd), "locklark-linux-lease-anchor")
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, false
+	}
+	return &linuxLeaseAnchor{
+		file: file, identity: tty, sid: sid, nsDev: nsDev, nsIno: nsIno,
+		binding: linuxTerminalBindingDigest(sid, tty, nsDev, nsIno),
+	}, true
+}
+
+func (a *linuxLeaseAnchor) live() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.file == nil {
+		return false
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(int(a.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, a.identity.dev, a.identity.uid) {
+		return false
+	}
+	if uint64(opened.Rdev) != a.identity.rdev || uint64(opened.Ino) != a.identity.ino ||
+		opened.Uid != a.identity.uid || opened.Gid != a.identity.gid || opened.Mode != a.identity.mode {
+		return false
+	}
+	sid, err := unix.IoctlGetInt(int(a.file.Fd()), unix.TIOCGSID)
+	if err != nil || sid != a.sid {
+		return false
+	}
+	nsDev, nsIno, ok := linuxMountNamespaceIdentity()
+	return ok && nsDev == a.nsDev && nsIno == a.nsIno
+}
+
+func (a *linuxLeaseAnchor) matches(binding CLIRunTerminalBinding) bool {
+	return a != nil && a.live() && a.binding.Equal(binding)
+}
+
+func (a *linuxLeaseAnchor) Close() error {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil
+	}
+	a.closed = true
+	if a.file == nil {
+		return nil
+	}
+	err := a.file.Close()
+	a.file = nil
+	return err
+}
+
 func (a *linuxPeerCTTYAssociation) Close() error {
 	if a == nil {
 		return nil
