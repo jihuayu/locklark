@@ -36,6 +36,11 @@ LABEL = "解锁"
 FORBIDDEN = ("AXWindowNumber", "AXValue", "AXSelectedText", "AXLabel")
 
 
+# Markers for ``FakeFrameworks.front_answer`` (see ``_Front``).
+CALLABLE = object()
+MISSING = object()
+
+
 class Node:
     """One fake AXUIElement backed by a plain attribute dict."""
 
@@ -97,13 +102,17 @@ class FakeFrameworks:
     kCGWindowName = "name"
 
     def __init__(self, windows, focused=None, front_pid=OWNED_PID, hit=None,
-                 getpid=None, cg_windows=None):
+                 getpid=None, cg_windows=None, front_answer=CALLABLE):
         self.windows = list(windows)
         # None keeps the CoreGraphics inventory POISONED (the default);
         # a list opts the UNSCOPED path into a working CG inventory.
         self.cg_windows = None if cg_windows is None else list(cg_windows)
         self.focused = focused
         self.front_pid = front_pid
+        # ``front_answer`` chooses how the fresh frontmost app exposes its
+        # ``processIdentifier``: ``CALLABLE`` keeps the real method; anything
+        # else is installed (or the attribute removed) before any lookup.
+        self.front_answer = front_answer
         self.hit = hit
         self.getpid = getpid
         self.requests = []
@@ -242,15 +251,36 @@ class _NSWorkspace:
 
     def frontmostApplication(self):
         pid = self.frameworks.front_pid
-        return None if pid is None else _Front(pid)
+        if pid is None:
+            return None
+        return _Front(pid, self.frameworks.front_answer)
+
+
+def _real_process_identifier(front):
+    """The fake frontmost app's real bound method: its PID."""
+    return front.pid
 
 
 class _Front:
-    def __init__(self, pid):
-        self.pid = pid
+    """A fresh frontmost app answering ``processIdentifier`` as requested.
 
-    def processIdentifier(self):
-        return self.pid
+    The answer is installed when the object is built, BEFORE any lookup, so
+    the method under test never observes a class-level state. ``CALLABLE``
+    keeps the real bound method; ``MISSING`` removes the attribute entirely;
+    any other answer (``_raises`` included) is the installed attribute.
+    """
+
+    processIdentifier = _real_process_identifier
+
+    def __init__(self, pid, answer=CALLABLE):
+        _Front.processIdentifier = _real_process_identifier
+        self.pid = pid
+        if answer is CALLABLE:
+            return
+        if answer is MISSING:
+            del _Front.processIdentifier
+        else:
+            _Front.processIdentifier = answer
 
 
 class _Libproc:
@@ -577,6 +607,164 @@ class ScopedFocusAndActivationTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError) as error:
             api.activate_owned({"id": window, "pid": OWNED_PID})
         self.assertEqual(error.exception.code, "focus-lost")
+
+
+def _raises():
+    raise RuntimeError("native lookup failed")
+
+
+class IntSubclass(int):
+    """An ``int`` subclass: equal to the PID but not the exact built-in type."""
+
+
+# how a fresh frontmost app answers: (FakeFrameworks.front_answer, same answer
+# installed on the app that focus_state sees AFTER activate_owned's activation)
+FRONT_ANSWERS = {
+    "missing": (MISSING, MISSING),
+    "non_callable": ("4242", "4242"),
+    "raising": (_raises, _raises),
+    "string": ("4242", "4242"),
+    "float": (4242.0, 4242.0),
+    "bool_true": (True, True),
+    "bool_false": (False, False),
+    "int_subclass": (IntSubclass(OWNED_PID), IntSubclass(OWNED_PID)),
+    "zero": (0, 0),
+    "negative": (-1, -1),
+    "different_pid": (OTHER_PID, OTHER_PID),
+}
+
+_MALFORMED = ("missing", "non_callable", "raising", "string", "float",
+              "bool_true", "bool_false", "int_subclass", "zero", "negative")
+
+
+class FrontmostPIDTests(unittest.TestCase):
+    """foreground_pid accepts ONLY a callable exact-int positive PID."""
+
+    def test_real_callable_exact_int_pid_is_accepted(self):
+        for front_pid in (OWNED_PID, OTHER_PID):
+            with self.subTest(front_pid=front_pid):
+                api, _ = scoped([owned_window()[0]], front_pid=front_pid)
+                self.assertIs(type(api.foreground_pid()), int)
+                self.assertEqual(api.foreground_pid(), front_pid)
+
+    def test_malformed_answers_are_no_pid(self):
+        for name in _MALFORMED:
+            with self.subTest(answer=name):
+                window, _ = owned_window()
+                api, _ = scoped([window], front_pid=OWNED_PID,
+                                front_answer=FRONT_ANSWERS[name][0])
+                api.owned_discovery(TITLE)
+                self.assertIsNone(api.foreground_pid())
+                state = api.focus_state({"id": window, "pid": OWNED_PID})
+                self.assertIsNone(state["window"])
+                self.assertIsNone(state["pid"])
+
+    def test_no_frontmost_application_is_no_pid(self):
+        window, _ = owned_window()
+        api, _ = scoped([window], front_pid=None)
+        self.assertIsNone(api.foreground_pid())
+
+    def test_different_pid_never_satisfies_the_owned_focus(self):
+        window, _ = owned_window()
+        api, _ = scoped([window], focused=window, front_pid=OTHER_PID)
+        api.owned_discovery(TITLE)
+        self.assertEqual(api.foreground_pid(), OTHER_PID)
+        state = api.focus_state({"id": window, "pid": OWNED_PID})
+        self.assertEqual(state["pid"], OTHER_PID)
+        self.assertIsNone(state["window"])
+
+    def test_real_focused_window_still_proves_focus_with_exact_pid(self):
+        window, _ = owned_window()
+        api, _ = scoped([window], focused=window, front_pid=OWNED_PID)
+        api.owned_discovery(TITLE)
+        state = api.focus_state({"id": window, "pid": OWNED_PID})
+        self.assertIs(state["window"], window)
+        self.assertIs(api.focus_identity({"id": window, "pid": OWNED_PID}, state), True)
+
+    def test_unscoped_real_focused_window_still_proves_focus(self):
+        # The same exact AXFocusedWindow/CFEqual guard with NO owned scope: an
+        # exact frontmost PID proves focus, and a different PID is refused by
+        # that existing guard (no new unscoped semantics).
+        for name, expected in (("callable", True), ("different_pid", False),
+                               ("string", False), ("missing", False),
+                               ("bool_true", False)):
+            with self.subTest(answer=name):
+                window, _ = owned_window()
+                answer, _ = FRONT_ANSWERS.get(name, (CALLABLE, CALLABLE))
+                frameworks = FakeFrameworks([window], focused=window,
+                                            front_pid=OWNED_PID, cg_windows=[],
+                                            front_answer=answer)
+                api = api_for(frameworks)
+                self.assertIsNone(api.owned_pid_scope())
+                chosen = {"id": window, "pid": OWNED_PID, "title": TITLE,
+                          "bounds": dict(WINDOW_FRAME)}
+                state = api.focus_state(chosen)
+                if expected:
+                    self.assertIs(state["window"], window)
+                    self.assertEqual(state["pid"], OWNED_PID)
+                else:
+                    self.assertIsNone(state["window"])
+
+
+class ActivateOwnedFrontPIDTests(unittest.TestCase):
+    """activate_owned's final frontmost check uses the same strict PID."""
+
+    def discovered(self, front_pid=OWNED_PID):
+        window, _ = owned_window()
+        api, frameworks = scoped([window], focused=window, front_pid=front_pid)
+        api.owned_discovery(TITLE)
+        return api, frameworks, window
+
+    @staticmethod
+    def flip_after_focus(api, final):
+        """The app focus_state sees is correct; only the final read differs."""
+        real = api.focus_state
+        calls = []
+
+        def focus_state(chosen):
+            state = real(chosen)
+            api.appkit.front_answer = final
+            calls.append(state)
+            return state
+
+        api.focus_state = focus_state
+        return calls
+
+    def test_real_owned_front_pid_activates_once(self):
+        api, frameworks, window = self.discovered()
+        self.assertIs(api.activate_owned({"id": window, "pid": OWNED_PID}), True)
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_malformed_final_answers_refuse_focus_lost(self):
+        for name in _MALFORMED:
+            with self.subTest(answer=name):
+                api, frameworks, window = self.discovered()
+                calls = self.flip_after_focus(api, FRONT_ANSWERS[name][1])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.activate_owned({"id": window, "pid": OWNED_PID})
+                self.assertEqual(error.exception.code, "focus-lost")
+                self.assertEqual(len(calls), 1)
+                self.assertIs(calls[0]["window"], window)
+                # The pre-activation proofs held; exactly one activation ran.
+                self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_different_pid_answer_refuses_focus_lost(self):
+        api, frameworks, window = self.discovered()
+        self.flip_after_focus(api, FRONT_ANSWERS["different_pid"][1])
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_owned({"id": window, "pid": OWNED_PID})
+        self.assertEqual(error.exception.code, "focus-lost")
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_different_pid_from_the_start_refuses_focus_lost(self):
+        api, frameworks, window = self.discovered(front_pid=OTHER_PID)
+        self.assertEqual(api.foreground_pid(), OTHER_PID)
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_owned({"id": window, "pid": OWNED_PID})
+        self.assertEqual(error.exception.code, "focus-lost")
+        # The pre-activation owned-handle proof passes and exactly one
+        # activation is attempted; the final different-PID guard refuses.
+        self.assertEqual(frameworks.activations, [OWNED_PID])
 
 
 class ScopedHitTests(unittest.TestCase):

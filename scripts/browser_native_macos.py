@@ -259,6 +259,24 @@ def _exact_status(code):
     return type(code) is int
 
 
+def _application_pid(application):
+    """The exact built-in positive PID of one ``NSRunningApplication``, or None.
+
+    Only a callable ``processIdentifier`` attribute that returns an exact
+    built-in ``int`` above 0 is accepted. A missing or non-callable attribute,
+    a raised call, and a string/float/bool/``int`` subclass/zero/negative
+    answer all yield None: the value is never coerced or normalised.
+    """
+    try:
+        identifier = getattr(application, "processIdentifier")
+        reported = identifier() if callable(identifier) else None
+    except Exception:
+        return None
+    if type(reported) is not int or reported <= 0:
+        return None
+    return reported
+
+
 def _ax_result(result):
     """Decode one documented AX ``(AXError, value)`` answer, or None.
 
@@ -1509,9 +1527,16 @@ class QuartzApi:
 
     # -- foreground / input -------------------------------------------------
     def foreground_pid(self):
+        """The frontmost application's exact positive PID, or None.
+
+        Only a callable ``processIdentifier()`` returning an exact built-in
+        ``int`` above 0 is a PID; a missing/non-callable/raising attribute or a
+        string/float/bool/``int`` subclass/zero/negative answer is None (no
+        focus identity), never coerced.
+        """
         workspace = self.appkit.NSWorkspace.sharedWorkspace()
         front = workspace.frontmostApplication()
-        return int(front.processIdentifier()) if front is not None else None
+        return _application_pid(front) if front is not None else None
 
     def focus_state(self, window=None):
         """AXFocusedWindow must be the unique exact window; AXMainWindow only adds.
@@ -1720,7 +1745,9 @@ class QuartzApi:
         if self.focus_identity(window, state) is not True:
             raise contract.ContractError("focus-lost")
         app = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        if app is None or int(app.processIdentifier()) != pid:
+        # The final check uses the same strict exact-int PID as foreground_pid:
+        # a malformed answer is no PID at all and refuses focus-lost.
+        if app is None or _application_pid(app) != pid:
             raise contract.ContractError("focus-lost")
         return True
 
