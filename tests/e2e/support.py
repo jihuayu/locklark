@@ -34,7 +34,9 @@ from .harness import (
     E2EContext,
     FeatureNotImplementedError,
     PTYResult,
+    _group_has_members,
     owned_gui_command,
+    session_bus_usable,
     terminate_process_group,
 )
 
@@ -2206,9 +2208,18 @@ def f17_broker_ready(ctx: E2EContext) -> bool:
 
 
 def desktop_runtime_available(ctx: E2EContext) -> bool:
-    """Whether this checkout can launch the desktop under Xvfb."""
+    """Whether this host can own the GUI session ``desktop_binary_starts`` needs.
 
-    return shutil.which("xvfb-run") is not None
+    The smoke always launches under Xvfb and, on Linux without a usable
+    session bus, under ``dbus-run-session``; each missing wrapper is the same
+    strict ``validation blocked`` (never PASS/pending) that the helper raises.
+    """
+
+    if shutil.which("xvfb-run") is None:
+        return False
+    if sys.platform.startswith("linux") and not session_bus_usable(dict(os.environ)):
+        return shutil.which("dbus-run-session") is not None
+    return True
 
 
 DESKTOP_SETTINGS_USAGE = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
@@ -2249,20 +2260,33 @@ def desktop_smoke_dir(ctx: E2EContext) -> Path:
 
 
 def desktop_smoke_settings(ctx: E2EContext) -> Path:
-    """Write the private settings file the desktop smoke launch binds.
+    """Create the private settings file the desktop smoke launch binds.
 
-    The file is a regular, absolute, clean path under ``ctx.temp_dir`` written
-    with the same owner-only permissions the desktop persists settings with
-    (``0600`` inside a ``0700`` directory). No HOME/CODEX_HOME/XDG directory
-    is read, written or overridden.
+    The exact bytes are written through one owner-only (``0600``) descriptor
+    created atomically and exclusively (``O_CREAT|O_EXCL``) under a fresh,
+    never-reused name inside the ``0700`` fixture directory, so the file is
+    never readable or writable by another user at any point and a pre-existing
+    file is never overwritten. No HOME/CODEX_HOME/XDG directory is read,
+    written or overridden.
     """
 
-    path = desktop_smoke_dir(ctx) / "settings.json"
-    path.write_text(
-        json.dumps(DESKTOP_SMOKE_SETTINGS, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    path.chmod(0o600)
+    directory = desktop_smoke_dir(ctx)
+    payload = (
+        json.dumps(DESKTOP_SMOKE_SETTINGS, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    fd, name = tempfile.mkstemp(prefix="settings-", suffix=".json", dir=str(directory))
+    path = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        written = 0
+        while written < len(payload):
+            written += os.write(fd, payload[written:])
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        path.unlink(missing_ok=True)
+        raise
+    os.close(fd)
     if file_mode(path) != 0o600:
         raise AssertionError(f"desktop smoke settings is not 0600: {file_mode(path):o}")
     if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
@@ -2276,20 +2300,41 @@ def desktop_argv(settings: Path) -> list[str]:
     return ["--settings", str(settings)]
 
 
+def desktop_group_reaped(process: subprocess.Popen) -> bool:
+    """True only when the owned session (and the wrapper itself) is gone."""
+
+    if process.poll() is None:
+        return False
+    try:
+        members = _group_has_members(process.pid)
+    except PermissionError:
+        return False
+    if members:
+        return False
+    try:
+        return os.getpgid(process.pid) != process.pid
+    except (ProcessLookupError, PermissionError, OSError):
+        return True
+
+
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
     """Locked-desktop startup smoke under a private Xvfb/D-Bus session.
 
     This proves only that the desktop process starts and stays alive for
-    ``seconds`` on its supported command line. It does not open, select or
-    unlock ``vault``: the desktop takes ``--file`` no more, and its settings
-    schema has no vault/login path, so the launch cannot bind one.
+    ``seconds`` on its supported command line. No settings key can select or
+    unlock the target vault: the schema has no vault/login path, and the empty
+    ``app.defaultVaultForSaving`` is a save-target preference, not a binder.
 
     The only supported argument is ``--settings ABSOLUTE_PATH``; the launch
-    binds an explicit settings file inside this context's private
-    ``temp_dir`` (never HOME, XDG or a global configuration). ``vault`` is
-    the test's target vault: it is only sanity-checked to sit inside the
-    private fixture root and must stay byte-identical, since an idle, locked
-    desktop must not touch it.
+    binds the private settings file from :func:`desktop_smoke_settings`. The
+    launch always terminates (and verifies the reaping of) its owned session
+    on every path: an exit-2 refusal, a normal stop, a nested error or an
+    exception unwinding this function. The target vault is re-hashed only
+    after that teardown, so writes the desktop makes while shutting down on
+    SIGTERM are caught. All conditions are evaluated first; a changed vault is
+    reported with one fixed error and takes precedence, a usage refusal is the
+    next fixed error, and an unproven teardown (or a failing teardown that
+    replaced the original error) is never a success or a silent pass.
     """
 
     vault_path = Path(vault)
@@ -2322,21 +2367,54 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
         # alive for later tests on slower/remote runners.
         start_new_session=True,
     )
+    outcome: dict[str, Any] = {}
+    pending: BaseException | None = None
     try:
         time.sleep(seconds)
-        exit_code = process.poll()
-        if exit_code == 2:
-            # Exit 2 is the desktop's fixed usage/path refusal: the argv or
-            # settings binding regressed, never a GUI/session failure.
-            raise AssertionError(
-                "desktop refused its smoke argv before any GUI "
-                f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
-            )
-        if sha256_file(vault_path) != before:
-            raise AssertionError("an idle desktop smoke launch mutated the target vault")
-        return exit_code is None
+        outcome["exit_code"] = process.poll()
+        outcome["mutated"] = sha256_file(vault_path) != before
+    except BaseException as exc:
+        pending = exc
     finally:
-        terminate_process_group(process, grace=3.0, owned_group=process.pid)
+        try:
+            terminate_process_group(process, grace=3.0, owned_group=process.pid)
+            outcome["reaped"] = desktop_group_reaped(process)
+        except Exception as exc:
+            outcome["teardown_error"] = exc
+    try:
+        outcome["mutated"] = sha256_file(vault_path) != before
+    except OSError as exc:
+        outcome["verify_error"] = exc
+
+    if outcome.get("mutated"):
+        raise AssertionError(
+            "desktop smoke mutated the target vault (checked after its owned "
+            f"session was terminated and reaped): {vault_path}"
+        )
+    if outcome.get("exit_code") == 2:
+        # Exit 2 is the desktop's fixed usage/path refusal: the argv or
+        # settings binding regressed, never a GUI/session failure.
+        raise AssertionError(
+            "desktop refused its smoke argv before any GUI "
+            f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
+        )
+    if pending is not None:
+        raise pending
+    if "teardown_error" in outcome:
+        raise AssertionError(
+            "desktop smoke teardown failed; its owned session was not proven "
+            f"reaped: {outcome['teardown_error']!r}"
+        ) from outcome["teardown_error"]
+    if not outcome.get("reaped"):
+        raise AssertionError(
+            "desktop smoke teardown left its owned session alive or could not "
+            f"prove it was reaped (exit_code={outcome.get('exit_code')!r})"
+        )
+    if "verify_error" in outcome:
+        raise AssertionError(
+            f"desktop smoke could not re-verify the target vault: {outcome['verify_error']!r}"
+        ) from outcome["verify_error"]
+    return outcome["exit_code"] is None
 
 
 def file_mode(path: Path) -> int:
