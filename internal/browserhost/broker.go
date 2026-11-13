@@ -118,17 +118,34 @@ type BrokerCallbacks struct {
 // minimum with the real Session.AuthorityDeadline.
 const cliRunControlMaxLifetime = 2 * time.Minute
 
+type cliRunControlReadOutcome uint8
+
+const (
+	cliRunControlReadError cliRunControlReadOutcome = iota
+	cliRunControlReadEOF
+	cliRunControlReadFrame
+)
+
+type cliRunControlReadObservation struct {
+	Outcome cliRunControlReadOutcome
+	Length  int
+}
+
 type Broker struct {
 	callbacks BrokerCallbacks
 	listener  net.Listener
 	// cliRunControlLifetime can only shorten the fixed two-minute control
 	// lifetime; it is a per-broker test seam, never a production extension.
 	cliRunControlLifetime time.Duration
-	mu                    sync.Mutex
-	conns                 map[*Connection]bool
-	never                 map[string]bool
-	closed                bool
-	done                  chan struct{}
+	// cliRunControlObserve is a nil-by-default, per-broker test observation of
+	// the unique post-ready reader's fixed outcome and frame length. It never
+	// receives raw bytes, a connection, proof material, or authority.
+	cliRunControlObserve func(cliRunControlReadObservation)
+	mu                   sync.Mutex
+	conns                map[*Connection]bool
+	never                map[string]bool
+	closed               bool
+	done                 chan struct{}
 }
 
 func NewBroker(callbacks BrokerCallbacks) *Broker {
@@ -663,7 +680,18 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 			_ = conn.Close()
 			return e
 		}
-		raw, _ := readFrame(conn, MaxOutput)
+		raw, readErr := readFrame(conn, MaxOutput)
+		if b.cliRunControlObserve != nil {
+			observation := cliRunControlReadObservation{Outcome: cliRunControlReadError}
+			switch {
+			case readErr == nil:
+				observation.Outcome = cliRunControlReadFrame
+				observation.Length = len(raw)
+			case errors.Is(readErr, io.EOF):
+				observation.Outcome = cliRunControlReadEOF
+			}
+			b.cliRunControlObserve(observation)
+		}
 		clear(raw)
 		_ = conn.Close()
 		return nil

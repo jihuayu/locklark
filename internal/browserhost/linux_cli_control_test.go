@@ -94,15 +94,21 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	receipt := cliRunReceiptFromFixture(t)
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
+	var preEOFOK, preEOFContextDone atomic.Bool
 	var count atomic.Int32
+	var controlFrames atomic.Int32
+	var controlFrame atomic.Value
 	b := NewBroker(BrokerCallbacks{
-		HandleCLIRun: func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+		HandleCLIRun: func(ctx context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
 			n := count.Add(1)
-			if n == 3 {
+			switch n {
+			case 3:
 				return BrokerCLIResponse{}, ErrCLIRunRefused
-			}
-			if n == 5 {
+			case 5:
 				time.Sleep(5 * time.Second)
+			case 12:
+				<-ctx.Done()
+				preEOFContextDone.Store(true)
 			}
 			if req.DeliveryControl {
 				seenControl.Store(true)
@@ -113,6 +119,12 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		},
 	})
 	b.cliRunControlLifetime = 8 * time.Second
+	b.cliRunControlObserve = func(observation cliRunControlReadObservation) {
+		if observation.Outcome == cliRunControlReadFrame {
+			controlFrames.Add(1)
+			controlFrame.Store(observation)
+		}
+	}
 	stage = "S-listen"
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
 	if err != nil {
@@ -233,6 +245,8 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	sentinelOK.Store(sentinelEvent == 'S' && sentinelClosed)
 	preByteEvent, _, _, preByteClosed := runEvent("pre-byte", strings.Repeat("e1", 32), false)
 	preByteOK.Store(preByteEvent == 'P' && preByteClosed)
+	preEOFEvent, _, _, preEOFClosed := runEvent("pre-eof", strings.Repeat("f2", 32), false)
+	preEOFOK.Store(preEOFEvent == 'Q' && preEOFClosed && preEOFContextDone.Load())
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -273,6 +287,19 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !preByteOK.Load() {
 		stage = "S-assert-pre-byte"
+		fail()
+	}
+	if !preEOFOK.Load() {
+		stage = "S-assert-pre-eof"
+		fail()
+	}
+	if controlFrames.Load() != 1 {
+		stage = "S-assert-observe-count"
+		fail()
+	}
+	observation, _ := controlFrame.Load().(cliRunControlReadObservation)
+	if observation.Outcome != cliRunControlReadFrame || observation.Length != 3 {
+		stage = "S-assert-observe-frame"
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIControlOK); err != nil {
@@ -451,6 +478,47 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		signal('P')
+		_ = conn.Close()
+	case "pre-eof":
+		endpoint, err := DefaultBrokerEndpoint()
+		if err != nil {
+			os.Exit(2)
+		}
+		conn, err := dialLocal(ctx, endpoint)
+		if err != nil {
+			os.Exit(2)
+		}
+		hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
+		if err := writeFrame(conn, hello); err != nil {
+			clear(hello)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(hello)
+		req.DeliveryControl = true
+		rawReq, _ := json.Marshal(req)
+		if err := writeFrame(conn, rawReq); err != nil {
+			clear(rawReq)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(rawReq)
+		unixConn, ok := conn.(*net.UnixConn)
+		if !ok || unixConn.CloseWrite() != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		resp, err := readFrame(conn, MaxOutput)
+		clear(resp)
+		if err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if err := readCLIRunControlReady(conn); err == nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		signal('Q')
 		_ = conn.Close()
 	default:
 		os.Exit(2)
