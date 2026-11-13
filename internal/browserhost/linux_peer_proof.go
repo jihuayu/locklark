@@ -34,11 +34,14 @@ type linuxPeerProof struct {
 	tty   linuxPeerTTYIdentity
 }
 
-// linuxOwnedPidFD owns one pidfd obtained from SO_PEERPIDFD. Close is
-// idempotent so a proof can be retired on every error path.
+// linuxOwnedPidFD owns one pidfd obtained from SO_PEERPIDFD. Every fd access
+// and poll shares one mutex with Close, so live never observes a raw fd after
+// it may have been closed and reused. Close is idempotent so a proof can be
+// retired on every error path.
 type linuxOwnedPidFD struct {
-	file *os.File
-	once sync.Once
+	mu     sync.Mutex
+	file   *os.File
+	closed bool
 }
 
 func newLinuxOwnedPidFD(fd int) (*linuxOwnedPidFD, error) {
@@ -58,21 +61,35 @@ func (p *linuxOwnedPidFD) Close() error {
 	if p == nil {
 		return nil
 	}
-	var err error
-	p.once.Do(func() {
-		if p.file != nil {
-			err = p.file.Close()
-			p.file = nil
-		}
-	})
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	if p.file == nil {
+		return nil
+	}
+	err := p.file.Close()
+	p.file = nil
 	return err
 }
 
-func (p *linuxOwnedPidFD) fd() (int, bool) {
-	if p == nil || p.file == nil {
-		return 0, false
+// live polls the owned pidfd while holding the same lock Close uses. It never
+// returns the descriptor to a caller, so no unlocked fd can be closed and
+// reused between the lookup and the poll.
+func (p *linuxOwnedPidFD) live() bool {
+	if p == nil {
+		return false
 	}
-	return int(p.file.Fd()), true
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil {
+		return false
+	}
+	poll := []unix.PollFd{{Fd: int32(p.file.Fd()), Events: unix.POLLIN}}
+	n, err := unix.Poll(poll, 0)
+	return err == nil && n == 0
 }
 
 func (p *linuxPeerProof) Close() error {
@@ -85,16 +102,7 @@ func (p *linuxPeerProof) Close() error {
 // live reports whether the peer pidfd has no exit event. A closed proof, a
 // failed poll, or any event is not live.
 func (p *linuxPeerProof) live() bool {
-	if p == nil {
-		return false
-	}
-	fd, ok := p.pidfd.fd()
-	if !ok {
-		return false
-	}
-	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	n, err := unix.Poll(poll, 0)
-	return err == nil && n == 0
+	return p != nil && p.pidfd.live()
 }
 
 type linuxPeerStat struct {

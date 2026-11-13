@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -63,14 +65,70 @@ func TestLinuxOwnedPidFDCloseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := owned.fd(); !ok {
-		t.Fatal("owned pidfd is not available")
+	foreign, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatal("foreign pidfd unavailable")
+	}
+	defer unix.Close(foreign)
+	if !owned.live() {
+		t.Fatal("owned pidfd is not live")
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := owned.fd(); ok {
-		t.Fatal("closed owned pidfd is still available")
+	if owned.live() {
+		t.Fatal("closed owned pidfd is still live")
+	}
+	if _, err := unix.FcntlInt(uintptr(foreign), unix.F_GETFD, 0); err != nil {
+		t.Fatal("Close affected a foreign fd")
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinuxOwnedPidFDLiveCloseConcurrent(t *testing.T) {
+	fd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatal("pidfd unavailable")
+	}
+	owned, err := newLinuxOwnedPidFD(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	stop := make(chan struct{})
+	var liveWG, closeWG sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		liveWG.Add(1)
+		go func() {
+			defer liveWG.Done()
+			<-start
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = owned.live()
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		closeWG.Add(1)
+		go func() {
+			defer closeWG.Done()
+			<-start
+			_ = owned.Close()
+		}()
+	}
+	close(start)
+	closeWG.Wait()
+	close(stop)
+	liveWG.Wait()
+	if owned.live() {
+		t.Fatal("closed pidfd became live")
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatal(err)
