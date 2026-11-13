@@ -36,7 +36,7 @@ func cliBrokerFixtureDir(t *testing.T) string {
 	return dir
 }
 
-// installCLIRunBrokerSeams replaces the Darwin gate and every broker seam for
+// installCLIRunBrokerSeams replaces the platform broker gate and every broker seam for
 // one test, and restores the production defaults afterwards. The signal seam
 // is replaced with one that subscribes to nothing, so no test ever delivers a
 // signal to the test process; a test that needs cancellation uses
@@ -941,7 +941,7 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 }
 
 // TestCLIRunBrokerDispatcherDisabledRunsLocalOnce proves that with the gate
-// disabled (the non-Darwin behavior) the existing local-factor path runs
+// disabled (the explicit no-broker-attempt behavior) the existing local-factor path runs
 // directly and no broker request is made or subscribed.
 func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 	f := newCLIBrokerFixture(t)
@@ -957,6 +957,6 @@ func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 		return nil, nil, errRunCLIConsole
 	})
 	if err := dispatchCLIRunWithBroker(f); err != errRunCLIConsole || requests != 0 || opens != 1 || subscriptions != 0 {
-		t.Fatalf("non-Darwin path changed: err=%v requests=%d opens=%d subscriptions=%d", err, requests, opens, subscriptions)
+		t.Fatalf("disabled broker path changed: err=%v requests=%d opens=%d subscriptions=%d", err, requests, opens, subscriptions)
 	}
 }

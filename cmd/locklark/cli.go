@@ -1190,9 +1190,9 @@ func handoffBrokerSignal(pending os.Signal, consumed bool, parent, ctx context.C
 }
 
 // executeCLIAuthenticatedWithBroker attempts the audited desktop broker path
-// on Darwin only. The existing local-factor path runs exactly once and only
-// after the exact browserhost.ErrBrokerUnavailable outcome; every other broker
-// outcome is returned without falling back.
+// on Darwin and Linux. The existing local-factor path runs exactly once and
+// only after the exact browserhost.ErrBrokerUnavailable outcome; every other
+// broker outcome is returned without falling back.
 //
 // The broker request and the child it prepares share one signal-aware context:
 // Interrupt, SIGTERM, or SIGHUP cancels both, exactly as the local factor path

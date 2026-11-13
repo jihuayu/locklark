@@ -16,12 +16,12 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
-// The brokered CLI run (Darwin only). `locklark cli run` asks the running
+// The brokered CLI run (Darwin and Linux). `locklark cli run` asks the running
 // desktop broker for exactly the pinned slot values through the audited
 // personal.RunBrokeredBundle lifecycle, so the desktop request is made only
 // after the private run root exists and the exact request and targets are
-// committed. On every other platform the existing local-factor path runs
-// unchanged, and so it does on Darwin after the exact, single
+// committed. Other platforms keep the existing local-factor path unchanged,
+// and so does Darwin/Linux after the exact, single
 // browserhost.ErrBrokerUnavailable outcome.
 
 // errCLIRunBrokerAbsent reports that the desktop broker is not running. It is
@@ -29,9 +29,9 @@ import (
 var errCLIRunBrokerAbsent = errors.New("desktop browser broker is not running")
 
 // cliRunBrokerEnabled reports whether this build attempts the brokered path.
-// Only Darwin has the kernel-attested peer terminal the broker requires; every
-// other platform keeps the existing local-factor path untouched.
-var cliRunBrokerEnabled = func() bool { return runtime.GOOS == "darwin" }
+// Darwin retains its legacy attestation; Linux uses the qualified same-session
+// proof path. Other platforms keep the existing local-factor path untouched.
+var cliRunBrokerEnabled = func() bool { return runtime.GOOS == "darwin" || runtime.GOOS == "linux" }
 
 // The seams below are injectable for tests only; production never replaces
 // them.
