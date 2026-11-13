@@ -175,7 +175,8 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		if err != nil {
 			fail()
 		}
-		connFD := rawConnFD(conn)
+		// This is the accepted server-side Unix conn fd, not a proof-held fd.
+		acceptedConnFD := rawConnFD(conn)
 		start := time.Now()
 		serveDone := make(chan struct{})
 		go func() {
@@ -201,7 +202,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		readyAt := time.Since(start)
 		<-serveDone
 		elapsed := time.Since(start)
-		fdClosed := linuxPendingFDClosed(int32(connFD))
+		fdClosed := linuxPendingFDClosed(int32(acceptedConnFD))
 		if hold {
 			_ = stdin.Close()
 		}
@@ -363,9 +364,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			_ = conn.Close()
 			os.Exit(2)
 		}
-		raw, err := readFrame(conn, MaxOutput)
-		clear(raw)
-		if err == nil {
+		if err := requireCleanServerEOF(conn); err != nil {
 			_ = conn.Close()
 			os.Exit(2)
 		}
@@ -375,6 +374,17 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+// requireCleanServerEOF accepts only an actual clean EOF: a complete extra
+// frame, a malformed frame, or a partial header (UnexpectedEOF) is rejected.
+func requireCleanServerEOF(conn net.Conn) error {
+	raw, err := readFrame(conn, MaxOutput)
+	clear(raw)
+	if err == nil || !errors.Is(err, io.EOF) {
+		return errCLIRunControl
+	}
+	return nil
 }
 
 func rawConnFD(conn net.Conn) int {
@@ -391,6 +401,33 @@ func rawConnFD(conn net.Conn) int {
 		return -1
 	}
 	return fd
+}
+
+func TestRequireCleanServerEOF(t *testing.T) {
+	cases := []struct {
+		name   string
+		write  func(net.Conn)
+		closed bool
+	}{
+		{"clean", func(net.Conn) {}, true},
+		{"partial", func(c net.Conn) { _, _ = c.Write([]byte{0, 0, 0}) }, false},
+		{"extra-frame", func(c net.Conn) { _ = writeFrame(c, []byte(`{"v":1}`)) }, false},
+		{"malformed", func(c net.Conn) { _, _ = c.Write([]byte{0, 0, 0, 0}) }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			go func() {
+				tc.write(server)
+				_ = server.Close()
+			}()
+			err := requireCleanServerEOF(client)
+			_ = client.Close()
+			if (err == nil) != tc.closed {
+				t.Fatalf("clean-EOF result mismatch for %s", tc.name)
+			}
+		})
+	}
 }
 
 func TestCLIRunControlReadyContract(t *testing.T) {
