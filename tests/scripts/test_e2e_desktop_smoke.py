@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
 import shlex
 import shutil
@@ -19,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -40,6 +42,43 @@ _STAND_IN = (
     "with open(sys.argv[1], 'w', encoding='utf-8') as handle:\n"
     "    json.dump({'argv': sys.argv[2:], 'environ': dict(os.environ), 'pid': os.getpid()}, handle)\n"
 )
+
+# Bytes the stand-in writes into its own synthetic vault once the harness
+# releases it. They differ from the fixture bytes, so a real change is visible.
+_VAULT_BYTES = b"synthetic locked vault fixture\n"
+_MUTATION = b"mutated by the stand-in desktop\n"
+
+# The seeded stand-in proves it was spawned by the helper (its parent is the
+# harness process, which is inside the smoke's new session; anything else kills
+# its own group instead of touching the vault). It then reads the
+# ``--settings`` file it was launched with, so the helper has already taken its
+# ``before`` digest, and reports on stdout; the harness turns that into a nudge
+# file. Only then does it rewrite its own vault, report ``mutated``/``alive``
+# and ``exec`` the plain stand-in, which keeps running until teardown. Reports
+# go out one at a time with ``os.write`` so no stdio buffer can hold one back.
+# ``_harness_pid``, ``_nudge``, ``_vault_path`` and ``_launch_argv`` are filled
+# in by the test.
+_MUTATING_STAND_IN = f"""
+# argv is [record, "--settings", path]; splice in the vault after the record.
+_launch_argv.insert(1, _vault_path[0])
+_vault = _launch_argv[1]
+if os.getppid() != _harness_pid:
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+with open(sys.argv[3], "r", encoding="utf-8") as _settings:
+    json.load(_settings)
+os.write(1, b"launch " + str(os.getpid()).encode() + b"\\n")
+while not os.path.exists(_nudge[0]):
+    time.sleep(0.01)
+with open(_vault, "r+b") as _vault_file:
+    _vault_file.seek(0)
+    _vault_file.truncate()
+    _vault_file.write({_MUTATION!r})
+    _vault_file.flush()
+    os.fsync(_vault_file.fileno())
+os.write(1, b"mutated\\n")
+os.write(1, b"alive\\n")
+os.execv(sys.executable, [sys.executable] + list(_launch_argv))
+"""
 
 _FORBIDDEN_IN_ARGV = ("--file", "--settings=")
 
@@ -111,7 +150,7 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.record = self.temp_dir / "stand-in-record.json"
         self.executed = self.temp_dir / "stand-in-executions"
         self.vault = self.temp_dir / "target-vault.ll"
-        self.vault.write_bytes(b"synthetic locked vault fixture\n")
+        self.vault.write_bytes(_VAULT_BYTES)
         self.desktop = self._install_stand_in()
         self.ctx = SimpleNamespace(
             repo_root=ROOT,
@@ -119,6 +158,13 @@ class DesktopSmokeFixture(unittest.TestCase):
             temp_dir=self.temp_dir,
             desktop_bin=self.desktop,
         )
+        # Every report a stand-in writes to its stdout, by first word. The
+        # helper's stdout redirect is a fixed part of its argv contract;
+        # ``_observe`` carries the same real spawn out with a pipe instead,
+        # without mocking anything downstream of it.
+        self.reports: dict[str, str] = {}
+        self.nudge = self.temp_dir / "stand-in-nudge"
+        self.launched_pid = self.temp_dir / "stand-in-pid"
         # A fake GUI session: no Xvfb, no D-Bus, no display. The helper still
         # runs its real settings writing, spawn and teardown code.
         patcher = mock.patch.object(
@@ -126,6 +172,53 @@ class DesktopSmokeFixture(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        observer = mock.patch.object(
+            support.subprocess, "Popen", side_effect=self._observe(support.subprocess.Popen)
+        )
+        observer.start()
+        self.addCleanup(observer.stop)
+
+    def _observe(self, real_popen):
+        """Spawn exactly as the helper asked and record its stdout reports."""
+
+        def popen(command, **kwargs):
+            # Pin the helper's own values first: the patch replaces the module
+            # attribute the helper reads, so comparisons must use locals.
+            null = kwargs.get("stdin")
+            self.assertIs(kwargs.get("stdout"), null)
+            self.assertIs(kwargs.get("stderr"), null)
+            self.assertTrue(kwargs.get("start_new_session"))
+            # Only stdout becomes a pipe, which is what a real GUI session does
+            # to the desktop's log; every other spawn argument is untouched.
+            process = real_popen(command, **{**kwargs, "stdout": subprocess.PIPE})
+            threading.Thread(
+                target=self._scrape, args=(process.stdout,), daemon=True
+            ).start()
+            # The helper's contract never handles stdout, and the collector
+            # owns the pipe from here (closing it once the child is gone).
+            process.stdout = None
+            return process
+
+        return popen
+
+    def _scrape(self, stream) -> None:
+        try:
+            self._collect(stream)
+        finally:
+            stream.close()
+
+    def _collect(self, stream) -> None:
+        for line in iter(stream.readline, b""):
+            head, _, rest = line.decode("utf-8", "replace").strip().partition(" ")
+            self.reports.setdefault(head, rest)
+            if head == "launch":
+                # Private 0600 files of their own: the nudge releases the
+                # seeded stand-in's rewrite, and the pid lets the test prove
+                # the group was owned without relying on the live record.
+                self.nudge.write_bytes(b"")
+                self.nudge.chmod(0o600)
+                self.launched_pid.write_text(rest, encoding="utf-8")
+                self.launched_pid.chmod(0o600)
 
     def _mkdtemp(self) -> Path:
         directory = Path(tempfile.mkdtemp(prefix="ll-desktop-smoke-"))
@@ -133,10 +226,11 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         return directory
 
-    def _install_stand_in(self) -> Path:
+    def _install_stand_in(self, seed: str = "") -> Path:
         script = self.temp_dir / "stand-in-desktop.py"
         script.write_text(
             _STAND_IN
+            + seed
             + "def _keep_running():\n"
             "    while True:\n"
             "        time.sleep(0.05)\n"
@@ -331,6 +425,61 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         before = _sha256(self.vault)
         self.assertTrue(self.launch())
         self.assertEqual(_sha256(self.vault), before)
+
+    def test_mutation_after_the_before_digest_fails_and_still_reaps(self):
+        # The change is made by the owned child itself, never by the harness
+        # or the helper, and only after it has read the settings the helper
+        # bound, which the helper writes after taking its ``before`` digest.
+        # Ordering to the child rides on its own stdout (which the real helper
+        # redirects into a pipe) and a private nudge file: no polling sleeps.
+        seed = (
+            f"_harness_pid = {os.getpid()}\n"
+            f"_nudge = [{str(self.nudge)!r}]\n"
+            f"_vault_path = [{str(self.vault)!r}]\n"
+            f"_launch_argv = [{str(self.record)!r}, *sys.argv[2:]]\n"
+            + _MUTATING_STAND_IN
+        )
+        self.ctx.desktop_bin = self._install_stand_in(seed)
+
+        observed: queue.Queue[tuple[bool, BaseException | None]] = queue.Queue()
+
+        def launch() -> None:
+            try:
+                observed.put((bool(self.launch(seconds=2.0)), None))
+            except BaseException as exc:  # reported on the main thread
+                observed.put((False, exc))
+
+        worker = threading.Thread(target=launch, daemon=True)
+        worker.start()
+        try:
+            ok = worker.join(timeout=60.0) is None
+            if not ok:  # one bounded block; the helper bounds its own window
+                self.fail("desktop smoke helper did not return within 60s")
+            if observed.empty():
+                self.fail("desktop smoke helper reported no outcome")
+            alive, error = observed.get_nowait()
+            self.assertIsInstance(error, AssertionError, f"unexpected outcome {alive!r}")
+            self.assertEqual(
+                str(error), "an idle desktop smoke launch mutated the target vault"
+            )
+        finally:
+            worker.join(timeout=10.0)
+
+        # The child's own byte-level handshake: it announced its pid, changed
+        # the vault and was still running when the helper reaped it. No static
+        # substring stands in for the helper's post-window digest.
+        self.assertEqual(self.vault.read_bytes(), _MUTATION)
+        self.assertEqual(set(self.reports), {"launch", "mutated", "alive"}, self.reports)
+        pid = int(self.launched_pid.read_text(encoding="utf-8"))
+        self.assertEqual(self.reports["launch"], str(pid))
+        # The shim recorded the helper's session leader, which exec'd the
+        # stand-in in place: same pid, and the owned group is that pid.
+        self.assertEqual(int(self.executed.read_text(encoding="utf-8")), pid)
+        self.assertFalse(_alive(pid), "a failing smoke must still reap its owned desktop")
+        self.assertFalse(
+            harness._group_has_members(pid),
+            "a failing smoke must still reap its owned process group",
+        )
 
     def test_early_exit_is_false_not_a_liveness_pass(self):
         # A desktop that stops during the window (other than the exit-2 usage
