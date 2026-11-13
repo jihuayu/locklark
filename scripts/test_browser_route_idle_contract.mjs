@@ -754,16 +754,27 @@ test("the idle journey proves the tested surface, then wipes only after the full
     "const minimumWipe = idleStart + ROUTE_IDLE_TTL;",
     "const wipeDeadline = idleStart + ROUTE_IDLE_WIPE_LIMIT;",
   ]);
-  // A wipe before the minimum is a failure; every other pre-minimum probe must
-  // still satisfy the tested surface and stay visible.
+  // Every poll reads both the wipe observation and the approved surface from
+  // one snapshot; the verdict uses only that snapshot's own time.
   assert.match(
     body,
-    /if \(now < minimumWipe\) \{\n\s+\/\/ A wipe before the full original TTL is a contract failure, and any\n\s+\/\/ other non-wiped probe must still show the approved surface\.\n\s+assert\.equal\(wiped, false, "Idle route detail did not stay live"\);\n\s+const surface = await fresh\.evaluate\(liveProbe\);\n\s+assert\.equal\(\n\s+surface\?\.visible,\n\s+true,\n\s+"Idle route detail left the foreground",\n\s+\);\n\s+const finding = verifyRouteSurface\(surface, fixture\.Title\);/,
+    /const idleProbe = idleRouteSnapshotProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),\n\s+liveProbe,\n\s+\);/,
   );
-  // The wipe poll uses the shared full wipe probe with every fixture canary.
   assert.match(
     body,
-    /routeWiped\(\n\s+await fresh\.evaluate\(\n\s+routeRevokedProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),\n\s+\),\n\s+\),\n\s+\);/,
+    /snapshot = await fresh\.evaluate\(idleProbe\);/,
+  );
+  assert.match(
+    body,
+    /const verdict = idleRouteSnapshotVerdict\(\n\s+snapshot,\n\s+minimumWipe,\n\s+fixture\.Title,\n\s+verifyRouteSurface,\n\s+\);/,
+  );
+  assert.match(
+    body,
+    /assert\.notEqual\(\n\s+verdict\.kind,\n\s+"early-wipe",\n\s+"Idle route detail did not stay live",\n\s+\);/,
+  );
+  assert.match(
+    body,
+    /assert\.notEqual\(\n\s+verdict\.kind,\n\s+"surface-failure",\n\s+verdict\.finding \|\| "Idle route detail did not stay live",\n\s+\);/,
   );
   assert.match(body, /if \(Date\.now\(\) >= wipeDeadline\)\n\s+throw Error\("Idle route detail did not expire"\);/);
   // After the wipe, both existing native approval labels must be absent in a
@@ -848,7 +859,10 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
   assert.doesNotMatch(body, /fixture\.Password|fixture\.Secret/);
   assert.equal(countMatches(body, /fixture\.Value/g), 2);
   assert.match(body, /routeForbiddenCanaries\(fixture\)/);
-  assert.match(body, /routeRevokedProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),/);
+  assert.match(
+    body,
+    /idleRouteSnapshotProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),/,
+  );
   assert.doesNotMatch(body, /clipboard|readText/);
   // The same console canary and private-text checks the ordinary journeys
   // apply still decide the pass.
@@ -863,6 +877,7 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
     "Stale route tab was not closed",
     "Idle route probes missing",
     "Idle route detail did not survive native approval",
+    "Idle route snapshot unavailable",
     "Idle route detail did not stay live",
     "Idle route detail left the foreground",
     "Idle route detail did not expire",
@@ -1032,6 +1047,22 @@ function runRevoked(overrides = {}, canaries) {
   return { value, wiped: harness.routeWiped(value), harness };
 }
 
+// The real snapshot verdict, with the real wipe predicate and status literals
+// from revocationHarness. The surface verifier stays a caller-supplied
+// function, exactly as the idle journey passes its tested verifier.
+function verdictHarness() {
+  const start = SOURCE.indexOf("function idleRouteSnapshotVerdict(");
+  const stop = SOURCE.indexOf("\n}", start) + 2;
+  assert.ok(start > 0 && stop > start, "idle snapshot verdict must exist");
+  const context = revocationHarness();
+  vm.runInContext(
+    SOURCE.slice(start, stop) +
+      "\nthis.idleRouteSnapshotVerdict = idleRouteSnapshotVerdict;",
+    context,
+  );
+  return context;
+}
+
 test("routeForbiddenCanaries allows only the verified Username", () => {
   const forbidden = forbiddenFor(FIXTURE);
   assert.deepEqual(forbidden, FORBIDDEN_CANARIES);
@@ -1146,6 +1177,87 @@ test("the generated revoked expression fails any remaining title, field, copy, s
     () => new vm.Script("(" + expression + ")").runInContext(vm.createContext({})),
     /document is not defined/,
   );
+});
+
+test("the idle snapshot reads and decides in one turn across the TTL boundary", () => {
+  const body = idleJourney();
+  const loopStart = body.indexOf('mark("route:idle-wait")');
+  const loopStop = body.indexOf('mark("route:idle-native-absent")', loopStart);
+  assert.ok(loopStart > 0 && loopStop > loopStart, "idle wait loop must exist");
+  const loop = body.slice(loopStart, loopStop);
+  // One page evaluate per poll; neither reading is a separate round trip.
+  assert.equal(countMatches(loop, /fresh\.evaluate\(/g), 1);
+  assert.match(loop, /snapshot = await fresh\.evaluate\(idleProbe\);/);
+  assert.doesNotMatch(
+    loop,
+    /fresh\.evaluate\(liveProbe\)|fresh\.evaluate\(\s*routeRevokedProbe/,
+  );
+  assert.match(loop, /const verdict = idleRouteSnapshotVerdict\(/);
+
+  // Execute the real probe generator: both reads run before the timestamp.
+  const probeStart = SOURCE.indexOf("function idleRouteSnapshotProbe(");
+  const probeStop = SOURCE.indexOf("\n}", probeStart) + 2;
+  assert.ok(probeStart > 0 && probeStop > probeStart, "snapshot probe must exist");
+  const order = [];
+  const probeContext = vm.createContext({
+    order,
+    Date: { now: () => (order.push("at"), 123456) },
+    routeRevokedProbe: () =>
+      "(()=>{order.push('wiped');return {closed:true};})()",
+  });
+  vm.runInContext(
+    SOURCE.slice(probeStart, probeStop) +
+      "\nthis.idleRouteSnapshotProbe = idleRouteSnapshotProbe;",
+    probeContext,
+  );
+  const expression = probeContext.idleRouteSnapshotProbe(
+    "title",
+    "value",
+    [],
+    "(()=>{order.push('surface');return {visible:true};})()",
+  );
+  const snapshot = new vm.Script("(" + expression + ")").runInContext(probeContext);
+  assert.deepEqual([...probeContext.order], ["wiped", "surface", "at"]);
+  assert.equal(snapshot.at, 123456);
+
+  // The real verdict uses that snapshot's own time. A snapshot exactly at the
+  // TTL may accept a wipe; one millisecond earlier must reject it. A good
+  // surface remains live, while a visible private leak still fails.
+  const verdict = verdictHarness().idleRouteSnapshotVerdict;
+  const minimumWipe = 1000;
+  const live = runSurface();
+  const cleanWipe = runRevoked().value;
+  const at = (time, wiped, surface) =>
+    verdict(
+      { at: time, wiped, surface },
+      minimumWipe,
+      FIXTURE.Title,
+      () => live.finding,
+    );
+  assert.equal(at(minimumWipe - 1, cleanWipe, live.surface).kind, "early-wipe");
+  assert.equal(at(minimumWipe - 1, {}, live.surface).kind, "early-live");
+  assert.equal(at(minimumWipe, cleanWipe, live.surface).kind, "wiped");
+  assert.equal(at(minimumWipe, {}, live.surface).kind, "late-live");
+  assert.equal(
+    at(minimumWipe - 1, {}, { ...live.surface, visible: false }).kind,
+    "left-foreground",
+  );
+  assert.equal(
+    verdict({}, minimumWipe, FIXTURE.Title, () => "").kind,
+    "unobservable",
+  );
+
+  const leaked = runSurface({
+    bodyText: [FIXTURE.Title, FIXTURE.Username, FIXTURE.Password].join("\n"),
+  });
+  const leakedVerdict = verdict(
+    { at: minimumWipe - 1, wiped: {}, surface: leaked.surface },
+    minimumWipe,
+    FIXTURE.Title,
+    () => leaked.finding,
+  );
+  assert.equal(leakedVerdict.kind, "surface-failure");
+  assert.equal(leakedVerdict.finding, "route-forbidden-canary-rendered");
 });
 
 // ---------------------------------------------------------------------------

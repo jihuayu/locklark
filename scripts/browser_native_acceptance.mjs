@@ -779,6 +779,36 @@ function routeWiped(value) {
     ROUTE_REVOKE_STATUS_KINDS.includes(value?.statusKind)
   );
 }
+// One idle TTL poll's read-only snapshot. The full wipe observation and the
+// approved surface are evaluated in the same page turn, and the timestamp is
+// taken after both, so a poll can never apply an earlier clock to a later
+// surface read or a previous status to this surface.
+function idleRouteSnapshotProbe(title, value, canaries, surfaceProbe) {
+  return `(()=>{
+    const wiped=${routeRevokedProbe(title, value, canaries)};
+    const surface=${surfaceProbe};
+    return {at:Date.now(),wiped,surface};
+  })()`;
+}
+// Classify that one snapshot by its own timestamp. Before the original TTL a
+// wipe is an early failure and a non-wipe must show the exact approved
+// surface; at/after the TTL only a complete wipe is success, while a still
+// live surface keeps waiting for the bounded deadline. No second page read or
+// clock is used for this surface.
+function idleRouteSnapshotVerdict(snapshot, minimumWipe, title, verifySurface) {
+  if (!Number.isSafeInteger(snapshot?.at)) return { kind: "unobservable" };
+  const wiped = routeWiped(snapshot?.wiped);
+  if (snapshot.at < minimumWipe) {
+    if (wiped) return { kind: "early-wipe" };
+    if (snapshot?.surface?.visible !== true)
+      return { kind: "left-foreground" };
+    const finding = verifySurface(snapshot?.surface, title);
+    return finding
+      ? { kind: "surface-failure", finding }
+      : { kind: "early-live" };
+  }
+  return { kind: wiped ? "wiped" : "late-live" };
+}
 // Diagnostics only for the default QuickFill=false post-repair refusal. The
 // route probe's fixed booleans/enums and the physical close proof are kept
 // verbatim in shape; no title, value, URL, token, text, id or canary is stored
@@ -1228,6 +1258,14 @@ async function acceptRouteIdleExpiry(driver) {
     fixture.Value,
     routeForbiddenCanaries(fixture),
   );
+  // Each poll reads both the wipe observation and the approved surface in one
+  // page turn, with its timestamp taken after both.
+  const idleProbe = idleRouteSnapshotProbe(
+    fixture.Title,
+    fixture.Value,
+    fixtureCanaries(fixture),
+    liveProbe,
+  );
   const before = new Set((await targets()).map((target) => target.id));
   const pagesBefore = new Set(
     context
@@ -1363,39 +1401,43 @@ async function acceptRouteIdleExpiry(driver) {
     for (;;) {
       // The same target id is still the one route page between polls.
       await exactRoute();
-      let wiped = false;
+      let snapshot;
       try {
-        wiped = routeWiped(
-          await fresh.evaluate(
-            routeRevokedProbe(
-              fixture.Title,
-              fixture.Value,
-              fixtureCanaries(fixture),
-            ),
-          ),
-        );
+        snapshot = await fresh.evaluate(idleProbe);
       } catch (error) {
         if (popupClosed(error)) throw Error("Route page was replaced");
         throw error;
       }
-      const now = Date.now();
-      if (now < minimumWipe) {
-        // A wipe before the full original TTL is a contract failure, and any
-        // other non-wiped probe must still show the approved surface.
-        assert.equal(wiped, false, "Idle route detail did not stay live");
-        const surface = await fresh.evaluate(liveProbe);
-        assert.equal(
-          surface?.visible,
-          true,
-          "Idle route detail left the foreground",
-        );
-        const finding = verifyRouteSurface(surface, fixture.Title);
-        assert.equal(
-          finding,
-          "",
-          finding || "Idle route detail did not stay live",
-        );
-      } else if (wiped) {
+      const verdict = idleRouteSnapshotVerdict(
+        snapshot,
+        minimumWipe,
+        fixture.Title,
+        verifyRouteSurface,
+      );
+      // A wipe before the full original TTL is a contract failure, and any
+      // other pre-TTL snapshot must still show the approved surface. The time
+      // and both readings come from this one snapshot, never a later read.
+      assert.notEqual(
+        verdict.kind,
+        "unobservable",
+        "Idle route snapshot unavailable",
+      );
+      assert.notEqual(
+        verdict.kind,
+        "early-wipe",
+        "Idle route detail did not stay live",
+      );
+      assert.notEqual(
+        verdict.kind,
+        "left-foreground",
+        "Idle route detail left the foreground",
+      );
+      assert.notEqual(
+        verdict.kind,
+        "surface-failure",
+        verdict.finding || "Idle route detail did not stay live",
+      );
+      if (verdict.kind === "wiped") {
         idle.liveObserved = true;
         break;
       }
