@@ -141,11 +141,14 @@ type Broker struct {
 	// the unique post-ready reader's fixed outcome and frame length. It never
 	// receives raw bytes, a connection, proof material, or authority.
 	cliRunControlObserve func(cliRunControlReadObservation)
-	mu                   sync.Mutex
-	conns                map[*Connection]bool
-	never                map[string]bool
-	closed               bool
-	done                 chan struct{}
+	// cliRunControlChallenge is a nil-by-default per-broker entropy seam for
+	// tests; production uses crypto/rand. It cannot grant authority.
+	cliRunControlChallenge func() (string, error)
+	mu                     sync.Mutex
+	conns                  map[*Connection]bool
+	never                  map[string]bool
+	closed                 bool
+	done                   chan struct{}
 }
 
 func NewBroker(callbacks BrokerCallbacks) *Broker {
@@ -650,6 +653,27 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	default:
 		resp.Error = cliRunErrorRefused
 	}
+	// Generate the delivery-control challenge before writing any successful
+	// prepared reply. An entropy failure writes only the fixed refusal and
+	// never leaks the prepared values.
+	var controlChallenge string
+	if req.DeliveryControl && transferred && bindErr == nil {
+		generate := b.cliRunControlChallenge
+		if generate == nil {
+			generate = newCLIRunControlChallenge
+		}
+		challenge, challengeErr := generate()
+		if challengeErr != nil || !validCLIRunControlChallenge(challenge) {
+			writeErr := writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			close(stop)
+			_ = conn.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			return errCLIRunControl
+		}
+		controlChallenge = challenge
+	}
 	// writeCLIResponse neither modifies nor takes ownership of resp: it
 	// re-checks the response pair first, so values with an error, values
 	// without a canonical receipt, and the legacy map can never reach the
@@ -676,7 +700,7 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 			_ = conn.Close()
 			return errCLIRunControl
 		}
-		if e := writeCLIRunControlReady(conn); e != nil {
+		if e := writeCLIRunControlReady(conn, controlChallenge); e != nil {
 			_ = conn.Close()
 			return e
 		}

@@ -1,8 +1,10 @@
 package browserhost
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"sync"
@@ -11,15 +13,37 @@ import (
 var errCLIRunControl = errors.New("CLI-run delivery control unavailable")
 var errCLIRunControlDeadline = errors.New("CLI-run delivery control requires a caller deadline")
 
+const cliRunControlChallengeBytes = 32
+
+func newCLIRunControlChallenge() (string, error) {
+	var raw [cliRunControlChallengeBytes]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", errCLIRunControl
+	}
+	return base64.StdEncoding.EncodeToString(raw[:]), nil
+}
+
+func validCLIRunControlChallenge(challenge string) bool {
+	if len(challenge) != base64.StdEncoding.EncodedLen(cliRunControlChallengeBytes) {
+		return false
+	}
+	raw, err := base64.StdEncoding.DecodeString(challenge)
+	if err != nil || len(raw) != cliRunControlChallengeBytes {
+		return false
+	}
+	return base64.StdEncoding.EncodeToString(raw) == challenge
+}
+
 var cliRunControlReady = []byte(`{"v":1,"delivery_control":true}`)
 
 // CLIRunControl is the opt-in post-delivery handle. It carries no authority:
 // its Close only ends the retained authenticated socket. The server still owns
 // proof, nonce, scope, and any future lease lifecycle.
 type CLIRunControl struct {
-	once sync.Once
-	conn net.Conn
-	stop func() bool
+	once      sync.Once
+	conn      net.Conn
+	stop      func() bool
+	challenge string
 }
 
 func (c *CLIRunControl) Close() error {
@@ -37,26 +61,54 @@ func (c *CLIRunControl) Close() error {
 	return nil
 }
 
-func writeCLIRunControlReady(conn net.Conn) error {
-	if conn == nil {
+func writeCLIRunControlReady(conn net.Conn, challenge string) error {
+	if conn == nil || !validCLIRunControlChallenge(challenge) {
 		return errCLIRunControl
 	}
-	return writeFrame(conn, cliRunControlReady)
-}
-
-func readCLIRunControlReady(conn net.Conn) error {
-	if conn == nil {
-		return errCLIRunControl
-	}
-	raw, err := readFrame(conn, MaxOutput)
+	raw, err := json.Marshal(struct {
+		V               int    `json:"v"`
+		DeliveryControl bool   `json:"delivery_control"`
+		Challenge       string `json:"challenge"`
+	}{V: 1, DeliveryControl: true, Challenge: challenge})
 	if err != nil {
 		return errCLIRunControl
 	}
 	defer clear(raw)
-	if !bytes.Equal(raw, cliRunControlReady) {
-		return errCLIRunControl
+	return writeFrame(conn, raw)
+}
+
+func readCLIRunControlReady(conn net.Conn) (string, error) {
+	if conn == nil {
+		return "", errCLIRunControl
 	}
-	return nil
+	raw, err := readFrame(conn, MaxOutput)
+	if err != nil {
+		return "", errCLIRunControl
+	}
+	defer clear(raw)
+	keys, values, ok := strictJSONObject(raw)
+	defer clearCLIRunRawMessages(values)
+	if !ok || len(keys) != 3 {
+		return "", errCLIRunControl
+	}
+	for _, field := range []string{"v", "delivery_control", "challenge"} {
+		if _, present := keys[field]; !present {
+			return "", errCLIRunControl
+		}
+	}
+	var v int
+	if json.Unmarshal(values["v"], &v) != nil || v != 1 {
+		return "", errCLIRunControl
+	}
+	var deliveryControl bool
+	if json.Unmarshal(values["delivery_control"], &deliveryControl) != nil || !deliveryControl {
+		return "", errCLIRunControl
+	}
+	var challenge string
+	if json.Unmarshal(values["challenge"], &challenge) != nil || !validCLIRunControlChallenge(challenge) {
+		return "", errCLIRunControl
+	}
+	return challenge, nil
 }
 
 // RequestCLIRunControl is the explicit opt-in API. It sends one request with
@@ -108,7 +160,8 @@ func RequestCLIRunControl(ctx context.Context, req CLIRunBrokerRequest) (CLIRunB
 		}
 		return CLIRunBrokerResponse{}, nil, e
 	}
-	if e := readCLIRunControlReady(conn); e != nil {
+	challenge, e := readCLIRunControlReady(conn)
+	if e != nil {
 		stop()
 		_ = conn.Close()
 		if ce := ctx.Err(); ce != nil {
@@ -127,7 +180,7 @@ func RequestCLIRunControl(ctx context.Context, req CLIRunBrokerRequest) (CLIRunB
 		_ = conn.Close()
 		return CLIRunBrokerResponse{}, nil, cliRunContextError(ce)
 	}
-	control := &CLIRunControl{conn: conn}
+	control := &CLIRunControl{conn: conn, challenge: challenge}
 	control.stop = context.AfterFunc(ctx, func() { _ = control.Close() })
 	return resp, control, nil
 }

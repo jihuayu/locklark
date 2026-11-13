@@ -5,6 +5,7 @@ package browserhost
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -94,8 +95,9 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	receipt := cliRunReceiptFromFixture(t)
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
-	var preEOFOK, preEOFContextDone atomic.Bool
+	var preEOFOK, preEOFContextDone, challengePairOK, challengeFailureOK atomic.Bool
 	var count atomic.Int32
+	var failChallenge atomic.Bool
 	var controlFrames atomic.Int32
 	var controlFrame atomic.Value
 	b := NewBroker(BrokerCallbacks{
@@ -119,6 +121,12 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		},
 	})
 	b.cliRunControlLifetime = 8 * time.Second
+	b.cliRunControlChallenge = func() (string, error) {
+		if failChallenge.Load() {
+			return "", errCLIRunControl
+		}
+		return newCLIRunControlChallenge()
+	}
 	b.cliRunControlObserve = func(observation cliRunControlReadObservation) {
 		if observation.Outcome == cliRunControlReadFrame {
 			controlFrames.Add(1)
@@ -224,6 +232,35 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		_ = stdoutR.Close()
 		return event, readyAt, elapsed, fdClosed
 	}
+	runPair := func(nonceA, nonceB string) {
+		stage = "S-challenge-pair"
+		cli := exec.Command(os.Args[0], "-test.run=^TestLinuxCLIRunControlClientHelper$", "-test.count=1")
+		cli.Env = append(os.Environ(),
+			linuxCLIControlModeEnv+"="+linuxCLIControlClient,
+			linuxCLIControlSocketEnv+"="+endpoint,
+			"LOCKLARK_BROWSER_SOCKET="+endpoint,
+			"LOCKLARK_LINUX_CLI_CONTROL_CLIENT_MODE=challenge-pair",
+			"LOCKLARK_LINUX_CLI_CONTROL_NONCE_A="+nonceA,
+			"LOCKLARK_LINUX_CLI_CONTROL_NONCE_B="+nonceB,
+		)
+		cli.Stdin = strings.NewReader("")
+		cli.Stdout = io.Discard
+		cli.Stderr = io.Discard
+		if err := cli.Start(); err != nil {
+			fail()
+		}
+		for i := 0; i < 2; i++ {
+			conn, err := listener.AcceptUnix()
+			if err != nil {
+				fail()
+			}
+			b.serve(conn)
+		}
+		if err := cli.Wait(); err != nil {
+			fail()
+		}
+		challengePairOK.Store(true)
+	}
 	run("control", strings.Repeat("a1", 32))
 	run("default", strings.Repeat("b2", 32))
 	run("control-refused", strings.Repeat("c3", 32))
@@ -247,6 +284,11 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	preByteOK.Store(preByteEvent == 'P' && preByteClosed)
 	preEOFEvent, _, _, preEOFClosed := runEvent("pre-eof", strings.Repeat("f2", 32), false)
 	preEOFOK.Store(preEOFEvent == 'Q' && preEOFClosed && preEOFContextDone.Load())
+	runPair(strings.Repeat("a2", 32), strings.Repeat("b3", 32))
+	failChallenge.Store(true)
+	run("challenge-refused", strings.Repeat("c4", 32))
+	failChallenge.Store(false)
+	challengeFailureOK.Store(true)
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -291,6 +333,14 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !preEOFOK.Load() {
 		stage = "S-assert-pre-eof"
+		fail()
+	}
+	if !challengePairOK.Load() {
+		stage = "S-assert-challenge-pair"
+		fail()
+	}
+	if !challengeFailureOK.Load() {
+		stage = "S-assert-challenge-failure"
 		fail()
 	}
 	if controlFrames.Load() != 1 {
@@ -390,6 +440,45 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		}
 		signal('E')
 		os.Exit(0)
+	case "challenge-pair":
+		reqA := cliRunFixtureRequest()
+		reqB := cliRunFixtureRequest()
+		tty, _, err := CurrentTTYIdentity()
+		if err != nil {
+			os.Exit(2)
+		}
+		for _, item := range []struct {
+			req   *CLIRunBrokerRequest
+			nonce string
+		}{
+			{&reqA, os.Getenv("LOCKLARK_LINUX_CLI_CONTROL_NONCE_A")},
+			{&reqB, os.Getenv("LOCKLARK_LINUX_CLI_CONTROL_NONCE_B")},
+		} {
+			item.req.Scope.TTY = tty
+			item.req.Scope.TTYPlatform = CLIRunTTYPlatform()
+			item.req.Scope.TTYPeerID = ""
+			item.req.Scope.Nonce = item.nonce
+		}
+		_, controlA, err := RequestCLIRunControl(ctx, reqA)
+		if err != nil || controlA == nil {
+			os.Exit(2)
+		}
+		challengeA := controlA.challenge
+		_ = controlA.Close()
+		_, controlB, err := RequestCLIRunControl(ctx, reqB)
+		if err != nil || controlB == nil {
+			os.Exit(2)
+		}
+		challengeB := controlB.challenge
+		_ = controlB.Close()
+		if challengeA == challengeB || challengeA == reqA.Scope.Nonce || challengeB == reqB.Scope.Nonce {
+			os.Exit(2)
+		}
+	case "challenge-refused":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if !errors.Is(err, ErrCLIRunRefused) || control != nil {
+			os.Exit(2)
+		}
 	case "default-hold":
 		endpoint, err := DefaultBrokerEndpoint()
 		if err != nil {
@@ -423,7 +512,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			_ = conn.Close()
 			os.Exit(2)
 		}
-		if err := readCLIRunControlReady(conn); err != nil {
+		if _, err := readCLIRunControlReady(conn); err != nil {
 			_ = conn.Close()
 			os.Exit(2)
 		}
@@ -473,7 +562,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			_ = conn.Close()
 			os.Exit(2)
 		}
-		if err := readCLIRunControlReady(conn); err == nil {
+		if _, err := readCLIRunControlReady(conn); err == nil {
 			_ = conn.Close()
 			os.Exit(2)
 		}
@@ -514,7 +603,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			_ = conn.Close()
 			os.Exit(2)
 		}
-		if err := readCLIRunControlReady(conn); err == nil {
+		if _, err := readCLIRunControlReady(conn); err == nil {
 			_ = conn.Close()
 			os.Exit(2)
 		}
@@ -581,17 +670,23 @@ func TestRequireCleanServerEOF(t *testing.T) {
 }
 
 func TestCLIRunControlReadyContract(t *testing.T) {
+	challenge := base64.StdEncoding.EncodeToString(make([]byte, cliRunControlChallengeBytes))
+	ready := func(c string) string {
+		return `{"v":1,"delivery_control":true,"challenge":"` + c + `"}`
+	}
 	cases := []struct {
 		name string
 		raw  string
 		ok   bool
 	}{
-		{"ready", string(cliRunControlReady), true},
-		{"wrong-v", `{"v":2,"delivery_control":true}`, false},
-		{"missing", `{"v":1}`, false},
-		{"false", `{"v":1,"delivery_control":false}`, false},
-		{"extra", `{"v":1,"delivery_control":true,"x":1}`, false},
-		{"trailing", string(cliRunControlReady) + "x", false},
+		{"ready", ready(challenge), true},
+		{"old-missing-challenge", `{"v":1,"delivery_control":true}`, false},
+		{"wrong-v", `{"v":2,"delivery_control":true,"challenge":"` + challenge + `"}`, false},
+		{"false", `{"v":1,"delivery_control":false,"challenge":"` + challenge + `"}`, false},
+		{"short-challenge", ready(challenge[:len(challenge)-1]), false},
+		{"noncanonical-challenge", ready(challenge[:len(challenge)-1] + "A"), false},
+		{"duplicate-challenge", `{"v":1,"delivery_control":true,"challenge":"` + challenge + `","challenge":"` + challenge + `"}`, false},
+		{"unknown-field", `{"v":1,"delivery_control":true,"challenge":"` + challenge + `","x":1}`, false},
 		{"empty", ``, false},
 	}
 	for _, tc := range cases {
@@ -602,7 +697,7 @@ func TestCLIRunControlReadyContract(t *testing.T) {
 				defer server.Close()
 				_ = writeFrame(server, []byte(tc.raw))
 			}()
-			err := readCLIRunControlReady(client)
+			_, err := readCLIRunControlReady(client)
 			if (err == nil) != tc.ok {
 				t.Fatalf("contract result mismatch for %s", tc.name)
 			}
