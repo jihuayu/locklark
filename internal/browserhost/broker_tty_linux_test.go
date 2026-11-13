@@ -162,6 +162,55 @@ func TestLinuxTTYDevEncoding(t *testing.T) {
 	}
 }
 
+// TestLinuxPTSUnitOfName pins the pure /dev/pts/N syntax: a well-formed name
+// yields its exact unit whether or not the node exists, and every other shape
+// is rejected. The real-node check runs only when fstat of that exact path
+// succeeds; a missing node is never a positive.
+func TestLinuxPTSUnitOfName(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		unit uint32
+		ok   bool
+	}{
+		{"/dev/pts/0", 0, true},
+		{"/dev/pts/17", 17, true},
+		{"/dev/pts/512", 512, true},
+		{"/dev/pts/x", 0, false},
+		{"/dev/pts/01", 0, false},
+		{"/dev/pts/", 0, false},
+		{"/dev/pts", 0, false},
+		{"/dev/tty", 0, false},
+		{"/dev/pts/17/", 0, false},
+		{"/dev/pts/-1", 0, false},
+	} {
+		unit, ok := linuxPTSUnitOfName(tc.path)
+		if ok != tc.ok || unit != tc.unit {
+			t.Fatalf("linuxPTSUnitOfName(%q) = %d,%v want %d,%v", tc.path, unit, ok, tc.unit, tc.ok)
+		}
+	}
+	for _, path := range []string{"/dev/pts/0", "/dev/pts/17"} {
+		f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Logf("%s not present as a real node; syntax and fstat check skipped", path)
+			continue
+		}
+		var info syscall.Stat_t
+		fstatErr := syscall.Fstat(int(f.Fd()), &info)
+		f.Close()
+		unit, nameOK := linuxPTSUnitOfName(path)
+		node, dev, nodeUnit, ok := ttyNodeIdentity(path)
+		if fstatErr != nil || info.Mode&syscall.S_IFMT != syscall.S_IFCHR || !nameOK || !ok {
+			t.Fatalf("%s: fstat %v mode %o name %v identity ok %v", path, fstatErr, info.Mode&syscall.S_IFMT, nameOK, ok)
+		}
+		if want := unix.Mkdev(unix.Major(uint64(info.Rdev)), unix.Minor(uint64(info.Rdev))); uint64(info.Rdev) != want {
+			t.Fatalf("%s: fstat rdev 0x%x not its own major/minor 0x%x", path, info.Rdev, want)
+		}
+		if node != path || dev != uint64(info.Rdev) || nodeUnit != unit || unix.Major(dev) != 136 || uint64(unix.Minor(dev)) != uint64(unit) {
+			t.Fatalf("%s: identity %q 0x%x unit %d, stat rdev 0x%x unit %d", path, node, dev, nodeUnit, info.Rdev, unit)
+		}
+	}
+}
+
 // mountNamespacePath is checked against temporary symlinks only: one pointing
 // at this broker's own mount namespace stands in for the same namespace, one
 // pointing elsewhere for a distinct namespace. No privileges or unshare are
