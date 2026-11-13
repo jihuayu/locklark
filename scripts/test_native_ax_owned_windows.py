@@ -146,10 +146,10 @@ class OwnedWindowsTests(unittest.TestCase):
         self.assertEqual(result, [first, second])
         self.assertIs(result[0], first)
         self.assertIs(result[1], second)
-        # Exactly one explicit creation, then AXWindows, then per element the
-        # GetPid ownership proof immediately followed by its AXRole read.
-        self.assertEqual(fake.names(), ["create", "copy", "getpid", "copy",
-                                        "getpid", "copy"])
+        # Exactly one explicit creation, then AXWindows, then EVERY GetPid
+        # ownership proof, and only then the AXRole reads.
+        self.assertEqual(fake.names(), ["create", "copy", "getpid", "getpid",
+                                        "copy", "copy"])
         self.assertEqual(fake.pids_asked(), [OWNED_PID])
         self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
         self.assertEqual([call[1] for call in fake.calls if call[0] == "getpid"],
@@ -187,11 +187,10 @@ class OwnedWindowsTests(unittest.TestCase):
             with self.subTest(expected_getpid_calls=expected):
                 fake = FakeApplicationServices(list(windows))
                 self.assertRefused(fake)
-                # Every listed window was checked; the refusal is the mismatch,
-                # and a foreign handle never gets its role read.
+                # Ownership is proven for every listed window up to the
+                # mismatch, and NO role is read for any of them.
                 self.assertEqual(fake.names().count("getpid"), expected)
-                self.assertEqual(fake.attributes(),
-                                 [AX_WINDOWS] + [AX_ROLE] * (expected - 1))
+                self.assertEqual(fake.attributes(), [AX_WINDOWS])
 
     def test_getpid_is_called_with_the_out_argument_slot(self):
         handle = Handle()
@@ -538,16 +537,33 @@ class OwnedWindowRoleTests(unittest.TestCase):
         # The foreign handle got GetPid and NO role read at all.
         self.assertEqual(fake.attributes(), [AX_WINDOWS])
 
-    def test_ownership_before_role_for_each_element(self):
+    def test_owned_first_foreign_later_proves_both_and_queries_zero_roles(self):
+        # The owned element passes GetPid FIRST; the foreign one is proven
+        # later in pass 1. No role may be read for either of them.
+        owned, foreign = Handle(), Handle(owner=OTHER_PID)
+        fake = FakeApplicationServices([owned, foreign])
+        self.assertRefused(fake)
+        self.assertEqual(fake.names(), ["create", "copy", "getpid", "getpid"])
+        self.assertEqual([call[1] for call in fake.calls if call[0] == "getpid"],
+                         [owned, foreign])
+        self.assertEqual(fake.attributes(), [AX_WINDOWS])
+        self.assertEqual([call for call in fake.calls if call[2:3] == (AX_ROLE,)], [])
+
+    def test_two_owned_windows_prove_both_pids_before_any_role(self):
         first, second = Handle(), Handle()
         fake = FakeApplicationServices([first, second])
-        self.run_helper(fake)
+        self.assertEqual(self.run_helper(fake), [first, second])
         order = [call[0] if call[0] != "copy" else call[2] for call in fake.calls]
         self.assertEqual(order, ["create", AX_WINDOWS,
-                                 "getpid", AX_ROLE, "getpid", AX_ROLE])
+                                 "getpid", "getpid", AX_ROLE, AX_ROLE])
+        # Every GetPid precedes the first role query.
+        first_role = next(index for index, call in enumerate(fake.calls)
+                          if call[0] == "copy" and call[2] == AX_ROLE)
+        self.assertEqual(fake.names()[:first_role].count("getpid"), 2)
         roles_read = [call[1] for call in fake.calls if call[0] == "copy"
                       and call[2] == AX_ROLE]
         self.assertEqual(roles_read, [first, second])
+        self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
 
     def test_malformed_pid_refuses_before_any_ax_call(self):
         fake = FakeApplicationServices([Handle()])

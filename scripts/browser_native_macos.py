@@ -645,18 +645,21 @@ class QuartzApi:
         AXWindows is obtained ONLY from
         ``ApplicationServices.AXUIElementCreateApplication(pid)`` for the one
         caller-supplied positive owned PID, through the documented PyObjC
-        out-argument contract. Every listed element must then prove, in this
-        exact order and BEFORE any handle leaves this method:
+        out-argument contract. Every listed element is validated in TWO passes,
+        and nothing is returned unless both hold:
 
-        1. ownership: ``AXUIElementGetPid(element, None)`` answers the
-           ``(AXError, pid)`` tuple with exact status 0 and an exact built-in
-           ``int`` pid equal to the requested PID;
-        2. role: ``AXUIElementCopyAttributeValue(element, "AXRole", None)``
-           answers a strict ``(AXError, value)`` tuple with exact status 0 whose
-           value is exactly ``"AXWindow"`` (an empty string copied to an exact
-           built-in ``str``). A genuine native list has been observed to carry
-           the application root (whose role is ``"AXApplication"``), so no
-           non-window role is ever returned, skipped or re-labelled.
+        1. ownership pass, for EVERY listed element: ``AXUIElementGetPid(
+           element, None)`` answers the ``(AXError, pid)`` tuple with exact
+           status 0 and an exact built-in ``int`` pid equal to the requested
+           PID;
+        2. role pass, only once ALL ownership proofs hold: for each element,
+           ``AXUIElementCopyAttributeValue(element, "AXRole", None)`` answers a
+           strict ``(AXError, value)`` tuple with exact status 0 whose value is
+           exactly ``"AXWindow"`` (an empty string copied to an exact built-in
+           ``str``). A genuine native list has been observed to carry the
+           application root (whose role is ``"AXApplication"``), so no
+           non-window role is ever returned, skipped or re-labelled. An
+           ownership mismatch therefore refuses before ANY role is queried.
 
         Only the opaque AX handles are returned, in AX order and bounded by
         ``MAX_AX_WINDOWS``. Nothing else is read here: no CoreGraphics window
@@ -692,6 +695,8 @@ class QuartzApi:
             raise _a11y_query()
         if count > MAX_AX_WINDOWS:
             raise contract.ContractError("a11y-overrun")
+        # Pass 1: collect the bounded handles and prove EVERY listed PID. No
+        # role is queried while any ownership proof is still outstanding.
         handles = []
         for index in range(count):
             try:
@@ -700,29 +705,38 @@ class QuartzApi:
                 raise _a11y_query()
             if element is None:
                 raise _a11y_query()
-            try:
-                answer = self.ax.AXUIElementGetPid(element, None)
-            except Exception:
-                raise _a11y_query()
-            decoded = _ax_result(answer)
-            if decoded is None or decoded[0] != 0:
-                raise _a11y_query()
-            owner = decoded[1]
-            if not _exact_status(owner) or owner != pid:
-                raise _a11y_query()
-            # Ownership is proven first; only then is the role read, and only
-            # an exact success carrying exactly AXWindow may join the handles.
-            try:
-                answer = self.ax.AXUIElementCopyAttributeValue(element, "AXRole", None)
-            except Exception:
-                raise _a11y_query()
-            decoded = _ax_result(answer)
-            if decoded is None or decoded[0] != 0:
-                raise _a11y_query()
-            if _native_text(decoded[1]) != "AXWindow":
-                raise _a11y_query()
+            self._prove_owned_element(element, pid)
             handles.append(element)
+        # Pass 2: only after all ownership proofs hold, read each role, and
+        # return nothing unless every element is an exact AXWindow.
+        for element in handles:
+            self._prove_ax_window_role(element)
         return handles
+
+    def _prove_owned_element(self, element, pid):
+        """The listed element's owner PID must be the exact requested ``pid``."""
+        try:
+            answer = self.ax.AXUIElementGetPid(element, None)
+        except Exception:
+            raise _a11y_query()
+        decoded = _ax_result(answer)
+        if decoded is None or decoded[0] != 0:
+            raise _a11y_query()
+        owner = decoded[1]
+        if not _exact_status(owner) or owner != pid:
+            raise _a11y_query()
+
+    def _prove_ax_window_role(self, element):
+        """The element's AXRole must be the strict success answer ``AXWindow``."""
+        try:
+            answer = self.ax.AXUIElementCopyAttributeValue(element, "AXRole", None)
+        except Exception:
+            raise _a11y_query()
+        decoded = _ax_result(answer)
+        if decoded is None or decoded[0] != 0:
+            raise _a11y_query()
+        if _native_text(decoded[1]) != "AXWindow":
+            raise _a11y_query()
 
     # -- owned-PID AX path (no CoreGraphics window inventory) ----------------
     def scope_to_owned_pid(self, pid):
