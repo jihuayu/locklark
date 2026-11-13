@@ -115,6 +115,20 @@ const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"]
 function popupClosed(error) {
   return POPUP_CLOSED.includes(error?.message);
 }
+// The idle route row click is the one popup click whose own successful action
+// can destroy the popup before its final CDP response arrives: the release
+// opens the persistent route tab, Chrome closes the action popup, and the
+// release response is lost. Accept only that exact pending-close error, for
+// that exact final release, and only when the caller explicitly opted in. The
+// press is never covered, and timeouts or other CDP failures stay fatal; the
+// click is delivered once and is never retried.
+function expectedRouteClickClose(error, event, expected) {
+  return (
+    expected === true &&
+    event === "mouseReleased" &&
+    error?.message === "Popup closed"
+  );
+}
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1223,8 +1237,12 @@ async function acceptRouteIdleExpiry(driver) {
   mark("route:idle-row-click");
   // The TTL is measured from this physical row click, immediately before it.
   const idleStart = Date.now();
-  // Exactly one real CDP mouse press/release through the popup wrapper.
-  await action.click(rowSelector);
+  // Exactly one real CDP mouse press/release through the popup wrapper. If
+  // the route tab opens and Chrome closes the popup before the release's CDP
+  // response arrives, only that exact final-release close is expected and the
+  // input is never repeated; the route and popup-absence gates below still
+  // prove the click took effect.
+  await action.click(rowSelector, { expectedRouteClose: true });
   mark("route:idle-page-opened");
   let opened;
   await wait(async () => {
@@ -1986,7 +2004,7 @@ try {
           mode: 0o600,
         });
       },
-      click: async (selector) => {
+      click: async (selector, { expectedRouteClose = false } = {}) => {
         const rect = await evaluate(
           "(()=>{const e=document.querySelector(" +
             JSON.stringify(selector) +
@@ -1999,12 +2017,19 @@ try {
           button: "left",
           clickCount: 1,
         });
-        await call("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          ...rect,
-          button: "left",
-          clickCount: 1,
-        });
+        try {
+          await call("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            ...rect,
+            button: "left",
+            clickCount: 1,
+          });
+        } catch (error) {
+          if (
+            !expectedRouteClickClose(error, "mouseReleased", expectedRouteClose)
+          )
+            throw error;
+        }
       },
     };
   }

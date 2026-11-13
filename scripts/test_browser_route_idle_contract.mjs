@@ -640,7 +640,7 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
     "rows[0].id === fixture.SeedID &&",
     'mark("route:idle-row-click")',
     "const idleStart = Date.now();",
-    "await action.click(rowSelector);",
+    "await action.click(rowSelector, { expectedRouteClose: true });",
     "Route page did not open",
     "Route page must be unique",
     'mark("route:idle-native-label")',
@@ -655,11 +655,74 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
   assert.match(SOURCE, /^const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";$/m);
   // Exactly one real mouse click on the exact synthetic row, through the
   // popup wrapper, and no row click is made elsewhere in the journey.
-  assert.equal(countMatches(body, /action\.click\(rowSelector\)/g), 1);
+  assert.equal(
+    countMatches(
+      body,
+      /action\.click\(rowSelector, \{ expectedRouteClose: true \}\);/g,
+    ),
+    1,
+  );
   // No DOM event, worker message, navigation or page hook is used.
   assert.doesNotMatch(body, /dispatchEvent|sendMessage|relayMessage|postMessage/);
   assert.doesNotMatch(body, /\b(goto|navigate)\b|Page\.navigate|Page\.reload|chrome\.tabs/);
   assert.doesNotMatch(body, /bringToFront[^\n]*\n(?:[^\n]*\n){0,3}[^\n]*input\(/);
+});
+
+test("the idle row click accepts only its one final-release popup close", () => {
+  // The opt-in exists exactly once, on the idle row click.
+  assert.equal(
+    countMatches(
+      SOURCE,
+      /action\.click\(rowSelector, \{ expectedRouteClose: true \}\);/g,
+    ),
+    1,
+  );
+  // Execute the real predicate: only a pending "Popup closed" on the final
+  // release, for the explicitly opted-in click, is expected. A press close,
+  // a timeout, another CDP failure or an absent opt-in all stay fatal.
+  const helperStart = SOURCE.indexOf("function expectedRouteClickClose(");
+  const helperStop = SOURCE.indexOf("\n}", helperStart) + 2;
+  assert.ok(helperStart > 0 && helperStop > helperStart, "helper must exist");
+  const context = vm.createContext({});
+  vm.runInContext(
+    SOURCE.slice(helperStart, helperStop) +
+      "\nthis.expectedRouteClickClose = expectedRouteClickClose;",
+    context,
+  );
+  const expected = context.expectedRouteClickClose;
+  assert.equal(expected(Error("Popup closed"), "mouseReleased", true), true);
+  for (const [error, event, optedIn] of [
+    [Error("Popup closed"), "mousePressed", true],
+    [Error("Popup closed"), "mouseReleased", false],
+    [Error("Popup closed"), "mouseReleased", "true"],
+    [Error("Popup CDP closed"), "mouseReleased", true],
+    [Error("Popup CDP timed out"), "mouseReleased", true],
+    [Error("Popup inspection failed"), "mouseReleased", true],
+    [undefined, "mouseReleased", true],
+  ])
+    assert.equal(expected(error, event, optedIn), false);
+  // The wrapper sends press and release once each. Only the final release is
+  // inside the catch, there is no retry, and the allowed close is the exact
+  // helper call rather than a broad popupClosed() match.
+  const clickStart = SOURCE.indexOf("      click: async (selector");
+  const clickStop = SOURCE.indexOf("\n      },", clickStart);
+  assert.ok(clickStart > 0 && clickStop > clickStart, "click wrapper must exist");
+  const click = SOURCE.slice(clickStart, clickStop);
+  assert.equal(countMatches(click, /type: "mousePressed"/g), 1);
+  assert.equal(countMatches(click, /type: "mouseReleased"/g), 1);
+  assert.match(
+    click,
+    /await call\("Input\.dispatchMouseEvent", \{\n\s+type: "mousePressed"/,
+  );
+  assert.match(
+    click,
+    /try \{\n\s+await call\("Input\.dispatchMouseEvent", \{\n\s+type: "mouseReleased"/,
+  );
+  assert.match(
+    click,
+    /!expectedRouteClickClose\(error, "mouseReleased", expectedRouteClose\)/,
+  );
+  assert.doesNotMatch(click, /popupClosed|for \(|while \(|retry/i);
 });
 
 test("the idle journey proves the tested surface, then wipes only after the full TTL", () => {
@@ -681,7 +744,7 @@ test("the idle journey proves the tested surface, then wipes only after the full
   assertOrder(body, [
     'mark("route:idle-row-click")',
     "const idleStart = Date.now();",
-    "await action.click(rowSelector);",
+    "await action.click(rowSelector, { expectedRouteClose: true });",
   ]);
   // The minimum wipe is the worker's full two minutes from that click; the
   // overall wipe bound is the existing 150 seconds from the same click.

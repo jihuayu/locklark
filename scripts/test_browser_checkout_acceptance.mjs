@@ -2006,7 +2006,7 @@ test("route per-field copy uses physical input, exact native labels and the priv
   const popupFrom = source.indexOf("async function attachPopup(target) {");
   assert.ok(popupFrom > 0, "missing attachPopup wrapper");
   const popup = source.slice(popupFrom, source.indexOf("\n  }\n", popupFrom));
-  const clickFrom = popup.indexOf("click: async (selector) => {");
+  const clickFrom = popup.indexOf("click: async (selector, { expectedRouteClose = false } = {}) => {");
   assert.ok(clickFrom > 0, "attachPopup has no click method");
   const wrapper = popup.slice(clickFrom, popup.indexOf("\n      },", clickFrom));
   assert.match(wrapper, /document\.visibilityState!=="visible"/);
@@ -2574,8 +2574,8 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.doesNotMatch(source, /ROUTE_INPUT_COUNT_PROBE|__locklarkRouteInputCount|isTrusted|inputEvents/);
   assert.match(source, /^const ROUTE_COPY_FIELD_SELECTOR =\n  '\[data-field-id="password"\] \[data-action="copy-field"\]';$/m);
   const wrapper = source.slice(
-    source.indexOf("click: async (selector) => {"),
-    source.indexOf("\n      },", source.indexOf("click: async (selector) => {")),
+    source.indexOf("click: async (selector, { expectedRouteClose = false } = {}) => {"),
+    source.indexOf("\n      },", source.indexOf("click: async (selector, { expectedRouteClose = false } = {}) => {")),
   );
   assert.match(wrapper, /document\.visibilityState!=="visible"/);
   assert.match(wrapper, /Popup control must be available/);
