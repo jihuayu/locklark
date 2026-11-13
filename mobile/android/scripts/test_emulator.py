@@ -11,7 +11,27 @@ import urllib.parse
 
 
 class RuntimeFailure(Exception):
-    pass
+    # The only adb category a failure may carry, and nothing else.
+    def __init__(self, adb_category=None):
+        super().__init__()
+        self.adb_category = adb_category
+
+
+ADB_CATEGORIES = ("missing", "timeout", "other", "offline", "unauthorized", "not_found")
+ADB_STDERR_CATEGORIES = (("offline", (b"device offline",)),
+                         ("unauthorized", (b"unauthorized", b"device still authorizing")),
+                         ("not_found", (b"not found", b"no devices/emulators found", b"unknown package")))
+
+
+def adb_category(stderr):
+    """Map required adb stderr to one fixed category; device text never escapes."""
+    if not isinstance(stderr, (bytes, bytearray)):
+        return "other"
+    for category, markers in ADB_STDERR_CATEGORIES:
+        if any(marker in stderr for marker in markers):
+            return category
+    return "other"
+
 
 
 STAGE = "prerequisites"
@@ -138,18 +158,23 @@ def main():
     log = (state / "controller.log").open("xb")
     os.chmod(log.name, 0o600)
     def command(arguments, *, private=False, timeout=60, required=True):
-        result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        try:
+            result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeFailure("timeout") from None
+        except OSError as error:
+            raise RuntimeFailure("other" if not isinstance(error, FileNotFoundError) else "missing") from None
         if not private:
             log.write(result.stdout); log.write(result.stderr); log.flush()
         if required and result.returncode:
-            raise RuntimeFailure()
+            raise RuntimeFailure(adb_category(result.stderr))
         return result
     if command(["shell", "getprop", "ro.kernel.qemu"]).stdout.strip() != b"1" or command(["shell", "getprop", "sys.boot_completed"]).stdout.strip() != b"1":
-        raise RuntimeFailure()
+        raise RuntimeFailure("other")
     if AUTOFILL_ONLY and command(["shell", "getprop", "ro.build.version.sdk"]).stdout.strip() != AUTOFILL_API.encode():
-        raise RuntimeFailure()
+        raise RuntimeFailure("other")
     if command(["shell", "service", "check", "package"]).stdout.strip() != b"Service package: found":
-        raise RuntimeFailure()
+        raise RuntimeFailure("other")
     package, test_package = "org.locklark.android", "org.locklark.android.test"
     STAGE = "install"
     command(["install", "-r", str(root / "app/build/outputs/apk/debug/app-debug.apk")], timeout=120)
@@ -244,11 +269,21 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
     runtime = (state / "runtime.log").open("xb")
     os.chmod(runtime.name, 0o600)
     def command(arguments, *, private=False, timeout=60, required=True):
-        result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        # The same adb call: a CompletedProcess for every reply, a fixed
+        # category only when the reply is non-zero and required.
+        try:
+            result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            # The bytes it did capture are still the run's private log.
+            for data in (error.stdout, error.stderr):
+                if data: log.write(data)
+            raise RuntimeFailure("timeout") from None
+        except OSError as error:
+            raise RuntimeFailure("other" if not isinstance(error, FileNotFoundError) else "missing") from None
         if not private:
             log.write(result.stdout); log.write(result.stderr); log.flush()
         if required and result.returncode:
-            raise RuntimeFailure()
+            raise RuntimeFailure(adb_category(result.stderr))
         return result
     logger = subprocess.Popen(adb + ["logcat", "-v", "brief"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     log_failed = threading.Event()
@@ -274,9 +309,10 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
         timeout = 900
     try:
         result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", selected, test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=timeout, required=False)
-    except subprocess.TimeoutExpired as error:
-        for data in (error.stdout, error.stderr):
-            if data: log.write(data)
+    except RuntimeFailure as error:
+        if error.adb_category != "timeout":
+            raise
+        # The timeout itself: no reply was read, so result stays None.
         command(["shell", "am", "force-stop", package], required=False)
     finally:
         logger.terminate()
@@ -301,6 +337,7 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
     # BoundOperationTest 1 + OfflineVaultTest 3 + AutofillHandoffTest 2.
     expected_tests = AUTOFILL_TESTS if autofill_only else 6
     if result is None or not complete_pass(result.returncode, result.stdout, expected_tests):
+        DIAGNOSTIC["adb_category"] = "timeout" if result is None else adb_category(result.stderr)
         raise RuntimeFailure()
     command(["shell", "run-as", package, "rm", "cache/instrumentation-canaries.json"], private=True)
 
@@ -313,14 +350,22 @@ def entrypoint():
     only when nothing above failed, so an exit request during cleanup (which
     main() records as a failure and does not re-raise) is never a success.
     """
+    diagnosis = None
     try:
         code = main()
-    except BaseException:
+    except BaseException as error:
         # Exception, KeyboardInterrupt or SystemExit: all are a failure page.
         code = 1
+        # The one place that surrounds every main() step, getprop and install
+        # before its try included. Only a fixed category this gate raised is
+        # kept; anything else leaves the diagnosis exactly as it was.
+        diagnosis = dict(DIAGNOSTIC)
+        category = getattr(error, "adb_category", None)
+        if isinstance(category, str) and category in ADB_CATEGORIES:
+            diagnosis["adb_category"] = category
     if code != 0:
         print("FAIL: Android native runtime validation at " + STAGE)
-        print("Fixed Android runtime diagnosis: " + json.dumps(DIAGNOSTIC, sort_keys=True))
+        print("Fixed Android runtime diagnosis: " + json.dumps(DIAGNOSTIC if diagnosis is None else diagnosis, sort_keys=True))
         print("Android autofill setting restore failed: " + str(cleanup_failed).lower())
         if STATE is not None: print("Private Android runtime evidence: " + str(STATE))
         return 1
