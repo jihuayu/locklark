@@ -121,7 +121,7 @@ def safe_diagnostic(raw):
 
 
 def main():
-    global STAGE, STATE, DIAGNOSTIC
+    global STAGE, STATE, DIAGNOSTIC, cleanup_failed
     root = Path(__file__).resolve().parents[1]
     sdk = Path(os.environ["ANDROID_HOME"])
     serial = os.environ["ANDROID_SERIAL"]
@@ -174,31 +174,48 @@ def main():
             raise RuntimeFailure()
         run_gate(state, adb, root, package, test_package, log, autofill_only=AUTOFILL_ONLY)
     finally:
-        try:
-            # Restore the exact prior Autofill service first, then clear only
-            # this dedicated emulator's own app/test data.
-            if prior_autofill:
-                secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
-            else:
-                secure_setting(["delete", "secure", "autofill_service"])
-            if normalized_autofill() != prior_autofill:
-                raise RuntimeFailure()
-            if AUTOFILL_ONLY:
-                for cleared in (package, test_package):
-                    try:
-                        subprocess.run(adb + ["shell", "pm", "clear", cleared],
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-                    except subprocess.TimeoutExpired:
-                        pass
-        except Exception:
-            # Only a failed restore/readback replaces the original failure stage.
-            STAGE = "autofill-setting-restore"
-            raise
+        # The module's fixed bool, read by the caller; a failed restore never
+        # touches STAGE or raises. The bool is reported once, by whoever holds
+        # the outcome: the caller on a runtime failure, or here when clean.
+        cleanup_failed = globals()["cleanup_failed"] = restore_autofill(
+            secure_setting, normalized_autofill, prior_autofill, package, test_package)
+    if cleanup_failed:
+        # Clean main: the restore is the only failure, so that one stage is
+        # reported. A runtime failure is reported from its own reached STAGE
+        # by the caller, which never names this stage.
+        print("FAIL: Android native runtime validation at autofill-setting-restore")
+        print("Android autofill setting restore failed: true")
+        return 1
     if AUTOFILL_ONLY:
         print("PASS: Android real OS autofill approve -> Dataset -> exactly two bound fields; controller/logcat canary scan")
     else:
         print("PASS: Android native offline UI instrumentation, real OS autofill authentication handoff; controller/logcat canary scan")
     print("Private Android runtime evidence: " + str(state))
+    return 0
+
+
+def restore_autofill(secure_setting, normalized_autofill, prior_autofill, package, test_package):
+    """Restore the exact prior Autofill service, then clear own app data.
+
+    Returns the fixed cleanup_failed bool and never raises.
+    """
+    try:
+        if prior_autofill:
+            secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
+        else:
+            secure_setting(["delete", "secure", "autofill_service"])
+        if normalized_autofill() != prior_autofill:
+            raise RuntimeFailure()
+        if AUTOFILL_ONLY:
+            for cleared in (package, test_package):
+                try:
+                    subprocess.run(adb + ["shell", "pm", "clear", cleared],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                except subprocess.TimeoutExpired:
+                    pass
+    except Exception:
+        return True
+    return False
 
 
 def run_gate(state, adb, root, package, test_package, log, *, autofill_only=False):
@@ -268,10 +285,15 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
 
 
 if __name__ == "__main__":
+    cleanup_failed = False
     try:
-        main()
-    except Exception:
+        exit_code = main()
+    except (Exception, KeyboardInterrupt) as original:
+        # The reached runtime stage is reported once, unchanged; the restore
+        # outcome is only the fixed bool.
         print("FAIL: Android native runtime validation at " + STAGE)
         print("Fixed Android runtime diagnosis: " + json.dumps(DIAGNOSTIC, sort_keys=True))
+        print("Android autofill setting restore failed: " + str(cleanup_failed).lower())
         if STATE is not None: print("Private Android runtime evidence: " + str(STATE))
-        raise SystemExit(1)
+        raise SystemExit(1) from original
+    raise SystemExit(0 if exit_code == 0 else 1)
