@@ -2215,9 +2215,9 @@ DESKTOP_SETTINGS_USAGE = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
 
 # One minimal, schema-valid desktop settings document. The key spellings are
 # the dotted preference keys from internal/desktop/settings.go; the values are
-# the documented defaults. ``app.defaultVaultForSaving`` stays empty: it is a
-# save-target preference only, its key spelling is not a path, and no login
-# factor is ever put in settings.
+# the documented defaults. The schema has no vault or login path, so settings
+# never select or bind the target vault. ``app.defaultVaultForSaving`` stays
+# empty: it is a save-target preference only.
 DESKTOP_SMOKE_SETTINGS: Mapping[str, Any] = {
     "security.autolock.minutes": 5,
     "security.clipboard.clearAfterSeconds": 30,
@@ -2277,15 +2277,19 @@ def desktop_argv(settings: Path) -> list[str]:
 
 
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
-    """Smoke-launch the real desktop under a private Xvfb/D-Bus session.
+    """Locked-desktop startup smoke under a private Xvfb/D-Bus session.
 
-    The desktop no longer accepts ``--file``; the only supported argument is
-    ``--settings ABSOLUTE_PATH``. The launch therefore binds an explicit
-    settings file inside this context's private ``temp_dir`` (never HOME, XDG
-    or a global configuration) and asserts the process is still alive after
-    ``seconds``. ``vault`` is the test's target vault: it is only sanity-checked
-    to sit inside the private fixture root and must stay byte-identical, since
-    an idle, locked desktop must not read or mutate it.
+    This proves only that the desktop process starts and stays alive for
+    ``seconds`` on its supported command line. It does not open, select or
+    unlock ``vault``: the desktop takes ``--file`` no more, and its settings
+    schema has no vault/login path, so the launch cannot bind one.
+
+    The only supported argument is ``--settings ABSOLUTE_PATH``; the launch
+    binds an explicit settings file inside this context's private
+    ``temp_dir`` (never HOME, XDG or a global configuration). ``vault`` is
+    the test's target vault: it is only sanity-checked to sit inside the
+    private fixture root and must stay byte-identical, since an idle, locked
+    desktop must not touch it.
     """
 
     vault_path = Path(vault)
