@@ -101,6 +101,7 @@ function harness(options = {}) {
   const RealDate = Date;
   let clock = RealDate.now();
   let nextTimer = 1;
+  let nowHook = null;
   const timers = new Map();
   class ClockDate extends RealDate {
     constructor(...args) {
@@ -108,7 +109,9 @@ function harness(options = {}) {
       else super(clock);
     }
     static now() {
-      return clock;
+      const value = clock;
+      nowHook?.(value);
+      return value;
     }
   }
   let hash = options.hash || "";
@@ -206,6 +209,9 @@ function harness(options = {}) {
     pendingTimers: () => [...timers].map(([handle, timer]) => ({ handle, ms: timer.ms })),
     now: () => clock,
     advanceClock(ms) { clock += ms; },
+    // Lets one test move the clock between two Date.now() reads inside the
+    // synchronous claim validation-to-arm handoff.
+    setNowHook(callback) { nowHook = callback; },
     // Fire the oldest still-pending timer exactly as armed, without moving
     // the clock, then let its continuations settle.
     async next() {
@@ -312,20 +318,23 @@ function vaultState(overrides = {}) {
   };
 }
 
-function claimedReply(overrides = {}) {
+function claimedReply(overrides = {}, now = Date.now()) {
   const detail = fixtureDetail();
   return {
     type: "route-claimed",
     token: TOKEN,
     item_id: detail.id,
     revision: detail.revision,
-    expires_in_seconds: 120,
+    // The worker's exact original deadline, in UTC epoch milliseconds.
+    expires_at_ms: now + 120000,
     detail,
     ...overrides,
   };
 }
 
-async function openRoutePage(reply = claimedReply()) {
+// A function reply receives the virtual instant at which the page resolves
+// its claim, so tests can construct an exact absolute deadline.
+async function openRoutePage(reply) {
   const h = harness({ hash: "#route=" + TOKEN });
   await h.flush();
   const lifecycle = h.lifecyclePorts[0];
@@ -334,7 +343,11 @@ async function openRoutePage(reply = claimedReply()) {
   await h.flush();
   const claim = h.take("route-claim");
   assert.equal(claim.message.token, TOKEN);
-  claim.resolve(reply);
+  claim.resolve(
+    typeof reply === "function"
+      ? reply(h.now())
+      : reply ?? claimedReply({}, h.now()),
+  );
   await h.flush();
   return h;
 }
@@ -382,7 +395,7 @@ test("route page sends exactly one claim and renders only the exact reply", asyn
   h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
   await h.flush();
   assert.deepEqual(h.types(), ["route-claim"]);
-  h.requests[0].resolve(claimedReply());
+  h.requests[0].resolve(claimedReply({}, h.now()));
   await h.flush();
   assert.deepEqual(h.types(), ["route-claim"], "route page sent ordinary traffic");
   assert.equal(h.el("#detail-title").textContent, "Route Target");
@@ -436,7 +449,7 @@ test("route claim shows one fixed pending status until a valid reply", async () 
   assert.equal(h.requests[0].message.type, "route-claim");
   assert.equal(h.el("#status").textContent, PENDING);
   assert.equal(h.body.dataset.view, "vault");
-  h.requests[0].resolve(claimedReply());
+  h.requests[0].resolve(claimedReply({}, h.now()));
   await h.flush();
   // A valid reply clears the pending text before the detail renders.
   assert.equal(h.el("#status").textContent, "");
@@ -786,10 +799,13 @@ function assertWiped(h, label) {
   assert.deepEqual(h.el("#detail-fields").children, [], label + " kept field rows");
   assert.equal(h.el("#detail-title").textContent, "", label + " kept the title");
 }
-// The page derives its one absolute deadline when the claim resolves. Time is
-// always measured from that instant, never from when the harness started.
+// The page arms the claim's one absolute deadline at the instant it resolves.
+// Time is always measured from that instant, never from when the harness
+// started.
 async function claimResolvedAt(seconds = 120) {
-  const h = await openRoutePage(claimedReply({ expires_in_seconds: seconds }));
+  const h = await openRoutePage((now) =>
+    claimedReply({ expires_at_ms: now + seconds * 1000 }),
+  );
   const armedAt = h.now();
   assert.equal(h.body.dataset.view, "detail");
   return {
@@ -802,13 +818,13 @@ async function claimResolvedAt(seconds = 120) {
   };
 }
 
-test("a non-120 remaining claim arms exactly that remaining deadline and wipes at it", async () => {
+test("a non-120 absolute claim deadline arms exactly that instant and wipes at it", async () => {
   const page = await claimResolvedAt(45);
   const h = page.h;
   assert.equal(h.el("#detail-title").textContent, "Route Target");
   const timers = pageTimers(h);
   assert.equal(timers.length, 1, "expected exactly the route deadline timer");
-  assert.equal(timers[0].ms, 45 * 1000, "the remainder, not a full TTL, was armed");
+  assert.equal(timers[0].ms, 45 * 1000, "the exact original deadline was armed");
   // A repeated or later route message never re-arms or extends the deadline.
   h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
   h.lifecyclePorts[0].emit({ type: "route-revoked", token: "d".repeat(64) });
@@ -838,6 +854,55 @@ test("a non-120 remaining claim arms exactly that remaining deadline and wipes a
   assert.deepEqual(h.pendingTimers(), [], "the route deadline survived its own wipe");
 });
 
+test("a claim 2.5s after a 120s grant stays live at 119.9s and wipes at 120s", async () => {
+  // The real regression: the claim resolves 2500 ms after the grant began.
+  // The old reply floored the 117.5s remainder to 117s, so the page wiped
+  // about half a second before the grant's full 120s deadline. The absolute
+  // deadline keeps the remaining 117500 ms exactly.
+  const h = await openRoutePage((now) =>
+    claimedReply({ expires_at_ms: now - 2500 + 120000 }),
+  );
+  assert.equal(h.body.dataset.view, "detail");
+  assert.deepEqual(pageTimers(h).map((timer) => timer.ms), [117500]);
+  // 119900 ms after the grant is still 100 ms before its deadline.
+  h.advanceClock(117400);
+  assert.equal(h.body.dataset.view, "detail", "the route wiped before its full TTL");
+  assert.equal(h.el("#detail-title").textContent, "Route Target");
+  assert.deepEqual(pageTimers(h).map((timer) => timer.ms), [117500]);
+  // Exactly 120000 ms after the grant, the same timer wipes it.
+  h.advanceClock(100);
+  const fired = await h.next();
+  assert.equal(fired.ms, 117500);
+  assertWiped(h, "the original absolute deadline");
+  assert.deepEqual(h.types(), ["route-claim", "route-close"]);
+});
+
+test("an expiry between validation and arming never renders the detail", async () => {
+  const h = harness({ hash: "#route=" + TOKEN });
+  await h.flush();
+  h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
+  const reply = claimedReply({ expires_at_ms: h.now() + 100 });
+  let advanced = false;
+  h.setNowHook(() => {
+    if (advanced) return;
+    advanced = true;
+    // The first Date.now() is validation's snapshot. Move the clock to the
+    // deadline before the arm's own Date.now() recheck.
+    h.advanceClock(100);
+    h.setNowHook(null);
+  });
+  h.requests[0].resolve(reply);
+  await h.flush();
+  assert.equal(advanced, true, "the claim was not validated");
+  assertWiped(h, "a deadline that passed before arming");
+  assert.equal(h.el("#detail-title").textContent, "");
+  assert.equal(h.el("#status").textContent, "条目已失效，请重新从金库打开");
+  assert.deepEqual(pageTimers(h), [], "an expired claim armed a timer");
+  assert.deepEqual(h.types(), ["route-claim", "route-close"]);
+  assert.equal(h.take("route-close").message.token, TOKEN);
+});
+
 test("an early deadline timer rechecks the same absolute deadline and re-arms the remainder", async () => {
   const page = await claimResolvedAt(30);
   const h = page.h;
@@ -864,25 +929,29 @@ test("an early deadline timer rechecks the same absolute deadline and re-arms th
   assert.deepEqual(h.types(), ["route-claim", "route-close"]);
 });
 
-test("an invalid, zero or oversized claim expiry never renders", async () => {
+test("a missing, malformed, expired or oversized claim deadline never renders", async () => {
   const cases = [
-    claimedReply({ expires_in_seconds: undefined }),
-    claimedReply({ expires_in_seconds: 0 }),
-    claimedReply({ expires_in_seconds: -5 }),
-    claimedReply({ expires_in_seconds: 121 }),
-    claimedReply({ expires_in_seconds: 3600 }),
-    claimedReply({ expires_in_seconds: 45.5 }),
-    claimedReply({ expires_in_seconds: "45" }),
-    claimedReply({ expires_in_seconds: Number.NaN }),
+    ["missing", () => claimedReply({ expires_at_ms: undefined })],
+    ["legacy-seconds-only", () => claimedReply({ expires_at_ms: undefined, expires_in_seconds: 120 })],
+    ["zero", (now) => claimedReply({ expires_at_ms: 0 }, now)],
+    ["negative", (now) => claimedReply({ expires_at_ms: now - 5 }, now)],
+    ["already-expired", (now) => claimedReply({ expires_at_ms: now - 1 }, now)],
+    ["expires-now", (now) => claimedReply({ expires_at_ms: now }, now)],
+    ["overlong-by-one-ms", (now) => claimedReply({ expires_at_ms: now + 120001 }, now)],
+    ["overlong", (now) => claimedReply({ expires_at_ms: now + 3600000 }, now)],
+    ["fractional", (now) => claimedReply({ expires_at_ms: now + 45500.5 }, now)],
+    ["string", (now) => claimedReply({ expires_at_ms: String(now + 45000) }, now)],
+    ["nan", () => claimedReply({ expires_at_ms: Number.NaN })],
+    ["infinite", () => claimedReply({ expires_at_ms: Number.POSITIVE_INFINITY })],
+    ["unsafe-integer", () => claimedReply({ expires_at_ms: Number.MAX_SAFE_INTEGER + 2 })],
   ];
-  for (const reply of cases) {
+  for (const [label, makeReply] of cases) {
     const h = harness({ hash: "#route=" + TOKEN });
     await h.flush();
     h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
     await h.flush();
-    h.requests[0].resolve(reply);
+    h.requests[0].resolve(makeReply(h.now()));
     await h.flush();
-    const label = "expires_in_seconds=" + String(reply.expires_in_seconds);
     assertWiped(h, label);
     assert.equal(h.el("#detail-title").textContent, "", label + " rendered the title");
     assert.deepEqual(pageTimers(h), [], label + " armed a deadline");
