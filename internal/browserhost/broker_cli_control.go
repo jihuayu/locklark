@@ -9,6 +9,7 @@ import (
 )
 
 var errCLIRunControl = errors.New("CLI-run delivery control unavailable")
+var errCLIRunControlDeadline = errors.New("CLI-run delivery control requires a caller deadline")
 
 var cliRunControlReady = []byte(`{"v":1,"delivery_control":true}`)
 
@@ -67,6 +68,9 @@ func readCLIRunControlReady(conn net.Conn) error {
 func RequestCLIRunControl(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, *CLIRunControl, error) {
 	if ctx == nil {
 		return CLIRunBrokerResponse{}, nil, errCLIRunInvalid
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return CLIRunBrokerResponse{}, nil, errCLIRunControlDeadline
 	}
 	if !validCLIRunRequest(req.V, req.VaultPath, req.Scope, req.Targets) {
 		return CLIRunBrokerResponse{}, nil, errCLIRunInvalid

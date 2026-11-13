@@ -92,13 +92,16 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	endpoint := os.Getenv(linuxCLIControlSocketEnv)
 	stage = "S-receipt"
 	receipt := cliRunReceiptFromFixture(t)
-	var seenControl, seenDefault atomic.Bool
+	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var count atomic.Int32
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
-			switch count.Add(1) {
-			case 3:
+			n := count.Add(1)
+			if n == 3 {
 				return BrokerCLIResponse{}, ErrCLIRunRefused
+			}
+			if n == 5 {
+				time.Sleep(60 * time.Millisecond)
 			}
 			if req.DeliveryControl {
 				seenControl.Store(true)
@@ -108,6 +111,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 			return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{"token": []byte("transport-only")}, Receipt: receipt}, nil
 		},
 	})
+	b.cliRunControlLifetime = 120 * time.Millisecond
 	stage = "S-listen"
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
 	if err != nil {
@@ -133,14 +137,53 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		if err != nil {
 			fail()
 		}
+		start := time.Now()
 		b.serve(conn)
+		elapsed := time.Since(start)
+		if mode == "control-deadline" {
+			deadlineOK.Store(elapsed < 110*time.Millisecond)
+		}
 		if err := cli.Wait(); err != nil {
 			fail()
 		}
 	}
+	runHold := func(mode, nonce string) {
+		stage = "S-client-" + mode
+		cli := exec.Command(os.Args[0], "-test.run=^TestLinuxCLIRunControlClientHelper$", "-test.count=1")
+		cli.Env = append(os.Environ(),
+			linuxCLIControlModeEnv+"="+linuxCLIControlClient,
+			linuxCLIControlSocketEnv+"="+endpoint,
+			linuxCLIControlNonceEnv+"="+nonce,
+			"LOCKLARK_BROWSER_SOCKET="+endpoint,
+			"LOCKLARK_LINUX_CLI_CONTROL_CLIENT_MODE="+mode,
+		)
+		stdin, err := cli.StdinPipe()
+		if err != nil {
+			fail()
+		}
+		cli.Stdout = io.Discard
+		cli.Stderr = io.Discard
+		if err := cli.Start(); err != nil {
+			fail()
+		}
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			fail()
+		}
+		start := time.Now()
+		b.serve(conn)
+		elapsed := time.Since(start)
+		_ = stdin.Close()
+		if err := cli.Wait(); err != nil {
+			fail()
+		}
+		hardCapOK.Store(elapsed < 160*time.Millisecond)
+	}
 	run("control", strings.Repeat("a1", 32))
 	run("default", strings.Repeat("b2", 32))
 	run("control-refused", strings.Repeat("c3", 32))
+	run("control-deadline", strings.Repeat("d4", 32))
+	runHold("control-hold", strings.Repeat("e5", 32))
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -149,6 +192,14 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !seenDefault.Load() {
 		stage = "S-assert-default"
+		fail()
+	}
+	if !hardCapOK.Load() {
+		stage = "S-assert-hardcap"
+		fail()
+	}
+	if !deadlineOK.Load() {
+		stage = "S-assert-deadline"
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIControlOK); err != nil {
@@ -191,6 +242,21 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		if !errors.Is(err, ErrCLIRunRefused) || control != nil {
 			os.Exit(2)
 		}
+	case "control-deadline":
+		deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+		defer deadlineCancel()
+		_, control, err := RequestCLIRunControl(deadlineCtx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		<-deadlineCtx.Done()
+	case "control-hold":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		_ = control.Close()
 	default:
 		os.Exit(2)
 	}
@@ -224,6 +290,14 @@ func TestCLIRunControlReadyContract(t *testing.T) {
 				t.Fatalf("contract result mismatch for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestCLIRunControlRejectsNoDeadline(t *testing.T) {
+	t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(t.TempDir(), "absent"))
+	_, control, err := RequestCLIRunControl(context.Background(), cliRunFixtureRequest())
+	if !errors.Is(err, errCLIRunControlDeadline) || control != nil {
+		t.Fatal("no-deadline control request was not rejected before dial")
 	}
 }
 

@@ -113,14 +113,22 @@ type BrokerCallbacks struct {
 }
 
 // Broker is the desktop-hosted local IPC endpoint.
+// cliRunControlMaxLifetime bounds the transport control socket. It is not a
+// session authority cap; a future lease activation must additionally take the
+// minimum with the real Session.AuthorityDeadline.
+const cliRunControlMaxLifetime = 2 * time.Minute
+
 type Broker struct {
 	callbacks BrokerCallbacks
 	listener  net.Listener
-	mu        sync.Mutex
-	conns     map[*Connection]bool
-	never     map[string]bool
-	closed    bool
-	done      chan struct{}
+	// cliRunControlLifetime can only shorten the fixed two-minute control
+	// lifetime; it is a per-broker test seam, never a production extension.
+	cliRunControlLifetime time.Duration
+	mu                    sync.Mutex
+	conns                 map[*Connection]bool
+	never                 map[string]bool
+	closed                bool
+	done                  chan struct{}
 }
 
 func NewBroker(callbacks BrokerCallbacks) *Broker {
@@ -516,6 +524,7 @@ var cliRunTTYGate = verifyCLIRunTTY
 // the broker's parsed request nor the slots the returned PreparedValues are
 // bound to.
 func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) error {
+	controlStarted := time.Now()
 	// The snapshot is captured from req and never handed out. Its slot names
 	// are owned string copies, so nothing the callback (or the broker clearing
 	// req later) does to another slice reaches it. The callback request is a
@@ -543,6 +552,24 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	defer clearCLIRunTargets(expectedTargets)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var controlTimer *time.Timer
+	if req.DeliveryControl {
+		lifetime := cliRunControlMaxLifetime
+		if b.cliRunControlLifetime > 0 && b.cliRunControlLifetime < lifetime {
+			lifetime = b.cliRunControlLifetime
+		}
+		remaining := lifetime - time.Since(controlStarted)
+		if remaining <= 0 {
+			cancel()
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		controlTimer = time.AfterFunc(remaining, func() {
+			cancel()
+			_ = conn.Close()
+		})
+		defer controlTimer.Stop()
+	}
 	stop := make(chan struct{})
 	watchDone := make(chan struct{})
 	go func() {
@@ -1143,6 +1170,9 @@ var (
 // occurred. Cancellation and deadlines are always preserved in every phase.
 // Errors never echo broker payloads, endpoint paths, or request secrets.
 func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, error) {
+	// The one-shot API never opts into delivery control, even if a caller set
+	// the internal intent field. RequestCLIRunControl is the only opt-in path.
+	req.DeliveryControl = false
 	if ctx == nil {
 		return CLIRunBrokerResponse{}, errCLIRunInvalid
 	}
