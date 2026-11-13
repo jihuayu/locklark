@@ -163,12 +163,21 @@ func newLinuxLeaseAnchor(a *linuxPeerCTTYAssociation) (*linuxLeaseAnchor, bool) 
 	if !ok || current != a.snapshot {
 		return nil, false
 	}
+	nsDev, nsIno, ok := linuxMountNamespaceIdentity()
+	if !ok {
+		return nil, false
+	}
 	fd, tty, sid, ok := a.held.duplicateForAnchor()
 	if !ok {
 		return nil, false
 	}
-	nsDev, nsIno, ok := linuxMountNamespaceIdentity()
-	if !ok {
+	afterNSDev, afterNSIno, ok := linuxMountNamespaceIdentity()
+	if !ok || afterNSDev != nsDev || afterNSIno != nsIno || sid != current.brokerSID {
+		_ = unix.Close(fd)
+		return nil, false
+	}
+	recheck, ok := a.snapshotLocked()
+	if !ok || recheck != current {
 		_ = unix.Close(fd)
 		return nil, false
 	}
@@ -193,7 +202,7 @@ func (a *linuxLeaseAnchor) live() bool {
 		return false
 	}
 	var opened unix.Stat_t
-	if unix.Fstat(int(a.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, a.identity.dev, a.identity.uid) {
+	if unix.Fstat(int(a.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, a.identity.rdev, a.identity.uid) {
 		return false
 	}
 	if uint64(opened.Rdev) != a.identity.rdev || uint64(opened.Ino) != a.identity.ino ||

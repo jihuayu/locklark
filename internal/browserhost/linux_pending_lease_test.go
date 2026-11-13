@@ -108,7 +108,7 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	stage = "S-store"
 	store := newLinuxPendingLeaseStore(4)
 	var index atomic.Int32
-	var added, matched, closedMatched atomic.Bool
+	var added, anchorLive, matched, closedMatched atomic.Bool
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, peer Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
 			switch index.Add(1) {
@@ -154,11 +154,37 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 		}
 	}
 	run(strings.Repeat("a1", 32))
+	stage = "S-anchor"
+	store.mu.Lock()
+	records := len(store.records)
+	if records == 1 {
+		anchorLive.Store(store.records[0].anchor.live())
+	}
+	store.mu.Unlock()
+	switch {
+	case !added.Load():
+		stage = "S-anchor-add"
+		fail()
+	case records != 1:
+		stage = "S-anchor-record"
+		fail()
+	case !anchorLive.Load():
+		stage = "S-anchor-live"
+		fail()
+	}
 	run(strings.Repeat("b2", 32))
 	run(strings.Repeat("c3", 32))
 	_ = listener.Close()
 	stage = "S-assert"
-	if !added.Load() || !matched.Load() || closedMatched.Load() {
+	switch {
+	case !added.Load():
+		stage = "S-assert-add"
+		fail()
+	case !matched.Load():
+		stage = "S-assert-match"
+		fail()
+	case closedMatched.Load():
+		stage = "S-assert-closed"
 		fail()
 	}
 	if _, err := result.WriteString(linuxPendingResultOK); err != nil {
