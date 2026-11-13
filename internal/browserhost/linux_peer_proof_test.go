@@ -3,6 +3,7 @@
 package browserhost
 
 import (
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -65,16 +66,23 @@ func TestLinuxOwnedPidFDCloseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = owned.Close() })
 	foreign, err := unix.PidfdOpen(os.Getpid(), 0)
 	if err != nil {
 		t.Fatal("foreign pidfd unavailable")
 	}
-	defer unix.Close(foreign)
+	t.Cleanup(func() { _ = unix.Close(foreign) })
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
+		t.Fatal("owned pidfd was not open before Close")
+	}
 	if !owned.live() {
 		t.Fatal("owned pidfd is not live")
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatal("Close did not close the owned descriptor")
 	}
 	if owned.live() {
 		t.Fatal("closed owned pidfd is still live")
@@ -96,6 +104,7 @@ func TestLinuxOwnedPidFDLiveCloseConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = owned.Close() })
 	start := make(chan struct{})
 	stop := make(chan struct{})
 	var liveWG, closeWG sync.WaitGroup
