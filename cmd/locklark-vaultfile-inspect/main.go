@@ -125,24 +125,6 @@ func classifyVaultError(err error) string {
 	return "invalid_file"
 }
 
-func readRegular(path string, max int64) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > max {
-		return nil, errors.New("input")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, errors.New("input")
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, max+1))
-	if err != nil || int64(len(raw)) > max {
-		clear(raw)
-		return nil, errors.New("input")
-	}
-	return raw, nil
-}
-
 func decodeCheckpoint(raw []byte) (*vaultfile.PolicyCheckpoint, error) {
 	var wire checkpointWire
 	if err := strictDecode(raw, &wire); err != nil {
