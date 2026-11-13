@@ -34,8 +34,8 @@ var errLinuxPeerProofUnavailable = errors.New("linux peer proof unavailable")
 
 // linuxPeerProof is one private, unexported snapshot candidate for a
 // Unix-socket peer. It owns a pidfd and one opened broker-visible TTY candidate
-// until Close. It does not prove peer signal->tty origin and is not wired into
-// authenticatedPeer, the broker, or any authorization/approval/lease path.
+// until Close. It is used only through the qualified same-session association;
+// by itself it does not prove signal->tty origin or authorize a request.
 type linuxPeerProof struct {
 	uid   uint32
 	pid   int
@@ -125,6 +125,7 @@ type linuxPeerStat struct {
 }
 
 type linuxPeerExecIdentity struct {
+	path string
 	dev  uint64
 	ino  uint64
 	uid  uint32
@@ -360,8 +361,21 @@ func readLinuxPeerExecIdentity(pid int, uid uint32) (linuxPeerExecIdentity, bool
 	if pid <= 0 {
 		return linuxPeerExecIdentity{}, false
 	}
-	info, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
+	base := "/proc/" + strconv.Itoa(pid)
+	link, err := os.Readlink(base + "/exe")
+	if err != nil {
+		return linuxPeerExecIdentity{}, false
+	}
+	path, ok := canonicalExecutablePath(link)
+	if !ok || !trustedPeerExecutable(path, "UID "+strconv.FormatUint(uint64(uid), 10), "linux") {
+		return linuxPeerExecIdentity{}, false
+	}
+	info, err := os.Stat(base + "/exe")
 	if err != nil || !trustedPeerExecMode(info.Mode()) {
+		return linuxPeerExecIdentity{}, false
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil || !os.SameFile(info, pathInfo) {
 		return linuxPeerExecIdentity{}, false
 	}
 	owner, ok := platformFileOwner(info)
@@ -373,7 +387,7 @@ func readLinuxPeerExecIdentity(pid int, uid uint32) (linuxPeerExecIdentity, bool
 		return linuxPeerExecIdentity{}, false
 	}
 	return linuxPeerExecIdentity{
-		dev: uint64(stat.Dev), ino: uint64(stat.Ino),
+		path: path, dev: uint64(stat.Dev), ino: uint64(stat.Ino),
 		uid: stat.Uid, gid: stat.Gid, mode: stat.Mode,
 	}, true
 }

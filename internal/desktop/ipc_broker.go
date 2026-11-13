@@ -193,6 +193,20 @@ func (a *App) notifyBrowserBrokerLocked() {
 // every other failure are the fixed errCLIRunRefused, so no later failure can
 // fall back as eligible.
 func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
+	return a.handleCLIRunWithProof(ctx, peer, req, true)
+}
+
+// handleCLIRunUnit is the unexported unit-only entry for direct desktop
+// fixtures. The broker callback never calls it; the production entry always
+// requires the sealed live CTTY proof.
+func (a *App) handleCLIRunUnit(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
+	return a.handleCLIRunWithProof(ctx, peer, req, false)
+}
+
+func (a *App) handleCLIRunWithProof(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest, requireProof bool) (browserhost.BrokerCLIResponse, error) {
+	if requireProof && !req.VerifyCLIRunCTTY(peer) {
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
 	// Everything below works on local copies: scope is the immutable copy the
 	// canonical request, the native review, and the preparation are built from,
 	// and callbackTargets is a fresh copy of the requested targets, so no later
@@ -262,6 +276,9 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	// An explicit approval only counts for the same session and epoch, still
 	// unlocked, that was current at entry.
 	if !a.brokerCurrent(s, epoch) {
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
+	if requireProof && !req.VerifyCLIRunCTTY(peer) {
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
 	if ctx == nil || ctx.Err() != nil {

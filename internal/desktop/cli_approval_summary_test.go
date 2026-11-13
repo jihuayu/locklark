@@ -620,7 +620,7 @@ func TestCLIRunHandlerReturnsExactPreparedValuesAndReceipt(t *testing.T) {
 	a, req := desktopCLIRunFixture(t)
 	want := desktopVaultPassword(t, a.session, req.Targets)
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) { return true, nil }
-	resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+	resp, e := a.handleCLIRunUnit(context.Background(), desktopPeerFixture(), req)
 	desktopAssertCLIPrepared(t, "direct", resp, e, desktopCLITargetsFixture())
 	desktopAssertCLIPreparedBytes(t, "direct", resp, "token", want)
 	desktopReleaseCLIPrepared(resp)
@@ -789,7 +789,7 @@ func TestCLIRunHandlerRefusesStaleOrChangedSession(t *testing.T) {
 			if tc.ctx != nil {
 				ctx = tc.ctx()
 			}
-			resp, e := a.handleCLIRun(ctx, desktopPeerFixture(), req)
+			resp, e := a.handleCLIRunUnit(ctx, desktopPeerFixture(), req)
 			if e == nil || errors.Is(e, browserhost.ErrBrokerUnavailable) || !errors.Is(e, errCLIRunRefused) {
 				t.Fatalf("want the fixed refusal, got %v", e)
 			}
@@ -807,7 +807,7 @@ func TestCLIRunHandlerVaultMismatchIsRefusal(t *testing.T) {
 	a, req := desktopCLIRunFixture(t)
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) { return true, nil }
 	req.VaultPath = "/fixture/other.ll"
-	resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+	resp, e := a.handleCLIRunUnit(context.Background(), desktopPeerFixture(), req)
 	if e != errCLIRunRefused || desktopHasCLIPrepared(resp) {
 		t.Fatalf("vault mismatch: %v %#v", e, resp)
 	}
@@ -853,7 +853,7 @@ func TestCLIRunHandlerEntryUnavailableIsExactSentinel(t *testing.T) {
 				return false, nil
 			}
 			tc.install(t, a)
-			resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+			resp, e := a.handleCLIRunUnit(context.Background(), desktopPeerFixture(), req)
 			if e != browserhost.ErrBrokerUnavailable {
 				t.Fatalf("want the exact unavailable sentinel, got %v", e)
 			}
@@ -873,7 +873,7 @@ func TestCLIRunApprovalScopeIsDiscardedOnLock(t *testing.T) {
 	a.notifyBrowserBrokerUnlocked()
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+		resp, e := a.handleCLIRunUnit(context.Background(), desktopPeerFixture(), req)
 		result <- cliRunApprovalResult{approved: desktopHasCLIPrepared(resp), err: e}
 	}()
 	waitCLIRunApprovalPending(t, a)

@@ -60,6 +60,7 @@ type CLIRunBrokerRequest struct {
 	VaultPath string                     `json:"vault_path"`
 	Scope     CLIRunScope                `json:"scope"`
 	Targets   []personal.CLIBrokerTarget `json:"targets"`
+	cttyProof *clirunCTTYProof
 }
 
 // CLIRunBrokerResponse is the audited one-shot reply of the desktop broker.
@@ -425,18 +426,18 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	//     every later outcome: refused, cancelled, timed out, or never
 	//     delivered. A replay or a full cache is refused before approval, and
 	//     before the terminal check, so neither can be used to probe it.
-	//  2. The declared terminal must be the OS peer-attested controlling
-	//     terminal of this authenticated process. No declared string is
-	//     authority. Every attestation failure is a fixed refusal, including
-	//     errCLIRunUnavailable / unsupported: a platform without peer
-	//     attestation (Linux), a peer without a controlling terminal, and a
-	//     declared name that does not match the attested terminal all write
-	//     "refused". After a valid request only the exact
-	//     ErrBrokerUnavailable callback sentinel or a missing callback may
-	//     select "unavailable" (handleCLIRunConn), so no TTY outcome can be
+	//  2. The terminal must be authenticated from this connection, never from
+	//     a declared string. Linux uses the sealed live CTTY association built
+	//     from the authenticated Unix socket; Darwin/Windows retain the legacy
+	//     gate. A Linux connection with no self CTTY/no Unix socket uses the
+	//     legacy gate as its only decider; production Linux still refuses there.
+	//     Every proof/gate failure, including unsupported, stale, mismatched,
+	//     or missing proof, is a fixed refusal. After a valid proof only the
+	//     exact ErrBrokerUnavailable callback sentinel or a missing callback
+	//     may select "unavailable" (handleCLIRunConn), so no TTY outcome can be
 	//     fallback-eligible.
 	//
-	// Only after both checks pass is a missing HandleCLIRun classified as the
+	// Only after a valid proof/gate is a missing HandleCLIRun classified as the
 	// explicit unavailable: it must not short-circuit a refused nonce or an
 	// unattested, unsupported, or mismatching terminal, so those always stay a
 	// fixed refusal whatever the callback state.
@@ -444,11 +445,37 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 		return
 	}
-	if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
+	if cliRunCTTYProofRequired() {
+		proof, boundPeer, proofErr := newCLIRunCTTYProof(conn, peer, req.Scope)
+		switch {
+		case proofErr == errCLIRunCTTYUnsupported:
+			// No self CTTY or no Unix connection: the legacy gate remains the
+			// only decider. On Linux production it always refuses.
+			if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
+				writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+				return
+			}
+		case proofErr != nil:
+			writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			return
+		default:
+			defer proof.Close()
+			req.cttyProof = proof
+			peer = boundPeer
+			if !req.VerifyCLIRunCTTY(peer) {
+				writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+				return
+			}
+		}
+	} else if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
 		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 		return
 	}
 	if b.callbacks.HandleCLIRun == nil {
+		if req.cttyProof != nil && !req.VerifyCLIRunCTTY(peer) {
+			writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			return
+		}
 		resp.Error = cliRunErrorUnavailable
 		writeCLIResponse(conn, resp)
 		return
@@ -465,11 +492,12 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	clearCLIRunResponse(&resp)
 }
 
-// cliRunTTYGate is the peer terminal check serveCLIRun runs after the nonce is
-// consumed and before the callback. Its verdict has exactly two outcomes
-// here: nil proceeds, anything else is the fixed refusal. Production always
-// uses verifyCLIRunTTY; the tests replace it to prove that an unsupported or
-// no-proof peer terminal (errCLIRunUnavailable) is refused, not unavailable.
+// cliRunTTYGate is the legacy/self-CTTY-missing gate. On Linux, a self CTTY
+// uses newCLIRunCTTYProof instead; when no self CTTY or Unix connection exists,
+// this gate remains the only decider and production Linux still refuses. Its
+// verdict has two outcomes here: nil proceeds, anything else is the fixed
+// refusal. Tests replace it only for unit coverage; that seam never authorizes
+// a Linux connection that has a live qualified proof.
 var cliRunTTYGate = verifyCLIRunTTY
 
 // handleCLIRunConn runs HandleCLIRun with a cancelable context, writes the
@@ -510,6 +538,7 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		VaultPath: string([]byte(req.VaultPath)),
 		Scope:     req.Scope.Clone(),
 		Targets:   make([]personal.CLIBrokerTarget, len(expectedTargets)),
+		cttyProof: req.cttyProof,
 	}
 	copy(callbackReq.Targets, expectedTargets)
 	defer clearCLIRunTargets(expectedTargets)
@@ -545,10 +574,15 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		clearCLIRunTargets(callbackReq.Targets)
 		callbackReq.Targets = nil
 	}()
+	// A stale proof never turns a callback success or unavailable sentinel into
+	// disclosure: recheck the exact peer/scope binding before any transfer.
+	staleProof := req.cttyProof != nil && !req.VerifyCLIRunCTTY(peer)
 	// Only the exact transport/service-unavailable sentinel may select the
 	// explicit unavailable token; a wrapped copy of it (errors.Is), a refusal,
 	// a cancellation, a deadline, or any other callback error is a refusal.
 	switch {
+	case staleProof:
+		resp.Error = cliRunErrorRefused
 	case err == nil:
 		// Only the audited pair crosses: prepared bytes plus the canonical
 		// receipt, and only when the slots are exactly the requested ones as

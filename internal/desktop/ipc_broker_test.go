@@ -291,11 +291,11 @@ func desktopCLIRunRefusalMatrix(t *testing.T, a *App, path string, key []byte) {
 	previous := a.cliApprover
 	t.Cleanup(func() { a.cliApprover = previous })
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) { return true, nil }
-	resp, e := a.handleCLIRun(context.Background(), browserhost.Peer{User: "fixture"}, directReq())
+	resp, e := a.handleCLIRunUnit(context.Background(), browserhost.Peer{User: "fixture"}, directReq())
 	desktopAssertCLIPrepared(t, "direct", resp, e, desktopCLITargetsFixture())
 	desktopReleaseCLIPrepared(resp)
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) { return false, nil }
-	if refused, e := a.handleCLIRun(context.Background(), browserhost.Peer{User: "fixture"}, directReq()); e != errCLIRunRefused || desktopHasCLIPrepared(refused) {
+	if refused, e := a.handleCLIRunUnit(context.Background(), browserhost.Peer{User: "fixture"}, directReq()); e != errCLIRunRefused || desktopHasCLIPrepared(refused) {
 		t.Fatalf("direct denied CLI: %v %#v", e, refused)
 	}
 	// The pending-lock case keeps the original request and captured session:
@@ -305,7 +305,7 @@ func desktopCLIRunRefusalMatrix(t *testing.T, a *App, path string, key []byte) {
 		a.Lock()
 		return true, nil
 	}
-	if refused, e := a.handleCLIRun(context.Background(), browserhost.Peer{User: "fixture"}, directReq()); e != errCLIRunRefused || desktopHasCLIPrepared(refused) {
+	if refused, e := a.handleCLIRunUnit(context.Background(), browserhost.Peer{User: "fixture"}, directReq()); e != errCLIRunRefused || desktopHasCLIPrepared(refused) {
 		t.Fatalf("direct pending-lock CLI: %v %#v", e, refused)
 	}
 }
