@@ -169,6 +169,26 @@ func (p *linuxOwnedTTY) Close() error {
 	return err
 }
 
+// sessionID reads TIOCGSID from exactly this held slave under the same mutex
+// as Close. The kernel returns ENOTTY unless the caller's signal->tty is this
+// real tty, so success is the broker-session ownership check used by the
+// qualified association wrapper.
+func (p *linuxOwnedTTY) sessionID() (int, bool) {
+	if p == nil {
+		return 0, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil {
+		return 0, false
+	}
+	sid, err := unix.IoctlGetInt(int(p.file.Fd()), unix.TIOCGSID)
+	if err != nil || sid <= 0 {
+		return 0, false
+	}
+	return sid, true
+}
+
 // valid rechecks only this fd's local object and current path. A matching
 // dev_t/inode is not proof that the peer holds or originated this TTY.
 func (p *linuxOwnedTTY) valid() bool {
