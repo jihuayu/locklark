@@ -893,6 +893,14 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                      "failureRecordState": "rejected",
                      "wrapperFamily": "unknown"},
                 )
+        # The enum set is exactly the seven fixed values the sender exports;
+        # drift on either side fails here instead of at the next red run.
+        self.assertEqual(
+            support.CHECKOUT_PICKER_STATUSES,
+            ("no-gesture", "unavailable", "unsupported", "list-failed",
+             "selected", "cancelled", "other"),
+        )
+        self.assertEqual(len(set(support.CHECKOUT_PICKER_STATUSES)), 7)
         # A stage outside the allowlist still exposes no picker status, so the
         # enum is never attributed to a failure the picker did not set.
         self.assertEqual(
@@ -903,6 +911,48 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "exit": "exited 7", "startupPhase": "unknown",
              "failureRecordState": "rejected", "wrapperFamily": "unknown"},
         )
+
+    def test_picker_status_never_coexists_with_a_native_error(self):
+        # The sender writes pickerStatus only when no native helper error is
+        # the original failure, so both together reject the whole record even
+        # when each field alone would be accepted.
+        picker = "checkout-picker-cancel:picker"
+        valid_native = {"code": "window-timeout", "action": "label-wait",
+                        "index": 0, "x_codes": [3]}
+
+        def diagnostic(**fields):
+            payload = {"stage": picker, "reason": "CANARY-9f3a1c", **fields}
+            return support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(payload)
+
+        rejected = {
+            "stage": "unclassified", "kind": "unclassified", "native": None,
+            "exit": "exited 7", "startupPhase": "unknown",
+            "failureRecordState": "rejected", "wrapperFamily": "unknown",
+        }
+        combinations = [
+            # Every fixed enum value beside a well-formed native error.
+            *({"pickerStatus": value, "nativeError": valid_native}
+              for value in support.CHECKOUT_PICKER_STATUSES),
+            # Beside a malformed native error that would fail closed anyway.
+            {"pickerStatus": "other",
+             "nativeError": {**valid_native, "code": "window-frozen"}},
+            {"pickerStatus": "other", "nativeError": None},
+            {"pickerStatus": "other", "nativeError": {}},
+        ]
+        for fields in combinations:
+            with self.subTest(fields=fields):
+                record, message = self._nonzero(diagnostic(**fields))
+                self._assert_no_canary(record, message)
+                self.assertEqual(record, rejected)
+        # Neither field alone changes: a valid native error alone keeps its
+        # helper projection, and a picker status alone keeps its enum.
+        self.assertEqual(
+            self._nonzero(diagnostic(nativeError=valid_native))[0]["kind"],
+            "native-helper",
+        )
+        alone = self._nonzero(diagnostic(pickerStatus="other"))[0]
+        self.assertEqual(alone["pickerStatus"], "other")
+        self.assertEqual(alone["kind"], "acceptance-failure")
 
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX

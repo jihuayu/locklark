@@ -3156,6 +3156,11 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     picker_status = _checkout_picker_status(diagnostic)
     if picker_status is _PICKER_STATUS_INVALID:
         return None
+    # Mirrors the native sender, which writes pickerStatus only when no native
+    # helper error is the original failure: the two never coexist in one
+    # record, so their coexistence rejects the whole record.
+    if picker_status is not None and "nativeError" in diagnostic:
+        return None
     native = _checkout_failed_native(diagnostic.get("nativeError"))
     # The human "reason" text is never copied; it only selects a fixed kind
     # for an allowlisted stage. A stage outside the allowlist is unclassified.

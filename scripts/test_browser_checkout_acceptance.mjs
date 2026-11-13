@@ -3,6 +3,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 // The optional route idle-expiry contract lives with the route contract and
 // registers its own tests when this file is executed.
@@ -241,11 +243,7 @@ function pickerPopup(labels, options = {}) {
       if (selector === "#checkout-status")
         return "请选择一个结账表单来源；不会自动选择，也不会自动提交";
       if (selector === "#status")
-        return options.emptyStatus === true
-          ? ""
-          : options.status === undefined
-            ? "已连接"
-            : options.status;
+        return options.status === undefined ? "已连接" : options.status;
       const match = selector.match(/:nth-child\((\d+)\)$/);
       if (match) return labels[Number(match[1]) - 1];
       return "";
@@ -437,14 +435,9 @@ test("a missing picker carries only the fixed status enum", async () => {
     ["已取消本次填充", "cancelled"],
     ["本次请求被拒绝", "other"],
     [null, "unavailable"],
-    ["", "unavailable"],
   ];
   for (const [line, expected] of cases) {
-    const popup = pickerPopup([TOP_LABEL], {
-      noPicker: true,
-      status: line === null ? null : line,
-      emptyStatus: line === "",
-    });
+    const popup = pickerPopup([TOP_LABEL], { noPicker: true, status: line });
     await assert.rejects(
       () => openCheckoutPicker(popup, eventually),
       (error) => {
@@ -464,6 +457,28 @@ test("a missing picker carries only the fixed status enum", async () => {
     () => openCheckoutPicker(unreadable, eventually),
     (error) => error.pickerStatus === "unavailable",
   );
+  // A real driver call answers undefined when #status is absent: the fake's
+  // defaults never stand in for it, and the missing status is unavailable.
+  for (const text of [
+    () => undefined,
+    async () => undefined,
+    (selector) => (selector === "#status" ? undefined : ""),
+  ]) {
+    const absent = pickerPopup([TOP_LABEL], { noPicker: true });
+    absent.text = text;
+    await assert.rejects(
+      () => openCheckoutPicker(absent, eventually),
+      (error) => {
+        assert.equal(error.pickerStatus, "unavailable");
+        assert.equal(
+          error.message,
+          "Checkout origin picker missing: popup status unavailable",
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(absent.clicked, ["#detail-fill"]);
+  }
   // The classification never echoes the popup text itself.
   await assert.rejects(
     () =>
@@ -477,6 +492,39 @@ test("a missing picker carries only the fixed status enum", async () => {
         "Checkout origin picker missing: popup status " +
           "other (unrecognised public status)",
   );
+});
+
+// The exported enum is exactly the seven fixed values and never drifts from
+// the report projection's constant in support.py, which reads the same set.
+test("picker status enum set is exactly the seven fixed values", () => {
+  const expected = [
+    "no-gesture",
+    "unavailable",
+    "unsupported",
+    "list-failed",
+    "selected",
+    "cancelled",
+    "other",
+  ];
+  assert.ok(Object.isFrozen(CHECKOUT_PICKER_STATUSES));
+  assert.deepEqual([...CHECKOUT_PICKER_STATUSES], expected);
+  assert.equal(new Set(CHECKOUT_PICKER_STATUSES).size, 7);
+  const support = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "tests",
+      "e2e",
+      "support.py",
+    ),
+    "utf8",
+  );
+  const match = support.match(
+    /^CHECKOUT_PICKER_STATUSES = \(([\s\S]*?)^\)/m,
+  );
+  assert.ok(match, "support.py picker status constant missing");
+  const python = [...match[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+  assert.deepEqual(python, expected);
 });
 
 test("picker cancellation presses only the real cancel control", async () => {
