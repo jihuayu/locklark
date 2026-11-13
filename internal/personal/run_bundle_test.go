@@ -1179,7 +1179,7 @@ func assertNoBrokeredSecrets(t *testing.T, label string, raw []byte, paths ...st
 	}
 	for _, needle := range needles {
 		if strings.Contains(string(raw), needle) {
-			t.Fatalf("%s leaked %q: %s", label, needle, raw)
+			t.Fatalf("%s: fixture material leaked", label)
 		}
 	}
 }
@@ -1204,19 +1204,19 @@ func TestPrepareBrokeredRunReturnsSlotValuesAfterIntent(t *testing.T) {
 		t.Fatalf("prepare: %v", err)
 	}
 	if receipt.Status != RunBundlePreparationStatus || !digestOK(receipt.Intent) || !digestOK(receipt.TargetDigest) || receipt.Session == "" {
-		t.Fatalf("receipt: %+v", receipt)
+		t.Fatalf("receipt: status_ok:%t intent_ok:%t target_digest_ok:%t session_present:%t", receipt.Status == RunBundlePreparationStatus, digestOK(receipt.Intent), digestOK(receipt.TargetDigest), receipt.Session != "")
 	}
 	if !reflect.DeepEqual(values, bundleTestValues()) {
-		t.Fatalf("values: %#v", values)
+		t.Fatalf("values: slot_count=%d slots=%s", len(values), strings.Join(sortedKeys(values), ","))
 	}
 
 	intents := brokeredRunIntents(t, s)
 	if len(intents) != 1 {
-		t.Fatalf("intents: %#v", intents)
+		t.Fatalf("intents: count=%d", len(intents))
 	}
 	intent := intents[0]
 	if intent.Item != f.loginID || intent.BaseRevision != f.loginRevision || intent.Link != receipt.TargetDigest || intent.Session != receipt.Session {
-		t.Fatalf("intent metadata: %+v receipt: %+v", intent, receipt)
+		t.Fatalf("intent metadata: item_matches:%t base_revision_matches:%t link_matches:%t session_matches:%t", intent.Item == f.loginID, intent.BaseRevision == f.loginRevision, intent.Link == receipt.TargetDigest, intent.Session == receipt.Session)
 	}
 
 	// Preparation never starts a process and never creates bundle files.
@@ -1266,19 +1266,19 @@ func TestPrepareBrokeredRunStaleAndMissingTargets(t *testing.T) {
 	stale := bundleTestTargets(f)
 	stale[1].Revision = strings.Repeat("a", 64)
 	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), stale, request, root); !errors.Is(err, ErrConflict) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
-		t.Fatalf("stale: %v %#v %+v", err, values, receipt)
+		t.Fatalf("stale: conflict:%t nil_values:%t empty_receipt:%t", errors.Is(err, ErrConflict), values == nil, receipt == (RunBundlePreparationReceipt{}))
 	}
 
 	missing := bundleTestTargets(f)
 	missing[3].ID = strings.Repeat("b", 32)
 	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), missing, request, root); !errors.Is(err, ErrNotFound) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
-		t.Fatalf("missing: %v %#v %+v", err, values, receipt)
+		t.Fatalf("missing: not_found:%t nil_values:%t empty_receipt:%t", errors.Is(err, ErrNotFound), values == nil, receipt == (RunBundlePreparationReceipt{}))
 	}
 
 	short := bundleTestTargets(f)
 	short = short[:2] // required "password" and "kubeconfig" profile slots missing
 	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), short, request, root); !errors.Is(err, ErrRunTarget) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
-		t.Fatalf("missing slot: %v %#v %+v", err, values, receipt)
+		t.Fatalf("missing slot: run_target:%t nil_values:%t empty_receipt:%t", errors.Is(err, ErrRunTarget), values == nil, receipt == (RunBundlePreparationReceipt{}))
 	}
 
 	if _, err := s.SetState(f.loginID, f.loginRevision, "item.trash"); err != nil {
@@ -1286,7 +1286,7 @@ func TestPrepareBrokeredRunStaleAndMissingTargets(t *testing.T) {
 	}
 	f.refresh(t)
 	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), bundleTestTargets(f), request, root); !errors.Is(err, ErrTrashed) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
-		t.Fatalf("trashed: %v %#v %+v", err, values, receipt)
+		t.Fatalf("trashed: trashed:%t nil_values:%t empty_receipt:%t", errors.Is(err, ErrTrashed), values == nil, receipt == (RunBundlePreparationReceipt{}))
 	}
 
 	if after := len(brokeredRunIntents(t, s)); after != before {
