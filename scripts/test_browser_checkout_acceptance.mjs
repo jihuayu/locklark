@@ -1575,7 +1575,7 @@ test("route label inspect preserves focus and the approval click stays physical"
   );
 });
 
-test("route probe maps the fixed claim-pending status to native-pending", () => {
+test("route probe maps the fixed statuses to precise finite diagnostic kinds", () => {
   // The visible route status is the only proof that the page entered its
   // claim before pagehide. Exactly the fixed text maps to a fixed enum, and
   // no status text or other DOM content leaves the page.
@@ -1590,9 +1590,18 @@ test("route probe maps the fixed claim-pending status to native-pending", () => 
   assert.ok(start >= 0 && stop > start, "route probe must stay top-level");
   const context = vm.createContext({});
   vm.runInContext(
-    source.slice(start, stop) + "\nthis.probe = routeStateProbe;",
+    source.slice(start, stop) +
+      "\nthis.probe = routeStateProbe;" +
+      "\nthis.kinds = ROUTE_STATUS_KINDS;" +
+      "\nthis.sanitize = sanitizeRouteObservation;",
     context,
   );
+  assert.deepEqual([...context.kinds], [
+    "route-opening",
+    "route-expired",
+    "route-refused",
+    "other",
+  ]);
   const kindFor = (statusText) => {
     context.document = {
       body: { dataset: { view: "closed" } },
@@ -1619,12 +1628,58 @@ test("route probe maps the fixed claim-pending status to native-pending", () => 
     assert.ok(!probed.includes(statusText) || statusText === "");
     return value.statusKind;
   };
-  assert.equal(kindFor("正在请求桌面审批…"), "native-pending");
+  assert.equal(kindFor("正在请求桌面审批…"), "route-opening");
   assert.equal(kindFor("正在请求桌面审批"), "other");
-  assert.equal(kindFor("正在请求桌面审批… "), "native-pending");
-  assert.equal(kindFor("无法打开此条目"), "claim-failed");
-  assert.equal(kindFor("条目已失效，请重新从金库打开"), "route-revoked");
+  assert.equal(kindFor("正在请求桌面审批… "), "route-opening");
+  assert.equal(kindFor("无法打开此条目"), "route-refused");
+  assert.equal(kindFor("条目已失效，请重新从金库打开"), "route-expired");
+  assert.equal(kindFor("已关闭此条目"), "other");
   assert.equal(kindFor(""), "other");
+  assert.equal(kindFor("SECRET-STATUS-TEXT"), "other");
+  // The boundary sanitizer keeps only the finite diagnostic kinds; unknown
+  // shapes and values still become other.
+  assert.equal(
+    context.sanitize({ statusKind: "route-opening" }).statusKind,
+    "route-opening",
+  );
+  assert.equal(
+    context.sanitize({ statusKind: "native-pending" }).statusKind,
+    "other",
+  );
+  assert.equal(
+    context.sanitize({ statusKind: "SECRET-STATUS-TEXT" }).statusKind,
+    "other",
+  );
+});
+
+test("route safe reasons include every fixed surface finding and exact popup close", () => {
+  // The failure report keeps its allowlist closed: these exact fixed findings
+  // and the pending close message must survive instead of becoming
+  // unclassified. Any other message still takes the unclassified fallback.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("    const safeReasons = [");
+  const stop = source.indexOf("    ];", start);
+  assert.ok(start > 0 && stop > start, "safe reasons must stay top-level in the catch");
+  const safeReasons = source.slice(start, stop);
+  for (const reason of [
+    "route-detail-view-missing",
+    "route-detail-title-mismatch",
+    "route-concealed-control-missing",
+    "route-password-rendered",
+    "route-forbidden-canary-rendered",
+    "Popup closed",
+    "Idle route snapshot unavailable",
+    "Idle route detail left the foreground",
+  ])
+    assert.equal(
+      countMatches(safeReasons, new RegExp('"' + reason + '"', "g")),
+      1,
+      reason,
+    );
+  assert.match(source, /: "unclassified acceptance failure",/);
 });
 
 test("route status trace keeps every #status write batched in one callback", () => {
@@ -1788,7 +1843,7 @@ test("route status trace keeps every #status write batched in one callback", () 
   pendingNode.parentNode = status;
   status.childNodes = [pendingNode];
   batch([{ type: "childList", target: document.body, addedNodes: [status], removedNodes: [] }]);
-  assert.deepEqual(statuses().at(-1), "native-pending");
+  assert.deepEqual(statuses().at(-1), "route-opening");
 
   // The real case: pending then revoked, then cleared, all in one callback.
   // Each record carries its own text node, so every transition survives even
@@ -1798,12 +1853,12 @@ test("route status trace keeps every #status write batched in one callback", () 
   const cleared = write("");
   batch([pending, revoked, cleared]);
   const tail = statuses().slice(-3);
-  assert.deepEqual(tail, ["native-pending", "route-revoked", "empty"]);
+  assert.deepEqual(tail, ["route-opening", "route-expired", "empty"]);
 
   // The same batched shape for pending then the closed text.
   const pendingAgain = write("正在请求桌面审批…");
   batch([pendingAgain, write("已关闭此条目")]);
-  assert.deepEqual(statuses().slice(-2), ["native-pending", "closed"]);
+  assert.deepEqual(statuses().slice(-2), ["route-opening", "closed"]);
 
   // Only a status-owned characterData record classifies, and unknown status
   // text becomes only the fixed "other" enum. A fresh context keeps this
@@ -1818,7 +1873,7 @@ test("route status trace keeps every #status write batched in one callback", () 
   owned.parentNode = isolatedStatus;
   isolatedStatus.childNodes = [owned];
   isolated.batch([{ type: "characterData", target: owned }]);
-  assert.deepEqual(isolated.statuses().at(-1), "claim-failed");
+  assert.deepEqual(isolated.statuses().at(-1), "route-refused");
   isolatedStatus.textContent = "SECRET-STATUS-TEXT";
   isolated.batch([
     {

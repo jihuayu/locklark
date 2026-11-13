@@ -477,10 +477,13 @@ function popupStatusKind(value) {
 // Only fixed enums and booleans ever leave the page: never text, titles,
 // field values, URLs, tokens, ids or hidden application state.
 const ROUTE_VIEWS = ["locked", "vault", "detail", "closed", "editor"];
+// Precise diagnostic names for the route page's fixed production statuses.
+// These are the failure-report vocabulary; the separate wipe probe keeps its
+// established accepted-status contract below.
 const ROUTE_STATUS_KINDS = [
-  "native-pending",
-  "claim-failed",
-  "route-revoked",
+  "route-opening",
+  "route-expired",
+  "route-refused",
   "other",
 ];
 const ROUTE_CLAIM_PENDING_STATUS = "正在请求桌面审批…";
@@ -510,7 +513,7 @@ function routeStateProbe(title) {
       view:${JSON.stringify(ROUTE_VIEWS)}.includes(view)?view:'other',
       detailShown:!!detail&&!detail.hidden,
       titleMatchesFixture:!!heading&&String(heading.textContent||'')===${JSON.stringify(title)},
-      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':'other'
+      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'route-opening':statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'route-refused':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-expired':'other'
     };
   })()`;
 }
@@ -539,7 +542,7 @@ function routeStatusTraceProbe(title) {
     const LIMIT=${ROUTE_STATUS_TRACE_LIMIT};
     const VIEWS=${JSON.stringify(ROUTE_VIEWS)};
     const FIXTURE_TITLE=${JSON.stringify(title)};
-    const kindOf=(text)=>text===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLOSED_STATUS)}?'closed':text?'other':'empty';
+    const kindOf=(text)=>text===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'route-opening':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'route-refused':text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-expired':text===${JSON.stringify(ROUTE_CLOSED_STATUS)}?'closed':text?'other':'empty';
     const entries=[];
     let last=null,observing=null;
     const push=(channel,value)=>{
@@ -3369,6 +3372,7 @@ try {
       "Previous action popup did not close",
       "Action popup is not visible and focused",
       "AbortSignal not honored",
+      "Popup closed",
       "Popup CDP failed",
       "Popup CDP closed",
       "Popup CDP timed out",
@@ -3453,6 +3457,7 @@ try {
       "route-detail-title-mismatch",
       "route-concealed-control-missing",
       "route-password-rendered",
+      "route-forbidden-canary-rendered",
       "Route page did not return to the foreground",
       "Route password copy control missing",
       "Route password is not concealed",
@@ -3476,7 +3481,9 @@ try {
       "Mouse wrapper dispatched input",
       "Stale route tab was not closed",
       "Idle route detail did not survive native approval",
+      "Idle route snapshot unavailable",
       "Idle route detail did not stay live",
+      "Idle route detail left the foreground",
       "Idle route detail did not expire",
       "Route page text unavailable",
       "Popup template unavailable",
