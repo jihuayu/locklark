@@ -34,7 +34,6 @@ from .harness import (
     E2EContext,
     FeatureNotImplementedError,
     PTYResult,
-    _group_has_members,
     owned_gui_command,
     session_bus_usable,
     terminate_process_group,
@@ -2300,21 +2299,71 @@ def desktop_argv(settings: Path) -> list[str]:
     return ["--settings", str(settings)]
 
 
+# Fixed note appended to any error that unwinds while the smoke's owned
+# session was not proven dead, or whose cleanup itself failed. ``kind`` is one
+# of "teardown", "unproven", "verify" or "body"; the rest is a short, vetted
+# description (exception type name or exit state), never a payload.
+DESKTOP_SMOKE_CLEANUP_FAILED = "desktop-smoke-cleanup-failed"
+
+
+def desktop_cleanup_note(
+    kind: str, *, error: BaseException | None = None, exit_code: Any = None
+) -> str:
+    """The fixed ``cleanup-failed`` note (:data:`DESKTOP_SMOKE_CLEANUP_FAILED`)."""
+
+    parts = [f"cleanup={DESKTOP_SMOKE_CLEANUP_FAILED}", f"kind={kind}"]
+    if error is not None:
+        parts.append(f"error={type(error).__name__}")
+    if exit_code is not None:
+        parts.append(f"exit={type(exit_code).__name__}:{exit_code!r}")
+    return "{" + " ".join(parts) + "}"
+
+
+def _annotate_cleanup_failure(exc: BaseException | None, note: str) -> None:
+    """Attach ``note`` to ``exc`` without ever replacing or masking it.
+
+    The note travels through the exception's fixed ``__notes__`` list
+    (``add_note`` semantics). Only a ``SystemExit`` that would otherwise read
+    as success (``None``/``0``) also gets its success marker in ``args``
+    replaced by the fixed note, so cleanup failure can never look like success.
+    """
+
+    if exc is None:
+        return
+    notes = getattr(exc, "__notes__", None)
+    if not isinstance(notes, list):
+        notes = []
+        try:
+            exc.__notes__ = notes
+        except (AttributeError, TypeError):
+            notes = []
+    notes.append(note)
+    if isinstance(exc, SystemExit) and exc.code in (None, 0):
+        try:
+            exc.args = (f"{DESKTOP_SMOKE_CLEANUP_FAILED} {note}",)
+        except (AttributeError, TypeError):
+            pass
+
+
 def desktop_group_reaped(process: subprocess.Popen) -> bool:
-    """True only when the owned session (and the wrapper itself) is gone."""
+    """True only when the owned session is proven gone.
+
+    The wrapper exit plus an ``ESRCH`` (ProcessLookupError) for its process
+    group proves that no member — and no process merely holding the group id
+    — is left. ``EPERM`` or any other ``OSError`` means the kill/query could
+    not see the group, which is *unknown*, and unknown is never reported as
+    reaped.
+    """
 
     if process.poll() is None:
         return False
     try:
-        members = _group_has_members(process.pid)
-    except PermissionError:
-        return False
-    if members:
-        return False
-    try:
-        return os.getpgid(process.pid) != process.pid
-    except (ProcessLookupError, PermissionError, OSError):
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
         return True
+    except OSError:
+        return False
+    return False
 
 
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
@@ -2327,14 +2376,24 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
 
     The only supported argument is ``--settings ABSOLUTE_PATH``; the launch
     binds the private settings file from :func:`desktop_smoke_settings`. The
-    launch always terminates (and verifies the reaping of) its owned session
-    on every path: an exit-2 refusal, a normal stop, a nested error or an
-    exception unwinding this function. The target vault is re-hashed only
-    after that teardown, so writes the desktop makes while shutting down on
-    SIGTERM are caught. All conditions are evaluated first; a changed vault is
-    reported with one fixed error and takes precedence, a usage refusal is the
-    next fixed error, and an unproven teardown (or a failing teardown that
-    replaced the original error) is never a success or a silent pass.
+    target vault is hashed once around the active window and again only after
+    the owned session was terminated and reaped; both facts are kept
+    individually, so a desktop that writes the vault and then restores it (for
+    example while shutting down on SIGTERM) still fails. The verdict is:
+
+    1. a changed vault (during the window or after teardown) -> one fixed
+       error, with the highest precedence;
+    2. an exit-2 usage refusal -> the fixed usage error;
+    3. the original exception unwinding this function, re-raised unchanged;
+    4. no such primary error -> success only when the exit was normal *and*
+       the owned session is proven reaped.
+
+    Whenever the session was not proven dead, the teardown raised, or the
+    final hash could not be taken, the error that unwinds — the original one,
+    the usage refusal, or a new failure when none existed — carries the fixed
+    ``desktop-smoke-cleanup-failed`` note; a successful ``SystemExit(0)`` can
+    never leave as success. No ``finally`` returns, so no primary error is
+    swallowed.
     """
 
     vault_path = Path(vault)
@@ -2367,54 +2426,111 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
         # alive for later tests on slower/remote runners.
         start_new_session=True,
     )
-    outcome: dict[str, Any] = {}
-    pending: BaseException | None = None
+    facts: dict[str, Any] = {
+        "pre_mutated": False,
+        "post_mutated": False,
+        "exit_code": None,
+        "reaped": None,
+        "teardown_error": None,
+        "verify_error": None,
+        "aborted": False,
+    }
+    primary: BaseException | None = None
     try:
-        time.sleep(seconds)
-        outcome["exit_code"] = process.poll()
-        outcome["mutated"] = sha256_file(vault_path) != before
-    except BaseException as exc:
-        pending = exc
+        try:
+            time.sleep(seconds)
+            facts["exit_code"] = process.poll()
+            try:
+                facts["pre_mutated"] = sha256_file(vault_path) != before
+            except FileNotFoundError:
+                # The vault vanishing is a change, not an unknown.
+                facts["pre_mutated"] = True
+        except BaseException as exc:
+            primary = exc
     finally:
         try:
             terminate_process_group(process, grace=3.0, owned_group=process.pid)
-            outcome["reaped"] = desktop_group_reaped(process)
-        except Exception as exc:
-            outcome["teardown_error"] = exc
-    try:
-        outcome["mutated"] = sha256_file(vault_path) != before
-    except OSError as exc:
-        outcome["verify_error"] = exc
+        except BaseException as exc:  # noqa: BLE001 - any escape is a failure
+            facts["teardown_error"] = exc
+        try:
+            facts["reaped"] = desktop_group_reaped(process)
+        except BaseException as exc:  # noqa: BLE001
+            facts["teardown_error"] = facts["teardown_error"] or exc
+            facts["reaped"] = False
+        # The last statement of the finally: runs even for SystemExit and for a
+        # cleanup that raised, so the final hash is never skipped.
+        try:
+            try:
+                facts["post_mutated"] = sha256_file(vault_path) != before
+            except FileNotFoundError:
+                # The vault vanishing is a change, not an unknown.
+                facts["post_mutated"] = True
+        except BaseException as exc:  # noqa: BLE001 - reported as "body"
+            facts["aborted"] = True
+            facts["verify_error"] = exc
+            if primary is None:
+                raise
 
-    if outcome.get("mutated"):
-        raise AssertionError(
-            "desktop smoke mutated the target vault (checked after its owned "
-            f"session was terminated and reaped): {vault_path}"
+    mutated = facts["pre_mutated"] or facts["post_mutated"]
+    cleanup_failed = (
+        facts["teardown_error"] is not None
+        or not facts["reaped"]
+        or facts["verify_error"] is not None
+    )
+    note = None
+    if facts["aborted"]:
+        note = desktop_cleanup_note(
+            "body", error=facts["verify_error"], exit_code=facts["exit_code"]
         )
-    if outcome.get("exit_code") == 2:
+    elif facts["teardown_error"] is not None:
+        note = desktop_cleanup_note(
+            "teardown", error=facts["teardown_error"], exit_code=facts["exit_code"]
+        )
+    elif facts["verify_error"] is not None:
+        note = desktop_cleanup_note(
+            "verify", error=facts["verify_error"], exit_code=facts["exit_code"]
+        )
+    elif not facts["reaped"]:
+        note = desktop_cleanup_note("unproven", exit_code=facts["exit_code"])
+    if note is None and cleanup_failed:
+        # Defensive invariant: cleanup_failed is derived from exactly the three
+        # facts above, so this is unreachable; it fails closed if it changes.
+        note = desktop_cleanup_note("unproven", exit_code=facts["exit_code"])
+
+    if mutated:
+        failure = AssertionError(
+            "desktop smoke mutated the target vault (during the window and/or "
+            f"after its owned session was terminated and reaped; pre={facts['pre_mutated']} "
+            f"post={facts['post_mutated']}): {vault_path}"
+        )
+        if note is not None:
+            _annotate_cleanup_failure(failure, note)
+            _annotate_cleanup_failure(primary, note)
+        raise failure
+    if facts["exit_code"] == 2:
         # Exit 2 is the desktop's fixed usage/path refusal: the argv or
         # settings binding regressed, never a GUI/session failure.
-        raise AssertionError(
+        if note is None:
+            raise AssertionError(
+                "desktop refused its smoke argv before any GUI "
+                f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
+            )
+        failure = AssertionError(
             "desktop refused its smoke argv before any GUI "
-            f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
+            f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}) {note}: {command!r}"
         )
-    if pending is not None:
-        raise pending
-    if "teardown_error" in outcome:
+        _annotate_cleanup_failure(failure, note)
+        raise failure
+    if primary is not None:
+        if note is not None:
+            _annotate_cleanup_failure(primary, note)
+        raise primary
+    if note is not None:
         raise AssertionError(
-            "desktop smoke teardown failed; its owned session was not proven "
-            f"reaped: {outcome['teardown_error']!r}"
-        ) from outcome["teardown_error"]
-    if not outcome.get("reaped"):
-        raise AssertionError(
-            "desktop smoke teardown left its owned session alive or could not "
-            f"prove it was reaped (exit_code={outcome.get('exit_code')!r})"
+            "desktop smoke teardown failed or was not proven reaped, and no "
+            f"other error carried the failure: {note}"
         )
-    if "verify_error" in outcome:
-        raise AssertionError(
-            f"desktop smoke could not re-verify the target vault: {outcome['verify_error']!r}"
-        ) from outcome["verify_error"]
-    return outcome["exit_code"] is None
+    return facts["exit_code"] is None
 
 
 def file_mode(path: Path) -> int:
