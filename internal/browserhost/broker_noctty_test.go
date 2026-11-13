@@ -27,7 +27,7 @@ const (
 	// the closing parenthesis, leaving 50 tokens for fields 3 through 52.
 	browserhostNoCTTYStatFields     = 52
 	browserhostNoCTTYStatTailFields = browserhostNoCTTYStatFields - 2
-	browserhostNoCTTYStatStates     = "RSDZTtWXxKPI"
+	browserhostNoCTTYStatStates     = "RSDZTtXZPI"
 )
 
 // runLegacyNoCTTYTest makes Linux-only legacy-gate contracts execute in a real
@@ -71,8 +71,8 @@ func runLegacyNoCTTYTest(t *testing.T, name string, body func(*testing.T)) {
 // namespace and devpts work, so an unavailable result would not prove tty_nr
 // is zero. The read is bounded, the command name is skipped at its final ')'
 // (it may itself contain spaces or parentheses), state must be a kernel task
-// state, the line must contain the complete 52-field stat layout, and field
-// 7's original token must be exactly "0".
+// state, the line must contain exactly the complete 52-field stat layout, and
+// field 7's original token must be exactly "0".
 func noCTTYStatField7IsZero(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -88,7 +88,7 @@ func noCTTYStatField7IsZero(path string) bool {
 		return false
 	}
 	fields := strings.Fields(string(data[end+1:]))
-	if len(fields) < browserhostNoCTTYStatTailFields || len(fields[0]) != 1 {
+	if len(fields) != browserhostNoCTTYStatTailFields || len(fields[0]) != 1 {
 		return false
 	}
 	return strings.IndexByte(browserhostNoCTTYStatStates, fields[0][0]) >= 0 && fields[4] == "0"
@@ -142,9 +142,13 @@ func TestBrowserhostNoCTTYStatField7(t *testing.T) {
 		{"nonzero", noCTTYStatFixture("worker", "S", "1", browserhostNoCTTYStatTailFields) + "\n", false},
 		{"noncanonical zero", noCTTYStatFixture("worker", "S", "00", browserhostNoCTTYStatTailFields) + "\n", false},
 		{"negative zero", noCTTYStatFixture("worker", "S", "-0", browserhostNoCTTYStatTailFields) + "\n", false},
-		{"bad state", noCTTYStatFixture("worker", "Q", "0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"bad state Q", noCTTYStatFixture("worker", "Q", "0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"bad state W", noCTTYStatFixture("worker", "W", "0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"bad state K", noCTTYStatFixture("worker", "K", "0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"bad state x", noCTTYStatFixture("worker", "x", "0", browserhostNoCTTYStatTailFields) + "\n", false},
 		{"truncated zero at field 7", noCTTYStatFixture("worker", "S", "0", 5) + "\n", false},
 		{"truncated zero at field 51", noCTTYStatFixture("worker", "S", "0", browserhostNoCTTYStatTailFields-1) + "\n", false},
+		{"extra field after field 52", noCTTYStatFixture("worker", "S", "0", browserhostNoCTTYStatTailFields+1) + "\n", false},
 		{"missing close paren", "123 worker S 1 2 3 0 4 5\n", false},
 		{"missing tty field", "123 (worker) S 1 2 3\n", false},
 	} {
