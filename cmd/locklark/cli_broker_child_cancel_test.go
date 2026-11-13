@@ -48,7 +48,7 @@ const (
 	cliBrokerReadyChildCancelWait = 5 * time.Second
 
 	// cliBrokerReadyChildExitWait is the short deadline used after the SUT
-	// returns. A live child still holding the connection cannot produce EOF.
+	// returns for both the terminal read and the process-exit proof.
 	cliBrokerReadyChildExitWait = 3 * time.Second
 )
 
@@ -108,11 +108,12 @@ func validCLIBrokerReadyAddr(addr string) bool {
 // nonce), listens on loopback, and fixes the child arguments and program digest
 // before the call. Once the real test binary has connected and sent the exact
 // nonce and PID, the non-blocking signal seam delivers Interrupt. The SUT must
-// return the typed terminal broker failure with no local fallback, and a short
-// read deadline must observe EOF, proving the child exited. No second
-// shell-based child cancellation case is retained. The child holds only its
-// owned ready connection: this case makes no stdin claim, and the existing
-// personal stdin unit is untouched.
+// return the typed terminal broker failure with no local fallback. A short
+// deadline must then observe an orderly EOF, or on Windows the reset produced
+// by TerminateProcess teardown only after the pinned child is proven exited.
+// No second shell-based child cancellation case is retained. The child holds
+// only its owned ready connection: this case makes no stdin claim, and the
+// existing personal stdin unit is untouched.
 func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -214,6 +215,10 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	if pid <= 0 || pid == os.Getpid() {
 		t.Fatal("real child readiness PID is not a distinct child")
 	}
+	// Pin the announced child before cancellation. On Windows this is the
+	// exited-child proof for the reset teardown that the platform may expose
+	// instead of EOF; elsewhere the peer EOF below is the proof.
+	childExited := watchCLIBrokerReadyChildExit(t, pid)
 
 	// The readiness handshake starts the one bound that covers the liveness
 	// probe, cancellation, and the dispatcher's return.
@@ -243,8 +248,8 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	if n != 0 || !errors.As(probeErr, &timeout) || !timeout.Timeout() {
 		t.Fatal("ready child connection was not live before cancellation")
 	}
-	// Restore the connection before delivering the signal; the EOF proof below
-	// sets its own short deadline after the dispatcher returns.
+	// Restore the connection before delivering the signal; the terminal-close
+	// proof below sets its own short deadline after the dispatcher returns.
 	if err = conn.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatal("child liveness deadline could not be cleared")
 	}
@@ -296,7 +301,12 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(cliBrokerReadyChildExitWait))
 	var one [1]byte
 	n, readErr := conn.Read(one[:])
-	if n != 0 || !errors.Is(readErr, io.EOF) {
+	// The child must be gone before a non-EOF terminal close can be accepted:
+	// Windows can report a reset when TerminateProcess tears the socket down.
+	if !childExited() {
+		t.Fatal("real child process did not exit after cancellation")
+	}
+	if n != 0 || !cliBrokerReadyChildClosed(readErr) {
 		t.Fatal("real child kept the readiness connection after cancellation")
 	}
 }
