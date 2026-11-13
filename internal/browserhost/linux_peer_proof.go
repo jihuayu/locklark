@@ -192,6 +192,38 @@ func (p *linuxOwnedTTY) sessionID() (int, bool) {
 
 // valid rechecks only this fd's local object and current path. A matching
 // dev_t/inode is not proof that the peer holds or originated this TTY.
+type linuxTTYBindingIdentity struct {
+	dev  uint64
+	rdev uint64
+	ino  uint64
+	uid  uint32
+	gid  uint32
+	mode uint32
+}
+
+func (p *linuxOwnedTTY) bindingIdentity() (linuxTTYBindingIdentity, bool) {
+	if p == nil {
+		return linuxTTYBindingIdentity{}, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil || !trustedTTYDevice(p.identity.path) {
+		return linuxTTYBindingIdentity{}, false
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(int(p.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, p.identity.dev, p.identity.uid) {
+		return linuxTTYBindingIdentity{}, false
+	}
+	if uint64(opened.Rdev) != p.identity.dev || uint64(opened.Ino) != p.identity.ino ||
+		opened.Uid != p.identity.uid || opened.Gid != p.identity.gid || opened.Mode != p.identity.mode {
+		return linuxTTYBindingIdentity{}, false
+	}
+	return linuxTTYBindingIdentity{
+		dev: uint64(opened.Dev), rdev: uint64(opened.Rdev), ino: uint64(opened.Ino),
+		uid: opened.Uid, gid: opened.Gid, mode: opened.Mode,
+	}, true
+}
+
 func (p *linuxOwnedTTY) valid() bool {
 	if p == nil {
 		return false

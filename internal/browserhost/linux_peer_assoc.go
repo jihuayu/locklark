@@ -3,10 +3,13 @@
 package browserhost
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"net"
 	"os"
 	"sync"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -79,6 +82,58 @@ func (a *linuxPeerCTTYAssociation) live() bool {
 	}
 	current, ok := a.snapshotLocked()
 	return ok && current == a.snapshot
+}
+
+func (a *linuxPeerCTTYAssociation) binding() (CLIRunTerminalBinding, bool) {
+	if a == nil {
+		return CLIRunTerminalBinding{}, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return CLIRunTerminalBinding{}, false
+	}
+	current, ok := a.snapshotLocked()
+	if !ok || current != a.snapshot {
+		return CLIRunTerminalBinding{}, false
+	}
+	tty, ok := a.held.bindingIdentity()
+	if !ok {
+		return CLIRunTerminalBinding{}, false
+	}
+	nsDev, nsIno, ok := linuxMountNamespaceIdentity()
+	if !ok {
+		return CLIRunTerminalBinding{}, false
+	}
+	return linuxTerminalBindingDigest(current.peerSID, tty, nsDev, nsIno), true
+}
+
+func linuxMountNamespaceIdentity() (uint64, uint64, bool) {
+	info, err := os.Stat("/proc/self/ns/mnt")
+	if err != nil {
+		return 0, 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Ino == 0 {
+		return 0, 0, false
+	}
+	return uint64(stat.Dev), uint64(stat.Ino), true
+}
+
+func linuxTerminalBindingDigest(sid int, tty linuxTTYBindingIdentity, nsDev, nsIno uint64) CLIRunTerminalBinding {
+	h := sha256.New()
+	_, _ = h.Write([]byte("locklark/linux/ctty-terminal-binding/v1\x00"))
+	var raw [8]byte
+	for _, value := range []uint64{
+		uint64(sid), tty.dev, tty.rdev, tty.ino,
+		uint64(tty.uid), uint64(tty.gid), uint64(tty.mode), nsDev, nsIno,
+	} {
+		binary.BigEndian.PutUint64(raw[:], value)
+		_, _ = h.Write(raw[:])
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], h.Sum(nil))
+	return CLIRunTerminalBinding{digest: digest}
 }
 
 func (a *linuxPeerCTTYAssociation) Close() error {

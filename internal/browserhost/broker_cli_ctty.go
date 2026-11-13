@@ -15,6 +15,7 @@ var errCLIRunCTTYUnsupported = errors.New("linux CLI-run CTTY association unavai
 // validator callback and cannot be supplied by a client or desktop.
 type clirunCTTYProofOwner interface {
 	live() bool
+	binding() (CLIRunTerminalBinding, bool)
 	Close() error
 }
 
@@ -54,6 +55,30 @@ func cliRunScopeDigest(scope CLIRunScope) ([sha256.Size]byte, bool) {
 	}
 	defer clear(raw)
 	return sha256.Sum256(raw), true
+}
+
+// CLIRunTerminalBinding is a fixed, read-only terminal identity. The digest is
+// private, it is never serialized, and a zero value is not a valid binding.
+type CLIRunTerminalBinding struct {
+	digest [sha256.Size]byte
+}
+
+// Equal compares two live bindings. The zero value never matches anything.
+func (b CLIRunTerminalBinding) Equal(other CLIRunTerminalBinding) bool {
+	return b.digest != ([sha256.Size]byte{}) && b.digest == other.digest
+}
+
+// CLIRunCTTYBinding revalidates the exact live proof/peer/scope and returns the
+// stable terminal binding for the held CTTY. It never exposes the digest.
+func (r CLIRunBrokerRequest) CLIRunCTTYBinding(peer Peer) (CLIRunTerminalBinding, bool) {
+	if !r.VerifyCLIRunCTTY(peer) {
+		return CLIRunTerminalBinding{}, false
+	}
+	p := r.cttyProof
+	if p == nil || p.owner == nil {
+		return CLIRunTerminalBinding{}, false
+	}
+	return p.owner.binding()
 }
 
 func (p *clirunCTTYProof) Close() error {
