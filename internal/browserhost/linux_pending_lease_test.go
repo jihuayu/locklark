@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,7 +69,11 @@ func TestLinuxPendingLeaseAnchorSameTerminal(t *testing.T) {
 	waitErr := cmd.Wait()
 	result, err := io.ReadAll(resultR)
 	if err != nil || waitErr != nil || string(result) != linuxPendingResultOK {
-		t.Fatal("pending lease anchor minimum failed")
+		stage := strings.TrimSpace(string(result))
+		if stage == "" {
+			stage = "unknown"
+		}
+		t.Fatalf("pending lease anchor minimum failed at %s", stage)
 	}
 }
 
@@ -80,7 +85,9 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	if result == nil {
 		os.Exit(2)
 	}
+	stage := "S-session"
 	fail := func() {
+		_, _ = result.WriteString(stage + "\n")
 		_ = result.Close()
 		os.Exit(2)
 	}
@@ -98,6 +105,7 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	if err != nil {
 		fail()
 	}
+	stage = "S-store"
 	store := newLinuxPendingLeaseStore(4)
 	var index atomic.Int32
 	var added, matched, closedMatched atomic.Bool
@@ -116,10 +124,13 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 			return BrokerCLIResponse{}, ErrCLIRunRefused
 		},
 	})
-	if err := b.Start(endpoint); err != nil {
+	stage = "S-listen"
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
+	if err != nil {
 		fail()
 	}
 	run := func(nonce string) {
+		stage = "S-client"
 		cli := exec.Command(os.Args[0], "-test.run=^TestLinuxPendingLeaseClientHelper$", "-test.count=1")
 		cli.Env = append(os.Environ(),
 			linuxPendingModeEnv+"="+linuxPendingClient,
@@ -133,6 +144,11 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 		if err := cli.Start(); err != nil {
 			fail()
 		}
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			fail()
+		}
+		b.serve(conn)
 		if err := cli.Wait(); err != nil {
 			fail()
 		}
@@ -140,7 +156,8 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	run(strings.Repeat("a1", 32))
 	run(strings.Repeat("b2", 32))
 	run(strings.Repeat("c3", 32))
-	_ = b.Close()
+	_ = listener.Close()
+	stage = "S-assert"
 	if !added.Load() || !matched.Load() || closedMatched.Load() {
 		fail()
 	}
