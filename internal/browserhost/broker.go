@@ -398,11 +398,11 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 	}
 }
 
-func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
+func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) error {
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	raw, e := readFrame(conn, MaxInput)
 	if e != nil {
-		return
+		return e
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	// The decoded scope is the only copy kept: it stays alive through native
@@ -411,8 +411,7 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	req, ok := decodeCLIRunBrokerRequest(raw)
 	if !ok {
 		clear(raw)
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
 	defer func() {
 		clear(raw)
@@ -442,8 +441,7 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	// unattested, unsupported, or mismatching terminal, so those always stay a
 	// fixed refusal whatever the callback state.
 	if consumeCLIRunNonce(peer, req.Scope.Nonce) != nil {
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
 	if cliRunCTTYProofRequired() {
 		proof, boundPeer, proofErr := newCLIRunCTTYProof(conn, peer, req.Scope)
@@ -452,33 +450,27 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 			// No self CTTY or no Unix connection: the legacy gate remains the
 			// only decider. On Linux production it always refuses.
 			if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
-				writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-				return
+				return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 			}
 		case proofErr != nil:
-			writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-			return
+			return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 		default:
 			defer proof.Close()
 			req.cttyProof = proof
 			peer = boundPeer
 			if !req.VerifyCLIRunCTTY(peer) {
-				writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-				return
+				return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 			}
 		}
 	} else if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
 	if b.callbacks.HandleCLIRun == nil {
 		if req.cttyProof != nil && !req.VerifyCLIRunCTTY(peer) {
-			writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-			return
+			return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 		}
 		resp.Error = cliRunErrorUnavailable
-		writeCLIResponse(conn, resp)
-		return
+		return writeCLIResponse(conn, resp)
 	}
 	// The request frame is fully read, validated, terminal-attested, and its
 	// nonce consumed; the callback still runs with an OS-authenticated peer.
@@ -486,10 +478,12 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	// or sends an unexpected extra byte, cancels the callback instead of
 	// leaving a native approval prompt pending after the CLI exited. Context
 	// values stay nil; only cancellation is propagated.
-	b.handleCLIRunConn(conn, peer, req, &resp)
-	// The wire encoding already went out; every byte slice of the broker's own
-	// copy is zeroed in place here.
+	writeErr := b.handleCLIRunConn(conn, peer, req, &resp)
+	// Whether the frame was written fully or failed, the broker's own prepared
+	// copy is cleared here. A successful write is only transport completion,
+	// never proof that the client adopted a value or granted a lease.
 	clearCLIRunResponse(&resp)
+	return writeErr
 }
 
 // cliRunTTYGate is the legacy/self-CTTY-missing gate. On Linux, a self CTTY
@@ -517,7 +511,7 @@ var cliRunTTYGate = verifyCLIRunTTY
 // mutates, reorders, or clears anything in its copy therefore changes neither
 // the broker's parsed request nor the slots the returned PreparedValues are
 // bound to.
-func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) {
+func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) error {
 	// The snapshot is captured from req and never handed out. Its slot names
 	// are owned string copies, so nothing the callback (or the broker clearing
 	// req later) does to another slice reaches it. The callback request is a
@@ -612,15 +606,17 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	// written from the already slot-bound encoding, so the bytes that were
 	// checked against the expected target snapshot are exactly the bytes that
 	// go out.
+	var writeErr error
 	if transferred && bindErr == nil {
-		writeCLIRunRaw(conn, bound)
+		writeErr = writeCLIRunRaw(conn, bound)
 	} else {
-		writeCLIResponse(conn, *resp)
+		writeErr = writeCLIResponse(conn, *resp)
 	}
 	// Closing unblocks the monitor if it is still reading; the close of stop
 	// tells it a lost monitor is expected rather than a client cancellation.
 	close(stop)
 	_ = conn.Close()
+	return writeErr
 }
 
 // watchCLIRunConn watches an idle CLI-run connection for the whole time the
@@ -880,34 +876,32 @@ func clearCLIRunSpec(spec *cliprofile.Spec) {
 // values with an error, or values without a canonical receipt, never reaches
 // the wire: it is replaced by the explicit refusal. An oversized reply is also
 // replaced by the refusal; a marshal failure writes nothing.
-func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
+func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) error {
 	raw, e := marshalCLIRunResponse(resp)
 	if e != nil {
-		writeCLIRunRefusal(conn)
-		return
+		return writeCLIRunRefusal(conn)
 	}
-	writeCLIRunRaw(conn, raw)
+	return writeCLIRunRaw(conn, raw)
 }
 
 // writeCLIRunRaw writes one already-encoded reply, replacing it with the fixed
 // refusal when it is oversized, and zeroes the encoding afterwards.
-func writeCLIRunRaw(conn net.Conn, raw []byte) {
+func writeCLIRunRaw(conn net.Conn, raw []byte) error {
 	defer clear(raw)
 	if len(raw) == 0 || len(raw) > MaxOutput {
-		writeCLIRunRefusal(conn)
-		return
+		return writeCLIRunRefusal(conn)
 	}
-	_ = writeFrame(conn, raw)
+	return writeFrame(conn, raw)
 }
 
 // writeCLIRunRefusal writes the fixed refusal reply.
-func writeCLIRunRefusal(conn net.Conn) {
+func writeCLIRunRefusal(conn net.Conn) error {
 	raw, e := marshalCLIRunResponse(CLIRunBrokerResponse{Error: cliRunErrorRefused})
 	if e != nil {
-		return
+		return e
 	}
 	defer clear(raw)
-	_ = writeFrame(conn, raw)
+	return writeFrame(conn, raw)
 }
 
 func readFrame(r io.Reader, max int) ([]byte, error) {
