@@ -41,9 +41,40 @@ jobs:
           path: ${{ runner.temp }}/locklark-bin/
           if-no-files-found: error
           retention-days: 14
-  go:
+  # Cheap contracts gate every expensive platform/build job below. This job
+  # only consumes the same-run Linux artifact; it must not rebuild the CLI.
+  contracts:
     needs: [linux-build]
-    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - name: Smoke test downloaded CLI before contracts
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Test pure-Python cheap contracts
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
+          # Discover every mobile contract so the emulator gate/category
+          # regressions run with the other cheap checks, not after a build.
+          python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
+          python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
+          python3 -m unittest discover -s scripts -p 'test_*native*.py'
+  go:
+    needs: [linux-build, contracts]
+    # Keep failure reporting, but never start this expensive layer when the
+    # cheap contracts job failed or was skipped.
+    if: ${{ !cancelled() && needs.contracts.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -230,6 +261,7 @@ jobs:
           & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   desktop-macos:
+    needs: [contracts]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -277,7 +309,7 @@ jobs:
           go test ./internal/sshagent ./internal/localpath -count=1
           go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
   web-core:
-    needs: [linux-build]
+    needs: [linux-build, contracts]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
@@ -300,14 +332,6 @@ jobs:
         run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
       - name: Smoke test downloaded CLI before acceptance
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
-      - name: Test pure-Python cheap contracts before builds
-        timeout-minutes: 10
-        run: |
-          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
-          # Discover every mobile contract so the emulator gate/category
-          # regressions run with the other cheap checks, not after a build.
-          python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
-          python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
       - name: Test browser extension
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
@@ -333,9 +357,6 @@ jobs:
             ${{ runner.temp }}/locklark-extension-verified/
           if-no-files-found: error
           retention-days: 14
-      - name: Test native acceptance readiness and reference cleanup
-        timeout-minutes: 1
-        run: python3 -m unittest discover -s scripts -p 'test_*native*.py'
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -450,7 +471,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   web-browsers:
-    needs: [linux-build]
+    needs: [linux-build, contracts]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
@@ -674,7 +695,9 @@ jobs:
         script: bash .github/scripts/mobile-android-runtime.sh
     needs:
     - linux-build
+    - contracts
   ios:
+    needs: [contracts]
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -690,7 +713,7 @@ jobs:
   # command enforces it.
   ci-required:
     name: ci-required
-    needs: [linux-build, go, desktop-macos, web-core, web-browsers, web, android, ios]
+    needs: [linux-build, contracts, go, desktop-macos, web-core, web-browsers, web, android, ios]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -698,6 +721,7 @@ jobs:
       - name: Require every required job to succeed
         env:
           LINUX_BUILD_RESULT: ${{ needs.linux-build.result }}
+          CONTRACTS_RESULT: ${{ needs.contracts.result }}
           GO_RESULT: ${{ needs.go.result }}
           DESKTOP_MACOS_RESULT: ${{ needs.desktop-macos.result }}
           WEB_CORE_RESULT: ${{ needs.web-core.result }}
@@ -706,7 +730,7 @@ jobs:
           ANDROID_RESULT: ${{ needs.android.result }}
           IOS_RESULT: ${{ needs.ios.result }}
         run: |
-          required='linux-build go desktop-macos web-core web-browsers web android ios'
+          required='linux-build contracts go desktop-macos web-core web-browsers web android ios'
           failed=0
           summary=''
           for job in $required; do
