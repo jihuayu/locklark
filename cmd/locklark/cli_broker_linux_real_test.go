@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -81,10 +82,10 @@ func TestLinuxCLIRunRealBrokerHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	endpoint := os.Getenv(linuxCLIRealSocketEnv)
-	verified := false
+	var verified atomic.Bool
 	b := browserhost.NewBroker(browserhost.BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
-			verified = req.VerifyCLIRunCTTY(peer)
+			verified.Store(req.VerifyCLIRunCTTY(peer))
 			return browserhost.BrokerCLIResponse{}, browserhost.ErrCLIRunRefused
 		},
 	})
@@ -106,7 +107,7 @@ func TestLinuxCLIRunRealBrokerHelper(t *testing.T) {
 	}
 	waitErr := cli.Wait()
 	_ = b.Close()
-	if waitErr != nil || !verified {
+	if waitErr != nil || !verified.Load() {
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIRealResultOK); err != nil {
