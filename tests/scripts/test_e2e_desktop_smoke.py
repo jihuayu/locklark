@@ -126,10 +126,12 @@ os.execv(sys.executable, [sys.executable] + list(_launch_argv))
 
 _FORBIDDEN_IN_ARGV = ("--file", "--settings=")
 
-# The helper's fixed error once the owned session is terminated and reaped.
+# The helper's fixed error once the vault changed. The helper keeps the two
+# digest facts apart (during the window vs. after teardown) and names the
+# vault; the test pins exactly that fixed shape.
 _MUTATION_ERROR = (
-    "desktop smoke mutated the target vault (checked after its owned "
-    "session was terminated and reaped)"
+    "desktop smoke mutated the target vault (during the window and/or "
+    "after its owned session was terminated and reaped; pre={pre} post={post}): {vault}"
 )
 
 # Everything the helper may change in the launch environment: ``TMPDIR`` is
@@ -749,8 +751,18 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
                 self.fail("desktop smoke helper reported no outcome")
             alive, error = observed.get_nowait()
             self.assertIsInstance(error, AssertionError, f"unexpected outcome {alive!r}")
-            # One fixed error, evaluated after the owned session was reaped.
-            self.assertIn(_MUTATION_ERROR, str(error))
+            # One fixed error, evaluated after the owned session was reaped:
+            # the child changed the vault while the helper was still in its
+            # window, so both digests see the change and no cleanup note is
+            # attached (teardown succeeded and the group was proven reaped).
+            self.assertIsNone(getattr(error, "__notes__", None))
+            mutated = re.fullmatch(
+                re.escape(
+                    _MUTATION_ERROR.format(pre=True, post=True, vault=self.vault)
+                ),
+                str(error),
+            )
+            self.assertIsNotNone(mutated, f"unexpected mutation error {str(error)!r}")
         finally:
             # A reported failure still reaps: bounded, and only the own
             # thread; nothing here ever signals a process group.
