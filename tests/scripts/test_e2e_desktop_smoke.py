@@ -600,9 +600,10 @@ class DesktopSmokeFixture(unittest.TestCase):
         to the genuine ``support.terminate_process_group``: exactly what the
         helper would have called. Around that call it only records the
         ``Popen.poll() is None`` fact (still running right before teardown) and
-        then reads ``Popen.returncode``. Reading the status the helper's own
-        teardown produced is not the test reaping anything: a ``None`` here
-        means the helper did *not* reap, which the test then reports.
+        then reads ``Popen.returncode``. It delegates the only reaping call, so
+        neither fact is offered as proof that the helper reaped: that proof is
+        the pid and group checks, and the status read here only says what the
+        helper's own call left behind.
         """
 
         real = support.terminate_process_group
@@ -1043,15 +1044,13 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assert_reports_drained()
         self.assertEqual(set(reports), {"launch", "mutated", "alive"}, reports)
         self.assert_private_signals()
-        # The helper's own teardown observed the child still running (the
-        # ``alive`` report alone is no proof of that), then really reaped it:
-        # the status the helper produced is present -- no wait() by this test
-        # ever competed for it -- and it is not the exit-2 refusal.
+        # At the helper's own teardown the child was still running (the
+        # ``alive`` report alone is no proof), and the status that call
+        # produced is exactly 3: the stand-in's SIGTERM handler ran and exited
+        # with 3, so a SIGKILL (-9) cannot pass this. Reaping itself is proven
+        # below by the pid and group checks, not by this observation.
         self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
-        self.assertEqual(len(teardown["returncode"]), 1)
-        (exit_status,) = teardown["returncode"]
-        self.assertIsNotNone(exit_status, "the helper did not reap the owned desktop")
-        self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
+        self.assertEqual(teardown["returncode"], [3], "teardown did not run the child's handler")
         self.assert_launch_owned_and_reaped(reports)
 
     def test_mutation_written_only_from_the_sigterm_handler_fails_post(self):
@@ -1091,13 +1090,12 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assertNotEqual(before, _sha256(self.vault), "the vault did not change")
         self.assertEqual(self.vault.read_bytes(), _MUTATION)
         # The write is teardown-only only if the child was still running at the
-        # helper's own teardown; the helper then really reaped it (the status
-        # exists and is not the exit-2 refusal), and its pid and group are gone.
+        # helper's own teardown; that call's status is exactly 0, i.e. the
+        # child's own SIGTERM handler completed its write and exited cleanly
+        # (a SIGKILL would be -9 and is rejected). Reaping is proven below by
+        # the pid and group checks.
         self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
-        self.assertEqual(len(teardown["returncode"]), 1)
-        (exit_status,) = teardown["returncode"]
-        self.assertIsNotNone(exit_status, "the helper did not reap the owned desktop")
-        self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
+        self.assertEqual(teardown["returncode"], [0], "teardown did not run the child's handler")
         self.assert_launch_owned_and_reaped(reports, required=set(reports))
 
     def test_early_exit_is_false_not_a_liveness_pass(self):
@@ -1111,20 +1109,23 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
 
     def test_window_mutation_then_exit2_reports_mutation_not_usage_refusal(self):
         # The owned child changes the vault inside the window and then really
-        # ends with ``os._exit(2)``: no exec, no restored bytes, no SIGTERM
-        # handler. The helper therefore sees both facts -- the in-window change
-        # and rc=2 -- and its fixed priority must report the mutation, not the
-        # usage refusal, while the teardown still reaps the owned group.
+        # ends with ``os._exit(2)``: no exec and no restored bytes. It keeps
+        # the stand-in's inherited SIGTERM handler, but its own exit comes
+        # first, so that handler is never triggered. The helper therefore sees
+        # both facts -- the in-window change and rc=2 -- and its fixed priority
+        # must report the mutation, not the usage refusal, while the owned
+        # group is still proven reaped.
         launches = self.record_of_launch_count()
         teardown = self.observe_owned_teardown()
         outcomes = self.observe_smoke_outcome()
         reports, error = self.mutation_launch(
             _MUTATING_EXIT2_STAND_IN, harness_pid=os.getpid()
         )
-        # Exactly one helper launch happened. The helper's own decision saw the
-        # real facts -- child exited 2, mutation both in and after the window,
-        # reaped -- before its fixed priority chose the mutation error over the
-        # usage refusal; nothing here reaped or judged in the helper's place.
+        # Exactly one helper launch happened, and the helper's own lifecycle
+        # collected these facts -- the child exited with the real status 2,
+        # both digests saw the in-window mutation, and its owned group was
+        # proven reaped -- before the fixed priority chose the mutation error
+        # over the usage refusal. Nothing here reaped or decided for the helper.
         self.assertEqual(self.record_of_launch_count(), launches + 1)
         self.assertEqual(len(outcomes), 1, "the helper's outcome was not recorded")
         (facts,) = outcomes
@@ -1135,11 +1136,13 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assertIs(facts["reaped"], True)
         self.assertIsNone(facts["teardown_error"])
         self.assertIsNone(facts["hash_error"])
-        # The child had already exited (rc=2) by teardown, and the helper's own
-        # reaping call produced exactly that status -- not a signal or a timeout.
-        self.assertEqual(len(teardown["returncode"]), 1)
-        (exit_status,) = teardown["returncode"]
-        self.assertEqual(exit_status, 2, "the helper did not observe/reap the real rc=2")
+        # The child had already exited before the helper's teardown call, so
+        # the SIGTERM handler it inherited was never triggered: teardown found
+        # it gone rather than ending it. The status recorded around that call
+        # is only what it observed (2), corroborating the lifecycle facts; it
+        # is not a separate reap and no claim about one rests on it.
+        self.assertEqual(teardown["poll_before"], [False], "the child was still running at teardown")
+        self.assertEqual(teardown["returncode"], [2])
 
         self.assertIsInstance(error, AssertionError)
         self.assert_mutation_error(error, pre=True, post=True)
