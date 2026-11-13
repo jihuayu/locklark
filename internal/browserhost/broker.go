@@ -60,7 +60,11 @@ type CLIRunBrokerRequest struct {
 	VaultPath string                     `json:"vault_path"`
 	Scope     CLIRunScope                `json:"scope"`
 	Targets   []personal.CLIBrokerTarget `json:"targets"`
-	cttyProof *clirunCTTYProof
+	// DeliveryControl is an explicit opt-in for the post-response control
+	// socket. It is an intent only: proof, nonce, scope, and approval still
+	// decide every authorization question.
+	DeliveryControl bool `json:"delivery_control,omitempty"`
+	cttyProof       *clirunCTTYProof
 }
 
 // CLIRunBrokerResponse is the audited one-shot reply of the desktop broker.
@@ -528,18 +532,23 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		}
 	}
 	callbackReq := CLIRunBrokerRequest{
-		V:         req.V,
-		VaultPath: string([]byte(req.VaultPath)),
-		Scope:     req.Scope.Clone(),
-		Targets:   make([]personal.CLIBrokerTarget, len(expectedTargets)),
-		cttyProof: req.cttyProof,
+		V:               req.V,
+		VaultPath:       string([]byte(req.VaultPath)),
+		Scope:           req.Scope.Clone(),
+		Targets:         make([]personal.CLIBrokerTarget, len(expectedTargets)),
+		DeliveryControl: req.DeliveryControl,
+		cttyProof:       req.cttyProof,
 	}
 	copy(callbackReq.Targets, expectedTargets)
 	defer clearCLIRunTargets(expectedTargets)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stop := make(chan struct{})
-	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
+	watchDone := make(chan struct{})
+	go func() {
+		watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
+		close(watchDone)
+	}()
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, callbackReq)
 	// Everything the callback returned that is not transferred is cleared on
 	// every exit. Only a successful callback hands its prepared bytes over to
@@ -612,6 +621,21 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	} else {
 		writeErr = writeCLIResponse(conn, *resp)
 	}
+	// A control-ready reply is sent only after a complete audited success was
+	// written and only when the request explicitly opted in. The monitor stays
+	// alive to detect the client's Close, EOF, or cancellation; this handler
+	// then closes the retained socket. No lease is activated here.
+	if req.DeliveryControl && transferred && bindErr == nil && writeErr == nil {
+		if e := writeCLIRunControlReady(conn); e != nil {
+			close(stop)
+			_ = conn.Close()
+			return e
+		}
+		<-watchDone
+		close(stop)
+		_ = conn.Close()
+		return nil
+	}
 	// Closing unblocks the monitor if it is still reading; the close of stop
 	// tells it a lost monitor is expected rather than a client cancellation.
 	close(stop)
@@ -683,7 +707,7 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 	if !parsed {
 		return CLIRunBrokerRequest{}, false
 	}
-	keysAllowed := map[string]struct{}{"v": {}, "vault_path": {}, "scope": {}, "targets": {}}
+	keysAllowed := map[string]struct{}{"v": {}, "vault_path": {}, "scope": {}, "targets": {}, "delivery_control": {}}
 	for key, value := range values {
 		if _, allowed := keysAllowed[key]; !allowed {
 			return CLIRunBrokerRequest{}, false
@@ -713,6 +737,10 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 	if json.Unmarshal(values["v"], &v) != nil || v != 1 {
 		return CLIRunBrokerRequest{}, false
 	}
+	var deliveryControl bool
+	if raw, present := values["delivery_control"]; present && json.Unmarshal(raw, &deliveryControl) != nil {
+		return CLIRunBrokerRequest{}, false
+	}
 	if json.Unmarshal(values["vault_path"], &vaultPath) != nil {
 		return CLIRunBrokerRequest{}, false
 	}
@@ -728,7 +756,7 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 		return CLIRunBrokerRequest{}, false
 	}
 	valid = true
-	return CLIRunBrokerRequest{V: 1, VaultPath: vaultPath, Scope: scope, Targets: targets}, true
+	return CLIRunBrokerRequest{V: 1, VaultPath: vaultPath, Scope: scope, Targets: targets, DeliveryControl: deliveryControl}, true
 }
 
 // CanonicalCLIRunTargets converts the wire targets to the exact RunBundle
