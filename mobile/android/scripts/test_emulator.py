@@ -270,9 +270,12 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
         try:
             result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         except subprocess.TimeoutExpired as error:
-            # The bytes it did capture are still the run's private log.
-            for data in (error.stdout, error.stderr):
-                if data: log.write(data)
+            # A non-private run keeps the bytes it did capture as evidence;
+            # a private one never writes them, and a closed log is not
+            # reopened, so the timeout stays the primary failure.
+            if not private and not log.closed:
+                for data in (error.stdout, error.stderr):
+                    if data: log.write(data)
             raise RuntimeFailure("timeout") from None
         except OSError as error:
             raise RuntimeFailure("other" if not isinstance(error, FileNotFoundError) else "missing") from None

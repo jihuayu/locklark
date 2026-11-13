@@ -8,9 +8,9 @@ import test_emulator as gate
 import test_emulator_gate as old
 
 # The real client exception class, and private device text that must never print.
-def TIMEOUT():
+def TIMEOUT(*, stdout=None, stderr=None):
     """The real client timeout, with the fields its __init__ requires."""
-    return subprocess.TimeoutExpired(["adb"], 1)
+    return subprocess.TimeoutExpired(["adb"], 1, output=stdout, stderr=stderr)
 PRIVATE = old.RAWTEXT
 DIAGNOSIS = old.DIAGNOSIS
 ERROR = old.ERROR
@@ -20,6 +20,8 @@ GETPROP = ["shell", "getprop"]
 INSTALL = ["install", "-t", "-r"]
 INSTRUMENT = ["shell", "am", "instrument"]
 SETTINGS = ["shell", "settings"]
+OWN_AUTOFILL = b"org.locklark.android/org.locklark.android.autofill.AutofillAuthService"
+SENSITIVE = json.dumps(old.CANARIES).encode()
 
 
 def reply(*, stderr=b"", returncode=1, stdout=b"FAILURES!!!\nINSTRUMENTATION_STATUS_CODE: -2\n"):
@@ -158,10 +160,6 @@ class EntryTests(unittest.TestCase):
             device, self.at(device, SETTINGS + ["put"], lambda: reply(stderr=b"error: device offline\n")))
         # The restore's own put is refused too: the primary keeps its category.
         self.page(code, printed, "autofill-setting", "offline", flag=True)
-        # Private: neither the prior nor the own autofill value reached the log.
-        logged = (gate.STATE / "controller.log").read_bytes()
-        self.assertFalse(old.FakeDevice.PRIOR.encode() in logged, "prior service leaked")
-        self.assertFalse(b"org.locklark.android/.autofill" in logged, "own service leaked")
         # The readback inside the try, refused once the prior read succeeded.
         device = self.device()
         seen = []
@@ -172,6 +170,42 @@ class EntryTests(unittest.TestCase):
             return reply(stderr=b"device unauthorized\n")
         code, printed = self.attempt(device, self.at(device, SETTINGS + ["get"], readback))
         self.page(code, printed, "autofill-setting", "unauthorized", flag=True)
+
+    def test_settings_values_never_reach_the_log_on_success(self):
+        # The prior read, the put and the readback all succeed: the real
+        # service strings exist only in memory, never in the private log.
+        device = self.device()
+        code, printed = self.attempt(device)
+        self.assertEqual(code, 0)
+        ran = [command for command in device.commands if command[:2] == ["shell", "settings"]]
+        self.assertEqual([command[2] for command in ran[:3]], ["get", "put", "get"])
+        logged = (gate.STATE / "controller.log").read_bytes()
+        self.assertFalse(old.FakeDevice.PRIOR.encode() in logged, "prior service leaked")
+        self.assertFalse(OWN_AUTOFILL in logged, "own service leaked")
+
+    def test_canary_timeout_keeps_its_partial_bytes_private(self):
+        # A private command after log.close(): a write would raise ValueError
+        # and hide the timeout. The primary stays "timeout", the partial
+        # canary never prints, and the failed restore does not replace it.
+        device = self.device(cleanup_fails=True)
+        def timeout():
+            raise TIMEOUT(stdout=SENSITIVE, stderr=SENSITIVE)
+        code, printed = self.attempt(device, self.at(device, ["exec-out", "run-as"], timeout))
+        self.page(code, printed, "private-canary-scan", "timeout", flag=True)
+        self.assertNotIn(SENSITIVE.decode(), "\n".join(printed))
+        logged = (gate.STATE / "controller.log").read_bytes()
+        self.assertFalse(SENSITIVE in logged, "partial canary leaked to the log")
+
+    def test_rm_timeout_keeps_its_partial_bytes_private(self):
+        # The last private command also runs after log.close().
+        device = self.device()
+        def timeout():
+            raise TIMEOUT(stdout=SENSITIVE, stderr=b"rm: " + SENSITIVE)
+        code, printed = self.attempt(device, self.at(device, ["shell", "run-as"], timeout))
+        self.page(code, printed, "complete-test-count", "timeout")
+        self.assertNotIn(SENSITIVE.decode(), "\n".join(printed))
+        logged = (gate.STATE / "controller.log").read_bytes()
+        self.assertFalse(SENSITIVE in logged, "partial canary leaked to the log")
 
     def test_canary_refusal_is_a_fixed_category(self):
         # required=False, then the manual non-zero check keeps the category.
