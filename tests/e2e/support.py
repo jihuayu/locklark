@@ -2211,15 +2211,99 @@ def desktop_runtime_available(ctx: E2EContext) -> bool:
     return shutil.which("xvfb-run") is not None
 
 
+DESKTOP_SETTINGS_USAGE = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
+
+# One minimal, schema-valid desktop settings document. The key spellings are
+# the dotted preference keys from internal/desktop/settings.go; the values are
+# the documented defaults. ``app.defaultVaultForSaving`` stays empty: it is a
+# save-target preference only, its key spelling is not a path, and no login
+# factor is ever put in settings.
+DESKTOP_SMOKE_SETTINGS: Mapping[str, Any] = {
+    "security.autolock.minutes": 5,
+    "security.clipboard.clearAfterSeconds": 30,
+    "security.autolock.onSleep": True,
+    "security.autolock.onDeviceLock": True,
+    "security.autolock.onWindowClose": True,
+    "security.revealPasswords": False,
+    "privacy.checkHibp": False,
+    "appearance.theme": "system",
+    "appearance.interfaceDensity": "comfortable",
+    "app.keepInTray": True,
+    "app.defaultVaultForSaving": "",
+}
+
+# A vault path that must never appear in argv or settings.
+DESKTOP_VAULT_SENTINEL = "/nonexistent/locklark-desktop-smoke/vault.ll"
+
+
+def desktop_smoke_dir(ctx: E2EContext) -> Path:
+    """The private, owner-only directory holding the smoke settings file."""
+
+    directory = ctx.temp_dir / "desktop-smoke"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if file_mode(directory) != 0o700:
+        raise AssertionError(
+            f"desktop smoke directory is not owner-only: mode {file_mode(directory):o}"
+        )
+    return directory
+
+
+def desktop_smoke_settings(ctx: E2EContext) -> Path:
+    """Write the private settings file the desktop smoke launch binds.
+
+    The file is a regular, absolute, clean path under ``ctx.temp_dir`` written
+    with the same owner-only permissions the desktop persists settings with
+    (``0600`` inside a ``0700`` directory). No HOME/CODEX_HOME/XDG directory
+    is read, written or overridden.
+    """
+
+    path = desktop_smoke_dir(ctx) / "settings.json"
+    path.write_text(
+        json.dumps(DESKTOP_SMOKE_SETTINGS, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    if file_mode(path) != 0o600:
+        raise AssertionError(f"desktop smoke settings is not 0600: {file_mode(path):o}")
+    if not path.is_absolute() or os.path.normpath(str(path)) != str(path):
+        raise AssertionError(f"desktop smoke settings path is not absolute and clean: {path}")
+    return path
+
+
+def desktop_argv(settings: Path) -> list[str]:
+    """The only command line the desktop still accepts: ``--settings`` only."""
+
+    return ["--settings", str(settings)]
+
+
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
-    if shutil.which("xvfb-run") is None:
-        return False
+    """Smoke-launch the real desktop under a private Xvfb/D-Bus session.
+
+    The desktop no longer accepts ``--file``; the only supported argument is
+    ``--settings ABSOLUTE_PATH``. The launch therefore binds an explicit
+    settings file inside this context's private ``temp_dir`` (never HOME, XDG
+    or a global configuration) and asserts the process is still alive after
+    ``seconds``. ``vault`` is the test's target vault: it is only sanity-checked
+    to sit inside the private fixture root and must stay byte-identical, since
+    an idle, locked desktop must not read or mutate it.
+    """
+
+    vault_path = Path(vault)
+    if not vault_path.is_file():
+        raise AssertionError(f"desktop smoke target vault does not exist: {vault_path}")
+    root = os.path.realpath(ctx.temp_dir)
+    if os.path.commonpath([root, os.path.realpath(vault_path)]) != root:
+        raise AssertionError(
+            f"desktop smoke target vault is outside the private fixture root: {vault_path}"
+        )
+    before = sha256_file(vault_path)
+    settings = desktop_smoke_settings(ctx)
     env = dict(os.environ)
     env["TMPDIR"] = str(ctx.temp_dir)
     # Own a complete Linux GUI session: private D-Bus (unless the caller already
     # supplied a usable bus) plus Xvfb, matching the native acceptance scripts.
     command = owned_gui_command(
-        [str(ctx.desktop_bin), "--file", str(vault)], env=env, use_xvfb=True
+        [str(ctx.desktop_bin), *desktop_argv(settings)], env=env, use_xvfb=True
     )
     process = subprocess.Popen(
         command,
@@ -2236,7 +2320,17 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
     )
     try:
         time.sleep(seconds)
-        return process.poll() is None
+        exit_code = process.poll()
+        if exit_code == 2:
+            # Exit 2 is the desktop's fixed usage/path refusal: the argv or
+            # settings binding regressed, never a GUI/session failure.
+            raise AssertionError(
+                "desktop refused its smoke argv before any GUI "
+                f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
+            )
+        if sha256_file(vault_path) != before:
+            raise AssertionError("an idle desktop smoke launch mutated the target vault")
+        return exit_code is None
     finally:
         terminate_process_group(process, grace=3.0, owned_group=process.pid)
 
@@ -3575,9 +3669,15 @@ __all__ = [
     "cli_profiles",
     "cli_supports",
     "command_known",
+    "DESKTOP_SETTINGS_USAGE",
+    "DESKTOP_SMOKE_SETTINGS",
+    "DESKTOP_VAULT_SENTINEL",
+    "desktop_argv",
     "desktop_binary_starts",
     "desktop_runtime_available",
     "desktop_broker_implemented",
+    "desktop_smoke_dir",
+    "desktop_smoke_settings",
     "desktop_sources",
     "edit_url",
     "evidence_paths",
