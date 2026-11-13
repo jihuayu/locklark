@@ -132,7 +132,7 @@ func (s *linuxPendingLeaseStore) Match(req CLIRunBrokerRequest, peer Peer, vault
 	}
 	now := s.now()
 	s.expireLocked(now)
-	s.removeForeignEpochLocked(session, vault, epoch)
+	s.removeOlderEpochLocked(session, vault, epoch)
 	s.removeDeadAnchorsLocked()
 	for i, record := range s.records {
 		if record.key != key {
@@ -185,10 +185,13 @@ func (s *linuxPendingLeaseStore) expireLocked(now time.Time) {
 	s.records = kept
 }
 
-func (s *linuxPendingLeaseStore) removeForeignEpochLocked(session *personal.Session, vault string, epoch uint64) {
+// removeOlderEpochLocked evicts only records strictly older than the current
+// epoch. A late request carrying an older epoch must not close a newer record;
+// its key simply does not match and Match returns false without granting.
+func (s *linuxPendingLeaseStore) removeOlderEpochLocked(session *personal.Session, vault string, epoch uint64) {
 	kept := s.records[:0]
 	for _, record := range s.records {
-		if record.key.session == session && record.key.vault == vault && record.key.epoch != epoch {
+		if record.key.session == session && record.key.vault == vault && record.key.epoch < epoch {
 			_ = record.anchor.Close()
 			continue
 		}

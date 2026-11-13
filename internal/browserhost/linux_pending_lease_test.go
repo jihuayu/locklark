@@ -110,7 +110,7 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	store := newLinuxPendingLeaseStore(4)
 	var index atomic.Int32
 	var added, ttlOK, duplicateNoRenew, anchorLive, matched, oldEpochCleaned atomic.Bool
-	var clearClosed, closeClosed, capacityOK, closedMatched atomic.Bool
+	var clearClosed, closeClosed, capacityOK, newerPreserved, closedMatched atomic.Bool
 	var anchorFD, clearFD, closeFD, capacityFD atomic.Int32
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, peer Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
@@ -168,6 +168,18 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 				capacityStore.mu.Unlock()
 				capacityStore.Clear()
 				capacityOK.Store(capacityA && !capacityB && capacityRecords == 1 && linuxPendingFDClosed(capacityFD.Load()))
+
+				newerStore := newLinuxPendingLeaseStore(2)
+				if newerStore.Add(req, peer, "newer-vault", session, 8, deadline) {
+					newerFD := linuxPendingFD(newerStore)
+					stale := newerStore.Match(req, peer, "newer-vault", session, 7)
+					newerStore.mu.Lock()
+					newerRecords := len(newerStore.records)
+					newerLive := newerRecords == 1 && newerStore.records[0].anchor.live()
+					newerStore.mu.Unlock()
+					newerPreserved.Store(!stale && newerRecords == 1 && newerLive && !linuxPendingFDClosed(newerFD))
+					newerStore.Clear()
+				}
 			}
 			return BrokerCLIResponse{}, ErrCLIRunRefused
 		},
@@ -248,6 +260,9 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 		fail()
 	case !capacityOK.Load():
 		stage = "S-assert-capacity"
+		fail()
+	case !newerPreserved.Load():
+		stage = "S-assert-newer"
 		fail()
 	case closedMatched.Load():
 		stage = "S-assert-closed"
