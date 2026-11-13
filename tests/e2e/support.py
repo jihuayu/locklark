@@ -2300,49 +2300,121 @@ def desktop_argv(settings: Path) -> list[str]:
 
 
 # Fixed note appended to any error that unwinds while the smoke's owned
-# session was not proven dead, or whose cleanup itself failed. ``kind`` is one
-# of "teardown", "unproven", "verify" or "body"; the rest is a short, vetted
-# description (exception type name or exit state), never a payload.
+# session was not proven dead, or whose own cleanup failed. It is built only
+# from booleans and exception *type names* (never a message or payload):
+# ``pre``/``post`` mutation, ``exit2``, ``body``/``teardown``/``verify`` and
+# ``unproven``. Every fact that holds is listed, not just the first one.
 DESKTOP_SMOKE_CLEANUP_FAILED = "desktop-smoke-cleanup-failed"
 
+# Exit status carried by the ``SystemExit`` this helper raises when the launch
+# refused to start: same contract as cmd/locklark-desktop (2 = fixed usage).
+_DESKTOP_SMOKE_EXIT_REFUSED = 2
 
-def desktop_cleanup_note(
-    kind: str, *, error: BaseException | None = None, exit_code: Any = None
-) -> str:
-    """The fixed ``cleanup-failed`` note (:data:`DESKTOP_SMOKE_CLEANUP_FAILED`)."""
-
-    parts = [f"cleanup={DESKTOP_SMOKE_CLEANUP_FAILED}", f"kind={kind}"]
-    if error is not None:
-        parts.append(f"error={type(error).__name__}")
-    if exit_code is not None:
-        parts.append(f"exit={type(exit_code).__name__}:{exit_code!r}")
-    return "{" + " ".join(parts) + "}"
+# Exit status carried by the ``SystemExit`` this helper re-raises when its
+# cleanup failed and the original exit would otherwise read as success.
+_DESKTOP_SMOKE_EXIT_CLEANUP = 1
 
 
-def _annotate_cleanup_failure(exc: BaseException | None, note: str) -> None:
-    """Attach ``note`` to ``exc`` without ever replacing or masking it.
+def desktop_cleanup_note(facts: Mapping[str, Any]) -> str | None:
+    """The fixed ``cleanup-failed`` note for all cleanup/mutation facts.
 
-    The note travels through the exception's fixed ``__notes__`` list
-    (``add_note`` semantics). Only a ``SystemExit`` that would otherwise read
-    as success (``None``/``0``) also gets its success marker in ``args``
-    replaced by the fixed note, so cleanup failure can never look like success.
+    Returns ``None`` when nothing is wrong. The note lists every flag that
+    holds — ``mutated-pre``/``mutated-post``, ``exit2``, ``body``,
+    ``teardown(<Type>)``, ``verify(<Type>)``, ``unproven`` — and the recorded
+    exit state, so no single failure can hide another.
     """
 
-    if exc is None:
-        return
+    parts: list[str] = []
+    if facts.get("pre_mutated"):
+        parts.append("mutated-pre")
+    if facts.get("post_mutated"):
+        parts.append("mutated-post")
+    if facts.get("exit_code") == _DESKTOP_SMOKE_EXIT_REFUSED:
+        parts.append("exit2")
+    if facts.get("verify_error") is not None:
+        parts.append(f"body({type(facts['verify_error']).__name__})")
+    if facts.get("teardown_error") is not None:
+        parts.append(f"teardown({type(facts['teardown_error']).__name__})")
+    if facts.get("hash_error") is not None:
+        parts.append(f"verify({type(facts['hash_error']).__name__})")
+    if not facts.get("reaped"):
+        parts.append("unproven")
+    exit_code = facts.get("exit_code")
+    if exit_code is not None:
+        parts.append(f"exit={exit_code!r}" if type(exit_code) is int else f"exit-{type(exit_code).__name__}")
+    if not parts:
+        return None
+    return "{" + " ".join([f"cleanup={DESKTOP_SMOKE_CLEANUP_FAILED}", *parts]) + "}"
+
+
+def _annotate_cleanup_failure(exc: BaseException, note: str) -> None:
+    """Attach ``note`` to ``exc`` without replacing or masking it.
+
+    The note travels through the exception's ``__notes__`` list (``add_note``
+    semantics). A ``SystemExit`` keeps its type and message but never leaves
+    with a success code: ``None``/``0`` become :data:`_DESKTOP_SMOKE_EXIT_CLEANUP`.
+    """
+
     notes = getattr(exc, "__notes__", None)
     if not isinstance(notes, list):
         notes = []
-        try:
-            exc.__notes__ = notes
-        except (AttributeError, TypeError):
-            notes = []
-    notes.append(note)
-    if isinstance(exc, SystemExit) and exc.code in (None, 0):
-        try:
-            exc.args = (f"{DESKTOP_SMOKE_CLEANUP_FAILED} {note}",)
-        except (AttributeError, TypeError):
-            pass
+    if note not in notes:
+        notes.append(note)
+    try:
+        exc.__notes__ = notes
+    except (AttributeError, TypeError):
+        pass
+    if isinstance(exc, SystemExit):
+        code = exc.code
+        if code is None or (isinstance(code, int) and code == 0):
+            exc.code = _DESKTOP_SMOKE_EXIT_CLEANUP
+            exc.args = (_DESKTOP_SMOKE_EXIT_CLEANUP,)
+
+
+def _smoke_outcome(
+    facts: Mapping[str, Any], primary: BaseException | None
+) -> BaseException | None:
+    """Decide exactly which error, if any, the smoke raises.
+
+    Priority (first match wins): vault mutation (pre OR post) > exit-2 usage
+    refusal > the original ``primary`` error > cleanup failure > success.
+    success. Every non-mutation error that is about to be raised carries the
+    full cleanup note, and a ``primary`` error that is not about to be raised
+    is annotated in place too, so a cleanup failure is never masked.
+    """
+
+    note = desktop_cleanup_note(facts)
+    mutated = bool(facts.get("pre_mutated") or facts.get("post_mutated"))
+    refusal = facts.get("exit_code") == _DESKTOP_SMOKE_EXIT_REFUSED
+    raised: BaseException | None = None
+    if mutated:
+        raised = AssertionError(
+            "desktop smoke mutated the target vault (during the window and/or "
+            "after its owned session was terminated and reaped; "
+            f"pre={bool(facts.get('pre_mutated'))} post={bool(facts.get('post_mutated'))})"
+        )
+    elif refusal:
+        raised = SystemExit(_DESKTOP_SMOKE_EXIT_REFUSED)
+    elif primary is not None:
+        raised = primary
+    elif note is not None:
+        raised = AssertionError(
+            "desktop smoke cleanup failed and no primary error carried it"
+        )
+    if note is not None:
+        for exc in (raised, primary):
+            if exc is not None:
+                _annotate_cleanup_failure(exc, note)
+    if isinstance(raised, SystemExit):
+        # ``args`` is the interpreter's exit message and is never shown by
+        # ``str(SystemExit)``; carry it only after a refusal this helper made.
+        # A primary ``SystemExit`` is re-raised untouched.
+        refused = (
+            "desktop refused its smoke argv before any GUI "
+            f"(expected {DESKTOP_SETTINGS_USAGE!r}); rc={_DESKTOP_SMOKE_EXIT_REFUSED}"
+        )
+        raised.args = (f"{refused}; {note}",) if note is not None else (refused,)
+    return raised
 
 
 def desktop_group_reaped(process: subprocess.Popen) -> bool:
@@ -2379,21 +2451,16 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
     target vault is hashed once around the active window and again only after
     the owned session was terminated and reaped; both facts are kept
     individually, so a desktop that writes the vault and then restores it (for
-    example while shutting down on SIGTERM) still fails. The verdict is:
+    example while shutting down on SIGTERM) still fails.
 
-    1. a changed vault (during the window or after teardown) -> one fixed
-       error, with the highest precedence;
-    2. an exit-2 usage refusal -> the fixed usage error;
-    3. the original exception unwinding this function, re-raised unchanged;
-    4. no such primary error -> success only when the exit was normal *and*
-       the owned session is proven reaped.
-
-    Whenever the session was not proven dead, the teardown raised, or the
-    final hash could not be taken, the error that unwinds — the original one,
-    the usage refusal, or a new failure when none existed — carries the fixed
-    ``desktop-smoke-cleanup-failed`` note; a successful ``SystemExit(0)`` can
-    never leave as success. No ``finally`` returns, so no primary error is
-    swallowed.
+    Every phase only records facts; one decision (:func:`_smoke_outcome`) then
+    applies the fixed priority: mutation (pre OR post) > exit-2 usage refusal
+    > original exception (re-raised unchanged) > cleanup failure > success
+    (normal exit and the owned session proven reaped). Anything wrong during
+    teardown or the final hash adds the fixed ``desktop-smoke-cleanup-failed``
+    note to the error that unwinds; a ``SystemExit`` never leaves with a
+    success code. No ``finally`` returns and no phase re-raises on its own, so
+    no primary error is swallowed and the final hash always runs.
     """
 
     vault_path = Path(vault)
@@ -2430,10 +2497,10 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
         "pre_mutated": False,
         "post_mutated": False,
         "exit_code": None,
-        "reaped": None,
+        "reaped": False,
+        "body_error": None,
         "teardown_error": None,
-        "verify_error": None,
-        "aborted": False,
+        "hash_error": None,
     }
     primary: BaseException | None = None
     try:
@@ -2447,90 +2514,40 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
                 facts["pre_mutated"] = True
         except BaseException as exc:
             primary = exc
+            facts["body_error"] = exc
     finally:
         try:
             terminate_process_group(process, grace=3.0, owned_group=process.pid)
         except BaseException as exc:  # noqa: BLE001 - any escape is a failure
             facts["teardown_error"] = exc
         try:
-            facts["reaped"] = desktop_group_reaped(process)
+            facts["reaped"] = bool(desktop_group_reaped(process))
         except BaseException as exc:  # noqa: BLE001
             facts["teardown_error"] = facts["teardown_error"] or exc
             facts["reaped"] = False
-        # The last statement of the finally: runs even for SystemExit and for a
-        # cleanup that raised, so the final hash is never skipped.
+        # The last statement of the finally: runs under any BaseException,
+        # including a SystemExit and a teardown that raised. It only records
+        # the fact; priority is decided once, after this point.
         try:
             try:
                 facts["post_mutated"] = sha256_file(vault_path) != before
             except FileNotFoundError:
                 # The vault vanishing is a change, not an unknown.
                 facts["post_mutated"] = True
-        except BaseException as exc:  # noqa: BLE001 - reported as "body"
-            facts["aborted"] = True
-            facts["verify_error"] = exc
-            if primary is None:
-                raise
+        except BaseException as exc:  # noqa: BLE001
+            facts["hash_error"] = exc
 
-    mutated = facts["pre_mutated"] or facts["post_mutated"]
-    cleanup_failed = (
-        facts["teardown_error"] is not None
-        or not facts["reaped"]
-        or facts["verify_error"] is not None
-    )
-    note = None
-    if facts["aborted"]:
-        note = desktop_cleanup_note(
-            "body", error=facts["verify_error"], exit_code=facts["exit_code"]
-        )
-    elif facts["teardown_error"] is not None:
-        note = desktop_cleanup_note(
-            "teardown", error=facts["teardown_error"], exit_code=facts["exit_code"]
-        )
-    elif facts["verify_error"] is not None:
-        note = desktop_cleanup_note(
-            "verify", error=facts["verify_error"], exit_code=facts["exit_code"]
-        )
-    elif not facts["reaped"]:
-        note = desktop_cleanup_note("unproven", exit_code=facts["exit_code"])
-    if note is None and cleanup_failed:
-        # Defensive invariant: cleanup_failed is derived from exactly the three
-        # facts above, so this is unreachable; it fails closed if it changes.
-        note = desktop_cleanup_note("unproven", exit_code=facts["exit_code"])
-
-    if mutated:
-        failure = AssertionError(
-            "desktop smoke mutated the target vault (during the window and/or "
-            f"after its owned session was terminated and reaped; pre={facts['pre_mutated']} "
-            f"post={facts['post_mutated']}): {vault_path}"
-        )
-        if note is not None:
-            _annotate_cleanup_failure(failure, note)
-            _annotate_cleanup_failure(primary, note)
+    # Every phase only recorded facts; decide once, and never without the note.
+    failure = _smoke_outcome(facts, primary)
+    if failure is not None:
         raise failure
-    if facts["exit_code"] == 2:
-        # Exit 2 is the desktop's fixed usage/path refusal: the argv or
-        # settings binding regressed, never a GUI/session failure.
-        if note is None:
-            raise AssertionError(
-                "desktop refused its smoke argv before any GUI "
-                f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}): {command!r}"
-            )
-        failure = AssertionError(
-            "desktop refused its smoke argv before any GUI "
-            f"(rc=2, expected {DESKTOP_SETTINGS_USAGE!r}) {note}: {command!r}"
-        )
-        _annotate_cleanup_failure(failure, note)
-        raise failure
-    if primary is not None:
-        if note is not None:
-            _annotate_cleanup_failure(primary, note)
-        raise primary
-    if note is not None:
+    if desktop_cleanup_note(facts) is not None:
+        # Unreachable: any note forces ``failure`` above. Fails closed if the
+        # decision logic ever changes.
         raise AssertionError(
-            "desktop smoke teardown failed or was not proven reaped, and no "
-            f"other error carried the failure: {note}"
+            f"desktop smoke cleanup failure without an error: {desktop_cleanup_note(facts)}"
         )
-    return facts["exit_code"] is None
+    return True
 
 
 def file_mode(path: Path) -> int:
