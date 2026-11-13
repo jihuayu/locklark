@@ -102,3 +102,73 @@ func TestControlPhaseCodec(t *testing.T) {
 		}
 	}
 }
+
+func TestControlServerAckCodec(t *testing.T) {
+	challengeA := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{3}, cliRunControlChallengeBytes))
+	challengeB := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, cliRunControlChallengeBytes))
+	commitRaw := `{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":true}`
+	cancelRaw := `{"v":1,"op":"cancel","challenge":"` + challengeB + `","ack":true}`
+
+	if decoded, err := DecodeControlServerAck([]byte(commitRaw)); err != nil || decoded.Challenge != challengeA || !decoded.Ack {
+		t.Fatalf("commit ack decode mismatch: %#v %v", decoded, err)
+	}
+	if decoded, err := DecodeControlServerAck([]byte(cancelRaw)); err != nil || decoded.Op != ControlPhaseCancel || decoded.Challenge != challengeB || !decoded.Ack {
+		t.Fatalf("cancel ack did not preserve fields: %#v %v", decoded, err)
+	}
+	if _, err := DecodeControlServerAck([]byte(commitRaw + " \r\n")); err != nil {
+		t.Fatalf("server ack rejected legal trailing whitespace: %v", err)
+	}
+	if _, err := DecodeControlServerAck([]byte(commitRaw + "x")); err == nil {
+		t.Fatal("server ack accepted non-whitespace trailing data")
+	}
+
+	ack := ControlServerAck{V: 1, Op: ControlPhaseCancel, Challenge: challengeB, Ack: true}
+	got, err := MarshalControlServerAck(ack)
+	if err != nil || string(got) != cancelRaw {
+		t.Fatalf("cancel ack encoder mismatch: %q %v", got, err)
+	}
+	other := ControlServerAck{V: 1, Op: ControlPhaseCommit, Challenge: challengeB, Ack: true}
+	gotOther, err := MarshalControlServerAck(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeControlServerAck(gotOther); err != nil || decoded.Challenge != challengeB {
+		t.Fatalf("different canonical challenge was not preserved: %#v %v", decoded, err)
+	}
+
+	for _, raw := range []string{
+		`{"v":null,"op":"commit","challenge":"` + challengeA + `","ack":true}`,
+		`{"v":true,"op":"commit","challenge":"` + challengeA + `","ack":true}`,
+		`{"v":[],"op":"commit","challenge":"` + challengeA + `","ack":true}`,
+		`{"v":1,"op":null,"challenge":"` + challengeA + `","ack":true}`,
+		`{"v":1,"op":1,"challenge":"` + challengeA + `","ack":true}`,
+		`{"v":1,"op":{},"challenge":"` + challengeA + `","ack":true}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":false}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":null}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":"true"}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":true,"x":1}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":true,"ack":true}`,
+		`{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":true} ` + "x",
+	} {
+		if _, err := DecodeControlServerAck([]byte(raw)); err == nil {
+			t.Fatalf("server ack accepted invalid raw %q", raw)
+		}
+	}
+	if _, err := DecodeControlServerAck([]byte(`{"v":1,"op":"commit","challenge":"` + challengeA + `"}`)); err == nil {
+		t.Fatal("server ack accepted client direction")
+	}
+	if _, err := DecodeControlClientPhase([]byte(commitRaw)); err == nil {
+		t.Fatal("client phase accepted server ack direction")
+	}
+	for _, invalid := range []ControlServerAck{
+		{V: 1, Op: ControlPhaseCancel, Challenge: challengeB},
+		{V: 1, Op: ControlPhaseCancel, Challenge: challengeB, Ack: false},
+		{V: 2, Op: ControlPhaseCancel, Challenge: challengeB, Ack: true},
+		{V: 1, Op: "activate", Challenge: challengeB, Ack: true},
+		{V: 1, Op: ControlPhaseCancel, Challenge: "", Ack: true},
+	} {
+		if _, err := MarshalControlServerAck(invalid); err == nil {
+			t.Fatalf("server ack encoder accepted %#v", invalid)
+		}
+	}
+}
