@@ -206,6 +206,73 @@ os._exit(0)
 """
 )
 
+# The write-then-restore variant: in the window, after the nudge, it captures
+# the vault's original bytes and rewrites the vault with ``fsync``; the helper's
+# in-window digest must see that change. Its real SIGTERM handler then restores
+# exactly those original bytes with ``fsync`` and re-reads them before reporting
+# ``restored``/``done``, so the helper's post-teardown digest sees the original
+# bytes again and records post=False. The handler is installed before the launch
+# report and the process exits only after that handler completes -- no exec,
+# no fixed outcome, and no wait/reap by the test.
+_WRITE_RESTORE_STAND_IN = (
+    _SEEDED_STAND_IN_PREAMBLE
+    + f"""
+def _owned_now():
+    return os.getppid() == _harness_pid and os.getsid(0) == os.getpid()
+
+
+# Captured before the in-window rewrite, so the handler restores the exact
+# bytes it replaced rather than a literal copied from the test.
+with open(_vault, "rb") as _vault_file:
+    _original = _vault_file.read()
+
+
+def _on_sigterm(signum, frame):
+    global _vh_stopping
+    if _vh_stopping:
+        return
+    _vh_stopping = True
+    # Restore only from the helper's own session; a foreign SIGTERM exits.
+    if not _owned_now():
+        os._exit({_OWNED_EXIT})
+    with open(_vault, "r+b") as _vault_file:
+        _vault_file.seek(0)
+        _vault_file.truncate()
+        _vault_file.write(_original)
+        _vault_file.flush()
+        os.fsync(_vault_file.fileno())
+    with open(_vault, "rb") as _vault_file:
+        _restored = _vault_file.read() == _original
+    os.write(1, b"restored " + (b"ok" if _restored else b"bad") + b"\\n")
+    if not _owned_now():
+        os._exit({_OWNED_EXIT})
+    os.write(1, b"done\\n")
+
+
+# Installed before the launch report and before the nudge wait: the helper's
+# real SIGTERM is the only teardown this process sees.
+_vh_stopping = False
+signal.signal(signal.SIGTERM, _on_sigterm)
+while not os.path.exists(_nudge[0]):
+    time.sleep(0.01)
+# Ownership again right before the write, without a group signal: only the
+# helper's own session (and this process as its leader) may reach the vault.
+if not _owned_now():
+    os._exit({_OWNED_EXIT})
+with open(_vault, "r+b") as _vault_file:
+    _vault_file.seek(0)
+    _vault_file.truncate()
+    _vault_file.write({_MUTATION!r})
+    _vault_file.flush()
+    os.fsync(_vault_file.fileno())
+os.write(1, b"mutated\\n")
+os.write(1, b"alive\\n")
+while not _vh_stopping:
+    time.sleep(0.05)
+os._exit(0)
+"""
+)
+
 # The mutation-then-exit-2 variant: in the window, after the nudge, it rewrites
 # its own vault exactly like the in-window variant, reports ``mutated``/``exit2``
 # and then really ends with status 2 (the desktop's usage refusal) -- no exec.
@@ -1097,6 +1164,63 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
         self.assertEqual(teardown["returncode"], [0], "teardown did not run the child's handler")
         self.assert_launch_owned_and_reaped(reports, required=set(reports))
+
+    def test_window_write_then_sigterm_restore_still_reports_pre_mutation(self):
+        # The owned child changes the vault inside the window (after the
+        # helper's ``before`` digest), and only its real SIGTERM handler puts
+        # the captured original bytes back. The helper's own facts must
+        # therefore be pre=True and post=False: the in-window digest saw the
+        # write, the post-teardown digest saw the restore, and the mutation
+        # verdict still wins. Neither digest nor the outcome is mocked, and
+        # this test never waits on or reaps the Popen itself.
+        self._nudge_after = "launch"
+        before = _sha256(self.vault)
+        teardown = self.observe_owned_teardown()
+        outcomes = self.observe_smoke_outcome()
+
+        reports, error = self.mutation_launch(
+            _WRITE_RESTORE_STAND_IN, harness_pid=os.getpid()
+        )
+        self.assertIsInstance(error, AssertionError)
+        self.assertNotEqual(type(error), SystemExit, "the smoke left as a non-failure")
+        self.assert_mutation_error(error, pre=True, post=False)
+
+        # The helper's real facts are the evidence: the in-window digest saw
+        # the change and the digest after its own teardown saw the restore.
+        self.assertEqual(len(outcomes), 1, "the helper's outcome was not recorded")
+        (facts,) = outcomes
+        self.assertIs(facts["pre_mutated"], True)
+        self.assertIs(facts["post_mutated"], False)
+        self.assertIs(facts["reaped"], True)
+        self.assertIsNone(facts["teardown_error"])
+        self.assertIsNone(facts["hash_error"])
+        # The child was still alive when the helper took its in-window poll;
+        # it exited only from the real SIGTERM handler, so the window fact is
+        # not a usage refusal (2) and no pre-window exit made pre True.
+        self.assertIsNone(facts["exit_code"])
+
+        self.assert_reports_drained()
+        self.assertEqual(
+            set(reports),
+            {"launch", "mutated", "alive", "restored", "done"},
+            reports,
+        )
+        self.assertEqual(self.reports, reports, "reports changed after draining")
+        self.assertEqual(reports["restored"], "ok", "the child's handler restore was not proven")
+        self.assert_private_signals()
+
+        # The post digest is the same as the before digest: the handler
+        # restored exactly the bytes it captured, not a fixed literal.
+        self.assertEqual(_sha256(self.vault), before, "the vault was not restored")
+        self.assertEqual(self.vault.read_bytes(), _VAULT_BYTES)
+
+        # The helper's own teardown observed the child still running and then
+        # reaped its real status; the test did not wait on it.
+        self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
+        self.assertEqual(len(teardown["returncode"]), 1)
+        (exit_status,) = teardown["returncode"]
+        self.assertEqual(exit_status, 0, "the helper did not reap the restored child's exit")
+        self.assert_launch_owned_and_reaped(reports)
 
     def test_early_exit_is_false_not_a_liveness_pass(self):
         # A desktop that stops during the window (other than the exit-2 usage
