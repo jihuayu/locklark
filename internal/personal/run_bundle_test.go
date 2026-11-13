@@ -1192,6 +1192,10 @@ func TestPrepareBrokeredRunReturnsSlotValuesAfterIntent(t *testing.T) {
 		// Validation requires the .exe suffix; the path still never exists.
 		request.Program += ".exe"
 	}
+	request.Directory = filepath.Join(request.Directory, "locklark-broker-work-sentinel")
+	if err := os.Mkdir(request.Directory, 0700); err != nil {
+		t.Fatal(err)
+	}
 	root := brokeredRunRoot(t)
 
 	receipt, values, err := s.PrepareBrokeredRun(context.Background(), bundleTestTargets(f), request, root)
