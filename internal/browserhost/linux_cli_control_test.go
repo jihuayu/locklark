@@ -529,7 +529,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		clear(rawReply)
 		rawReady, err := readFrame(conn, MaxOutput)
 		clear(rawReady)
-		if err == nil {
+		if !errors.Is(err, io.EOF) {
 			_ = conn.Close()
 			os.Exit(2)
 		}
@@ -737,6 +737,9 @@ func TestCLIRunControlReadyContract(t *testing.T) {
 	}{
 		{"ready", ready(challenge), true},
 		{"crlf", ready(challenge) + "\r\n", true},
+		{"escaped-cr-in-challenge", ready(challenge[:len(challenge)-1] + `\r` + "A"), false},
+		{"escaped-lf-in-challenge", ready(challenge[:len(challenge)-1] + `\n` + "A"), false},
+		{"escaped-crlf-in-challenge", ready(challenge[:len(challenge)-1] + `\r\n` + "A"), false},
 		{"old-missing-challenge", `{"v":1,"delivery_control":true}`, false},
 		{"wrong-v", `{"v":2,"delivery_control":true,"challenge":"` + challenge + `"}`, false},
 		{"null-v", `{"v":null,"delivery_control":true,"challenge":"` + challenge + `"}`, false},
