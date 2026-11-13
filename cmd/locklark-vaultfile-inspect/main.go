@@ -126,12 +126,9 @@ func classifyVaultError(err error) string {
 }
 
 func decodeCheckpoint(raw []byte) (*vaultfile.PolicyCheckpoint, error) {
-	var wire checkpointWire
-	if err := strictDecode(raw, &wire); err != nil {
+	wire, err := parseCheckpointWire(raw)
+	if err != nil {
 		return nil, err
-	}
-	if wire.V != 1 || wire.VaultID == "" || wire.OwnerRootKeyID == "" {
-		return nil, errors.New("checkpoint")
 	}
 	publicKey, err := decode32(wire.OwnerRootPublicKey)
 	if err != nil {
@@ -149,6 +146,66 @@ func decodeCheckpoint(raw []byte) (*vaultfile.PolicyCheckpoint, error) {
 	}, nil
 }
 
+func parseCheckpointWire(raw []byte) (checkpointWire, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return checkpointWire{}, errors.New("checkpoint")
+	}
+	seen := map[string]bool{}
+	var wire checkpointWire
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return checkpointWire{}, errors.New("checkpoint")
+		}
+		key, ok := tok.(string)
+		if !ok || seen[key] {
+			return checkpointWire{}, errors.New("checkpoint")
+		}
+		seen[key] = true
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return checkpointWire{}, errors.New("checkpoint")
+		}
+		switch key {
+		case "v":
+			if err := json.Unmarshal(value, &wire.V); err != nil || wire.V != 1 {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		case "vault_id":
+			if err := json.Unmarshal(value, &wire.VaultID); err != nil || wire.VaultID == "" {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		case "owner_root_key_id":
+			if err := json.Unmarshal(value, &wire.OwnerRootKeyID); err != nil || wire.OwnerRootKeyID == "" {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		case "owner_root_public_key":
+			if err := json.Unmarshal(value, &wire.OwnerRootPublicKey); err != nil || wire.OwnerRootPublicKey == "" {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		case "policy_seq":
+			if err := json.Unmarshal(value, &wire.PolicySeq); err != nil {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		case "policy_digest":
+			if err := json.Unmarshal(value, &wire.PolicyDigest); err != nil || wire.PolicyDigest == "" {
+				return checkpointWire{}, errors.New("checkpoint")
+			}
+		default:
+			return checkpointWire{}, errors.New("checkpoint")
+		}
+	}
+	tok, err = dec.Token()
+	if err != nil || tok != json.Delim('}') || len(seen) != 6 {
+		return checkpointWire{}, errors.New("checkpoint")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return checkpointWire{}, errors.New("checkpoint")
+	}
+	return wire, nil
+}
 func decode32(value string) ([]byte, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != value {
@@ -156,16 +213,4 @@ func decode32(value string) ([]byte, error) {
 		return nil, errors.New("checkpoint")
 	}
 	return raw, nil
-}
-
-func strictDecode(raw []byte, dst *checkpointWire) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	if dec.Decode(&struct{}{}) != io.EOF {
-		return errors.New("trailing")
-	}
-	return nil
 }
