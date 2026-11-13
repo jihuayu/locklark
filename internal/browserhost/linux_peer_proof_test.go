@@ -285,8 +285,23 @@ func TestLinuxPeerProofRealChildUnixSocket(t *testing.T) {
 	if _, err := io.ReadFull(conn, nonce); err != nil || string(nonce) != linuxPeerProofFixedNonce {
 		t.Fatal("fixed nonce handshake failed")
 	}
-	pidfd := linuxOwnedPidFDFDForTest(t, proof.pidfd)
 	ttyfd := linuxOwnedTTYFDForTest(t, proof.ttyfd)
+	if err := proof.ttyfd.Close(); err != nil {
+		t.Fatal("ttyfd-only close failed")
+	}
+	if !proof.pidfd.live() {
+		t.Fatal("pidfd liveness was lost with the tty fd")
+	}
+	if proof.live() {
+		t.Fatal("proof stayed live with only the pidfd held")
+	}
+	if _, err := unix.FcntlInt(uintptr(ttyfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatal("ttyfd-only close left the tty fd open")
+	}
+	pidfd := linuxOwnedPidFDFDForTest(t, proof.pidfd)
+	if _, err := unix.FcntlInt(uintptr(pidfd), unix.F_GETFD, 0); err != nil {
+		t.Fatal("ttyfd-only close affected the pidfd")
+	}
 	if err := proof.Close(); err != nil || proof.live() {
 		t.Fatal("peer proof close did not retire both owned fds")
 	}
