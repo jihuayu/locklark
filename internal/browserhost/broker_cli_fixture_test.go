@@ -20,11 +20,13 @@ import (
 // only give the path checks a well-formed shape; they name no real directory
 // and claim no terminal.
 //
-// unclean is an absolute program path with a ".." element, for the check that
-// refuses a program path filepath.Clean would rewrite. joining is a syntactically
-// absolute path built with "/" separators only: it is not cleaned (Windows
-// filepath.Clean rewrites "/" to "\\"), so it passes the program-path check but
-// not the stricter cleaned-helper check.
+// program and unclean name a program the host accepts, so on Windows they
+// carry the .exe suffix the RunBundle request check requires. unclean is an
+// absolute program path with a ".." element, for the check that refuses a
+// program path filepath.Clean would rewrite. joining is a syntactically
+// absolute helper path built with "/" separators only: it is not cleaned
+// (Windows filepath.Clean rewrites "/" to "\\"), so it passes the program-path
+// check but not the stricter cleaned-helper check.
 var cliRunFixturePaths = struct {
 	base, tty, program, work, runRoot, helper string
 	unclean, joining                          string
@@ -34,8 +36,13 @@ var _ = func() bool {
 	p := &cliRunFixturePaths
 	p.base = filepath.Join(volumeRoot(), "locklark", "fixture")
 	join := func(elem ...string) string { return filepath.Join(append([]string{p.base}, elem...)...) }
-	p.tty, p.program, p.work, p.runRoot, p.helper = join("ttys-fixture"), join("bin", "gh"), join("work"), join("run-root"), join("helpers")
-	p.unclean = p.base + string(filepath.Separator) + "bin" + string(filepath.Separator) + ".." + string(filepath.Separator) + "bin" + string(filepath.Separator) + "gh"
+	program := "gh"
+	if runtime.GOOS == "windows" {
+		program += ".exe"
+	}
+	sep := string(filepath.Separator)
+	p.tty, p.program, p.work, p.runRoot, p.helper = join("ttys-fixture"), join("bin", program), join("work"), join("run-root"), join("helpers")
+	p.unclean = p.base + sep + "bin" + sep + ".." + sep + "bin" + sep + program
 	p.joining = p.base + "/bin/../gh"
 	return true
 }()
