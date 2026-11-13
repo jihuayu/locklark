@@ -93,6 +93,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	stage = "S-receipt"
 	receipt := cliRunReceiptFromFixture(t)
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
+	var closeOK, cancelOK, eofOK, defaultEOFOK atomic.Bool
 	var count atomic.Int32
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
@@ -142,7 +143,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 			fail()
 		}
 	}
-	runEvent := func(mode, nonce string, hold bool) (byte, time.Duration, time.Duration) {
+	runEvent := func(mode, nonce string, hold bool) (byte, time.Duration, time.Duration, bool) {
 		stage = "S-client-" + mode
 		stdoutR, stdoutW, err := os.Pipe()
 		if err != nil {
@@ -174,6 +175,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		if err != nil {
 			fail()
 		}
+		connFD := rawConnFD(conn)
 		start := time.Now()
 		serveDone := make(chan struct{})
 		go func() {
@@ -199,6 +201,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		readyAt := time.Since(start)
 		<-serveDone
 		elapsed := time.Since(start)
+		fdClosed := linuxPendingFDClosed(int32(connFD))
 		if hold {
 			_ = stdin.Close()
 		}
@@ -206,17 +209,25 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 			fail()
 		}
 		_ = stdoutR.Close()
-		return event, readyAt, elapsed
+		return event, readyAt, elapsed, fdClosed
 	}
 	run("control", strings.Repeat("a1", 32))
 	run("default", strings.Repeat("b2", 32))
 	run("control-refused", strings.Repeat("c3", 32))
-	deadlineEvent, deadlineReady, deadlineElapsed := runEvent("control-deadline", strings.Repeat("d4", 32), false)
-	deadlineOK.Store(deadlineEvent == 'D' && deadlineReady >= 3*time.Second &&
+	deadlineEvent, deadlineReady, deadlineElapsed, deadlineClosed := runEvent("control-deadline", strings.Repeat("d4", 32), false)
+	deadlineOK.Store(deadlineEvent == 'D' && deadlineClosed && deadlineReady >= 3*time.Second &&
 		deadlineElapsed >= 3*time.Second && deadlineElapsed < 6*time.Second)
-	holdEvent, holdReady, holdElapsed := runEvent("control-hold", strings.Repeat("e5", 32), true)
-	hardCapOK.Store(holdEvent == 'R' && holdElapsed >= 7*time.Second && holdElapsed < 10500*time.Millisecond &&
-		holdElapsed-holdReady < 7*time.Second)
+	holdEvent, holdReady, holdElapsed, holdClosed := runEvent("control-hold", strings.Repeat("e5", 32), true)
+	hardCapOK.Store(holdEvent == 'R' && holdClosed && holdElapsed >= 7*time.Second &&
+		holdElapsed < 10500*time.Millisecond && holdElapsed-holdReady < 7*time.Second)
+	closeEvent, _, _, closeClosed := runEvent("control-close", strings.Repeat("f6", 32), true)
+	closeOK.Store(closeEvent == 'X' && closeClosed)
+	cancelEvent, _, _, cancelClosed := runEvent("control-cancel", strings.Repeat("a7", 32), true)
+	cancelOK.Store(cancelEvent == 'C' && cancelClosed)
+	eofEvent, _, _, eofClosed := runEvent("control-eof", strings.Repeat("b8", 32), false)
+	eofOK.Store(eofEvent == 'E' && eofClosed)
+	defaultEvent, _, _, defaultClosed := runEvent("default-hold", strings.Repeat("c9", 32), false)
+	defaultEOFOK.Store(defaultEvent == 'F' && defaultClosed)
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -233,6 +244,22 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !deadlineOK.Load() {
 		stage = "S-assert-deadline"
+		fail()
+	}
+	if !closeOK.Load() {
+		stage = "S-assert-close"
+		fail()
+	}
+	if !cancelOK.Load() {
+		stage = "S-assert-cancel"
+		fail()
+	}
+	if !eofOK.Load() {
+		stage = "S-assert-eof"
+		fail()
+	}
+	if !defaultEOFOK.Load() {
+		stage = "S-assert-default-eof"
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIControlOK); err != nil {
@@ -299,10 +326,71 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		signal('R')
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		_ = control.Close()
+	case "control-close":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		_ = control.Close()
+		signal('X')
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	case "control-cancel":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		cancel()
+		<-ctx.Done()
+		signal('C')
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	case "control-eof":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		signal('E')
+		os.Exit(0)
+	case "default-hold":
+		endpoint, err := DefaultBrokerEndpoint()
+		if err != nil {
+			os.Exit(2)
+		}
+		conn, err := dialLocal(ctx, endpoint)
+		if err != nil {
+			os.Exit(2)
+		}
+		if _, err := cliRunExchange(ctx, conn, req); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		raw, err := readFrame(conn, MaxOutput)
+		clear(raw)
+		if err == nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		signal('F')
+		_ = conn.Close()
 	default:
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func rawConnFD(conn net.Conn) int {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return -1
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return -1
+	}
+	var fd int
+	if err := raw.Control(func(candidate uintptr) { fd = int(candidate) }); err != nil {
+		return -1
+	}
+	return fd
 }
 
 func TestCLIRunControlReadyContract(t *testing.T) {
