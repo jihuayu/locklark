@@ -754,46 +754,6 @@ func TestCLIRunBrokerCancellationIsTerminal(t *testing.T) {
 	}
 }
 
-// TestCLIRunBrokerChildCancelledBySignal proves the same signal-aware context
-// cancels a prepared child: after a successful preparation, the signal cancels
-// the run and the dispatcher returns a terminal cancellation without falling
-// back.
-func TestCLIRunBrokerChildCancelledBySignal(t *testing.T) {
-	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true, f.tty)
-	shim := filepath.Join(t.TempDir(), "locklark.test")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 600\n"), 0700); err != nil {
-		t.Fatal("shim program unavailable")
-	}
-	f.request.Program, f.request.Args = shim, nil
-	t.Setenv("LOCKLARK_TEST_TOKEN", "")
-	requested := make(chan struct{})
-	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
-		close(requested)
-		return auditedReply("token", cliBrokerFixturePassword), nil
-	}
-	opens := 0
-	installCLIRunLocalConsole(t, func() (*os.File, *os.File, error) {
-		opens++
-		return nil, nil, errRunCLIConsole
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cliRunBrokerSignalsAction(t, func() {
-		go func() {
-			<-requested
-			cancel()
-		}()
-	})
-	err := executeCLIAuthenticatedWithBroker(ctx, "brokertool", f.binding, f.targets, f.call().Request)
-	if err == nil || err == errCLIRunBrokerAbsent || err == errRunCLIConsole || opens != 0 {
-		t.Fatalf("cancelled child fell back to the local factor: %v opens=%d", err, opens)
-	}
-	if _, ok := err.(*childExitStatus); ok {
-		t.Fatalf("cancelled child reported an exit status: %v", err)
-	}
-}
-
 // TestCLIRunBrokerQueuedSignalBeforeUnavailableIsTerminal is the no-sleep
 // dispatcher regression for the handoff race: SIGINT is queued in the broker
 // channel as the transport returns the exact browserhost.ErrBrokerUnavailable.

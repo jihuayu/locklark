@@ -112,15 +112,18 @@ func holdCLIChildIndependentStdin(t *testing.T) {
 	})
 }
 
-// TestCLIRunBrokerChildCancellationClosesRealProcess drives the production
-// dispatcher, but not the real broker transport: the request seam immediately
-// returns the audited reply without changing the request or waiting for the
-// child. The parent creates its own crypto/rand ready nonce (never the broker
-// scope nonce), listens on loopback, and fixes the child arguments and program
-// digest before the call. Once the real test binary has connected and sent the
-// exact nonce and PID, the non-blocking signal seam delivers Interrupt. The SUT
-// must return the typed terminal broker failure with no local fallback, and a
-// short read deadline must observe EOF, proving the child exited.
+// TestCLIRunBrokerChildCancellationClosesRealProcess is the complete
+// replacement for the removed shell/sleep-based
+// TestCLIRunBrokerChildCancelledBySignal. It drives the production dispatcher,
+// but not the real broker transport: the request seam immediately returns the
+// audited reply without changing the request or waiting for the child. The
+// parent creates its own crypto/rand ready nonce (never the broker scope
+// nonce), listens on loopback, and fixes the child arguments and program digest
+// before the call. Once the real test binary has connected and sent the exact
+// nonce and PID, the non-blocking signal seam delivers Interrupt. The SUT must
+// return the typed terminal broker failure with no local fallback, and a short
+// read deadline must observe EOF, proving the child exited. No second
+// shell-based child cancellation case is retained.
 func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
