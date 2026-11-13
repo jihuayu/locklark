@@ -25,6 +25,7 @@ COMMAND GROUPS
   cli           Bind and run pinned developer CLIs with ephemeral credentials
   team          Bootstrap and inspect owner team profiles and trust pins
   plugin        Manage signed local plugin catalogs (third-party execution disabled)
+  vaultfile     Inspect one sealed vault file without unlocking it
 
 PERSONAL VAULT (locklark personal <action> --file PATH ...)
   Vault & Lifecycle
@@ -79,6 +80,11 @@ CLI WRAPPERS (locklark cli <command> ...)
 TEAM BOOTSTRAP (locklark team <command> ...)
   team create|export-initial|fetch-initial|status|reconcile-protection --profile ABS_PATH [flags]
   Run "locklark team --help" for subcommand flags and exit codes.
+
+VAULTFILE INSPECTION (read-only)
+  vaultfile inspect --file PATH --checkpoint FILE
+    Verify a sealed file against an explicit caller-pinned checkpoint.
+    Reports policy/signature status only; does not decrypt the KDBX payload.
 
 PLUGIN CATALOG (locklark plugin <command> ...)
   plugin init        --file NEW_DB
@@ -141,6 +147,8 @@ func run(args []string, out, errOut io.Writer) error {
 		return runPersonal(args[1:], out)
 	case "plugin":
 		return runPlugin(args[1:], out)
+	case "vaultfile":
+		return runVaultfile(args[1:], out)
 	case "cli":
 		return runCLICommand(args[1:], out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":

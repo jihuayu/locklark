@@ -1,4 +1,4 @@
-package main
+package vaultfileinspect
 
 import (
 	"crypto/sha256"

@@ -1,7 +1,7 @@
 // Command locklark-vaultfile-inspect performs a read-only, caller-pinned
 // policy and content-signature inspection of one sealed vault file. It never
 // decrypts or authenticates the KDBX payload.
-package main
+package vaultfileinspect
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 	"errors"
 	"flag"
 	"io"
-	"os"
 
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
@@ -47,10 +46,9 @@ type resultWire struct {
 	Error        string `json:"error,omitempty"`
 }
 
-func main() {
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		os.Exit(1)
-	}
+// Run executes the read-only vaultfile inspection command.
+func Run(args []string, out io.Writer) error {
+	return run(args, out)
 }
 
 func run(args []string, out io.Writer) error {
