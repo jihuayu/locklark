@@ -10,8 +10,13 @@ import (
 
 // TestMain makes this binary usable as a real brokered child on every
 // platform: only the exact two-argument mode form with exit status 0 or 7
-// exits with that status, and every other invocation runs the suite normally.
+// exits with that status, only the exact four-argument readiness mode runs the
+// long-lived cancellation child, and every other invocation runs the suite
+// normally.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == cliBrokerReadyChildMode {
+		os.Exit(runCLIBrokerReadyChild(os.Args[2], os.Args[3]))
+	}
 	if len(os.Args) == 3 && os.Args[1] == "locklark-test-child-exit" {
 		if code := os.Args[2]; code == "0" || code == "7" {
 			os.Exit(int(code[0] - '0'))
