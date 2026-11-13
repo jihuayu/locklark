@@ -2705,7 +2705,10 @@ class MacInputBuildingTests(unittest.TestCase):
         self.assertEqual([(event["code"], event["down"]) for event in posted],
                          [(0x3B, True), (0x00, True), (0x00, False), (0x3B, False)])
         self.assertEqual(len(api.quartz.flagged), 4)
-        self.assertEqual({flags for _event, flags in api.quartz.flagged}, {macos.FLAGS["Control_L"]})
+        # Control is a pressed-state mask: the release of Control itself is the
+        # only event on which Control is no longer held.
+        self.assertEqual([flags for _event, flags in api.quartz.flagged],
+                         [macos.FLAGS["Control_L"]] * 3 + [0])
 
     def test_command_a_chord_posts_super_keycode_with_command_flag(self):
         api = self.api()
@@ -2714,7 +2717,108 @@ class MacInputBuildingTests(unittest.TestCase):
         self.assertEqual([event["code"] for event in posted], [0x37, 0x00, 0x00, 0x37])
         self.assertEqual([event["down"] for event in posted], [True, True, False, False])
         self.assertNotEqual(macos.FLAGS["Super_L"], macos.FLAGS["Control_L"])
-        self.assertEqual(api.quartz.flagged, [(event, macos.FLAGS["Super_L"]) for event in posted])
+        # Command is a pressed-state mask: Super down, a down/up and finally
+        # the Super up carry it only while Super is held.
+        self.assertEqual(api.quartz.flagged,
+                         [(posted[0], macos.FLAGS["Super_L"]),
+                          (posted[1], macos.FLAGS["Super_L"]),
+                          (posted[2], macos.FLAGS["Super_L"]),
+                          (posted[3], 0)])
+
+    def test_chord_flag_masks_follow_press_accumulate_and_reverse_release(self):
+        command, control = macos.FLAGS["Super_L"], macos.FLAGS["Control_L"]
+        cases = {
+            # A Chord of Super and 'a': Super down, 'a' down/up both Command-held,
+            # then the final Super up is Command-free.
+            ("Super_L", "a"): [command, command, command, 0],
+            # Two modifiers: every held key carries the sum; each release drops
+            # only its own bit, letter last.
+            ("Control_L", "Super_L", "a"): [
+                control,                          # Control down
+                control | command,                # Super down: both held
+                control | command,                # 'a' down: both held
+                control | command,                # 'a' up: both held
+                control,                          # Super up: Command gone
+                0],                               # Control up: nothing held
+        }
+        for parts, masks in cases.items():
+            with self.subTest(parts=parts, masks=masks):
+                api = self.api()
+                api.press_chord(parts)
+                codes = [macos.KEYCODES[part] for part in parts]
+                self.assertEqual([(event["code"], event["down"])
+                                  for event in api.quartz.posted],
+                                 [(code, True) for code in codes]
+                                 + [(code, False) for code in reversed(codes)])
+                self.assertEqual([flags for _event, flags in api.quartz.flagged], masks)
+                self.assertEqual(masks[-1], 0)
+
+    def test_super_a_final_release_is_not_command_and_releases_reverse(self):
+        api = self.api()
+        api.press_chord(("Super_L", "a"))
+        posted, flagged = api.quartz.posted, api.quartz.flagged
+        self.assertEqual([event["code"] for event, _flags in flagged], [0x37, 0x00, 0x00, 0x37])
+        self.assertEqual([event for event, _flags in flagged], posted)
+        self.assertEqual(flagged[-1], (posted[-1], 0))
+        self.assertFalse(flagged[-1][1] & macos.FLAGS["Super_L"])
+
+    def test_compound_modifiers_unhold_each_flag_with_its_holder(self):
+        api = self.api()
+        api.press_chord(("Control_L", "Shift_L", "Super_L", "a"))
+        control, shift, command = (macos.FLAGS["Control_L"], macos.FLAGS["Shift_L"],
+                                   macos.FLAGS["Super_L"])
+        compound = control | shift | command
+        self.assertEqual([flags for _event, flags in api.quartz.flagged],
+                         [control,                    # Control down
+                          control | shift,            # Shift down
+                          compound,                   # Super down: all held
+                          compound,                   # 'a' down: all held
+                          compound,                   # 'a' up: all held
+                          control | shift,            # Super up: Command gone
+                          control,                    # Shift up: Shift gone
+                          0])                         # Control up: nothing held
+        self.assertEqual(len(api.quartz.flagged), 8)
+
+    def test_both_sides_of_one_bit_clear_only_after_the_last_holder(self):
+        # (parts, per chord part: carries the bit, per down post: tagged,
+        #                        per up post: tagged)
+        cases = (
+            (("Control_L", "Control_R", "a"), (1, 1, 0), (1, 1, 1), (1, 1, 0)),
+            (("Alt_L", "Alt_R", "a"), (1, 1, 0), (1, 1, 1), (1, 1, 0)),
+            (("Shift_R", "Shift_L", "a"), (1, 1, 0), (1, 1, 1), (1, 1, 0)),
+            (("Shift_L", "a", "Shift_R"), (1, 0, 1), (1, 1, 1), (1, 1, 0)),
+            (("Shift_L", "a", "Shift_R", "Alt_L"),
+             (1, 0, 1, 0), (1, 1, 1, 1), (1, 1, 1, 0)),
+        )
+        for parts, on_bit, down_masks, up_masks in cases:
+            with self.subTest(parts=parts):
+                api = self.api()
+                api.press_chord(parts)
+                bit = macos.FLAGS[parts[0]]
+                self.assertEqual([bool(macos.FLAGS.get(part, 0) & bit) for part in parts],
+                                 [bool(tag) for tag in on_bit])
+                self.assertEqual(sum(on_bit), 2)   # both sides of this bit
+                masks = [flags for _event, flags in api.quartz.flagged]
+                self.assertEqual(len(masks), 2 * len(parts))
+                self.assertEqual([bool(flags & bit) for flags in masks],
+                                 [bool(tag) for tag in down_masks + up_masks])
+                # Counted, not idempotent: each release decrements the count
+                # for the shared bit, so the side released first (last chord
+                # part) still sees the other side held -- up_masks[0] is 1 for
+                # every side-by-side shape, including interleaved ones.  Only
+                # the release that brings the count to zero posts without it.
+                self.assertFalse(masks[-1] & bit)
+
+    def test_chord_without_modifier_keeps_the_empty_flag_mask(self):
+        for parts in (("a",), ("a", "s"), ("Escape", "Tab")):
+            with self.subTest(parts=parts):
+                api = self.api()
+                api.press_chord(parts)
+                codes = [macos.KEYCODES[part] for part in parts]
+                self.assertEqual([(event["code"], event["down"]) for event in api.quartz.posted],
+                                 [(code, True) for code in codes]
+                                 + [(code, False) for code in reversed(codes)])
+                self.assertEqual(api.quartz.flagged, [])
 
     def test_typing_posts_two_events_per_character(self):
         api = self.api()
@@ -2835,7 +2939,7 @@ class FailingQuartzEvents(FakeQuartzEvents):
         FakeQuartzEvents.__init__(self)
         self.fail_create, self.fail_post = set(fail_create), set(fail_post)
         self.fail_unicode, self.fail_flags = fail_unicode, fail_flags
-        self.post_attempts = []
+        self.post_attempts, self.flag_attempts = [], []
 
     def CGEventCreateMouseEvent(self, proxy, kind, point, button):
         if len(self.created) in self.fail_create:
@@ -2855,7 +2959,11 @@ class FailingQuartzEvents(FakeQuartzEvents):
         FakeQuartzEvents.CGEventKeyboardSetUnicodeString(self, event, length, text)
 
     def CGEventSetFlags(self, event, flags):
-        if self.fail_flags:
+        # True fails every call; an int fails only at that zero-based position.
+        self.flag_attempts.append((event, flags))
+        if (self.fail_flags is True
+                or (type(self.fail_flags) is int
+                    and len(self.flag_attempts) - 1 == self.fail_flags)):
             raise RuntimeError("flags unavailable")
         FakeQuartzEvents.CGEventSetFlags(self, event, flags)
 
@@ -2900,6 +3008,39 @@ class MacInputPreconstructionTests(unittest.TestCase):
     def test_flag_failure_posts_nothing(self):
         self.refused(self.api(fail_flags=True), "input-unsupported",
                      lambda api: api.press_chord(("Control_L", "a")))
+
+    def test_modifier_chord_flag_failure_posts_nothing(self):
+        for parts in (("Super_L", "a"), ("Control_L", "Super_L", "a"),
+                      ("Control_L", "Control_R", "a"), ("a",)):
+            with self.subTest(parts=parts):
+                api = self.api(fail_flags=(parts != ("a",)))
+                if parts == ("a",):
+                    api.press_chord(parts)  # no modifier: no flag call at all
+                    self.assertEqual(api.quartz.flagged, [])
+                    continue
+                self.refused(api, "input-unsupported", lambda api: api.press_chord(parts))
+
+    def test_modifier_chord_partial_flag_failure_posts_nothing(self):
+        for parts in (("Super_L", "a"), ("Control_L", "Control_R", "a"),
+                      ("Control_L", "Shift_L", "Super_L", "a")):
+            for position in range(2 * len(parts)):
+                with self.subTest(parts=parts, position=position):
+                    api = self.api(fail_flags=position)
+                    with self.assertRaises(contract.ContractError) as error:
+                        api.press_chord(parts)
+                    self.assertEqual(error.exception.code, "input-unsupported")
+                    self.assertEqual(api.quartz.posted, [])
+                    self.assertEqual(api.quartz.post_attempts, [])
+                    self.assertEqual(len(api.quartz.flag_attempts), position + 1)
+
+    def test_modifier_chord_creation_failure_at_every_position_posts_nothing(self):
+        for parts in (("Super_L", "a"), ("Control_L", "Shift_L", "Super_L", "a"),
+                      ("Control_L", "Control_R", "a")):
+            for position in range(2 * len(parts)):
+                with self.subTest(parts=parts, position=position):
+                    api = self.api(fail_create={position})
+                    self.refused(api, "input-failed", lambda api: api.press_chord(parts))
+                    self.assertEqual(api.quartz.flagged, [])
 
     def test_mid_batch_post_failure_is_unknown_and_never_retried(self):
         api = self.api(fail_post={2})

@@ -1901,26 +1901,58 @@ class QuartzApi:
         return self._post(events)
 
     def press_chord(self, parts):
-        """Build the chord and set its flags before the first post."""
+        """Build the chord and set its per-event flags before the first post.
+
+        ``FLAGS`` is the CGEventFlags pressed-state mask (Apple: "EventFlags"),
+        so a modifier carries its flag only while it is held.  The down events
+        (chord order) add a count for their bit and the up events (reverse
+        order) remove it, so the final ``Super`` up posts with no Command flag.
+        A bit shared by the left/right sides is held until the count reaches
+        zero, and a chord without a modifier keeps the empty mask throughout.
+        """
         quartz = self.quartz
-        codes, flags = [], 0
+        parts = list(parts)
+        codes = [KEYCODES.get(part) for part in parts]
+        if any(code is None for code in codes):
+            raise contract.ContractError("input-unsupported")
+        # Count held keys per flag bit: the left/right sides of a modifier
+        # share one bit, so only the release that drops the count to zero may
+        # clear it.  The mask on each posted event is the set of bits with a
+        # positive count after that event.
+        counts, held, unheld = {}, [], []
+
+        def live():
+            mask = 0
+            for flag, count in counts.items():
+                if count > 0:
+                    mask |= flag
+            return mask
+
         for part in parts:
-            code = KEYCODES.get(part)
-            if code is None:
-                raise contract.ContractError("input-unsupported")
-            codes.append(code)
-            flags |= FLAGS.get(part, 0)
-        events = [quartz.CGEventCreateKeyboardEvent(None, code, True) for code in codes]
-        events += [quartz.CGEventCreateKeyboardEvent(None, code, False) for code in reversed(codes)]
-        if any(event is None for event in events):
-            raise contract.ContractError("input-failed")
-        if flags:
+            bit = FLAGS.get(part, 0)
+            if bit:
+                counts[bit] = counts.get(bit, 0) + 1
+            held.append(live())
+        for part in reversed(parts):
+            bit = FLAGS.get(part, 0)
+            if bit:
+                counts[bit] -= 1
+            unheld.append(live())
+        sequence = ([(code, True, flag) for code, flag in zip(codes, held)]
+                    + [(code, False, flag) for code, flag in zip(reversed(codes), unheld)])
+        events = []
+        for code, down, flag in sequence:
+            event = quartz.CGEventCreateKeyboardEvent(None, code, down)
+            if event is None:
+                raise contract.ContractError("input-failed")
+            events.append((event, flag))
+        if any(flag for _event, flag in events):
             try:
-                for event in events:
-                    quartz.CGEventSetFlags(event, flags)
+                for event, flag in events:
+                    quartz.CGEventSetFlags(event, flag)
             except Exception:
                 raise contract.ContractError("input-unsupported")
-        return self._post(events)
+        return self._post([event for event, _flag in events])
 
 
 class MacAdapter:
