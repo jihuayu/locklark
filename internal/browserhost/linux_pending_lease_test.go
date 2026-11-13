@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -108,18 +109,65 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	stage = "S-store"
 	store := newLinuxPendingLeaseStore(4)
 	var index atomic.Int32
-	var added, anchorLive, matched, closedMatched atomic.Bool
+	var added, ttlOK, duplicateNoRenew, anchorLive, matched, oldEpochCleaned atomic.Bool
+	var clearClosed, closeClosed, capacityOK, closedMatched atomic.Bool
+	var anchorFD, clearFD, closeFD, capacityFD atomic.Int32
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, peer Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
 			switch index.Add(1) {
 			case 1:
-				added.Store(store.Add(req, peer, req.VaultPath, session, 7, session.AuthorityDeadline()))
+				deadline := session.AuthorityDeadline()
+				now := time.Now()
+				added.Store(store.Add(req, peer, req.VaultPath, session, 7, deadline))
+				store.mu.Lock()
+				if len(store.records) == 1 {
+					record := store.records[0]
+					anchorFD.Store(int32(record.anchor.file.Fd()))
+					ttlOK.Store(record.expiry.After(now) &&
+						!record.expiry.After(now.Add(linuxPendingLeaseTTL)) &&
+						(deadline.IsZero() || !record.expiry.After(deadline)))
+					expiry := record.expiry
+					store.mu.Unlock()
+					duplicate := !store.Add(req, peer, req.VaultPath, session, 7, deadline)
+					store.mu.Lock()
+					duplicateNoRenew.Store(duplicate && len(store.records) == 1 && store.records[0].expiry.Equal(expiry))
+				}
+				store.mu.Unlock()
 			case 2:
 				matched.Store(store.Match(req, peer, req.VaultPath, session, 7))
+				oldEpoch := store.Match(req, peer, req.VaultPath, session, 8)
+				store.mu.Lock()
+				oldRecords := len(store.records)
+				store.mu.Unlock()
+				oldEpochCleaned.Store(!oldEpoch && oldRecords == 0 && linuxPendingFDClosed(anchorFD.Load()))
 				store.Clear()
 				store.Close()
 			case 3:
 				closedMatched.Store(store.Match(req, peer, req.VaultPath, session, 7))
+				deadline := session.AuthorityDeadline()
+				clearStore := newLinuxPendingLeaseStore(2)
+				if clearStore.Add(req, peer, "clear-vault", session, 7, deadline) {
+					clearFD.Store(linuxPendingFD(clearStore))
+					clearStore.Clear()
+					clearClosed.Store(linuxPendingFDClosed(clearFD.Load()))
+				}
+				closeStore := newLinuxPendingLeaseStore(2)
+				if closeStore.Add(req, peer, "close-vault", session, 7, deadline) {
+					closeFD.Store(linuxPendingFD(closeStore))
+					closeStore.Close()
+					closeClosed.Store(linuxPendingFDClosed(closeFD.Load()))
+				}
+				capacityStore := newLinuxPendingLeaseStore(1)
+				capacityA := capacityStore.Add(req, peer, "capacity-a", session, 7, deadline)
+				if capacityA {
+					capacityFD.Store(linuxPendingFD(capacityStore))
+				}
+				capacityB := capacityStore.Add(req, peer, "capacity-b", session, 7, deadline)
+				capacityStore.mu.Lock()
+				capacityRecords := len(capacityStore.records)
+				capacityStore.mu.Unlock()
+				capacityStore.Clear()
+				capacityOK.Store(capacityA && !capacityB && capacityRecords == 1 && linuxPendingFDClosed(capacityFD.Load()))
 			}
 			return BrokerCLIResponse{}, ErrCLIRunRefused
 		},
@@ -158,7 +206,7 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	store.mu.Lock()
 	records := len(store.records)
 	if records == 1 {
-		anchorLive.Store(store.records[0].anchor.live())
+		anchorLive.Store(store.records[0].anchor.live() && !linuxPendingFDClosed(anchorFD.Load()))
 	}
 	store.mu.Unlock()
 	switch {
@@ -180,8 +228,26 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	case !added.Load():
 		stage = "S-assert-add"
 		fail()
+	case !ttlOK.Load():
+		stage = "S-assert-ttl"
+		fail()
+	case !duplicateNoRenew.Load():
+		stage = "S-assert-renew"
+		fail()
 	case !matched.Load():
 		stage = "S-assert-match"
+		fail()
+	case !oldEpochCleaned.Load():
+		stage = "S-assert-oldepoch"
+		fail()
+	case !clearClosed.Load():
+		stage = "S-assert-clearfd"
+		fail()
+	case !closeClosed.Load():
+		stage = "S-assert-closefd"
+		fail()
+	case !capacityOK.Load():
+		stage = "S-assert-capacity"
 		fail()
 	case closedMatched.Load():
 		stage = "S-assert-closed"
@@ -192,6 +258,34 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 	}
 	_ = result.Close()
 	os.Exit(0)
+}
+
+func linuxPendingFD(store *linuxPendingLeaseStore) int32 {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.records) != 1 {
+		return 0
+	}
+	return int32(store.records[0].anchor.file.Fd())
+}
+
+func linuxPendingFDClosed(fd int32) bool {
+	if fd <= 0 {
+		return false
+	}
+	var stat unix.Stat_t
+	return errors.Is(unix.Fstat(int(fd), &stat), unix.EBADF)
+}
+
+func TestLinuxPendingLeaseCapacityBound(t *testing.T) {
+	for _, capacity := range []int{-1, 0, 17, 1000} {
+		if got := newLinuxPendingLeaseStore(capacity).capacity; got != linuxPendingLeaseCapacity {
+			t.Fatalf("capacity %d was not clamped to %d", capacity, linuxPendingLeaseCapacity)
+		}
+	}
+	if got := newLinuxPendingLeaseStore(1).capacity; got != 1 {
+		t.Fatalf("small capacity changed to %d", got)
+	}
 }
 
 func TestLinuxPendingScopeDigestExcludesNonceAndTempRoot(t *testing.T) {

@@ -46,7 +46,7 @@ type linuxPendingLeaseStore struct {
 }
 
 func newLinuxPendingLeaseStore(capacity int) *linuxPendingLeaseStore {
-	if capacity <= 0 {
+	if capacity <= 0 || capacity > linuxPendingLeaseCapacity {
 		capacity = linuxPendingLeaseCapacity
 	}
 	return &linuxPendingLeaseStore{capacity: capacity, now: time.Now}
@@ -132,10 +132,17 @@ func (s *linuxPendingLeaseStore) Match(req CLIRunBrokerRequest, peer Peer, vault
 	}
 	now := s.now()
 	s.expireLocked(now)
-	for _, record := range s.records {
-		if record.key == key && now.Before(record.expiry) && record.anchor.matches(binding) {
-			return true
+	s.removeForeignEpochLocked(session, vault, epoch)
+	s.removeDeadAnchorsLocked()
+	for i, record := range s.records {
+		if record.key != key {
+			continue
 		}
+		if !now.Before(record.expiry) || !record.anchor.matches(binding) {
+			s.removeLocked(i)
+			return false
+		}
+		return true
 	}
 	return false
 }
@@ -176,6 +183,37 @@ func (s *linuxPendingLeaseStore) expireLocked(now time.Time) {
 		_ = record.anchor.Close()
 	}
 	s.records = kept
+}
+
+func (s *linuxPendingLeaseStore) removeForeignEpochLocked(session *personal.Session, vault string, epoch uint64) {
+	kept := s.records[:0]
+	for _, record := range s.records {
+		if record.key.session == session && record.key.vault == vault && record.key.epoch != epoch {
+			_ = record.anchor.Close()
+			continue
+		}
+		kept = append(kept, record)
+	}
+	s.records = kept
+}
+
+func (s *linuxPendingLeaseStore) removeDeadAnchorsLocked() {
+	kept := s.records[:0]
+	for _, record := range s.records {
+		if !record.anchor.live() {
+			_ = record.anchor.Close()
+			continue
+		}
+		kept = append(kept, record)
+	}
+	s.records = kept
+}
+
+func (s *linuxPendingLeaseStore) removeLocked(index int) {
+	record := s.records[index]
+	_ = record.anchor.Close()
+	copy(s.records[index:], s.records[index+1:])
+	s.records = s.records[:len(s.records)-1]
 }
 
 func linuxPendingScopeDigest(scope CLIRunScope, targets []personal.CLIBrokerTarget) ([sha256.Size]byte, bool) {
