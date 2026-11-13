@@ -16,15 +16,26 @@ import (
 )
 
 // errLinuxPeerProofUnavailable is the fixed failure result of the private
-// Linux peer-proof helper. It intentionally carries no PID, path, device, or
-// syscall text. The helper is not authorization: it only proves that a live
-// Unix-socket peer has one stable process identity and controlling terminal.
+// Linux peer snapshot helper. It carries no PID, path, device, or syscall text.
+// The helper records a limited candidate snapshot; it is not authorization,
+// attestation, CTTY association, or a lease proof.
+//
+// Equal mount namespaces and one visible devpts do not rule out a retained
+// hidden or prior CTTY instance with the same 136:N. Holding this slave fd pins
+// only this devpts instance's index, not the peer's signal->tty origin.
+//
+// tty_jobctrl.c rejects TIOCGSID/TIOCGPGRP on a slave when the caller's
+// signal->tty is not that real_tty; a different-session broker therefore gets
+// ENOTTY. Re-reading those ioctls cannot establish peer association. A future
+// same-session or kernel-qualified strategy needs separate implementation and
+// a real platform proof. The real-child PTY test is a controlled same-fixture
+// positive, not a general proof of CTTY origin.
 var errLinuxPeerProofUnavailable = errors.New("linux peer proof unavailable")
 
-// linuxPeerProof is one private, unexported kernel proof of a Unix-socket
-// peer. It owns the peer pidfd and CTTY fd until Close. It is not wired into
-// authenticatedPeer, the broker, or any approval/lease path, and it cannot
-// authorize a request by itself.
+// linuxPeerProof is one private, unexported snapshot candidate for a
+// Unix-socket peer. It owns a pidfd and one opened broker-visible TTY candidate
+// until Close. It does not prove peer signal->tty origin and is not wired into
+// authenticatedPeer, the broker, or any authorization/approval/lease path.
 type linuxPeerProof struct {
 	uid   uint32
 	pid   int
@@ -100,9 +111,10 @@ func (p *linuxPeerProof) Close() error {
 	return errors.Join(p.pidfd.Close(), p.ttyfd.Close())
 }
 
-// live reports whether the peer is still running and the owned terminal object
-// is still valid. Before the terminal is acquired only the pidfd is checked;
-// a published proof always has both.
+// live reports only that the held pidfd has no exit event and the held TTY
+// candidate still passes local fstat/path checks. It does not re-associate that
+// candidate with the peer's signal->tty. Before TTY acquisition only the pidfd
+// is checked.
 func (p *linuxPeerProof) live() bool {
 	return p != nil && p.pidfd.live() && p.ttyfd.valid()
 }
@@ -129,9 +141,9 @@ type linuxPeerTTYIdentity struct {
 	mode uint32
 }
 
-// linuxOwnedTTY pins the peer CTTY object for the proof lifetime. Fstat and
-// identity checks run under the same mutex as Close; no raw descriptor accessor
-// exists.
+// linuxOwnedTTY pins one opened broker-visible TTY candidate for the snapshot
+// lifetime. Fstat and local path/identity checks share a mutex with Close; no
+// raw descriptor accessor exists.
 type linuxOwnedTTY struct {
 	mu       sync.Mutex
 	file     *os.File
@@ -157,6 +169,8 @@ func (p *linuxOwnedTTY) Close() error {
 	return err
 }
 
+// valid rechecks only this fd's local object and current path. A matching
+// dev_t/inode is not proof that the peer holds or originated this TTY.
 func (p *linuxOwnedTTY) valid() bool {
 	if p == nil {
 		return false
@@ -186,10 +200,12 @@ type linuxPeerIdentity struct {
 	exe  linuxPeerExecIdentity
 }
 
-// linuxPeerProofFromConn derives a proof only from the supplied connected Unix
-// socket. It reads SO_PEERCRED and SO_PEERPIDFD in one syscall section, holds
-// the pidfd, and revalidates the process and CTTY object before returning.
-// Callers cannot name a PID or terminal path.
+// linuxPeerProofFromConn records a limited candidate only from the supplied
+// connected Unix socket. It reads SO_PEERCRED and SO_PEERPIDFD in one syscall
+// section, holds the pidfd, and checks a broker-visible TTY node whose dev_t
+// matches the peer's current /proc tty_nr. It does not prove that the peer's
+// signal->tty originated from that node or authorize anything. Callers cannot
+// name a PID or terminal path.
 func linuxPeerProofFromConn(conn *net.UnixConn) (*linuxPeerProof, error) {
 	if conn == nil {
 		return nil, errLinuxPeerProofUnavailable
@@ -342,6 +358,9 @@ func readLinuxPeerExecIdentity(pid int, uid uint32) (linuxPeerExecIdentity, bool
 	}, true
 }
 
+// openLinuxPeerTTY opens one broker-visible candidate path and checks its
+// local dev/inode/owner identity. It does not establish peer signal->tty
+// origin; the held fd only prevents this devpts index from being freed.
 func openLinuxPeerTTY(path string, wantDev uint64, uid uint32) (*linuxOwnedTTY, bool) {
 	if !trustedTTYDevice(path) {
 		return nil, false
