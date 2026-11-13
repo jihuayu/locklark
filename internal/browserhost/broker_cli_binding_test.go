@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package browserhost
 
@@ -324,10 +324,10 @@ func TestCLIRunValidationCopyCleared(t *testing.T) {
 	spec := cliprofile.CloneSpec(fixtureValidationSpec())
 	tokenSlot, denyOne, denyTwo, envMap, dirs := &spec.Slots[0], spec.DenyArgs[0], spec.DenyArgs[1], spec.Env, spec.Dirs
 	request := personal.RunBundleRequest{
-		Program:      "/fixture/bin",
+		Program:      cliRunFixturePaths.program,
 		Args:         []string{"--other"},
-		Directory:    "/fixture/work",
-		HelperPath:   []string{"/fixture/helper"},
+		Directory:    cliRunFixturePaths.work,
+		HelperPath:   []string{cliRunFixturePaths.helper},
 		Passthrough:  map[string]string{"FIXTURE_HOST": "keep"},
 		TokenEnvName: "FIXTURE_TOKEN",
 		Spec:         cliprofile.CloneSpec(spec),
@@ -378,7 +378,7 @@ func TestCLIRunValidationCopyCleared(t *testing.T) {
 	scope := cliRunFixtureScope()
 	targets := cliRunFixtureRequest().Targets
 	scopeClone, targetsClone := scope.Clone(), append([]personal.CLIBrokerTarget(nil), targets...)
-	if !validCLIRunRequest(1, "/fixture/vault.ll", scope, targets) {
+	if !validCLIRunRequest(1, cliRunFixtureVault, scope, targets) {
 		t.Fatal("fixture request rejected")
 	}
 	if !reflect.DeepEqual(scope, scopeClone) || !reflect.DeepEqual(targets, targetsClone) {
@@ -392,7 +392,7 @@ func TestCLIRunValidationCopyCleared(t *testing.T) {
 	if len(shared.Slots) == 0 {
 		t.Fatal("built-in profile has no slots")
 	}
-	if !validCLIRunRequest(1, "/fixture/vault.ll", scope, targets) {
+	if !validCLIRunRequest(1, cliRunFixtureVault, scope, targets) {
 		t.Fatal("second fixture request rejected")
 	}
 	if !reflect.DeepEqual(builtin.Spec(), shared) {

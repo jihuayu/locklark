@@ -286,7 +286,7 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	// A valid absolute path that no session under test uses: it passes the
 	// client's scope check, so the callback sees it with no session yet and
 	// answers with the explicit, non-fallback unavailable.
-	req.VaultPath = "/fixture/no-session-vault.ll"
+	req.VaultPath = filepath.Join(cliRunFixturePaths.base, "no-session-vault.ll")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
@@ -549,17 +549,8 @@ func TestWatchCLIRunConnIdleTimeoutsDoNotCancel(t *testing.T) {
 	}
 }
 
-// cliRunFixtureScope sits in broker_fixture_test.go, which has no build tag.
-
-// cliRunFixtureRequest is a valid CLI-run request for outcome classification.
-func cliRunFixtureRequest() CLIRunBrokerRequest {
-	return CLIRunBrokerRequest{
-		V:         1,
-		VaultPath: "/fixture/vault.ll",
-		Scope:     cliRunFixtureScope(),
-		Targets:   []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "password"}},
-	}
-}
+// cliRunFixtureScope and cliRunFixtureRequest sit in
+// broker_cli_fixture_test.go, which has no build tag.
 
 // cliRunScriptedServer listens on a fresh broker socket and answers one CLI-run
 // connection with the supplied reply. It reports whether the client's request
@@ -1190,28 +1181,6 @@ func TestCLIRunResponsesClearRawCopiesWithoutAlteringValues(t *testing.T) {
 			<-sent
 		})
 	}
-}
-
-// cliRunReceiptJSON is a canonical receipt for the fixture request: a 32-hex
-// session and two 64-hex digests.
-func cliRunReceiptJSON() string {
-	return `{"status":"` + personal.RunBundlePreparationStatus + `","session":"` + reqID(70) + `","intent":"` + reqRevision(71) + `","target_digest":"` + reqRevision(72) + `"}`
-}
-
-// cliRunReceiptFromFixture decodes cliRunReceiptJSON into the receipt value.
-func cliRunReceiptFromFixture(t *testing.T) personal.RunBundlePreparationReceipt {
-	t.Helper()
-	receipt, ok := decodeCLIRunReceipt(json.RawMessage(cliRunReceiptJSON()))
-	if !ok {
-		t.Fatal("receipt fixture is not canonical")
-	}
-	return receipt
-}
-
-// cliRunAuditedReply is the exact audited success frame: raw base64 slot
-// values plus the canonical receipt.
-func cliRunAuditedReply(slot, b64 string) string {
-	return `{"v":1,"values_b64":{"` + slot + `":"` + b64 + `"},"receipt":` + cliRunReceiptJSON() + `}`
 }
 
 // TestCLIRunWireExactBytesAndReceipt proves the audited reply is canonical on

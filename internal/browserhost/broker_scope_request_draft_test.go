@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 // This file holds the request-level scope test (TestCLIRunScope_Request). It is
 // kept as an unstaged draft: validCLIRunRequest and reqID are defined only by
@@ -16,7 +16,7 @@ import (
 // TestCLIRunScope_Request proves the shared request check resolves the gh
 // profile and enforces its single token/password slot and canonical IDs.
 func TestCLIRunScope_Request(t *testing.T) {
-	const vault = "/fixture/vault.ll"
+	vault := cliRunFixtureVault
 	scope := cliRunFixtureScope()
 	good := []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "password"}}
 	if !validCLIRunRequest(1, vault, scope, good) {

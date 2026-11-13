@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package browserhost
 
@@ -17,17 +17,17 @@ func TestCLIRunScope_ValidateInvalid(t *testing.T) {
 	eight := func(n int) []string {
 		out := make([]string, n)
 		for i := range out {
-			out[i] = "/fixture/helper-dir"
+			out[i] = cliRunFixturePaths.helper
 		}
 		return out
 	}
 	cases := map[string]func(s *CLIRunScope){
 		"profile-too-long": func(s *CLIRunScope) { s.Profile = tooLong("p", CLIRunMaxProfile+1) },
-		"tty-too-long":     func(s *CLIRunScope) { s.TTY = tooLong("/dev/tty", CLIRunMaxTTYIdentity) },
+		"tty-too-long":     func(s *CLIRunScope) { s.TTY = tooLong(cliRunFixturePaths.tty, CLIRunMaxTTYIdentity) },
 		"nonce-bad":        func(s *CLIRunScope) { s.Nonce = "zz" + s.Nonce[2:] },
 		"nonce-short":      func(s *CLIRunScope) { s.Nonce = s.Nonce[:30] },
 		"program-relative": func(s *CLIRunScope) { s.Program = "fixture/bin/gh" },
-		"program-dirty":    func(s *CLIRunScope) { s.Program = "/fixture/bin/../bin/gh" },
+		"program-dirty":    func(s *CLIRunScope) { s.Program = cliRunFixturePaths.unclean },
 		"program-sha-bad":  func(s *CLIRunScope) { s.ProgramSH = strings.Repeat("A", CLIRunMaxProgramSHA256) },
 		"args-too-many":    func(s *CLIRunScope) { s.Args = eight(CLIRunMaxArgs + 1) },
 		"args-too-long":    func(s *CLIRunScope) { s.Args = []string{tooLong("a", CLIRunMaxArgBytes+1)} },
@@ -40,8 +40,9 @@ func TestCLIRunScope_ValidateInvalid(t *testing.T) {
 				s.Args[i] = strings.Repeat("a", CLIRunMaxArgBytes-1)
 			}
 		},
-		"helper-too-many": func(s *CLIRunScope) { s.Helper = eight(CLIRunMaxHelperPath + 1) },
-		"helper-relative": func(s *CLIRunScope) { s.Helper = []string{"relative-helper"} },
+		"helper-too-many":  func(s *CLIRunScope) { s.Helper = eight(CLIRunMaxHelperPath + 1) },
+		"helper-relative":  func(s *CLIRunScope) { s.Helper = []string{"relative-helper"} },
+		"helper-uncleaned": func(s *CLIRunScope) { s.Helper = []string{cliRunFixturePaths.joining} },
 		"passthru-too-many": func(s *CLIRunScope) {
 			s.Passthru = map[string]string{}
 			for i := 0; i < CLIRunMaxPassthrough+1; i++ {
@@ -116,11 +117,11 @@ func TestCLIRunScope_DecodeRejects(t *testing.T) {
 // value plus that same Clear call.
 func TestCLIRunScope_Clear(t *testing.T) {
 	s := CLIRunScope{
-		Profile: "gh", TTY: "/dev/ttys-fixture", TTYPeerID: "00000001", TTYPlatform: testGOOS,
-		Nonce: strings.Repeat("ab", 16), Program: "/fixture/bin/gh", ProgramSH: strings.Repeat("ab", 32),
-		CWD: "/fixture/work", TempRoot: "/fixture/run-root", Timeout: 60,
+		Profile: "gh", TTY: cliRunFixturePaths.tty, TTYPeerID: "00000001", TTYPlatform: testGOOS,
+		Nonce: strings.Repeat("ab", 16), Program: cliRunFixturePaths.program, ProgramSH: strings.Repeat("ab", 32),
+		CWD: cliRunFixturePaths.work, TempRoot: cliRunFixturePaths.runRoot, Timeout: 60,
 		TokenEnv: "GH_TOKEN",
-		Args:     []string{"--version"}, Helper: []string{"/fixture/helpers"},
+		Args:     []string{"--version"}, Helper: []string{cliRunFixturePaths.helper},
 		Passthru: map[string]string{"GH_HOST": passthruFixture},
 	}
 	args, helper, passthru := s.Args, s.Helper, s.Passthru
@@ -137,8 +138,6 @@ func TestCLIRunScope_Clear(t *testing.T) {
 		t.Fatalf("Clear left values in the decoded collections: %#v %#v %#v", args, helper, passthru)
 	}
 }
-
-const passthruFixture = "fixture-passthrough"
 
 // argsBytesExact is a scope whose args total exactly CLIRunMaxArgsBytes and
 // whose every argument is at most CLIRunMaxArgBytes, so it is refused only if
@@ -184,7 +183,7 @@ func TestCLIRunScope_Valid(t *testing.T) {
 			s := cliRunFixtureScope()
 			s.Helper = make([]string, CLIRunMaxHelperPath)
 			for i := range s.Helper {
-				s.Helper[i] = "/fixture/helpers"
+				s.Helper[i] = cliRunFixturePaths.helper
 			}
 			return s
 		}(),
@@ -216,7 +215,7 @@ func TestCLIRunScope_Clone(t *testing.T) {
 	clone.Helper[0] = "/mutated"
 	clone.Passthru["GH_HOST"] = "mutated"
 	clone.Passthru["EXTRA"] = "mutated"
-	if src.Args[0] != "--hostname" || src.Helper[0] != "/fixture/helpers" ||
+	if src.Args[0] != "--hostname" || src.Helper[0] != cliRunFixturePaths.helper ||
 		src.Passthru["GH_HOST"] != "fixture-passthrough-"+reqID(5) || len(src.Passthru) != 1 {
 		t.Fatalf("clone mutation reached the source: %+v", src)
 	}

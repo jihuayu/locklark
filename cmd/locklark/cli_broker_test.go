@@ -18,6 +18,24 @@ import (
 
 const cliBrokerFixturePassword = "fixture-run-cli-password"
 
+// cliBrokerFixtureTTY is the declared TTY name every brokered fixture run
+// carries: one absolute path below the test's own private fixture directory,
+// so it is a host-native absolute name on every platform the tests run on. The
+// directory is created, so filepath.EvalSymlinks can resolve the name back to
+// the clean copy of that private directory the way a real console path
+// resolves. It is only a declared name for the request/expected checks; it
+// claims no real terminal, and the kernel TTY attestation is never reached by
+// these tests.
+func cliBrokerFixtureTTY(t *testing.T) string {
+	t.Helper()
+	dir := cliTestDir(t)
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal("fixture directory does not resolve:", err)
+	}
+	return filepath.Join(dir, "ttys-fixture")
+}
+
 // installCLIRunBrokerSeams replaces the Darwin gate and every broker seam for
 // one test, and restores the production defaults afterwards. The signal seam
 // is replaced with one that subscribes to nothing, so no test ever delivers a
@@ -25,6 +43,7 @@ const cliBrokerFixturePassword = "fixture-run-cli-password"
 // cliRunBrokerSignalsAction.
 func installCLIRunBrokerSeams(t *testing.T, enabled bool) {
 	t.Helper()
+	tty := cliBrokerFixtureTTY(t)
 	originalEnabled, originalTTY, originalRequest := cliRunBrokerEnabled, cliRunBrokerTTY, cliRunBrokerRequest
 	originalRandom, originalDescribe, originalSignals := cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerSignals
 	t.Cleanup(func() {
@@ -32,7 +51,7 @@ func installCLIRunBrokerSeams(t *testing.T, enabled bool) {
 		cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerSignals = originalRandom, originalDescribe, originalSignals
 	})
 	cliRunBrokerEnabled = func() bool { return enabled }
-	cliRunBrokerTTY = func() (string, string, error) { return "/dev/ttys-fixture", "fixture-peer", nil }
+	cliRunBrokerTTY = func() (string, string, error) { return tty, "fixture-peer", nil }
 	cliRunBrokerDescribe = func(browserhost.CLIRunBrokerRequest) string { return "" }
 	cliRunBrokerSignals = func(chan<- os.Signal) {}
 }
@@ -199,7 +218,7 @@ func TestCLIRunBrokerScopeBindsCommittedRun(t *testing.T) {
 	req := sent[0]
 	want := browserhost.CLIRunScope{
 		Profile:     "token",
-		TTY:         "/dev/ttys-fixture",
+		TTY:         cliBrokerFixtureTTY(t),
 		TTYPeerID:   "",
 		TTYPlatform: browserhost.CLIRunTTYPlatform(),
 		Nonce:       req.Scope.Nonce,
