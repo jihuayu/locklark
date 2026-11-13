@@ -2365,22 +2365,30 @@ def desktop_cleanup_note(facts: Mapping[str, Any]) -> str | None:
 
 
 def _annotate_cleanup_failure(exc: BaseException, note: str) -> None:
-    """Attach ``note``; only a primary ``SystemExit(0)``/``(None)`` gets a new code.
+    """Attach ``note``; any primary ``SystemExit`` success code becomes 1.
 
-    The note travels through ``__notes__``. A ``SystemExit`` keeps its type,
-    ``args`` and message, except that a success code becomes
-    :data:`_DESKTOP_SMOKE_EXIT_CLEANUP` so a real cleanup failure can never
-    leave as exit 0. Any other code is left untouched.
+    The success-code fix runs first, before any note dedup or early return,
+    so the real exit status is corrected even when the note is already
+    present. ``None``, ``0`` and ``False`` (``SystemExit(False)`` exits 0)
+    become :data:`_DESKTOP_SMOKE_EXIT_CLEANUP`; ``True`` and non-success
+    codes (for example 7) are untouched. The object, its ``args`` and its
+    message are never replaced. The note travels through ``__notes__``.
     """
 
-    if note in (getattr(exc, "__notes__", None) or []):
+    if isinstance(exc, SystemExit) and (
+        exc.code is None
+        or (type(exc.code) is int and not exc.code)
+        or (type(exc.code) is bool and not exc.code)
+    ):
+        exc.code = _DESKTOP_SMOKE_EXIT_CLEANUP
+    notes = getattr(exc, "__notes__", None)
+    if note in (notes or []):
         return
     try:
         exc.add_note(note)
         return
     except (AttributeError, TypeError):
         pass
-    notes = getattr(exc, "__notes__", None)
     if not isinstance(notes, list):
         notes = []
     notes.append(note)
@@ -2388,11 +2396,6 @@ def _annotate_cleanup_failure(exc: BaseException, note: str) -> None:
         exc.__notes__ = notes
     except (AttributeError, TypeError):
         pass
-    if (
-        isinstance(exc, SystemExit)
-        and (exc.code is None or (type(exc.code) is int and exc.code == 0))
-    ):
-        exc.code = _DESKTOP_SMOKE_EXIT_CLEANUP
 
 
 def _smoke_outcome(
