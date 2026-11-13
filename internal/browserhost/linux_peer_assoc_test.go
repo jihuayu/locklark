@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -194,8 +195,41 @@ func TestLinuxPeerCTTYAssociationBrokerHelper(t *testing.T) {
 			_ = peer.Wait()
 			fail()
 		}
-		if !ack(1) {
+		peerIdentity := Peer{
+			User: "UID " + strconv.FormatUint(uint64(assoc.proof.uid), 10),
+			PID:  uint32(assoc.proof.pid), Process: assoc.proof.exe.path,
+		}
+		scope := cliRunFixtureScope()
+		digest, ok := cliRunScopeDigest(scope)
+		if !ok {
 			_ = assoc.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		bound := &clirunCTTYProof{
+			owner: assoc, peerUser: peerIdentity.User, peerPID: peerIdentity.PID,
+			peerProcess: peerIdentity.Process, scopeDigest: digest,
+		}
+		req := CLIRunBrokerRequest{V: 1, Scope: scope, cttyProof: bound}
+		binding, ok := req.CLIRunCTTYBinding(peerIdentity)
+		if !ok || binding.Equal(CLIRunTerminalBinding{}) {
+			_ = bound.Close()
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if err := bound.Close(); err != nil {
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if _, ok := req.CLIRunCTTYBinding(peerIdentity); ok {
+			_ = conn.Close()
+			_ = peer.Wait()
+			fail()
+		}
+		if !ack(1) {
 			_ = conn.Close()
 			_ = peer.Wait()
 			fail()

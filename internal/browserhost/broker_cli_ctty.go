@@ -57,13 +57,19 @@ func cliRunScopeDigest(scope CLIRunScope) ([sha256.Size]byte, bool) {
 	return sha256.Sum256(raw), true
 }
 
-// CLIRunTerminalBinding is a fixed, read-only terminal identity. The digest is
-// private, it is never serialized, and a zero value is not a valid binding.
+// CLIRunTerminalBinding is a fixed, read-only terminal identity value. The
+// digest is private and never serialized. Holding a stored value is not
+// authorization or a lease: callers must reacquire through CLIRunCTTYBinding
+// and revalidate the live proof, held TTY, session, and namespace before every
+// use. A reconstructed TTY cannot inherit an old binding. The zero value is
+// not valid.
 type CLIRunTerminalBinding struct {
 	digest [sha256.Size]byte
 }
 
-// Equal compares two live bindings. The zero value never matches anything.
+// Equal compares two previously obtained binding values. It does not
+// revalidate liveness; the caller must acquire a fresh binding for every
+// authorization decision. The zero value never matches anything.
 func (b CLIRunTerminalBinding) Equal(other CLIRunTerminalBinding) bool {
 	return b.digest != ([sha256.Size]byte{}) && b.digest == other.digest
 }

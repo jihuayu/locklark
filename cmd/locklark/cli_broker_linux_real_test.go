@@ -74,8 +74,6 @@ func TestLinuxCLIRunProductionBrokerTransport(t *testing.T) {
 type linuxCLIRealObservation struct {
 	binding browserhost.CLIRunTerminalBinding
 	ok      bool
-	req     browserhost.BrokerCLIRequest
-	peer    browserhost.Peer
 }
 
 func TestLinuxCLIRunRealBrokerHelper(t *testing.T) {
@@ -94,8 +92,15 @@ func TestLinuxCLIRunRealBrokerHelper(t *testing.T) {
 	observed := make(chan linuxCLIRealObservation, 4)
 	b := browserhost.NewBroker(browserhost.BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
+			saved := req
+			saved.Scope = req.Scope.Clone()
+			saved.Targets = append(saved.Targets[:0:0], saved.Targets...)
 			binding, ok := req.CLIRunCTTYBinding(peer)
-			observed <- linuxCLIRealObservation{binding: binding, ok: ok, req: req, peer: peer}
+			savedBinding, savedOK := saved.CLIRunCTTYBinding(peer)
+			if !savedOK || !binding.Equal(savedBinding) {
+				ok = false
+			}
+			observed <- linuxCLIRealObservation{binding: binding, ok: ok}
 			return browserhost.BrokerCLIResponse{}, browserhost.ErrCLIRunRefused
 		},
 	})
@@ -156,16 +161,6 @@ func TestLinuxCLIRunRealBrokerHelper(t *testing.T) {
 	default:
 	}
 	_ = b.Close()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, ok := first.req.CLIRunCTTYBinding(first.peer); !ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			fail()
-		}
-		time.Sleep(time.Millisecond)
-	}
 	if _, err := result.WriteString(linuxCLIRealResultOK); err != nil {
 		fail()
 	}
