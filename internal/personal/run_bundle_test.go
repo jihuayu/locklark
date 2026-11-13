@@ -1188,6 +1188,10 @@ func TestPrepareBrokeredRunReturnsSlotValuesAfterIntent(t *testing.T) {
 	s, f := brokeredRunFixture(t)
 	request := bundleTestRequest(t, f)
 	request.Program = filepath.Join(t.TempDir(), "synthetic-program")
+	if runtime.GOOS == "windows" {
+		// Validation requires the .exe suffix; the path still never exists.
+		request.Program += ".exe"
+	}
 	root := brokeredRunRoot(t)
 
 	receipt, values, err := s.PrepareBrokeredRun(context.Background(), bundleTestTargets(f), request, root)
@@ -1248,6 +1252,10 @@ func TestPrepareBrokeredRunStaleAndMissingTargets(t *testing.T) {
 	s, f := brokeredRunFixture(t)
 	request := bundleTestRequest(t, f)
 	request.Program = filepath.Join(t.TempDir(), "synthetic-program")
+	if runtime.GOOS == "windows" {
+		// Validation requires the .exe suffix; the path still never exists.
+		request.Program += ".exe"
+	}
 	root := brokeredRunRoot(t)
 	before := len(brokeredRunIntents(t, s))
 
