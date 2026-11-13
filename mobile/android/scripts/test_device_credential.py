@@ -1,7 +1,9 @@
+import ast
 import io
 import json
 import os
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -498,6 +500,370 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
             (run/"expected-private.json").chmod(0o600)
             (run/"result.json").write_text(json.dumps({"success":False,"stage":"create"}))
             with self.assertRaises(AcceptanceFailure):validated_evidence(root)
+
+
+class DeviceCredentialMainTests(unittest.TestCase):
+    """Behavioral main(): the primary outcome must survive cleanup and scan faults."""
+    ARGS = ["device_credential_acceptance.py", "--adb", "adb-clean", "--serial", "emulator-5554",
+            "--apk", "/tmp/private.apk", "--evidence-root", "/tmp/private-evidence",
+            "--artifacts", "/tmp/private-artifacts", "--authorize-device-pin-setup"]
+
+    FIXTURE = b"{}"  # private_file is mocked; the digest guard is satisfied in memory
+    FIXTURE_DIGEST = __import__("hashlib").sha256(FIXTURE).hexdigest()
+    PRIMARY = "Android OS credential primary failure stage: "
+
+    def primary_stage(self, output):
+        """Exactly one fixed-form primary-stage line; return its printed value."""
+        lines = [line for line in output.splitlines() if line.startswith(self.PRIMARY)]
+        self.assertEqual(len(lines), 1, output)
+        value = lines[0][len(self.PRIMARY):]
+        self.assertIn(value, auth.STAGES | {auth.NO_PRIMARY_FAILURE})
+        return value
+
+    def run_main(self, clean_main, cleanup, scan=None, step=None):
+        """Run main() with the acceptance mocked; scan is None or raising.
+
+        step replaces the first main-flow step so a focused test can raise a
+        specific exception (or KeyboardInterrupt) from inside the main try.
+        """
+        original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
+        wrote = []
+        source = Path("/tmp/private-run")  # never touched: private_file is mocked
+        def fail():
+            acceptance.stage = "enable-prompt"
+            raise AcceptanceFailure()
+        failure_step = mock.Mock(side_effect=fail)
+        def close_scan():
+            # main() wraps close() and scan() together, so a raising view
+            # exercises the same scan failure that a raising scan() would.
+            if scan is not None:
+                scan()
+        acceptance = SimpleNamespace(root="/tmp/private-run", source=source, source_hash=self.FIXTURE_DIGEST,
+                                     private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
+                                     checks=["owned_emulator"], key_level="tee",
+                                     setup_owned_emulator=step or mock.Mock(),
+                                     native_auth_flow=mock.Mock() if clean_main else failure_step,
+                                     key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
+                                     failure_metadata=mock.Mock(return_value=original),
+                                     cleanup_pin=cleanup, close=close_scan, scan=mock.Mock(),
+                                     write_private=lambda name, value: wrote.append((name, value)))
+        with mock.patch.object(sys, "argv", self.ARGS), \
+             mock.patch.object(auth, "validated_evidence", return_value=(source, {}, [], self.FIXTURE_DIGEST)), \
+             mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
+             mock.patch.object(auth, "private_file", return_value=self.FIXTURE), \
+             mock.patch("builtins.print") as printed:
+            code = auth.main()
+        if not clean_main and step is None:
+            failure_step.assert_called_once()
+        output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+        self.assertEqual([name for name, _ in wrote], ["result.json"])
+        self.assertNotIn("adb-clean", output)
+        self.assertNotIn("private-exception-body", json.dumps(wrote[0][1]))
+        return code, wrote[0][1], original, output, acceptance
+
+    def run_pre_acceptance_failure(self):
+        """Every prerequisite passes except the timeout bound, before acceptance."""
+        argv = self.ARGS + ["--timeout", "9"]
+        constructor = mock.Mock()
+        with mock.patch.object(sys, "argv", argv), \
+             mock.patch.object(auth, "DeviceCredentialAcceptance", constructor), \
+             mock.patch("builtins.print") as printed:
+            code = auth.main()
+        constructor.assert_not_called()
+        return code, "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+
+    def test_main_failure_and_cleanup_failure_preserves_original_stage_and_diagnostic(self):
+        def cleanup():
+            raise RuntimeError("private-exception-body 12345678 adb-clean")
+        code, result, original, output, acceptance = self.run_main(False, cleanup)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["diagnostic"], original)
+        self.assertEqual(result["original_failure_stage"], "enable-prompt")
+        self.assertTrue(result["cleanup_failed"])
+        self.assertFalse(result["scan_failed"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertIn("acceptance at pin-cleanup", output)
+        self.assertEqual(self.primary_stage(output), "enable-prompt")
+        self.assertNotIn("private-exception-body", output)
+        self.assertNotIn("12345678", output)
+
+    def test_clean_main_and_cleanup_failure_uses_no_primary_sentinel(self):
+        def cleanup():
+            raise AcceptanceFailure()
+        code, result, _, output, _ = self.run_main(True, cleanup)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertNotIn(auth.NO_PRIMARY_FAILURE, auth.STAGES)
+        self.assertTrue(result["cleanup_failed"])
+        self.assertEqual(result["diagnostic"], {})
+        self.assertIn("acceptance at pin-cleanup", output)
+        self.assertEqual(self.primary_stage(output), auth.NO_PRIMARY_FAILURE)
+
+    def test_main_failure_and_scan_failure_keeps_original_stage_printed_and_recorded(self):
+        def scan():
+            raise RuntimeError("private-exception-body adb-clean")
+        code, result, original, output, _ = self.run_main(False, mock.Mock(), scan)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "private-canary-scan")
+        self.assertEqual(result["original_failure_stage"], "enable-prompt")
+        self.assertEqual(result["diagnostic"], original)
+        self.assertFalse(result["cleanup_failed"])
+        self.assertTrue(result["scan_failed"])
+        self.assertIn("acceptance at private-canary-scan", output)
+        self.assertNotIn("acceptance at pin-cleanup", output)
+        self.assertEqual(self.primary_stage(output), "enable-prompt")
+        self.assertNotIn("private-exception-body", output)
+
+    def test_main_failure_and_cleanup_and_scan_failure_keeps_original_stage(self):
+        def cleanup():
+            raise AcceptanceFailure()
+        def scan():
+            raise AcceptanceFailure()
+        code, result, original, output, _ = self.run_main(False, cleanup, scan)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertEqual(result["original_failure_stage"], "enable-prompt")
+        self.assertEqual(result["diagnostic"], original)
+        self.assertTrue(result["cleanup_failed"])
+        self.assertTrue(result["scan_failed"])
+        self.assertIn("acceptance at pin-cleanup", output)
+        self.assertIn("acceptance at private-canary-scan", output)
+        self.assertEqual(self.primary_stage(output), "enable-prompt")
+
+    def test_clean_main_failures_alone_exit_one(self):
+        for kind, expected in (("cleanup", "pin-cleanup"), ("scan", "private-canary-scan")):
+            with self.subTest(kind=kind):
+                failure = mock.Mock(side_effect=AcceptanceFailure())
+                if kind == "cleanup":
+                    code, result, _, output, _ = self.run_main(True, failure)
+                else:
+                    code, result, _, output, _ = self.run_main(True, mock.Mock(), failure)
+                self.assertEqual(code, 1)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["stage"], expected)
+                self.assertEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+                self.assertEqual(result["cleanup_failed"], kind == "cleanup")
+                self.assertEqual(result["scan_failed"], kind == "scan")
+                self.assertIn("acceptance at " + expected, output)
+                self.assertEqual(self.primary_stage(output), auth.NO_PRIMARY_FAILURE)
+
+    def test_both_clean_writes_complete_and_exits_zero(self):
+        code, result, _, output, acceptance = self.run_main(True, mock.Mock())
+        self.assertEqual(code, 0)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertFalse(result["cleanup_failed"])
+        self.assertFalse(result["scan_failed"])
+        self.assertEqual(result["diagnostic"], {})
+        acceptance.cleanup_pin.assert_called_once()
+        self.assertIn("PASS: native OS credential opt-in", output)
+        self.assertNotIn("FAIL: ", output)
+        self.assertNotIn(self.PRIMARY, output)
+
+    def test_completed_main_flow_with_secondary_failure_uses_none_sentinel(self):
+        # Baseline for the interrupt tests: a returned main flow plus a cleanup
+        # fault is the no-primary sentinel, not "prerequisites".
+        def cleanup():
+            raise AcceptanceFailure()
+        code, result, _, output, _ = self.run_main(True, cleanup)
+        self.assertEqual(code, 1)
+        self.assertEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertEqual(self.primary_stage(output), auth.NO_PRIMARY_FAILURE)
+
+    def test_fault_after_success_assignment_in_main_flow_never_succeeds(self):
+        # The expected-private.json read is the digest guard's last main
+        # step. Raising there is caught by the main except clause with the
+        # mock's stage unadvanced, so it pins that a caught fault is never
+        # primary success and keeps the reported stage as-is.
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                def raise_it(path, exception=exception):
+                    raise exception
+                def run_main_with_bad_fixture():
+                    wrote = []
+                    acceptance = SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
+                                                 source_hash=self.FIXTURE_DIGEST, stage="key-policy",
+                                                 checks=[], key_level="tee", setup_owned_emulator=mock.Mock(),
+                                                 native_auth_flow=mock.Mock(), key_policy=mock.Mock(),
+                                                 copy_and_reinstall=mock.Mock(),
+                                                 failure_metadata=mock.Mock(return_value={}),
+                                                 cleanup_pin=mock.Mock(), close=mock.Mock(), scan=mock.Mock(),
+                                                 write_private=lambda name, value: wrote.append((name, value)))
+                    with mock.patch.object(sys, "argv", self.ARGS), \
+                         mock.patch.object(auth, "validated_evidence", return_value=(acceptance.source, {}, [], self.FIXTURE_DIGEST)), \
+                         mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
+                         mock.patch.object(auth, "private_file", side_effect=raise_it), \
+                         mock.patch("builtins.print") as printed:
+                        code = auth.main()
+                    output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+                    return code, wrote[0][1], output, acceptance
+                code, result, output, acceptance = run_main_with_bad_fixture()
+                self.assertEqual(code, 1)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["original_failure_stage"], "key-policy")
+                self.assertEqual(self.primary_stage(output), "key-policy")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+                acceptance.cleanup_pin.assert_called_once()
+
+    def test_interrupt_inside_main_flow_with_cleanup_failure_exits_one(self):
+        def cleanup():
+            raise AcceptanceFailure()
+        step = mock.Mock(side_effect=KeyboardInterrupt())
+        code, result, _, output, _ = self.run_main(True, cleanup, step=step)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertTrue(result["cleanup_failed"])
+        self.assertNotEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+        self.assertEqual(self.primary_stage(output), result["original_failure_stage"])
+
+    def test_fault_in_success_window_exactly_after_success_assignment(self):
+        # A caught exception or KeyboardInterrupt after success = True must
+        # still fail. main() is traced (test-only, restored in finally) to show
+        # the success assignment runs and the try completes into finally; the
+        # last main step then raises. No production test hook is involved.
+        source = Path(auth.__file__).read_text().splitlines()
+        success_line = next(number for number, line in enumerate(source, 1)
+                            if line == "        success = True")
+        # First statement actually executed in finally, per the AST, which is
+        # also the first line event traced there.
+        try_node = next(node for node in ast.walk(ast.parse("\n".join(source)))
+                        if isinstance(node, ast.Try) and node.finalbody and node.body
+                        and node.body[0].lineno <= success_line <= node.body[-1].end_lineno)
+        entering_finally = try_node.finalbody[0].lineno
+        traced = []
+        def tracer(frame, event, argument):
+            if (event == "line" and frame.f_code.co_filename == auth.__file__
+                    and frame.f_code.co_name == "main" and frame.f_lineno in (success_line, entering_finally)):
+                traced.append(frame.f_lineno)
+            return tracer
+        previous = sys.gettrace()
+        try:
+            sys.settrace(tracer)
+            try:
+                self.run_main(True, mock.Mock())
+            finally:
+                sys.settrace(previous)
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(traced, [success_line, entering_finally])
+        self.assertIs(sys.gettrace(), previous)
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                step = mock.Mock(side_effect=exception)
+                code, result, _, output, acceptance = self.run_main(True, mock.Mock(), step=step)
+                step.assert_called_once()
+                self.assertEqual(code, 1)
+                self.assertFalse(result["success"])
+                # The mock's stage is unadvanced here, matching a real
+                # acceptance whose highest reached stage is still reported.
+                self.assertEqual(result["original_failure_stage"], "enable-prompt")
+                self.assertEqual(self.primary_stage(output), "enable-prompt")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+                acceptance.cleanup_pin.assert_called_once()
+
+    def acceptance_stub(self, cleanup, wrote):
+        """Minimal acceptance stub; cleanup is called inside main's finally."""
+        original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
+        return SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
+                               source_hash=self.FIXTURE_DIGEST,
+                               private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
+                               checks=["owned_emulator"], key_level="tee", setup_owned_emulator=mock.Mock(),
+                               native_auth_flow=mock.Mock(), key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
+                               failure_metadata=mock.Mock(return_value=original),
+                               cleanup_pin=cleanup, close=mock.Mock(), scan=mock.Mock(),
+                               write_private=lambda name, value: wrote.append((name, value))), original
+
+    @staticmethod
+    def cloned_main():
+        """AST-cloned main() plus the raise reference, without inserting yet."""
+        source = Path(auth.__file__).read_text()
+        tree = ast.parse(source)
+        main_node = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "main")
+        clone_tree = ast.parse(ast.get_source_segment(source, main_node))
+        clone = clone_tree.body[0]
+        clone.name = "main_with_raise_after_success"
+        clone.decorator_list = []
+        try_node = next(node for node in clone.body if isinstance(node, ast.Try) and node.body)
+        position = next(index for index, statement in enumerate(try_node.body)
+                        if isinstance(statement, ast.Assign) and getattr(statement.targets[0], "id", None) == "success")
+        return source, tree, clone_tree, try_node, position, clone
+
+    def run_cloned_main(self, exception):
+        """Compile an AST clone of main() with one raise right after success = True.
+
+        Every other statement, the except clause and the finally block are the
+        real ones, so main's own except clause handles the fault inside the
+        main try, after the success assignment. Returns (exit, result, output, original).
+        """
+        _, _, clone_tree, try_node, position, _ = self.cloned_main()
+        # The raised instance is bound in the namespace, so the real except
+        # tuple handles it exactly as it handles a device-side fault.
+        raise_node = ast.Raise(exc=ast.Name(id="RAISE_AFTER_SUCCESS", ctx=ast.Load()), cause=None)
+        ast.copy_location(raise_node, try_node.body[position])
+        ast.fix_missing_locations(raise_node)
+        try_node.body.insert(position + 1, raise_node)
+        ast.fix_missing_locations(clone_tree)
+        # The raise is between the first try statement and the first handler,
+        # i.e. inside the guarded region, and success = True precedes it.
+        self.assertGreater(raise_node.lineno, try_node.body[0].lineno)
+        self.assertLess(raise_node.lineno, try_node.handlers[0].lineno)
+        handlers = try_node.handlers
+        self.assertTrue(any(isinstance(h.type, ast.Tuple) and
+                            {e.id for e in h.type.elts} >= {"Exception", "KeyboardInterrupt"} for h in handlers))
+        self.assertTrue(try_node.finalbody)
+        code = compile(clone_tree, "<cloned main>", "exec")
+        wrote = []
+        acceptance, original = self.acceptance_stub(mock.Mock(), wrote)
+        # Run the clone against the real module globals (require, parser,
+        # NO_PRIMARY_FAILURE, ...) with the injected exception bound here.
+        namespace = dict(vars(auth))
+        namespace["__name__"] = "cloned main"
+        namespace["RAISE_AFTER_SUCCESS"] = exception
+        # The clone resolves names in `namespace`, so patch there.
+        with mock.patch.object(sys, "argv", self.ARGS), \
+             mock.patch.dict(namespace, {"validated_evidence": mock.Mock(return_value=(acceptance.source, {}, [], self.FIXTURE_DIGEST)),
+                                         "DeviceCredentialAcceptance": mock.Mock(return_value=acceptance),
+                                         "private_file": mock.Mock(return_value=self.FIXTURE)}), \
+             mock.patch("builtins.print") as printed:
+            exec(code, namespace)
+            exit_code = namespace["main_with_raise_after_success"]()
+        acceptance.cleanup_pin.assert_called_once()
+        self.assertEqual([name for name, _ in wrote], ["result.json"])
+        output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+        return exit_code, wrote[0][1], output, original, acceptance
+
+    def test_fault_inside_main_try_immediately_after_success_for_both_fault_kinds(self):
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                exit_code, result, output, original, acceptance = self.run_cloned_main(exception)
+                # A fault thrown immediately after success = True is caught by
+                # main's except clause, so the run must fail, not succeed.
+                self.assertEqual(exit_code, 1)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["original_failure_stage"], "enable-prompt")
+                self.assertEqual(result["diagnostic"], original)
+                self.assertNotEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+                self.assertEqual(self.primary_stage(output), "enable-prompt")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+
+    def test_pre_acceptance_prerequisite_failure_prints_prerequisites(self):
+        code, output = self.run_pre_acceptance_failure()
+        self.assertEqual(code, 1)
+        self.assertIn("acceptance at prerequisites", output)
+        self.assertEqual(self.primary_stage(output), "prerequisites")
+        self.assertNotIn("PASS: ", output)
+        self.assertNotIn("adb-clean", output)
 
 
 if __name__=="__main__":unittest.main()

@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jihuayu/locklark/internal/personal"
 )
 
 func lastNativeResponse(t *testing.T, out *memoryPipe) Response {
@@ -36,6 +39,45 @@ func expectRefused(t *testing.T, out *memoryPipe, id string) Response {
 	return reply
 }
 
+// pairedQuick is paired() with the explicit native quick-fill gesture. Tests
+// that exercise V2 mutations use it so the V2 native gate is not the subject of
+// the test; dedicated tests cover the non-quick path.
+func pairedQuick(t *testing.T) (*Connection, *personal.Session, *memoryPipe, Request) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "quick.ll")
+	key := bytes.Repeat([]byte{7}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	id, e := s.AddLogin("Host login", "fixture-user", "fixture-password")
+	if e != nil {
+		t.Fatal(e)
+	}
+	rows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	rev, e := s.Edit(personal.Edit{ID: id, Revision: rows[0].Revision, Field: "url", Value: "https://example.test/login"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	out := &memoryPipe{}
+	c := NewConnection(NewWriter(out, time.Second), nil)
+	if e = c.Handle(Request{V: 1, ID: reqID(1), Type: "hello"}); e != nil {
+		t.Fatal(e)
+	}
+	if e = c.ApproveQuickPair(s); e != nil {
+		t.Fatal(e)
+	}
+	cap := out.responses(t)[0].Capability
+	return c, s, out, Request{V: 1, ID: reqID(2), Type: "match", Capability: cap, Origin: "https://example.test", TabID: 1, DocumentID: "doc-1", ItemID: "", Revision: rev}
+}
+
 func cleanupStagedConnection(t *testing.T, c *Connection) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -55,8 +97,8 @@ func generateViaHost(t *testing.T, c *Connection, out *memoryPipe, capability, i
 	if reply.Profile == nil || reply.GeneratedPassword == "" {
 		t.Fatalf("generate %q returned an incomplete response", options)
 	}
-	if !token.MatchString(reply.HistoryID) {
-		t.Fatalf("generate %q returned invalid history id %q", options, reply.HistoryID)
+	if reply.HistoryID != "" {
+		t.Fatalf("generate %q reported an unsaved history id %q", options, reply.HistoryID)
 	}
 	return reply
 }
@@ -182,7 +224,7 @@ func memorableLengthBounds(words int) (int, int) {
 }
 
 func TestGenerateModesBoundsAndEntropy(t *testing.T) {
-	c, _, out, r := paired(t)
+	c, _, out, r := pairedQuick(t)
 	cases := []struct {
 		name     string
 		options  string
@@ -242,7 +284,6 @@ func TestGenerateModesBoundsAndEntropy(t *testing.T) {
 			name: "pin-maximum-bound", options: `{"mode":"pin","length":99}`, mode: "pin", length: 12, alphabet: 10, entropy: 39,
 		},
 	}
-	history := map[string]bool{}
 	for index, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			reply := generateViaHost(t, c, out, r.Capability, reqID(100+index), test.options)
@@ -261,10 +302,6 @@ func TestGenerateModesBoundsAndEntropy(t *testing.T) {
 			} else if len(reply.GeneratedPassword) != test.length {
 				t.Fatalf("generated length = %d, want %d", len(reply.GeneratedPassword), test.length)
 			}
-			if history[reply.HistoryID] {
-				t.Fatalf("history id %q was reused", reply.HistoryID)
-			}
-			history[reply.HistoryID] = true
 			if test.check != nil {
 				test.check(t, reply.GeneratedPassword)
 			}
@@ -276,7 +313,7 @@ func TestGenerateModesBoundsAndEntropy(t *testing.T) {
 }
 
 func TestGenerateInvalidOptionsRefused(t *testing.T) {
-	c, _, out, r := paired(t)
+	c, _, out, r := pairedQuick(t)
 	invalid := []string{
 		`not-json`,
 		`[]`,
@@ -386,7 +423,7 @@ func dismissSaveRequest(capability, id, stageID string, never bool) Request {
 }
 
 func TestStagedSaveNewFlowPendingCommitAndDismiss(t *testing.T) {
-	c, s, out, r := paired(t)
+	c, s, out, r := pairedQuick(t)
 	cleanupStagedConnection(t, c)
 	now := time.Now()
 	c.now = func() time.Time { return now }
@@ -471,7 +508,7 @@ func TestDismissWireAcceptsNeverForOriginBoolean(t *testing.T) {
 }
 
 func TestStagedSaveUpdateCommitPreservesTitle(t *testing.T) {
-	c, s, out, r := paired(t)
+	c, s, out, r := pairedQuick(t)
 	cleanupStagedConnection(t, c)
 	rows, err := s.List("active")
 	if err != nil || len(rows) != 1 {
@@ -501,7 +538,7 @@ func TestStagedSaveUpdateCommitPreservesTitle(t *testing.T) {
 }
 
 func TestStagedSaveExpiryAndContextRefusals(t *testing.T) {
-	c, _, out, r := paired(t)
+	c, _, out, r := pairedQuick(t)
 	cleanupStagedConnection(t, c)
 	now := time.Now()
 	c.now = func() time.Time { return now }
@@ -553,7 +590,7 @@ func TestStagedSaveExpiryAndContextRefusals(t *testing.T) {
 }
 
 func TestStagedSaveUpdateItemRevisionValidation(t *testing.T) {
-	c, s, out, r := paired(t)
+	c, s, out, r := pairedQuick(t)
 	cleanupStagedConnection(t, c)
 	rows, err := s.List("active")
 	if err != nil || len(rows) != 1 {

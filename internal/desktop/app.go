@@ -72,6 +72,11 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
+	// browserPairs are explicit OS-peer pairing reviews. browserPairApprover
+	// is a test-only hook used by the direct IPC regression; production always
+	// waits for the native buttons below.
+	browserPairs        []*browserPairPending
+	browserPairApprover func(context.Context, browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error)
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -120,6 +125,14 @@ type App struct {
 	clipboardClearSeconds atomic.Int64
 	backgroundStop        chan struct{}
 	backgroundRunningFlag uint32
+	// defaultRevealAt debounces revealPasswords disclosure after a selection
+	// read so each selection schedules exactly one narrow password read.
+	defaultRevealAt time.Time
+	// narrowRevealPending is the revealPasswords read currently in flight;
+	// narrowRevealSeq identifies its request so a stale callback cannot clear
+	// a newer one.
+	narrowRevealPending bool
+	narrowRevealSeq     uint64
 }
 
 func New() *App {
@@ -184,6 +197,8 @@ func message(e error) string {
 		return mutationUnknownStatus
 	case errors.Is(e, personal.ErrMutationCancelled):
 		return "操作已取消，未开始写入"
+	case errors.Is(e, personal.ErrSnapshotCapacity), errors.Is(e, personal.ErrImportCapacity):
+		return capacityStatus
 	case errors.Is(e, personal.ErrMutationRefused):
 		return "输入不符合保存要求；未保存"
 	case errors.Is(e, personal.ErrOTPNotConfigured):
@@ -315,12 +330,18 @@ func (a *App) stopIdleTimer() {
 func (a *App) armIdleTimer() {
 	a.stopIdleTimer()
 	s := a.session
-	if s == nil {
+	if s == nil || a.idleTimeout() <= 0 {
+		// "Never" is enforced by both the session policy and the UI idle
+		// check; keeping an armed timer here would reintroduce the old
+		// hardcoded five-minute lock.
 		return
 	}
 	deadline, ok := s.IdleDeadline()
 	if !ok {
 		a.Lock()
+		return
+	}
+	if deadline.IsZero() {
 		return
 	}
 	generation := a.generation
@@ -340,7 +361,73 @@ func (a *App) armIdleTimer() {
 		})
 	})
 }
+
+// suspendEvent applies security.autolock.onSleep.
+func (a *App) suspendEvent() {
+	if a.settingsSnapshot().LockOnSleep {
+		a.Lock()
+	}
+}
+
+// screenLockEvent applies security.autolock.onDeviceLock.
+func (a *App) screenLockEvent() {
+	if a.settingsSnapshot().LockOnScreenLock {
+		a.Lock()
+	}
+}
+
+// windowClose applies security.autolock.onWindowClose. Locking on close keeps
+// the historical behaviour (lock, then let the window close). With the
+// preference disabled the unlocked session is retained in the tray when
+// app.keepInTray is on; without a tray the process still exits, which tears the
+// session down.
+func (a *App) windowClose(e *mygo.CloseEvent) {
+	if a.settingsSnapshot().LockOnWindowClose {
+		a.Lock()
+		return
+	}
+	if a.settingsSnapshot().KeepInTray && a.win != nil && e != nil {
+		e.PreventDefault()
+		a.win.Hide()
+	}
+}
+
+// applyIdlePolicy republishes the AutoLockMinutes preference to a running
+// session so changing the interval (including "Never") takes effect without a
+// re-unlock.
+func (a *App) applyIdlePolicy() {
+	if a.session == nil {
+		return
+	}
+	if err := a.session.SetIdleTimeout(a.idleTimeout()); err != nil {
+		return
+	}
+	if a.idleTimeout() <= 0 {
+		a.stopIdleTimer()
+		return
+	}
+	a.touchActivity()
+	a.armIdleTimer()
+}
+
+// lockStart is the linearization point of App.Lock. Under brokerMu it advances
+// App.generation and revokes the broker authority in the same critical section,
+// so no broker handler can read a new generation while the previous session or
+// epoch is still bound: a broker-run request that captured the binding before
+// this point sees the revoked binding at its next check, and one that enters
+// after it captures no unlocked session. It must be called exactly once, first,
+// by Lock.
+func (a *App) lockStart() {
+	a.brokerMu.Lock()
+	a.generation++
+	a.brokerSession = nil
+	a.brokerEpoch = a.generation
+	a.brokerMu.Unlock()
+}
+
 func (a *App) Lock() {
+	// Revoke all session/broker authority before any other lock work.
+	a.lockStart()
 	a.stopSSHAgent()
 	a.sshRows = nil
 	a.sshSelected = nil
@@ -353,8 +440,6 @@ func (a *App) Lock() {
 		}
 	}
 	a.operation = nil
-	// Revoke all session/UI authority before native clipboard metadata calls.
-	a.generation++
 	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
@@ -364,6 +449,7 @@ func (a *App) Lock() {
 		s.RequestLock()
 	}
 	a.cancelPendingCLIRun()
+	a.cancelPendingBrowserPairs()
 	a.notifyBrowserBrokerLocked()
 	if s != nil {
 		a.launch(s.Lock)
@@ -426,7 +512,7 @@ func (a *App) unlock() {
 	a.runContext(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
-		s, e := personal.UnlockSession(path, pw, key, 5*time.Minute)
+		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -476,7 +562,7 @@ func (a *App) createVaultFile() {
 		if e := personal.Create(path, string(pw), key); e != nil {
 			return outcome{err: e}
 		}
-		s, e := personal.UnlockSession(path, pw, key, 5*time.Minute)
+		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -607,10 +693,11 @@ func (a *App) disclose(field, purpose string) {
 			}
 			e := s.Consume(f, func(value []byte) error {
 				if purpose == "copy" {
-					if e := a.writeClipboard(value, time.Now().Add(30*time.Second), valid); e != nil {
+					timeout := a.clipboardTimeout()
+					if e := a.writeClipboard(value, clipboardDeadline(timeout), valid); e != nil {
 						return e
 					}
-					a.status = clipboardStatus(30 * time.Second)
+					a.status = clipboardStatus(timeout)
 				} else {
 					shown := visible(string(value))
 					if field == "notes" {
@@ -651,12 +738,21 @@ func (a *App) View(c *ui.Context) {
 	t := c.Theme()
 	a.brokerMu.Lock()
 	cliPending := a.cliPending != nil
+	pairPending := len(a.browserPairs) != 0
 	a.brokerMu.Unlock()
 	if cliPending {
 		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
 		return
 	}
-	if a.session != nil && a.sshApproval == nil && a.browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
+	if pairPending {
+		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.browserPairView(c) })
+		return
+	}
+	browser := a.browser
+	if browser == nil {
+		browser = a.brokeredBrowserApproval()
+	}
+	if a.session != nil && a.sshApproval == nil && browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
 		a.v2View(c)
 		return
 	}
@@ -677,8 +773,8 @@ func (a *App) View(c *ui.Context) {
 			a.lockView(c)
 		} else if a.sshApproval != nil {
 			a.sshApprovalView(c)
-		} else if a.browser != nil {
-			a.browserView(c)
+		} else if browser != nil {
+			a.browserViewFor(c, browser)
 		} else if a.quick.open {
 			a.quickSearchView(c)
 		} else {
@@ -1076,8 +1172,33 @@ func (a *App) transferView(c *ui.Context) {
 		})
 	})
 }
+
+// Run starts the desktop application with the per-user default settings file.
 func Run() error {
+	return runDesktop()
+}
+
+// RunWithSettingsPath starts the desktop application with an explicit,
+// absolute settings file instead of SettingsPath(). The path is validated
+// before any GUI state is created; an empty path selects Run().
+func RunWithSettingsPath(path string) error {
+	if path == "" {
+		return Run()
+	}
+	clean, err := validateSettingsFilePath(path)
+	if err != nil {
+		return err
+	}
+	return runDesktop(clean)
+}
+
+// runDesktop runs the native application. Optional settings paths were
+// already validated by RunWithSettingsPath.
+func runDesktop(settingsPaths ...string) error {
 	a := New()
+	if len(settingsPaths) == 1 {
+		a.settingsPath = settingsPaths[0]
+	}
 	if e := a.LoadSettings(); e != nil {
 		a.status = "安全设置文件无法读取；已使用默认值"
 	}
@@ -1115,14 +1236,14 @@ func Run() error {
 			a.win = shell.Window()
 		}
 		a.dispatch = a.win.Update
-		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
+		a.win.OnClose(func(e *mygo.CloseEvent) { a.windowClose(e) })
 		a.clipboardWrite = nativeclipboard.Write
 		a.clipboardClear = nativeclipboard.ClearOwned
 		// The broker may have started before the UI thread existed; publish the
 		// settings snapshot again so every connection factory reads live values.
 		a.refreshClipboardClearSeconds(a.settingsSnapshot())
-		mygo.Power.OnSuspend(a.Lock)
-		mygo.Power.OnLockScreen(a.Lock)
+		mygo.Power.OnSuspend(a.suspendEvent)
+		mygo.Power.OnLockScreen(a.screenLockEvent)
 		mygo.App.OnQuit(a.Lock)
 		a.startBrowserBroker()
 		a.registerQuickSearch(mygo.GlobalShortcut.Register)
@@ -1151,7 +1272,7 @@ func (a *App) systemUnlock() {
 	a.password = ""
 	a.secret = ""
 	a.runContext(func(ctx context.Context) outcome {
-		s, e := personal.UnlockWithSystemContext(ctx, path, store, 5*time.Minute)
+		s, e := personal.UnlockWithSystemContext(ctx, path, store, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -1212,7 +1333,6 @@ func (a *App) securityView(c *ui.Context) {
 		})
 	})
 }
-
 
 func (a *App) chooseVault() {
 	win, create := a.win, a.create

@@ -29,6 +29,9 @@ const personalHelpText = `usage: locklark personal <command> --file PATH [flags]
 Manage an owner-only local vault from an interactive controlling terminal.
 Master passwords, Secret Keys, search queries, and consent phrases are read
 with terminal echo disabled and are never accepted via flags or environment.
+The onedrive commands keep only a OneDrive OAuth refresh token, in the OS
+credential store, under a key derived from the explicit client ID, tenant and
+a hidden local profile label.
 
 VAULT & LIFECYCLE
   init                  --file NEW_PATH
@@ -75,6 +78,11 @@ MIGRATION, EXPORT & PASSKEY TRANSFER
   passkey-export        --file PATH --invitation FILE --target-pin HEX64 --selection PRIVATE_JSON --out NEW_PACKET
   passkey-plan          --file PATH --invitation FILE --packet FILE --source-pin HEX64
   passkey-import        --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
+
+ONEDRIVE OAUTH (OS credential store, refresh token only)
+  onedrive login|refresh --client-id ID --tenant TENANT --scopes SCOPE_LIST
+  onedrive status|logout --client-id ID --tenant TENANT
+  (the local profile label is read hidden from the terminal)
 
 Run "locklark personal <command> --help" for single-command usage.
 `
@@ -224,6 +232,9 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	}
 	if isPasskeyTransferAction(args) {
 		return runPersonalPasskeyTransfer(args, out)
+	}
+	if isOnedriveAction(args) {
+		return runPersonalOnedrive(args[1:], out)
 	}
 	var processArgs []string
 	if len(args) > 0 && (args[0] == "run-env" || args[0] == "run-cli") {

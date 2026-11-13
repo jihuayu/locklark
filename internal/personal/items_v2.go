@@ -286,9 +286,12 @@ func (s *Session) AddAttachment(id, revision, fileName, mimeType string, content
 		return "", "", ErrMutationRefused
 	}
 	body := append([]byte(nil), content...)
+	// The request holds only a copy, so the caller's slice is never touched;
+	// the copy is zeroed once the mutation no longer needs it (the persisted
+	// value was sealed into its own buffers).
+	defer clear(body)
 	r, e := s.nativeMutation(v2AttachmentAddAction, vault.Item{}, &Edit{ID: id, Revision: revision}, commandOption{v2: &v2Request{fileName: fileName, mimeType: mimeType, content: body}}, g)
 	if e != nil {
-		clear(body)
 		return "", "", e
 	}
 	return r.attachment.ID, r.revision, nil
@@ -398,7 +401,7 @@ func loadVaults(b *bolt.Bucket, i identity) ([]vault.VaultMeta, error) {
 	}
 	defer clear(p)
 	var vaults []vault.VaultMeta
-	if json.Unmarshal(p, &vaults) != nil || len(vaults) > 64 {
+	if json.Unmarshal(p, &vaults) != nil || len(vaults) > maxVaults {
 		return nil, invalid
 	}
 	seen := map[string]bool{vault.DefaultVaultID: true}
@@ -566,6 +569,49 @@ func appendHistory(history []vault.ItemHistoryEntry, entry vault.ItemHistoryEntr
 	return history
 }
 
+// completeHistorySections keeps an empty historical section list distinct from
+// a legacy entry that never recorded sections at all. ItemHistoryEntry sections
+// are always serialized, so a non-nil empty slice survives a vault round trip
+// and can clear the current sections deterministically on restore.
+func completeHistorySections(sections []vault.ItemSection) []vault.ItemSection {
+	out := vault.CloneSections(sections)
+	if out == nil {
+		return []vault.ItemSection{}
+	}
+	return out
+}
+
+// historyAutoEditAction is the action autoHistory has always stamped on full
+// Title/Username/Notes/Sections field snapshots.
+const historyAutoEditAction = "edit"
+
+// historyEntryCarriesFieldSnapshot reports whether an entry records the full
+// Title/Username/Notes state. Every autoHistory row does, even when the
+// snapshot fields are empty; only password-only import rows (1PUX history)
+// stay partial. Sections are tracked separately: older autoHistory rows only
+// stored sections when a concealed field changed, so a nil sections key means
+// "not recorded", never "empty".
+func historyEntryCarriesFieldSnapshot(entry vault.ItemHistoryEntry) bool {
+	return entry.Action == historyAutoEditAction || entry.Title != "" || entry.Username != "" || entry.Notes != ""
+}
+
+// restoreHistoryEntry applies one historical snapshot. Password-only rows
+// restore just the password; field snapshots restore the exact recorded
+// Title/Username/Notes, including empty values. Sections change only when the
+// entry actually recorded them: a present empty list clears them, a nil list
+// (legacy row that never stored sections) keeps the current ones.
+func restoreHistoryEntry(next *vault.Item, entry vault.ItemHistoryEntry) {
+	next.Password = entry.Password
+	if historyEntryCarriesFieldSnapshot(entry) {
+		next.Title = entry.Title
+		next.Username = entry.Username
+		next.Notes = entry.Notes
+	}
+	if entry.Sections != nil {
+		next.Sections = vault.CloneSections(entry.Sections)
+	}
+}
+
 func autoHistory(prev, next vault.Item) []vault.ItemHistoryEntry {
 	history := next.History
 	if history == nil {
@@ -576,14 +622,12 @@ func autoHistory(prev, next vault.Item) []vault.ItemHistoryEntry {
 	}
 	entry := vault.ItemHistoryEntry{
 		Timestamp: time.Now().Unix(),
-		Action:    "edit",
+		Action:    historyAutoEditAction,
 		Password:  prev.Password,
 		Title:     prev.Title,
 		Username:  prev.Username,
 		Notes:     prev.Notes,
-	}
-	if concealedChanged(prev.Sections, next.Sections) {
-		entry.Sections = vault.CloneSections(prev.Sections)
+		Sections:  completeHistorySections(prev.Sections),
 	}
 	return appendHistory(history, entry)
 }

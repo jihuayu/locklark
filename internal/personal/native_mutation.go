@@ -105,7 +105,7 @@ func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *E
 		s.lock()
 	}
 	active := s.active(false) == nil
-	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrAlreadyArchived) && !errors.Is(e, ErrAlreadyActive) && !errors.Is(e, ErrAlreadyTrashed) && !errors.Is(e, ErrNotTrashed) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrMutationRefused) && !errors.Is(e, ErrOTPNotConfigured) && !errors.Is(e, ErrBrowserOTP)) {
+	if g.CommitWon() && (!active || e != nil && !knownRefusal(e) && !errors.Is(e, ErrAlreadyArchived) && !errors.Is(e, ErrAlreadyActive) && !errors.Is(e, ErrAlreadyTrashed) && !errors.Is(e, ErrNotTrashed) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrOTPNotConfigured) && !errors.Is(e, ErrBrowserOTP)) {
 		clear(r.sshSeed)
 		if r.otp != nil {
 			r.otp.Clear()
@@ -121,6 +121,15 @@ func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *E
 	}
 	return r, e
 }
+
+// knownRefusal reports refusals that commit the signed refusal audit, or that
+// roll back the whole transaction, without saving the mutation. The gate is
+// won, yet the outcome is definite, so callers must see the refusal itself
+// instead of ErrMutationUnknown.
+func knownRefusal(e error) bool {
+	return errors.Is(e, ErrMutationRefused) || errors.Is(e, ErrSnapshotCapacity)
+}
+
 func (s *Session) SaveNativeLogin(meta NativeLoginMetadata, user, value []byte, g *MutationGate) (GenerationReceipt, error) {
 	defer clear(user)
 	defer clear(value)

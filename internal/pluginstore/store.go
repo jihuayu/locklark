@@ -65,7 +65,14 @@ type state struct {
 	catalog string
 }
 
+// loadObserver is a test seam that counts full catalog replays; it is nil in
+// production.
+var loadObserver func()
+
 func load(tx *bolt.Tx, anchor string, pins Pins) (state, error) {
+	if loadObserver != nil {
+		loadObserver()
+	}
 	out := state{plugins: map[string]Info{}, status: Status{Execution: "disabled", Plugins: []Info{}}}
 	if !hexValue(anchor, 32) {
 		return state{}, ErrInvalid
@@ -257,21 +264,35 @@ func mutate(path, parent, id string, p *Release, raw []byte, pins Pins) (Status,
 func mutateWithUpdate(update func(func(*bolt.Tx) error) error, parent, id string, p *Release, raw []byte, pins Pins) (Status, error) {
 	var result Status
 	e := update(func(tx *bolt.Tx) error {
-		current, e := load(tx, parent, pins)
+		events, packages := tx.Bucket(eventsBucket), tx.Bucket(packagesBucket)
+		if events == nil || packages == nil {
+			return ErrInvalid
+		}
+		before, e := load(tx, parent, pins)
 		if e != nil {
 			return e
 		}
-		if current.status.Checkpoint != parent {
+		if before.status.Checkpoint != parent {
 			return ErrConflict
 		}
-		if current.status.Sequence >= maxEvents {
+		if before.status.Sequence >= maxEvents {
 			return ErrCapacity
 		}
-		old, found := current.plugins[id]
+		old, found := before.plugins[id]
 		if found && old.Revoked {
 			return ErrRevoked
 		}
-		ev := Event{Sequence: current.status.Sequence + 1, Catalog: current.catalog, ID: id, Previous: parent}
+		ev := Event{Sequence: before.status.Sequence + 1, Catalog: before.catalog, ID: id, Previous: parent}
+		// Decode before appending so every later check can fail the transaction
+		// without leaving a partially applied event.
+		var next Release
+		var digest string
+		if p != nil {
+			raw = bytes.Clone(raw)
+			if next, digest, e = verifyDigest(raw, id, p.Publisher); e != nil || next.Publisher != p.Publisher || next.Version != p.Version {
+				return ErrInvalid
+			}
+		}
 		if p == nil {
 			if !found {
 				return ErrNotFound
@@ -289,25 +310,36 @@ func mutateWithUpdate(update func(func(*bolt.Tx) error) error, parent, id string
 			if found && p.Version <= old.Version {
 				return ErrVersion
 			}
-			if !found && len(current.plugins) >= maxPlugins {
+			if !found && len(before.plugins) >= maxPlugins {
 				return ErrCapacity
 			}
 			ev.Action = "plugin.install"
 			ev.Publisher = p.Publisher
 			ev.Version = p.Version
-			ev.Digest = Digest(raw)
-			if e = tx.Bucket(packagesBucket).Put([]byte(id), raw); e != nil {
+			ev.Digest = digest
+			if e = packages.Put([]byte(id), raw); e != nil {
 				return e
 			}
 		}
-		if e = tx.Bucket(eventsBucket).Put(binary.BigEndian.AppendUint64(nil, ev.Sequence), encoded(ev)); e != nil {
+		if e = events.Put(binary.BigEndian.AppendUint64(nil, ev.Sequence), encoded(ev)); e != nil {
 			return e
 		}
-		after, e := load(tx, ev.hash(), pins)
+		// Apply the appended event to the loaded state instead of replaying the
+		// whole catalog. The second pass could only differ from this apply by
+		// finding a store corruption that rolls this transaction back, so a
+		// failed apply rejects instead of committing a divergent head.
+		after, e := before.applied(ev, digest, p != nil)
 		if e != nil {
 			return e
 		}
+		// load lists the same plugin map sorted and never exposes the internal
+		// map or event slice, so the mutation receipt keeps that shape.
 		result = after.status
+		result.Plugins = make([]Info, 0, len(after.plugins))
+		for _, info := range after.plugins {
+			result.Plugins = append(result.Plugins, info)
+		}
+		sort.Slice(result.Plugins, func(i, j int) bool { return result.Plugins[i].ID < result.Plugins[j].ID })
 		return nil
 	})
 	if e != nil {
@@ -322,6 +354,43 @@ func mutateWithUpdate(update func(func(*bolt.Tx) error) error, parent, id string
 		}
 	}
 	return result, nil
+}
+
+// applied advances an already canonical event series by one canonical event
+// and mirrors the matching per-event rules of load without re-reading package
+// blobs. A mismatch returns ErrInvalid.
+func (s state) applied(ev Event, digest string, install bool) (state, error) {
+	next := ev.Sequence
+	if next != s.status.Sequence+1 || !hexValue(ev.Catalog, 16) || ev.Catalog != s.catalog || ev.Previous != s.status.Checkpoint || !ValidID(ev.ID) || !hexValue(ev.Digest, 32) || ev.Version == 0 || ev.Version > 1_000_000_000 || install != (ev.Action == "plugin.install") {
+		return state{}, ErrInvalid
+	}
+	old, found := s.plugins[ev.ID]
+	plugins := make(map[string]Info, len(s.plugins)+1)
+	for id, info := range s.plugins {
+		plugins[id] = info
+	}
+	plugins[ev.ID] = old
+	receipt := s.status
+	if install {
+		if found && (old.Revoked || old.Publisher != ev.Publisher || ev.Version <= old.Version) || !found && len(s.plugins) >= maxPlugins {
+			return state{}, ErrInvalid
+		}
+		plugins[ev.ID] = Info{ID: ev.ID, Publisher: ev.Publisher, Version: ev.Version, Digest: ev.Digest}
+		for n, listed := range receipt.Plugins {
+			if listed.ID == ev.ID {
+				receipt.Plugins[n] = plugins[ev.ID]
+			}
+		}
+	} else {
+		if !found || old.Revoked || old.Publisher != ev.Publisher || old.Version != ev.Version || old.Digest != ev.Digest {
+			return state{}, ErrInvalid
+		}
+		old.Revoked = true
+		plugins[ev.ID] = old
+	}
+	events := append(s.events[:len(s.events):len(s.events)], ev)
+	receipt.Sequence, receipt.Checkpoint = next, ev.hash()
+	return state{status: receipt, events: events, plugins: plugins, catalog: s.catalog}, nil
 }
 
 func Read(path, anchor string, pins Pins) (Status, error) {

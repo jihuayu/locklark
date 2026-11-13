@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
@@ -23,6 +24,12 @@ from .support import (
     f10_popup_vault_ready,
     f11_fill_contract_ready,
     f12_parity_doc,
+    HIBP_FIXED_HOST,
+    HIBP_HTTPS_PORT,
+    HIBP_NETWORK_PROMPT,
+    HIBP_PREFIX_RE,
+    f13_cli_hibp_opt_in,
+    f13_cli_hibp_range_lookups,
     f13_hibp_client_ready,
     f13_watchtower_ready,
     go_package_test,
@@ -43,6 +50,7 @@ from .support import (
     require_hex64,
     reveal_login,
     shell_function_body,
+    source_text,
 )
 
 
@@ -277,9 +285,20 @@ def t1_f11_04(ctx):
     assert counts["pass"] >= 1, counts
 
 
-@e2e_test("T1_F11_05", 1, ["F11"], "Same-site iframe fill validates top-level and frame origins")
+@e2e_test(
+    "T1_F11_05",
+    1,
+    ["F11"],
+    "Same-site boundary component contract: same-origin subframe fill and sameSite evaluation",
+    coverage_kind="component_contract",
+)
 def t1_f11_05(ctx):
-    # Supported half, asserted for real: same-origin subframe fill validates the
+    # Component checks only.  Both Node tests call the shipped extension code
+    # directly; neither loads a page, a subframe or a browser runtime, so no
+    # page/subframe/browser injection journey (including sibling-domain iframe
+    # fill) is covered or end-to-end verified here.
+    #
+    # Same-origin half: the shipped identity fill entrypoint validates the
     # top-level and frame origins.
     counts = node_test_pattern(
         ctx,
@@ -288,23 +307,39 @@ def t1_f11_05(ctx):
         min_passed=1,
     )
     assert counts["pass"] >= 1, counts
-    # Unsupported half: same-site (sibling-subdomain) cross-origin frame fill is
-    # genuinely not implemented.  Gate on the real artifact instead of claiming
-    # the whole same-origin path is missing.
+    # Same-site half: the behavioural evidence is the direct sameSite test in
+    # M3_FILL.  The gate only decides whether a same-site helper is shipped at
+    # all: the current core.js sameSite/siteKey exports, or an actual psl.js
+    # registrable-domain helper when one exists.  It is not full PSL coverage -
+    # siteKey resolves suffixes from the finite MULTI_LABEL_SUFFIXES list.
     text = extension_or_source_text(ctx, "core.js") + extension_or_source_text(
         ctx, "content.js"
     )
-    same_site = any(
-        token in text for token in ("registrableDomain", "eTLD", "sameSiteOrigin")
-    )
+    has_core_same_site = "function sameSite" in text and "function siteKey" in text
+    psl = source_text(ctx, "browser-extension/psl.js")
+    has_psl = re.search(
+        r"\bfunction\s+(?:registrableDomain|getDomain)\b|\b(?:registrableDomain|getDomain)\s*[:=]",
+        psl,
+    ) is not None
     gate(
         ctx,
         "F11",
-        same_site,
-        "same-site cross-origin iframe fill is not supported by the extension "
-        "(same-origin subframe fill is implemented and covered by the M3 "
-        "component contract); end-to-end same-site validation remains blocked",
+        has_core_same_site or has_psl,
+        "same-site boundary component is absent: the extension ships neither the "
+        "core.js sameSite/siteKey helper nor a psl.js registrable-domain helper",
     )
+    assert has_core_same_site, (
+        "a psl.js registrable-domain helper was found, but the direct sameSite "
+        "component test in the M3 suite covers the core.js sameSite/siteKey helper; "
+        "add a behavioral test for the psl.js helper before claiming this half"
+    )
+    same_site_counts = node_test_pattern(
+        ctx,
+        M3_FILL,
+        r"M3 sameSite treats sibling subdomains as one site",
+        min_passed=1,
+    )
+    assert same_site_counts["pass"] >= 1, same_site_counts
 
 
 # ---------------------------------------------------------------------------
@@ -418,14 +453,15 @@ def t1_f13_01(ctx):
 )
 def t1_f13_02(ctx):
     # Local health categories ship in internal/watchtower and are surfaced by
-    # the desktop dashboard/popup banner.  The CLI health command has no opt-in
-    # HIBP flags; that is a different surface, not missing Watchtower analysis.
+    # the desktop dashboard/popup banner.  The CLI's opt-in network surface
+    # (``personal health --hibp true``) is a different surface, not missing
+    # Watchtower analysis.
     ready = f13_watchtower_ready(ctx)
     gate(
         ctx,
         "F13",
         ready,
-        "host Watchtower unsecured-HTTP/missing-2FA analysis is absent (CLI health flags are a separate command surface)",
+        "host Watchtower unsecured-HTTP/missing-2FA analysis is absent (the CLI --hibp opt-in is a separate command surface)",
     )
     if go_tool() is None:
         gate(
@@ -453,8 +489,8 @@ def t1_f13_02(ctx):
 def t1_f13_03(ctx):
     # Component-level evidence: the host range client is executed against its
     # bundled httptest server, so only the five-hex prefix leaves the process.
-    # A live api.pwnedpasswords.com round trip is NOT exercised offline; that
-    # residual end-to-end validation stays blocked rather than being claimed.
+    # The CLI opt-in contract is additionally exercised against the synthetic
+    # vault (declined consent, strict option pair) by the code after the gate.
     ready = f13_hibp_client_ready(ctx)
     gate(
         ctx,
@@ -469,6 +505,24 @@ def t1_f13_03(ctx):
             False,
             "validation blocked: go toolchain unavailable; HIBP client component test not executed",
         )
+    vault = make_vault(ctx, ["Breach Probe"])
+    opt_in = f13_cli_hibp_opt_in(ctx, vault)
+    gate(
+        ctx,
+        "F13",
+        opt_in["flags"],
+        "`personal health` does not advertise the `--hibp true` opt-in",
+    )
+    # A refused option pair and a declined consent must both stop before any
+    # unlock or vault.health.hibp intent, on the real compiled CLI.
+    assert opt_in["bad_pair_refused"], (
+        "personal health accepted a non-literal --hibp option pair: "
+        f"{opt_in}"
+    )
+    # The refusal itself was asserted inside f13_cli_hibp_opt_in (fixed
+    # cancellation error, no receipt, no unlock and no vault.health.hibp
+    # intent appended).
+    assert opt_in["audit_delta"] == [], opt_in
     counts = go_package_test(
         ctx,
         "./internal/watchtower",
@@ -476,6 +530,157 @@ def t1_f13_03(ctx):
         min_passed=1,
     )
     assert counts["pass"] >= 1, counts
+
+
+@e2e_test(
+    "T1_F13_06",
+    1,
+    ["F13"],
+    "Opt-in HIBP breach match through the CLI against the local mock range server",
+)
+def t1_f13_06(ctx):
+    # The CLI hard-codes https://api.pwnedpasswords.com/range/ and offers no
+    # endpoint/proxy/client override.  The shipped HIBP client is built with
+    # an empty `http.Client` (nil `Transport`), so its requests use Go's
+    # default transport, which honours `HTTPS_PROXY` via
+    # `ProxyFromEnvironment`.  That default is the only routing mechanism this
+    # test uses: a private child environment points `HTTPS_PROXY` at a
+    # loopback CONNECT proxy (`NO_PROXY`/`no_proxy` emptied) that accepts only
+    # api.pwnedpasswords.com:443 and relays it to a loopback TLS range server
+    # whose throwaway certificate for that hostname is the child's only trust
+    # anchor (SSL_CERT_FILE/SSL_CERT_DIR).  No system DNS/hosts change,
+    # nothing listens on 443, and no production switch is added.
+    #
+    # If the proxy/CA cannot start or no CONNECT ever arrives, the helper
+    # returns PENDING and this run is never redirected to the real service.
+    # Once CONNECT arrives, the route is being exercised: a TLS handshake or
+    # range failure makes this test hard-fail.  It is never downgraded to
+    # pending and never reported green.
+    if go_tool() is None:
+        gate(
+            ctx,
+            "F13",
+            False,
+            "validation blocked: go toolchain unavailable; CLI HIBP opt-in not exercised",
+        )
+    # Only the two synthetic passwords below are eligible, so the mock must
+    # see exactly their two prefixes and nothing else.
+    vault = init_vault(ctx)
+    breached = "Synthetic-Breached-Pass!2026"
+    clean = "Synthetic-Clean-Pass!2026-Xy9"
+    add_login(ctx, vault, "Breached Mail", password=breached)
+    add_login(ctx, vault, "Clean Mail", password=clean)
+    breached_hash = hashlib.sha1(breached.encode("utf-8")).hexdigest().upper()
+    clean_hash = hashlib.sha1(clean.encode("utf-8")).hexdigest().upper()
+    # Each prefix gets only its own suffix lines.  The breached password's real
+    # suffix is the one returned below, so the SUT must match it to report a
+    # breach; the clean prefix gets padding only.  The test still sends no
+    # suffix or password: only the prefix leaves the process.
+    responses = {
+        breached_hash[:5]: ((breached_hash[5:], 2),),
+        clean_hash[:5]: (),
+    }
+    assert len(responses) == 2, "the synthetic passwords must share no prefix"
+    before = audit_events(ctx, vault)
+    observed = f13_cli_hibp_range_lookups(ctx, vault, responses)
+    after = audit_events(ctx, vault)
+    if observed["status"] != "ran":
+        gate(
+            ctx,
+            "F13",
+            False,
+            "local HIBP route not established (loopback CONNECT proxy or synthetic "
+            f"CA unavailable): {observed.get('reason', 'no proxy connection')}; the "
+            "real service is never contacted and the breach match stays unvalidated",
+        )
+    # The mock was reached: only the fixed destination was attempted and only
+    # five-hex prefixes were requested.
+    assert observed["connections"], observed
+    assert all(
+        host == f"{HIBP_FIXED_HOST}:{HIBP_HTTPS_PORT}" for host in observed["connections"]
+    ), observed["connections"]
+    assert observed["refused"] == [], observed["refused"]
+    assert observed["requests"], "the proxy accepted CONNECT but no range request came"
+    by_prefix: dict[str, list[dict]] = {}
+    for record in observed["requests"]:
+        assert not record.get("refused"), record
+        path = record["path"]
+        assert path.startswith("/range/"), record
+        prefix = path[len("/range/") :]
+        assert HIBP_PREFIX_RE.fullmatch(prefix), path
+        assert record["headers"].get("Add-Padding", "").lower() == "true", record["headers"]
+        for secret_material in (
+            breached,
+            clean,
+            breached_hash[5:],
+            clean_hash[5:],
+            vault["secret"],
+        ):
+            ctx.assert_no_canary_leak(secret_material, path, json.dumps(record["headers"]))
+        by_prefix.setdefault(prefix, []).append(record)
+    # Both expected prefixes reached the mock, each exactly once, and each got
+    # exactly its own independent answer rather than a shared canned body.
+    assert set(by_prefix) == set(responses), (set(by_prefix), set(responses))
+    for prefix, expected_lines in responses.items():
+        records = by_prefix[prefix]
+        assert len(records) == 1, (prefix, records)
+        record = records[0]
+        assert record["unknown_prefix"] is False, record
+        served = tuple(
+            (line["suffix"], line["count"]) for line in record["suffixes"]
+        )
+        assert served == expected_lines, (prefix, served, expected_lines)
+        assert record["body"] == "".join(
+            f"{suffix}:{count}\r\n" for suffix, count in expected_lines
+        ) + "0" * 35 + ":0\r\n", record["body"]
+    assert len({record["body"] for record in observed["requests"]}) == 2, (
+        "the two prefixes did not receive independent responses"
+    )
+    payload = observed["payload"]
+    assert payload["hibp_checked"] is True, payload
+    assert payload["status"] == "checked-hibp", payload
+    titles = {row["id"]: row["title"] for row in list_rows(ctx, vault, state="active")}
+    for canary in (breached, clean, breached_hash[5:], clean_hash[5:], vault["secret"]):
+        ctx.assert_no_canary_leak(canary, json.dumps(payload), observed["transcript"])
+    breach_counts = {
+        finding["id"]: finding["breach_count"] for finding in payload["findings"]
+    }
+    breached_id = next(key for key, title in titles.items() if title == "Breached Mail")
+    clean_id = next(key for key, title in titles.items() if title == "Clean Mail")
+    assert breach_counts.get(breached_id) == 2, (payload, responses)
+    assert breach_counts.get(clean_id) == 0, payload
+    # Positive consent: the fixed NETWORK prompt and the Add-Padding notice
+    # were shown on the terminal before the mocked network phase.
+    assert HIBP_NETWORK_PROMPT in observed["transcript"], observed["transcript"][-1200:]
+    assert "Add-Padding: true" in observed["transcript"], observed["transcript"][-1200:]
+    # Positive audit: the consented run unlocked, recorded one succeeded local
+    # Watchtower pass, then the ``vault.health.hibp`` intent and its succeeded
+    # result.  ``personal audit`` observes with ``audit.list`` events of its
+    # own; only those observation events are dropped from the delta.
+    assert len(after) >= len(before), (len(before), len(after))
+    delta = [
+        event for event in after[len(before) :] if event.get("action") != "audit.list"
+    ]
+    results_by_action = [
+        (event.get("action"), event.get("result")) for event in delta
+    ]
+    assert results_by_action == [
+        ("desktop.unlock", "succeeded"),
+        ("vault.health.watchtower", "succeeded"),
+        ("vault.health.hibp", "intent"),
+        ("vault.health.hibp", "succeeded"),
+    ], results_by_action
+    audit_delta = json.dumps(delta)
+    for canary in (
+        breached,
+        clean,
+        breached_hash,
+        clean_hash,
+        breached_hash[5:],
+        clean_hash[5:],
+        vault["secret"],
+    ):
+        ctx.assert_no_canary_leak(canary, audit_delta)
 
 
 @e2e_test("T1_F13_04", 1, ["F13"], "Popup Watchtower banner warns on a matching login")

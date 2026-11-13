@@ -28,8 +28,22 @@ const (
 // v2FieldDisplay resolves one field for display. Concealment is applied before
 // the emptiness check: a masked detail clears protected values, so rendering
 // them as empty would claim the item has no password or one-time code. An
-// unmasked value is used only for an explicit reveal of that field.
+// unmasked value is used only for an explicit reveal of that field, or for the
+// narrow password-only disclosure supplied to v2FieldDisplayWith.
 func v2FieldDisplay(masked, plain *personal.ItemDetail, key string, revealed bool) string {
+	return v2FieldDisplayWith(masked, plain, key, revealed, nil)
+}
+
+// v2FieldDisplayWith is v2FieldDisplay with a narrow fallback for the
+// password-only revealPasswords disclosure. The fallback is consulted only
+// when the field is concealed, not explicitly revealed, and no plaintext
+// detail is loaded (the masked detail itself is being rendered).
+func v2FieldDisplayWith(masked, plain *personal.ItemDetail, key string, revealed bool, narrow func() string) string {
+	if !revealed && masked != nil && plain == nil && isConcealedKey(masked, key) && narrow != nil {
+		if value := narrow(); value != "" {
+			return value
+		}
+	}
 	if revealed && plain != nil {
 		if value, ok := fieldValue(plain, key); ok {
 			if value == "" {
@@ -694,5 +708,3 @@ func (a *App) v2WatchtowerView(c *ui.Context) {
 		})
 	}
 }
-
-

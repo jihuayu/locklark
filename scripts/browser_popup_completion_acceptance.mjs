@@ -1,7 +1,7 @@
 // Actual popup controls -> native vault -> popup; no privileged mutation hooks.
 import assert from "node:assert/strict";
 
-export async function acceptPopupCompletion({ popup, fixture, phase, eventually, attachment, itemID }) {
+export async function acceptPopupCompletion({ popup, input, fixture, phase, eventually, attachment, itemID, refresh }) {
   const enter = async (selector, value) => {
     await popup.click(selector);
     await popup.selectAll();
@@ -83,19 +83,42 @@ export async function acceptPopupCompletion({ popup, fixture, phase, eventually,
   await eventually(async () => await popup.disabled("#attachment-upload") === false,
     "Attachment download did not settle", 30000);
   phase("popup-completion:attachment-remove");
+  // The click triggers one native attachment request; Chrome may close the
+  // action popup before the request can be approved. Only the fixed approval
+  // control is observed, never the old popup or the whole desktop window.
+  const attachmentID = await popup.attribute('#attachment-list [data-attachment-id]', "data-attachment-id");
+  assert(attachmentID, "Exact attachment identity unavailable");
   await popup.click('#attachment-list [data-action="remove-attachment"]');
-  await eventually(async () => await popup.count('#attachment-list [data-attachment-id]') === 0,
-    "Attachment removal did not persist", 30000);
-  await popup.click("#detail-back");
-  await popup.click('#filter-tabs [data-filter="all"]');
-  await eventually(async () => await popup.disabled("#search-input") === false,
-    "Vault refresh after attachment removal did not settle");
-  await popup.click('#vault-list [data-item-id="' + itemID + '"]');
-  await waitDetail();
-  assert.equal(await popup.count('#attachment-list [data-attachment-id]'), 0,
+  phase("popup-completion:attachment-approval");
+  input([{ wait_label: "批准本次附件操作" }, { click_label: "批准本次附件操作" }]);
+  await eventually(async () => {
+    const control = input([], true, true).controls["批准本次附件操作"];
+    return !control.enabled && !control.showing;
+  }, "Native attachment approval remained available", 30000);
+  // The approved request is the one just made for this exact attachment; the
+  // fresh popup re-fetches the item instead of trusting the closed one.
+  const detail = await refresh();
+  phase("popup-completion:attachment-removed");
+  assert.equal(await detail.count('#attachment-list [data-attachment-id]'), 0,
     "Removed attachment returned after reopening");
-  assert.equal(await popup.count(section), 1, "Custom field removal did not survive reopening");
-  assert.equal(await popup.count('[data-field-id="notes"]'), 0, "Notes clear did not survive reopening");
+  assert.equal(await detail.count('[data-attachment-id="' + attachmentID + '"]'), 0,
+    "Approved attachment removal did not persist");
+  assert.equal(await detail.count(section), 1, "Custom field removal did not survive reopening");
+  // firstID was removed above and must not be touched; only the retained field
+  // is revealed to prove its secret survived the attachment removal/reopen.
+  await detail.click(toggle(secondID));
+  await eventually(async () => await detail.text(toggle(secondID)) === "隐藏",
+    "Custom field reveal after reopening was refused");
+  assert.equal(await detail.text('[data-field-id="' + secondID + '"] .field-value'), fixture.UpdateValue,
+    "Retained custom field value changed after reopening");
+  await detail.click(toggle(secondID));
+  assert.equal(await detail.count('[data-field-id="notes"]'), 0, "Notes clear did not survive reopening");
+  const pass = '[data-field-id="password"]';
+  assert.match(await detail.text(pass + " .field-value"), /•/, "Reopened password should be masked");
+  await detail.click(pass + ' [data-action="toggle-reveal"]');
+  await eventually(async () => await detail.text(pass + " .field-value") === fixture.Value,
+    "Reopened password reveal failed");
+  await detail.click(pass + ' [data-action="toggle-reveal"]');
   phase("popup-completion:complete");
-  console.log("PASS: real popup explicit notes/custom clear, unrelated secret retention, field removal and 2 MiB attachment upload/download SHA-256/removal");
+  console.log("PASS: real popup explicit notes/custom clear, unrelated secret retention, field removal and 2 MiB attachment upload/download SHA-256/native-approved removal");
 }

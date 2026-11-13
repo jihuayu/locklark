@@ -10,7 +10,7 @@ package osunlock
 import "C"
 
 import (
-	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -33,27 +33,27 @@ type keychain struct{}
 
 func New() Store { return keychain{} }
 
-var (
-	biometryOnce sync.Once
-	biometryName string
-)
+var biometry capabilityCache
+
+// biometryTTL bounds how long a capability answer is reused. Label and
+// Description are rendered together, so this avoids probing native frameworks
+// on every frame while still noticing a lid open or an attached Magic Keyboard
+// without restarting the app.
+const biometryTTL = time.Second
 
 // Biometry reports what the user-presence prompt can use on this Mac. It never
-// prompts: canEvaluatePolicy only inspects local capability. The value is
-// cached because Label and Description are rendered together and Touch ID
-// enrollment changes require an app restart to take effect.
+// prompts: canEvaluatePolicy only inspects local capability.
 func Biometry() string {
-	biometryOnce.Do(func() {
+	return biometry.get(time.Now, biometryTTL, func() string {
 		switch int(C.ll_biometry_available()) {
 		case 2:
-			biometryName = "Touch ID"
+			return "Touch ID"
 		case 1:
-			biometryName = "系统密码"
+			return "系统密码"
 		default:
-			biometryName = "不可用"
+			return "不可用"
 		}
 	})
-	return biometryName
 }
 
 func Label() string {

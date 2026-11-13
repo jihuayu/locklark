@@ -20,7 +20,7 @@ func TestRemoteHistoryExportsEveryAuthenticatedTransition(t *testing.T) {
 	if _, e := Read(path, f.cfg, parent.Checkpoint()); e != nil {
 		t.Fatal("baseline trusted local history unreadable")
 	}
-	h, e := ExportHistory(path, f.cfg, parent.Checkpoint())
+	_, h, e := ReadHistory(path, f.cfg, parent.Checkpoint())
 	if e != nil {
 		t.Fatal("remote full-history export unavailable")
 	}
@@ -47,7 +47,7 @@ func TestRemoteHistoryRejectsRollbackForkTamperAndACLRewrite(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	h, e := ExportHistory(path, f.cfg, f.cfg.Genesis())
+	_, h, e := ReadHistory(path, f.cfg, f.cfg.Genesis())
 	if e != nil {
 		t.Fatal(e)
 	}

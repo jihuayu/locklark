@@ -430,6 +430,29 @@ const assert = require("node:assert/strict");
         ):
             self.assertIn(state, text)
 
+    def test_diagnostic_labels_cover_quick_pair_and_passkey_removals(self):
+        text = FIREFOX.read_text(encoding="utf-8")
+        # Exactly three additions to the fixed diagnostic list, all also
+        # allowlisted by the shared X11 driver.
+        start = text.index("const labels = [")
+        labels = re.findall(
+            r'^\s+"([^"]+)",$', text[start : text.index("];", start)], re.MULTILINE
+        )
+        for label in ("连接并启用快捷填充", "批准删除 Passkey", "拒绝删除 Passkey"):
+            self.assertEqual(labels.count(label), 1, label)
+            self.assertIn('"' + label + '"', text[start:])
+        source = (SCRIPTS / "browser_native_x11.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        allowlist = None
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                getattr(target, "id", "") == "CONTROL_LABELS" for target in node.targets
+            ):
+                allowlist = ast.literal_eval(node.value)
+        self.assertIsInstance(allowlist, tuple)
+        for label in ("连接并启用快捷填充", "批准删除 Passkey", "拒绝删除 Passkey"):
+            self.assertIn(label, allowlist, label)
+
     def test_no_privileged_extension_or_cdp_shortcut(self):
         text = PASSKEY.read_text(encoding="utf-8")
         for forbidden in (

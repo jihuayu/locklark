@@ -145,7 +145,7 @@ func (s *Session) TouchBrowserSave(g *BrowserSaveGate) error {
 func (s *Session) winBrowserSave(g *BrowserSaveGate) bool {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
-	if s.saveGate != g || s.lockRequested.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle {
+	if s.saveGate != g || s.lockRequested.Load() || len(s.material) == 0 || s.idleExpired(time.Now()) {
 		g.Cancel()
 		return false
 	}
@@ -195,7 +195,7 @@ func (s *Session) saveBrowser(t BrowserSaveTarget, user, password []byte, g *Bro
 		s.lock()
 	}
 	active := s.active(false) == nil
-	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrBrowserSaveRefused) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound)) {
+	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrBrowserSaveRefused) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrSnapshotCapacity)) {
 		return BrowserSaveReceipt{}, ErrBrowserSaveUnknown
 	}
 	if !active {

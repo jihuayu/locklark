@@ -251,6 +251,8 @@ function makeSandbox(elements, options = {}) {
   } else {
     context.top = context;
   }
+  // An HTTPS page is a secure context; the injected helpers require it.
+  if (options.secure !== false) context.isSecureContext = true;
   return { context, document };
 }
 
@@ -261,6 +263,41 @@ function compiledDocumentFunction(name, sandbox) {
   );
 }
 
+// A minimal live card checkout page for the background's injected
+// core.fillCheckoutCardDocument. The page supplies the visible controls, the
+// document fence and its own clock, so the helper's real deadline, origin and
+// stability checks all still apply.
+const cardPage = { page: null };
+Object.defineProperty(Element.prototype, "getBoundingClientRect", {
+  value() {
+    const page = cardPage.page;
+    return page && page.controls.includes(this)
+      ? { width: 240, height: 32 }
+      : { width: 100, height: 24 };
+  },
+});
+const cardEventTarget = function (page, expectedOrigin, ...rest) {
+  if (!page || cardPage.page !== page) throw Error("unexpected scripting target");
+  const { context } = makeSandbox([], { origin: page.origin });
+  context.document.querySelectorAll = (selector) =>
+    String(selector) === "input,select" ? page.controls : [];
+  context.LocklarkCheckoutFence = page.fence;
+  context.Event = class extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      this.target = null;
+    }
+  };
+  // The page's own clock sits inside the deadline the worker passed; without a
+  // passed deadline it stays on the page's base clock.
+  context.Date = {
+    now: () => (Number.isSafeInteger(rest[1]) ? rest[1] - 1 : page.clock),
+  };
+  return compiledDocumentFunction("fillCheckoutCardDocument", { context })(
+    expectedOrigin,
+    ...rest,
+  );
+};
 function identitySandbox(options = {}) {
   const clock = options.clock ?? 1_700_000_000_000;
   const elements = {
@@ -334,8 +371,10 @@ function cardSandbox(options = {}) {
     csc: makeControl("INPUT", { autocomplete: "cc-csc" }),
   };
   const sandbox = makeSandbox(Object.values(elements), { ...options, clock });
-  const fn = compiledDocumentFunction("fillCardDocument", sandbox);
-  return { elements, sandbox, fn, clock };
+  const compiled = compiledDocumentFunction("fillCardDocument", sandbox);
+  // Card injection is only valid with the worker's explicit authorization.
+  const fn = (...args) => compiled(...args, true);
+  return { elements, sandbox, fn, raw: compiled, clock };
 }
 
 function otpSandbox(count, options = {}) {
@@ -661,6 +700,22 @@ test("M3 fillCardDocument fills number, expiry variants, selects and csc", () =>
   assert.equal(derived.elements.expYear.value, "2030");
 });
 
+test("M3 fillCardDocument refuses credit-card data without explicit authorization", () => {
+  const { elements, raw, clock } = cardSandbox();
+  assert.equal(
+    raw(
+      "https://example.test",
+      { number: "4242 4242 4242 4242" },
+      clock + 2000,
+      false,
+      "credit_card",
+    ),
+    false,
+  );
+  assert.equal(elements.number.value, "");
+  assert.equal(elements.number.events.length, 0);
+});
+
 test("M3 card validResponse accepts only bounded card maps", () => {
   const id = "a".repeat(32);
   for (const response of [
@@ -875,6 +930,47 @@ test("M3 identity fill permits only same-origin subframes", () => {
   );
 });
 
+test("M3 sameSite treats sibling subdomains as one site", () => {
+  // Component contract for the shipped sameSite/siteKey helper.  This is not a
+  // page, subframe or browser journey: it calls the exported helper directly.
+  assert.equal(typeof core.sameSite, "function");
+  assert.equal(typeof core.siteKey, "function");
+
+  // Sibling subdomains of one registrable domain are same-site.
+  assert.equal(
+    core.sameSite("https://app.example.com/login", "https://www.example.com/pay"),
+    true,
+  );
+  assert.equal(
+    core.sameSite("https://shop.example.co.uk/a", "https://www.example.co.uk/b"),
+    true,
+  );
+  assert.equal(core.siteKey("https://app.example.com/login"), "example.com");
+  assert.equal(core.siteKey("https://shop.example.co.uk/a"), "example.co.uk");
+
+  // Unrelated registrable domains (including a different TLD of the same
+  // label) are not same-site.
+  assert.equal(
+    core.sameSite("https://app.example.com/login", "https://evil.example.net/pay"),
+    false,
+  );
+  assert.equal(core.sameSite("https://example.com", "https://example.org"), false);
+  assert.equal(core.sameSite("https://example.co.uk", "https://example.com"), false);
+
+  // Sibling hosts directly under the ``co.uk`` public suffix do not share a
+  // registrable domain.
+  assert.equal(core.sameSite("https://a.co.uk", "https://b.co.uk"), false);
+  assert.equal(core.siteKey("https://a.co.uk"), "a.co.uk");
+
+  // Invalid or non-HTTPS input is refused rather than evaluated as same-site.
+  assert.throws(() =>
+    core.sameSite("http://app.example.com", "https://app.example.com"),
+  );
+  assert.throws(() => core.sameSite("not a url", "https://app.example.com"));
+  assert.throws(() => core.sameSite("", "https://app.example.com"));
+  assert.throws(() => core.siteKey("http://app.example.com"));
+});
+
 test("M3 OTP fill permits only same-origin subframes", () => {
   const sameOrigin = otpSandbox(6, { frame: true });
   assert.equal(
@@ -975,6 +1071,61 @@ function harness(options = {}) {
             ],
           }),
         );
+      if (request.type === "match-profiles")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: request.id,
+            type: "profiles",
+            profiles: [
+              {
+                id: itemId,
+                revision: itemRevision,
+                category: request.profile_kind,
+                title: "Fixture",
+              },
+            ],
+          }),
+        );
+      if (request.type === "fill-profile")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: request.id,
+            type: "profile-fill",
+            profile_fill: {
+              item_id: itemId,
+              revision: itemRevision,
+              category: "credit_card",
+              fields: {
+                "cc-name": "Fixture Holder",
+                "cc-number": "4242424242424242",
+                "cc-exp-month": "12",
+                "cc-exp-year": "2030",
+                "cc-csc": "123",
+              },
+            },
+          }),
+        );
+      // The native vault list the popup reads before a menu action, as the real
+      // popup does; it answers with the same card item and revision.
+      if (request.type === "vault-search")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: request.id,
+            type: "items",
+            items: [
+              {
+                id: itemId,
+                revision: itemRevision,
+                title: "Fixture",
+                category: "credit_card",
+                urls: [core.originFromURL(tabURL) + "/login"],
+              },
+            ],
+          }),
+        );
       if (request.type === "otp")
         queueMicrotask(() =>
           portMessage({
@@ -1021,6 +1172,11 @@ function harness(options = {}) {
       onUpdated: { addListener: (listener) => (listeners.updated = listener) },
       onRemoved: { addListener: (listener) => (listeners.removed = listener) },
     },
+    contextMenus: {
+      create() {},
+      removeAll() {},
+      onClicked: { addListener: (listener) => (listeners.menu = listener) },
+    },
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: {
@@ -1061,6 +1217,18 @@ function harness(options = {}) {
               },
             ];
           return [{ frameId, documentId, result: nextFillResult }];
+        }
+        // A context-menu card fill is executed on the live page; return exactly
+        // what that page reported, as Chrome does.
+        if (request.func === core.fillCheckoutCardDocument) {
+          injected.push(request);
+          injectedArgs.push({
+            func: request.func,
+            args: [...request.args],
+            fields: { ...(request.args[1] || {}) },
+          });
+          const result = cardEventTarget(cardPage.page, ...request.args);
+          return [{ frameId, documentId, result }];
         }
         if (
           request.func === core.fillIdentityDocument ||
@@ -1151,10 +1319,19 @@ function harness(options = {}) {
     deliver: (message) => portMessage(message),
     setFillResult: (value) => (nextFillResult = value),
     advanceClock: (milliseconds) => (clock += milliseconds),
+    now: () => clock,
     setTab: (url, nextDoc) => {
       tabURL = url;
       if (nextDoc) doc = nextDoc;
     },
+    // Chrome passes the clicked tab object as the second listener argument.
+    clickMenu: (menuItemId, tab = {}) =>
+      listeners.menu?.(
+        { menuItemId },
+        { id: tabId, windowId, url: tabURL, ...tab },
+      ),
+    // The external checkout page the user is looking at, if any.
+    cardPage: (page) => (cardPage.page = page || null),
     setFrame: (origin, nextDoc) => {
       frameOrigin = origin;
       if (nextDoc) frameDoc = nextDoc;
@@ -1224,6 +1401,7 @@ async function fillStructured(h, category, payload) {
     id: h.itemId,
     revision: h.itemRevision,
     category,
+    ...(category === "credit_card" ? { userGesture: cardGesture(h) } : {}),
   });
   for (let index = 0; index < 30; index++) {
     await tick();
@@ -1425,6 +1603,247 @@ test("M3 background identity and card fills are category-bound and zeroed", asyn
         await settle(2);
       }
     });
+  }
+});
+
+// The popup, inline menu and context menu mint exactly this shape inside a
+// trusted click: a nonce and its mint time, never a tab/frame/document claim.
+let gestureSerial = 0;
+function cardGesture(h, overrides = {}) {
+  return {
+    v: 2,
+    scope: "credit_card",
+    at: h.now(),
+    nonce: (++gestureSerial).toString(16).padStart(32, "0"),
+    ...overrides,
+  };
+}
+
+// The live top-document checkout page the user is looking at.
+function checkoutPage(origin = "https://example.test") {
+  return {
+    origin,
+    clock: 1_700_000_000_000,
+    fence: () => ({ document_stable: true, sandbox_ever: false }),
+    controls: [
+      makeControl("INPUT", { autocomplete: "cc-name" }),
+      makeControl("INPUT", { autocomplete: "cc-number" }),
+      makeControl("SELECT", {
+        autocomplete: "cc-exp-month",
+        options: [
+          { value: "01", text: "01" },
+          { value: "12", text: "12" },
+        ],
+      }),
+      makeControl("INPUT", { autocomplete: "cc-csc" }),
+    ],
+  };
+}
+
+test("inline and context-menu card fills use the same proof shape", async () => {
+  const h = harness({ frameOrigin: "https://example.test" });
+  try {
+    await connect(h);
+    const sender = h.contentSender(2);
+    const matched = await h.send(
+      { type: "inline-match", category: "credit_card" },
+      sender,
+    );
+    await settle(4);
+    assert.deepEqual(
+      [...matched.candidates].map((entry) => entry.category),
+      ["credit_card"],
+    );
+    const fills = () => h.sent.filter((entry) => entry.type === "fill").length;
+    // Content inline-fill makes a native `fill`. The worker awaits the native
+    // roundtrip, so deliver the reply while the request is still in flight.
+    const inline = async (userGesture, from = sender) => {
+      const before = fills();
+      const pending = h.send(
+        {
+          type: "inline-fill",
+          id: h.itemId,
+          revision: h.itemRevision,
+          category: "credit_card",
+          ...(userGesture ? { userGesture } : {}),
+        },
+        from,
+      );
+      let request = null;
+      for (let index = 0; index < 30; index++) {
+        await tick();
+        if (fills() > before) {
+          request = h.sent.filter((entry) => entry.type === "fill").at(-1);
+          break;
+        }
+      }
+      if (request) {
+        assert.equal("userGesture" in request, false);
+        h.deliver({
+          v: 1,
+          id: request.id,
+          type: "fill",
+          category: "credit_card",
+          card: { number: "4242424242424242" },
+        });
+      }
+      await pending;
+      await settle(15);
+      return fills() > before;
+    };
+    // No proof, a stale proof and a proof carrying a tab, frame or document
+    // claim are refused for this same-origin subframe.
+    assert.equal(await inline(undefined), false);
+    assert.equal(await inline(cardGesture(h, { at: h.now() - 10_001 })), false);
+    assert.equal(
+      await inline(cardGesture(h, { frameId: 2, documentId: "frame-doc-0" })),
+      false,
+    );
+    // A proof inside its ten-second window is accepted once for the
+    // browser-verified sender frame/document; the same nonce replayed from the
+    // same unchanged sender reaches native only once. The page-side menu mints
+    // the proof milliseconds before delivery, so mint it now.
+    h.advanceClock(9_000);
+    const proof = cardGesture(h);
+    assert.equal(await inline(proof), true, "the fresh proof is honored");
+    assert.equal(fills(), 1);
+    assert.equal(await inline({ ...proof }), false, "nonce replay refused");
+    assert.equal(fills(), 1);
+    // A page-side proof cannot fill the card without a live match context.
+    h.navigate("https://example.test/login", "doc-3");
+    await settle(2);
+
+    // Context menu: the popup first reads the native vault list, exactly as
+    // the real popup does, so the worker holds the item the menu entry names.
+    const page = checkoutPage();
+    h.cardPage(page);
+    const listed = await h.send({
+      type: "vault-search",
+      query: "",
+      category: "credit_card",
+    });
+    assert.deepEqual(
+      [...listed.vaultItems].map((item) => [item.id, item.revision]),
+      [[h.itemId, h.itemRevision]],
+    );
+    await settle(2);
+    const cardInjection = () =>
+      h.injectedArgs.filter(
+        (entry) => entry.func === core.fillCheckoutCardDocument,
+      );
+    // An entry that does not match the live vault item is refused and never
+    // reaches native.
+    h.clickMenu(`fill-card:${h.itemId}:${"d".repeat(64)}`);
+    await settle(10);
+    assert.equal(
+      h.sent.filter((entry) => entry.type === "match-profiles").length,
+      0,
+    );
+    // The worker's own click mints the proof, binds it to the browser-reported
+    // tab and goes through match-profiles + fill-profile, not `fill`.
+    h.clickMenu(`fill-card:${h.itemId}:${h.itemRevision}`);
+    for (let index = 0; index < 40; index++) {
+      await tick();
+      if (h.sent.some((entry) => entry.type === "fill-profile")) break;
+    }
+    assert.equal(fills(), 1, "the menu click sends no login/card fill request");
+    const matches = h.sent.filter((entry) => entry.type === "match-profiles");
+    assert.equal(matches.length, 1, "the menu asked native to match profiles");
+    assert.equal(matches[0].tab_id, 1);
+    assert.equal(matches[0].profile_kind, "credit_card");
+    assert.equal(JSON.stringify(matches[0]).includes(proof.nonce), false);
+    const profiles = h.sent.filter((entry) => entry.type === "fill-profile");
+    assert.equal(profiles.length, 1, "native fill-profile is requested once");
+    assert.equal(profiles[0].item_id, h.itemId);
+    assert.equal(profiles[0].revision, h.itemRevision);
+    assert.equal("userGesture" in profiles[0], false);
+    for (let index = 0; index < 40; index++) {
+      await tick();
+      if (cardInjection().length) break;
+    }
+    assert.equal(cardInjection().length, 1, "the approved card is injected once");
+    const injection = cardInjection()[0];
+    assert.equal(injection.args[0], page.origin);
+    assert.equal(injection.args[3], true, "the menu targets the top document");
+    assert.equal(injection.args[4], true);
+    assert.deepEqual(injection.fields, {
+      "cc-name": "Fixture Holder",
+      "cc-number": "4242424242424242",
+      "cc-exp-month": "12",
+      "cc-exp-year": "2030",
+      "cc-csc": "123",
+    });
+    // The real injected helper ran on the page and wrote each field once.
+    assert.deepEqual(
+      page.controls.map((control) => control.value),
+      ["Fixture Holder", "4242424242424242", "12", "123"],
+    );
+    for (const control of page.controls)
+      assert.deepEqual(
+        control.events.map((event) => event.type),
+        ["input", "change"],
+      );
+    let state = await h.state();
+    assert.equal(
+      state.status,
+      "已请求填充所选银行卡；未自动提交；请核实网站结果",
+    );
+    assert.equal(
+      JSON.stringify({ ...state, status: "" }).includes("4242424242424242"),
+      false,
+      "card fields never return to the popup",
+    );
+    // A second menu click is a separate trusted click: it mints a fresh proof,
+    // is honored once more, and never retries or doubles the first injection.
+    h.clickMenu(`fill-card:${h.itemId}:${h.itemRevision}`);
+    for (let index = 0; index < 40; index++) {
+      await tick();
+      if (h.sent.filter((entry) => entry.type === "fill-profile").length > 1)
+        break;
+    }
+    assert.equal(
+      h.sent.filter((entry) => entry.type === "fill-profile").length,
+      2,
+    );
+    for (let index = 0; index < 40; index++) {
+      await tick();
+      if (cardInjection().length > 1) break;
+    }
+    assert.equal(cardInjection().length, 2);
+    for (const control of page.controls)
+      assert.deepEqual(
+        control.events.map((event) => event.type),
+        ["input", "change", "input", "change"],
+        "each click writes every field exactly once",
+      );
+    await settle(15);
+    state = await h.state();
+    assert.equal(state.pending, false);
+    assert.equal(fills(), 1);
+    // A click whose reported tab is not the active captured tab/documents
+    // sends no native profile request.
+    const menuRequests = () => ({
+      matches: h.sent.filter((entry) => entry.type === "match-profiles").length,
+      profiles: h.sent.filter((entry) => entry.type === "fill-profile").length,
+    });
+    const settled = menuRequests();
+    h.clickMenu(`fill-card:${h.itemId}:${h.itemRevision}`, {
+      id: 99,
+      windowId: 8,
+    });
+    await settle(15);
+    assert.deepEqual(
+      menuRequests(),
+      settled,
+      "a click for another tab sends no native profile request",
+    );
+    assert.equal(cardInjection().length, 2);
+    state = await h.state();
+    assert.equal(state.pending, false);
+  } finally {
+    h.cardPage(null);
+    await h.send({ type: "disconnect" });
+    await settle(2);
   }
 });
 

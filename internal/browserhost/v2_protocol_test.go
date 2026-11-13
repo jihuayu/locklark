@@ -3,6 +3,7 @@ package browserhost
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ func v2Fixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, strin
 	if e := c.Handle(Request{V: 1, ID: reqID(1), Type: "hello"}); e != nil {
 		t.Fatal(e)
 	}
-	if e := c.ApprovePair(s); e != nil {
+	if e := c.ApproveQuickPair(s); e != nil {
 		t.Fatal(e)
 	}
 	cap := out.responses(t)[0].Capability
@@ -82,14 +83,32 @@ func v2Last(t *testing.T, out *memoryPipe) Response {
 	return all[len(all)-1]
 }
 
+// destructiveCall sends a removal even on a quick-fill connection and proves
+// it wrote nothing until its own native review was approved. Removals are never
+// covered by the pairing's quick-fill grant.
+func destructiveCall(t *testing.T, c *Connection, out *memoryPipe, value map[string]any) Response {
+	t.Helper()
+	kind, id := value["type"], value["id"]
+	before := len(out.responses(t))
+	v2Send(t, c, value)
+	if got := len(out.responses(t)); got != before {
+		t.Fatalf("%v executed before native approval: %d new frames", kind, got-before)
+	}
+	view := c.Snapshot()
+	if view.V2 == nil || view.V2.ID != id || view.V2.Type != kind {
+		t.Fatalf("%v did not create an exact native review: %#v", kind, view.V2)
+	}
+	if e := c.ApproveV2(fmt.Sprint(id)); e != nil {
+		t.Fatal(e)
+	}
+	return v2Last(t, out)
+}
+
 func TestGenerateModesAndRedaction(t *testing.T) {
 	c, out, _, cap := v2Fixture(t)
-	random := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(10), "type": "generate", "capability": cap, "mode": "random", "length": 24, "digits": true, "symbols": true})
-	if random.Type != "generated" || len(random.GeneratedPassword) != 24 || random.PasswordProfile == nil || random.PasswordProfile.Mode != "random" || random.HistoryID == "" {
+	random := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(10), "type": "generate", "capability": cap, "mode": "random", "length": 24, "digits": true, "symbols": true, "save_history": true})
+	if random.Type != "generated" || len(random.GeneratedPassword) != 24 || random.PasswordProfile == nil || random.PasswordProfile.Mode != "random" || random.HistoryID != "" {
 		t.Fatalf("random: %#v", random)
-	}
-	if token.MatchString(random.HistoryID) == false {
-		t.Fatal("history id")
 	}
 	optionsJSON := `{"mode":"random","length":18,"digits":true,"symbols":false}`
 	options := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(11), "type": "generate", "capability": cap, "options": optionsJSON})
@@ -223,7 +242,7 @@ func TestPopupVaultCRUDAndProfileFill(t *testing.T) {
 		t.Fatalf("card detail: %#v", cardDetail.Item)
 	}
 	cardRaw, _ := json.Marshal(cardDetail.Item)
-	if bytes.Contains(cardRaw, []byte("4242424242424242")) || bytes.Contains(cardRaw, []byte(`"123"`)) || bytes.Contains(cardRaw, []byte("4321")) {
+	if bytes.Contains(cardRaw, []byte("4242424242424242")) || bytes.Contains(cardRaw, []byte(`"123"`)) || bytes.Contains(cardRaw, []byte(`"pin":`)) {
 		t.Fatal("item-get leaked full PAN, CVV or PIN")
 	}
 	if !strings.Contains(cardDetail.Item.CreditCard.MaskedNumber, "4242") || strings.Contains(cardDetail.Item.CreditCard.MaskedNumber, "4242424242424242") {

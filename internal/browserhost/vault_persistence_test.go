@@ -32,7 +32,7 @@ func browserPersistenceFixture(t *testing.T) (*Connection, *memoryPipe, *persona
 	if e := c.Handle(Request{V: 1, ID: reqID(1), Type: "hello"}); e != nil {
 		t.Fatal(e)
 	}
-	if e := c.ApprovePair(s); e != nil {
+	if e := c.ApproveQuickPair(s); e != nil {
 		t.Fatal(e)
 	}
 	return c, out, s, path, key, out.responses(t)[0].Capability
@@ -50,7 +50,7 @@ func reopenBrowserPersistence(t *testing.T, path string, key []byte) (*Connectio
 	if e := c.Handle(Request{V: 1, ID: reqID(2), Type: "hello"}); e != nil {
 		t.Fatal(e)
 	}
-	if e := c.ApprovePair(s); e != nil {
+	if e := c.ApproveQuickPair(s); e != nil {
 		t.Fatal(e)
 	}
 	return c, out, s, out.responses(t)[0].Capability
@@ -147,7 +147,7 @@ func TestBrowserCreatePersistsWholeDurableItem(t *testing.T) {
 		t.Fatalf("reopened card detail: %#v", cardAfter.Item)
 	}
 	raw, _ := json.Marshal(cardAfter.Item)
-	for _, secret := range []string{"4242424242424242", `"123"`, "4321"} {
+	for _, secret := range []string{"4242424242424242", `"123"`, `"pin":`} {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Fatalf("reopened card detail leaked %q", secret)
 		}

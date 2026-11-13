@@ -13,6 +13,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -85,6 +86,78 @@ func DefaultSettings() Settings {
 	return s.normalized()
 }
 
+// UsageError reports invalid desktop command-line arguments. Its message is
+// the fixed usage text and never includes the offending argument or path.
+type UsageError struct{}
+
+func (*UsageError) Error() string { return desktopSettingsUsage }
+
+// desktopSettingsUsage is the only command-line syntax the desktop accepts.
+const desktopSettingsUsage = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
+
+// ErrSettingsPath is returned for an unusable explicit settings path. The
+// error never includes the path itself.
+var ErrSettingsPath = errors.New("desktop: settings path must be one absolute, clean file path")
+
+// parseDesktopArgs parses the desktop command line. Only a single
+// "--settings ABSOLUTE_PATH" option pair is accepted; no arguments means the
+// default SettingsPath(). A "--settings=" form is rejected so the option has
+// one spelling.
+func parseDesktopArgs(args []string) (settingsPath string, err error) {
+	switch {
+	case len(args) == 0:
+		return "", nil
+	case len(args) == 2 && args[0] == "--settings":
+		clean, err := validateSettingsFilePath(args[1])
+		if err != nil {
+			return "", err
+		}
+		return clean, nil
+	default:
+		return "", &UsageError{}
+	}
+}
+
+// validateSettingsFilePath accepts exactly one absolute, clean path without
+// NUL bytes. An existing path must be a regular file (checked with Lstat so a
+// symlink or special file such as a FIFO or device cannot disguise a
+// non-regular path); a path that does not exist yet is allowed.
+func validateSettingsFilePath(path string) (string, error) {
+	switch {
+	case path == "" || strings.ContainsRune(path, 0):
+		return "", ErrSettingsPath
+	case !filepath.IsAbs(path):
+		return "", ErrSettingsPath
+	case filepath.Clean(path) != path:
+		return "", ErrSettingsPath
+	}
+	if filepath.Dir(path) == path {
+		// A filesystem root cannot be a settings file.
+		return "", ErrSettingsPath
+	}
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return path, nil
+	case err != nil:
+		return "", ErrSettingsPath
+	case !info.Mode().IsRegular():
+		return "", ErrSettingsPath
+	}
+	return path, nil
+}
+
+// RunDesktopArgs validates the desktop command line and starts the
+// application with the selected settings path. Invalid arguments return a
+// *UsageError before any GUI state is created; no arguments run Run().
+func RunDesktopArgs(args []string) error {
+	path, err := parseDesktopArgs(args)
+	if err != nil {
+		return err
+	}
+	return RunWithSettingsPath(path)
+}
+
 // SettingsPath returns the per-user non-secret settings path. The containing
 // directory is created with 0700 and the file is written with 0600.
 func SettingsPath() string {
@@ -95,20 +168,58 @@ func SettingsPath() string {
 	return filepath.Join(dir, "locklark", "settings.json")
 }
 
-// normalize copies duration aliases into the canonical persisted units and
-// applies defaults for missing presentation values.
+// checkAutoLockMinutes validates security.autolock.minutes in its persisted
+// integer unit before it is ever converted to a duration, so a negative or
+// overflowing value can never be truncated or normalized into "never" (0).
+func checkAutoLockMinutes(minutes int) error {
+	if minutes < minAutoLockMinutes || minutes > maxAutoLockMinutes {
+		return fmt.Errorf("desktop: autolock minutes %d is out of range [%d, %d]", minutes, minAutoLockMinutes, maxAutoLockMinutes)
+	}
+	return nil
+}
+
+// checkClipboardClearSeconds validates security.clipboard.clearAfterSeconds in
+// seconds. Negative values are rejected rather than normalized to "never".
+func checkClipboardClearSeconds(seconds int) error {
+	if seconds < minClipboardClearSeconds || seconds > maxClipboardClearSeconds {
+		return fmt.Errorf("desktop: clipboard clear seconds %d is out of range [%d, %d]", seconds, minClipboardClearSeconds, maxClipboardClearSeconds)
+	}
+	return nil
+}
+
+// minutesDuration and secondsDuration convert after validation only.
+func (s Settings) minutesDuration() (time.Duration, error) {
+	if err := checkAutoLockMinutes(s.AutoLockMinutes); err != nil {
+		return 0, err
+	}
+	return time.Duration(s.AutoLockMinutes) * time.Minute, nil
+}
+
+func (s Settings) secondsDuration() (time.Duration, error) {
+	if err := checkClipboardClearSeconds(s.ClipboardClearSeconds); err != nil {
+		return 0, err
+	}
+	return time.Duration(s.ClipboardClearSeconds) * time.Second, nil
+}
+
+// normalize copies presentation defaults and the in-memory duration aliases
+// into the canonical persisted units. It never repairs an out-of-range
+// integer: ValidateSettings reports it, and a negative alias resolves to -1 in
+// the persisted unit so it is rejected instead of becoming "never".
 func (s Settings) normalized() Settings {
 	if s.IdleTimeout != 0 {
-		s.AutoLockMinutes = int(s.IdleTimeout / time.Minute)
-	}
-	if s.IdleTimeout < 0 {
-		s.AutoLockMinutes = 0
+		if s.IdleTimeout < 0 {
+			s.AutoLockMinutes = -1
+		} else {
+			s.AutoLockMinutes = int(s.IdleTimeout / time.Minute)
+		}
 	}
 	if s.ClipboardClearTimeout != 0 {
-		s.ClipboardClearSeconds = int(s.ClipboardClearTimeout / time.Second)
-	}
-	if s.ClipboardClearTimeout < 0 {
-		s.ClipboardClearSeconds = 0
+		if s.ClipboardClearTimeout < 0 {
+			s.ClipboardClearSeconds = -1
+		} else {
+			s.ClipboardClearSeconds = int(s.ClipboardClearTimeout / time.Second)
+		}
 	}
 	if s.Theme == "" {
 		s.Theme = "system"
@@ -126,19 +237,27 @@ func (s Settings) normalized() Settings {
 	default:
 		s.InterfaceDensity = "comfortable"
 	}
-	s.IdleTimeout = s.AutoLockDuration()
-	s.ClipboardClearTimeout = s.ClipboardClearDuration()
+	if d, err := s.minutesDuration(); err == nil {
+		s.IdleTimeout = d
+	} else {
+		s.IdleTimeout = 0
+	}
+	if d, err := s.secondsDuration(); err == nil {
+		s.ClipboardClearTimeout = d
+	} else {
+		s.ClipboardClearTimeout = 0
+	}
 	return s
 }
 
 // ValidateSettings enforces the bounded, documented preference values.
 func ValidateSettings(s Settings) (Settings, error) {
 	s = s.normalized()
-	if s.AutoLockMinutes < 0 || s.AutoLockMinutes > 480 {
-		return Settings{}, fmt.Errorf("desktop: autolock minutes %d is out of range", s.AutoLockMinutes)
+	if err := checkAutoLockMinutes(s.AutoLockMinutes); err != nil {
+		return Settings{}, err
 	}
-	if s.ClipboardClearSeconds < 0 || s.ClipboardClearSeconds > 3600 {
-		return Settings{}, fmt.Errorf("desktop: clipboard clear seconds %d is out of range", s.ClipboardClearSeconds)
+	if err := checkClipboardClearSeconds(s.ClipboardClearSeconds); err != nil {
+		return Settings{}, err
 	}
 	switch s.InterfaceDensity {
 	case "comfortable", "compact":
@@ -155,13 +274,21 @@ func ValidateSettings(s Settings) (Settings, error) {
 
 // AutoLockDuration returns the idle timeout, or 0 when auto-lock is disabled.
 func (s Settings) AutoLockDuration() time.Duration {
-	return time.Duration(s.AutoLockMinutes) * time.Minute
+	d, err := s.minutesDuration()
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // ClipboardClearDuration returns the owned clipboard lease duration, or 0
 // when clipboard clearing is disabled.
 func (s Settings) ClipboardClearDuration() time.Duration {
-	return time.Duration(s.ClipboardClearSeconds) * time.Second
+	d, err := s.secondsDuration()
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // LoadSettings reads the settings file. A missing file returns the defaults
@@ -272,12 +399,16 @@ func (a *App) SaveSettings() error {
 	return SaveSettings(a.settingsPath, a.settings)
 }
 
-// SetAutoLockMinutes validates, applies and persists the idle auto-lock
-// interval. 0 disables idle locking.
+// SetAutoLockMinutes validates the raw integer, applies and persists the idle
+// auto-lock interval. 0 disables idle locking; a negative or out-of-range value
+// is rejected without touching the current settings.
 func (a *App) SetAutoLockMinutes(minutes int) error {
+	if err := checkAutoLockMinutes(minutes); err != nil {
+		return err
+	}
 	s := a.settingsSnapshot()
 	s.AutoLockMinutes = minutes
-	s.IdleTimeout = time.Duration(minutes) * time.Minute
+	s.IdleTimeout = time.Duration(minutes) * time.Minute // bounded by the check above
 	s, err := ValidateSettings(s)
 	if err != nil {
 		return err
@@ -285,15 +416,20 @@ func (a *App) SetAutoLockMinutes(minutes int) error {
 	a.settings = s
 	a.refreshClipboardClearSeconds(s)
 	a.touchActivity()
+	a.applyIdlePolicy()
 	return a.SaveSettings()
 }
 
-// SetClipboardClearSeconds validates, applies and persists the owned
-// clipboard lease duration. 0 disables automatic clearing.
+// SetClipboardClearSeconds validates the raw integer, applies and persists the
+// owned clipboard lease duration. 0 disables automatic clearing; a negative or
+// out-of-range value is rejected without touching the current settings.
 func (a *App) SetClipboardClearSeconds(seconds int) error {
+	if err := checkClipboardClearSeconds(seconds); err != nil {
+		return err
+	}
 	s := a.settingsSnapshot()
 	s.ClipboardClearSeconds = seconds
-	s.ClipboardClearTimeout = time.Duration(seconds) * time.Second
+	s.ClipboardClearTimeout = time.Duration(seconds) * time.Second // bounded above
 	s, err := ValidateSettings(s)
 	if err != nil {
 		return err
@@ -320,13 +456,39 @@ func (a *App) SetLockOnScreenLock(on bool) error {
 	return a.SaveSettings()
 }
 
-// SetRevealPasswords persists the default concealment preference.
+// SetLockOnWindowClose persists whether closing the window locks the vault.
+func (a *App) SetLockOnWindowClose(on bool) error {
+	s := a.settingsSnapshot()
+	s.LockOnWindowClose = on
+	a.settings = s.normalized()
+	a.refreshClipboardClearSeconds(a.settings)
+	return a.SaveSettings()
+}
+
+// SetRevealPasswords persists the default concealment preference. Turning it
+// off immediately retracts any live default password disclosure.
 func (a *App) SetRevealPasswords(on bool) error {
 	s := a.settingsSnapshot()
 	s.RevealPasswords = on
 	a.settings = s.normalized()
 	a.refreshClipboardClearSeconds(a.settings)
+	if !on {
+		a.defaultRevealAt = time.Time{}
+		a.hideRevealed()
+	}
+	a.retractNarrowRevealIfDisabled()
 	return a.SaveSettings()
+}
+
+// retractNarrowRevealIfDisabled hides an outstanding password-only disclosure
+// when the preference is no longer active, e.g. after ApplySettings.
+func (a *App) retractNarrowRevealIfDisabled() {
+	if !a.settingsSnapshot().RevealPasswords {
+		a.defaultRevealAt = time.Time{}
+		if a.hideNarrowPassword() && !a.v2.revealUntil.IsZero() {
+			a.v2.revealUntil = time.Time{}
+		}
+	}
 }
 
 // ApplySettings validates and applies an in-memory settings value, then
@@ -339,11 +501,24 @@ func (a *App) ApplySettings(s Settings) error {
 	a.settings = s
 	a.refreshClipboardClearSeconds(s)
 	a.touchActivity()
+	a.applyIdlePolicy()
+	if s.RevealPasswords && a.v2.detail != nil && a.defaultRevealAt.IsZero() && a.v2.narrowPassword.value == nil {
+		a.defaultRevealAt = time.Now()
+	}
+	a.retractNarrowRevealIfDisabled()
 	return a.SaveSettings()
 }
 
 // idleTimeout returns the effective idle timeout.
-func (a *App) idleTimeout() time.Duration { return a.settingsSnapshot().AutoLockDuration() }
+// An invalid preference fails closed to the documented default instead of
+// silently becoming "never".
+func (a *App) idleTimeout() time.Duration {
+	d, err := a.settingsSnapshot().minutesDuration()
+	if err != nil {
+		return DefaultSettings().AutoLockDuration()
+	}
+	return d
+}
 
 // clipboardClearDuration is the non-blocking mirror of
 // security.clipboard.clearAfterSeconds. Broker connection goroutines call it
@@ -369,13 +544,22 @@ func (a *App) refreshClipboardClearSeconds(s Settings) {
 	a.clipboardClearSeconds.Store(seconds)
 }
 
-// maxClipboardClearSeconds is the documented upper bound for automatic
-// clipboard clearing; ValidateSettings enforces the same range.
-const maxClipboardClearSeconds = 3600
+// Documented bounds for the persisted integer preference units.
+const (
+	minAutoLockMinutes       = 0
+	maxAutoLockMinutes       = 480
+	minClipboardClearSeconds = 0
+	maxClipboardClearSeconds = 3600
+)
 
 // clipboardTimeout returns the effective clipboard lease duration.
+// An invalid mirror never disables cleanup: it falls back to the default.
 func (a *App) clipboardTimeout() time.Duration {
-	return a.clipboardClearDuration()
+	d := a.clipboardClearDuration()
+	if d < 0 {
+		return DefaultSettings().ClipboardClearDuration()
+	}
+	return d
 }
 
 // touchActivity records an explicit user interaction for idle auto-lock.
@@ -408,6 +592,22 @@ func (a *App) checkIdle(now time.Time) bool {
 // independent ticker started by Run and may also be called by tests with a
 // synthetic clock. It never assumes that View has rendered.
 func (a *App) backgroundTick(now time.Time) {
+	switch {
+	case !a.settingsSnapshot().RevealPasswords || a.v2.largeTypeOpen:
+		a.defaultRevealAt = time.Time{}
+	case a.busy:
+		// The single worker slot is taken, so run would return before the
+		// read starts. Keep the schedule armed for a later tick.
+	case !a.narrowRevealPending && !a.defaultRevealAt.IsZero() && !now.Before(a.defaultRevealAt.Add(defaultRevealDelay)):
+		a.defaultRevealAt = time.Time{}
+		a.requestPasswordReveal()
+	}
+	if a.v2.narrowPassword.value != nil {
+		d := a.v2.detail
+		if d == nil || !a.v2.narrowPassword.current(d.ID, d.Revision, now) || d.Kind != string(vault.CategoryLogin) || !a.settingsSnapshot().RevealPasswords {
+			a.hideNarrowPassword()
+		}
+	}
 	a.checkOTPExposure(now)
 	if !a.displayUntil.IsZero() && !now.Before(a.displayUntil) {
 		a.display = ""
@@ -513,6 +713,8 @@ func (a *App) settingsView(c *ui.Context) {
 			oneui.Checkbox(c, &sleep, "系统休眠时自动锁定").OnChange(func() { _ = a.SetLockOnSleep(sleep) })
 			screen := s.LockOnScreenLock
 			oneui.Checkbox(c, &screen, "屏幕锁定时自动锁定").OnChange(func() { _ = a.SetLockOnScreenLock(screen) })
+			window := s.LockOnWindowClose
+			oneui.Checkbox(c, &window, "关闭窗口时自动锁定").OnChange(func() { _ = a.SetLockOnWindowClose(window) })
 		})
 
 		// 2. Clipboard Protection Card
@@ -616,7 +818,6 @@ func durationLabel(d time.Duration) string {
 	}
 	return fmt.Sprintf("%d 秒", int(d/time.Second))
 }
-
 
 // normalizeThemeName is a small helper for future appearance controls and
 // keeps the accepted values in one place.

@@ -640,6 +640,8 @@ class E2EContext:
         self.desktop_bin = self.bin_dir / "locklark-desktop"
         team_sync = self.bin_dir / "locklark-team-sync"
         self.team_sync_bin: Path | None = team_sync if _executable(team_sync) else None
+        # Sanitized, small evidence a test may add to the JSON report.
+        self.evidence: dict[str, Any] | None = None
         self._cleaned = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -714,6 +716,7 @@ class E2EContext:
         timeout: float = 20.0,
         binary: Path | str | None = None,
         check_echo: bool = True,
+        drain_after_exit: float = 0.2,
     ) -> PTYResult:
         """Run the CLI with a real POSIX PTY and answer hidden prompts.
 
@@ -897,10 +900,14 @@ class E2EContext:
             except termios.error:
                 echo_restored = False
 
+            # Output written by the child just before it exits can still be in
+            # the PTY buffer; callers that assert on late terminal text request
+            # a longer bounded drain.  Drain before closing the slave: closing
+            # it first makes the pending final write unreadable.
+            drain_available(drain_after_exit)
             if slave_open:
                 os.close(slave)
                 slave_open = False
-            drain_available(0.2)
             return PTYResult(
                 returncode=proc.returncode,
                 stdout=stdout_bytes.decode("utf-8", "replace"),
@@ -1242,6 +1249,21 @@ class E2EContext:
             raise FeatureNotImplementedError(
                 f"[PROGRESSIVE_UNIMPLEMENTED: {feature_id}] {detail}"
             )
+
+    def record_evidence(self, evidence: dict[str, Any]) -> None:
+        """Attach bounded, sanitized evidence to this test's report record."""
+
+        if not isinstance(evidence, dict):
+            raise AssertionError("evidence must be a JSON object")
+        try:
+            serialized = json.dumps(
+                evidence, ensure_ascii=False, sort_keys=True, allow_nan=False
+            )
+        except (TypeError, ValueError):
+            raise AssertionError("evidence must be JSON-serializable") from None
+        if len(serialized.encode("utf-8")) > 32768:
+            raise AssertionError("evidence metadata is too large")
+        self.evidence = json.loads(serialized)
 
 
 __all__ = [

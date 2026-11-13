@@ -101,8 +101,9 @@ class LineWorker {
 }
 
 // Independent OS clipboard reader. The expected bytes are sent as JSON on the
-// helper's private stdin, never in argv, environment or the DOM.
-class PrivateClipboard {
+// helper's private stdin, never in argv, environment or the DOM. Exported so
+// another external journey can reuse exactly this private-pipe reader.
+export class PrivateClipboard {
   constructor(context) {
     this.context = context;
     this.worker = null;
@@ -339,11 +340,31 @@ function unlockDesktop(context, desktop) {
   ]);
 }
 
+// Exact broker consent labels of the desktop pairing prompt
+// (internal/desktop/ipc_broker.go). This shared journey clicks only the quick
+// consent label: its native text explicitly authorizes V2 detail and field copy
+// for this bounded connection without a per-operation window (each native
+// approval would close the action popup). Normal per-operation consent is never
+// clicked here. Refusal remains a real pre-check.
+const NORMAL_CONSENT_LABEL = "确认连接（每次敏感操作需批准）";
+const QUICK_CONSENT_LABEL = "连接并启用快捷填充";
+const REFUSE_CONSENT_LABEL = "拒绝连接";
+
+// Exact per-operation V2 review labels of normal mode
+// (internal/desktop/browser.go). Quick mode must never surface these; they are
+// still allowlisted so a diagnostic inspection reports their absence.
+const GET_APPROVE_LABEL = "批准本次操作";
+const COPY_FIELD_APPROVE_LABEL = "批准本次字段披露";
+const COPY_FIELD_REFUSE_LABEL = "拒绝本次字段披露";
+
 // Only fixed public control labels and their boolean state may be reported.
+// 确认连接此扩展 is a different standalone host prompt, not broker consent.
 const PUBLIC_CONTROLS = [
   "金库文件", "主密码", "Secret Key", "解锁", "新建登录", "立即锁定",
   "显示密码", "复制密码", "金库", "安全设置", "全部", "归档", "回收站",
-  "搜索 / 刷新", "确认连接此扩展", "连接并启用快捷填充", "拒绝连接",
+  "搜索 / 刷新", "确认连接此扩展", NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL,
+  REFUSE_CONSENT_LABEL, GET_APPROVE_LABEL, COPY_FIELD_APPROVE_LABEL,
+  COPY_FIELD_REFUSE_LABEL,
 ];
 
 function sanitizeControls(controls) {
@@ -402,16 +423,67 @@ function fixedErrorFrames(error) {
   return frames.slice(0, 8);
 }
 
+// Before any action popup exists, no broker pairing prompt may be pending: the
+// desktop was only started and unlocked, and no popup has requested a connection
+// yet. This check runs BEFORE the popup because focusing the desktop closes it.
 function assertNoNativePairUi(context, desktop) {
   const view = desktopInspect(context, desktop);
-  for (const label of ["确认连接此扩展", "连接并启用快捷填充", "拒绝连接"]) {
+  for (const label of [NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL, REFUSE_CONSENT_LABEL]) {
     const control = view.controls?.[label];
     assert(!control || control.present !== true,
-      "Shared desktop must not ask for a native quick-pair confirmation");
+      "Shared desktop shows a pending broker pairing prompt before any popup connect");
   }
-  return true;
+  // Kept separately observable: the standalone host prompt is a different UI
+  // and must not be conflated with broker consent.
+  const standalone = view.controls?.["确认连接此扩展"];
+  return !standalone || standalone.present !== true;
 }
 
+// Paired shared session: connect is unavailable and refresh is available.
+async function assertPopupPaired(context, popup) {
+  await context.eventually(
+    async () =>
+      (await popup.disabled("#connect")) === true &&
+      (await popup.disabled("#refresh")) === false,
+    "Shared popup did not bind the live desktop session",
+  );
+}
+
+// One settled read: connect disabled? refresh disabled? A closed popup (a later
+// retry of an error-swallowing eventually) reads as "not observable".
+async function popupPairState(popup) {
+  try {
+    return {
+      // Ancestor selectors do not exist in the popup; undefined is "not paired".
+      connectDisabled: await popup.disabled(":root #connect"),
+      refreshDisabled: await popup.disabled(":root #refresh"),
+    };
+  } catch {
+    return {};
+  }
+}
+
+// Refused pairing must leave the shared session unpaired: connect still
+// available and refresh still unavailable. Retries only read the same DOM.
+async function assertPopupUnpaired(context, popup) {
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === false && last.refreshDisabled === true;
+    },
+    "Shared popup is paired although the desktop refused the connection",
+  ).catch(() => {
+    // The Firefox eventually swallows errors; report the settled state.
+    assert.fail(
+      "Shared popup is not observably unpaired after refusal " + JSON.stringify(last),
+    );
+  });
+}
+
+// Later copies reuse the already bound live shared session. This never pairs:
+// if the popup lost its binding it is a stale-session bug in that phase, not a
+// reason to click #connect again.
 async function connectedPopup(context) {
   const popup = await context.openPopup();
   await context.eventually(
@@ -420,16 +492,120 @@ async function connectedPopup(context) {
       (await popup.disabled("#connect")) === false,
     "Shared popup controls are unavailable",
   );
-  // A live shared session may already be bound; only an unbound popup pairs.
-  if ((await popup.disabled("#connect")) === false) await popup.click("#connect");  await context.eventually(
-    async () =>
-      (await popup.disabled("#connect")) === true &&
-      (await popup.disabled("#refresh")) === false,
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === true && last.refreshDisabled === false;
+    },
     "Shared popup did not bind the live desktop session",
-  );
+  ).catch(() => {
+    assert.fail("Shared popup lost its live desktop binding " + JSON.stringify(last));
+  });
   return popup;
 }
 
+// No broker pairing prompt may be pending. This inspects (and focuses) the
+// desktop, so it must only run while the action popup is closed.
+function assertNoBrokerPairPrompt(context, desktop, reason) {
+  const view = desktopInspect(context, desktop);
+  for (const label of [NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL, REFUSE_CONSENT_LABEL]) {
+    const control = view.controls?.[label];
+    assert(!control || control.present !== true,
+      "Shared desktop shows a broker pairing prompt " + reason);
+  }
+  return true;
+}
+
+// First real Chromium pairing through actual broker consent. Refusal is proven
+// physically first, then a fresh connection is approved only with the fixed
+// quick-consent label, whose native text explicitly authorizes V2 detail and
+// field copy for 15 minutes. Normal per-operation consent is never clicked and
+// no other label is substituted; consent is never inferred from status text.
+async function pairSharedSession(context, desktop, step) {
+  // 1. Refusal on the actual broker prompt: no popup is open, no pending prompt.
+  step("shared-clipboard:pair-connect");
+  await requestRefusal(context, desktop);
+
+  // 2. The prompt is gone and a fresh popup still observes an unpaired session.
+  step("shared-clipboard:pair-refused-state");
+  assertNoBrokerPairPrompt(context, desktop, "after the user refused the connection");
+  await assertRefusedUnpaired(context);
+
+  // 3. New real connection approved only by the fixed quick-consent label.
+  step("shared-clipboard:pair-quick-consent");
+  return reconnectQuickConsent(context, desktop, step);
+}
+
+// Refusal proof on the initial session: no pending prompt before the request,
+// one physical #connect, then the real refusal label natively clicked.
+async function requestRefusal(context, desktop) {
+  // Native desktop inspection raises its window and closes the action popup, so
+  // it runs only while no popup is open. The handle is dropped before the click.
+  assertNoBrokerPairPrompt(context, desktop, "before the user requested a connection");
+  await requestPairing(context);
+  desktopInput(context, desktop, [
+    { wait_label: REFUSE_CONSENT_LABEL },
+    { click_label: REFUSE_CONSENT_LABEL },
+  ]);
+}
+
+// A fresh popup is proven unpaired, its real #connect is clicked exactly once
+// and the handle is discarded at once: the native click focuses the desktop and
+// may close the popup. Never called again for the same request.
+async function requestPairing(context) {
+  const popup = await context.openPopup();
+  await assertPopupUnpaired(context, popup);
+  await popup.click("#connect");
+}
+
+// The refusal click focused the desktop; a fresh popup is opened only after the
+// request settled. No retry: the same DOM is read until it observes the state.
+async function assertRefusedUnpaired(context) {
+  await context.delay(300);
+  const popup = await context.openPopup();
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === false && last.refreshDisabled === true;
+    },
+    "Shared popup is paired although the desktop refused the connection",
+  ).catch(() => {
+    try {
+      return popup.dismiss();
+    } finally {
+      assert.fail("Shared popup is not observably unpaired after refusal " +
+        JSON.stringify(last));
+    }
+  });
+  await popup.dismiss().catch(() => {});
+}
+
+// Re-pair after a desktop lock+unlock: the old browser capability of that bound
+// session is gone. Open a fresh popup, prove it is unpaired with connect enabled,
+// click its real #connect exactly once, discard the handle, then wait for and
+// physically click the exact quick-consent label. Consent is never inferred from
+// text or state; only a reopened popup observing the live binding proves it.
+async function reconnectQuickConsent(context, desktop, step) {
+  // No desktop inspection may run while this popup holds focus.
+  step("shared-clipboard:repair-connect");
+  await requestPairing(context);
+  step("shared-clipboard:repair-quick-consent");
+  desktopInput(context, desktop, [
+    { wait_label: QUICK_CONSENT_LABEL },
+    { click_label: QUICK_CONSENT_LABEL },
+  ]);
+  step("shared-clipboard:repair-verify");
+  await context.delay(300);
+  const popup = await context.openPopup();
+  await assertPopupPaired(context, popup);
+  return popup;
+}
+
+// The row click requests the item detail (item-get). Quick consent explicitly
+// covers V2 detail, so no native per-operation window appears and the action
+// popup keeps its in-memory detail view. The same handle must show the detail.
 async function openSyntheticDetail(context, popup, step) {
   assert(/^[a-f0-9]{32}$/.test(context.fixture.SeedID || ""),
     "Synthetic fixture item id is required");
@@ -454,38 +630,59 @@ async function openSyntheticDetail(context, popup, step) {
   step("shared-clipboard:detail-row");
   await popup.click(row);
   step("shared-clipboard:detail-view");
-  await context.eventually(
-    async () => (await popup.text("#detail-title")) === context.fixture.Title,
-    "Shared vault detail did not open",
-  );
-  step("shared-clipboard:detail-password-controls");
-  assert.equal(await popup.count('[data-field-id="password"]'), 1,
-    "Concealed password field is missing");
-  assert.equal(await popup.count('[data-field-id="password"] [data-action="toggle-reveal"]'), 1,
-    "Password field is not concealed and revealable");
-  assert.equal(await popup.count(COPY_CONFIRM_SELECTOR), 1,
-    "Concealed password copy control is missing");
+  try {
+    await context.eventually(
+      async () => (await popup.text("#detail-title")) === context.fixture.Title,
+      "Shared vault detail did not open",
+      20000,
+    );
+    step("shared-clipboard:detail-password-controls");
+    assert.equal(await popup.count('[data-field-id="password"]'), 1,
+      "Concealed password field is missing");
+    assert.equal(await popup.count('[data-field-id="password"] [data-action="toggle-reveal"]'), 1,
+      "Password field is not concealed and revealable");
+    assert.equal(await popup.count(COPY_CONFIRM_SELECTOR), 1,
+      "Concealed password copy control is missing");
+  } catch (error) {
+    await popup.dismiss().catch(() => {});
+    throw error;
+  }
+  return popup;
 }
 
-// Only the native lease path renders the automatic-cleanup wording next to the
-// copied control; the legacy browser write renders the manual-cleanup warning.
+// Exactly one real copy click in the same action popup holding the synthetic
+// detail. The concealed password copy (item-copy-field) is explicitly covered
+// by quick consent, so no native per-operation window is awaited. The popup
+// must show the visible copy confirmation and automatic-cleanup toast, and it
+// is never clicked again. The returned timestamp is taken only after that
+// confirmed success, because product starts its lease when copyValue executes;
+// the later TTL wait must anchor there, not before the confirmation.
 async function copyConcealedPassword(context, popup) {
   await popup.click(COPY_CONFIRM_SELECTOR);
-  await context.eventually(
-    async () => {
-      const button = String((await popup.text(COPY_CONFIRM_SELECTOR)) || "");
-      const toast = String((await popup.text("#toast")) || "");
-      return button.includes("已复制") && toast.includes("自动清理");
-    },
-    "Popup did not confirm the native copy",
-    20000,
-  );
-  const toast = String((await popup.text("#toast")) || "");
-  assert(toast.includes("已启用自动清理"),
-    "Popup did not announce the native automatic-cleanup lease");
-  assert(!toast.includes("无法保证自动清除"),
-    "Popup used the legacy manual browser-copy wording");
-  return Date.now();
+  const observed = popup;
+  try {
+    await context.eventually(
+      async () => {
+        const button = String((await observed.text(COPY_CONFIRM_SELECTOR)) || "");
+        const toast = String((await observed.text("#toast")) || "");
+        return button.includes("已复制") && toast.includes("自动清理");
+      },
+      "Popup did not confirm the native copy",
+      20000,
+    );
+    const toast = String((await observed.text("#toast")) || "");
+    assert(toast.includes("已启用自动清理"),
+      "Popup did not announce the native automatic-cleanup lease");
+    assert(!toast.includes("无法保证自动清除"),
+      "Popup used the legacy manual browser-copy wording");
+    // Lease anchor: the confirmed copy already executed copyValue, so the
+    // product's TTL starts from here.
+    const copiedAt = Date.now();
+    return { popup: observed, copiedAt };
+  } catch (error) {
+    await observed.dismiss().catch(() => {});
+    throw error;
+  }
 }
 
 async function copyIsPasteable(context, clipboard) {
@@ -575,19 +772,27 @@ export async function acceptSharedClipboard(context) {
     step("shared-clipboard:native-pair-ui");
     receipts.native_pair_ui_absent = assertNoNativePairUi(context, desktop);
     receipts.native_pair_ui_checked_before_popup = true;
+    receipts.broker_consent_labels_checked = true;
 
     step("shared-clipboard:connect");
-    popup = await connectedPopup(context);
+    popup = await pairSharedSession(context, desktop, step);
     receipts.popup_connected_shared = true;
+    receipts.pair_refused_unpaired = true;
+    receipts.pair_quick_consent_bound = true;
 
     step("shared-clipboard:detail");
-    await openSyntheticDetail(context, popup, step);
+    popup = await openSyntheticDetail(context, popup, step);
     receipts.synthetic_row_listed = true;
     receipts.detail_opened = true;
+    receipts.quick_consent_accepted = true;
+    receipts.detail_popup_retained = true;
 
     step("shared-clipboard:native-copy");
     await clipboard.start();
-    const copiedAt = await copyConcealedPassword(context, popup);
+    const copied = await copyConcealedPassword(context, popup);
+    popup = copied.popup;
+    const copiedAt = copied.copiedAt;
+    receipts.popup_copy_in_quick_detail = true;
     receipts.concealed_password_copy = true;
     receipts.dom_copied_confirmed = true;
     receipts.native_autocleanup_wording = true;
@@ -629,8 +834,8 @@ export async function acceptSharedClipboard(context) {
     // A fresh real copy is owned by the app, so locking must clear exactly it.
     step("shared-clipboard:fresh-copy");
     popup = await connectedPopup(context);
-    await openSyntheticDetail(context, popup, step);
-    await copyConcealedPassword(context, popup);
+    popup = await openSyntheticDetail(context, popup, step);
+    popup = (await copyConcealedPassword(context, popup)).popup;
     receipts.fresh_native_copy = await copyIsPasteable(context, clipboard);
     await popup.dismiss();
     popup = null;
@@ -667,8 +872,14 @@ export async function acceptSharedClipboard(context) {
     // ordinary external process orchestration, not an authentication hook.
     step("shared-clipboard:late-prepare-unlock");
     unlockDesktop(context, desktop);
-    popup = await connectedPopup(context);
-    await openSyntheticDetail(context, popup, step);
+    // Locking ended the old browser session: its capability is disconnected, so
+    // the binding must be re-established by a real new quick consent.
+    popup = await reconnectQuickConsent(context, desktop, step);
+    receipts.late_prepare_repair_quick_consent_bound = true;
+    receipts.late_prepare_repair_connect_once = true;
+    receipts.late_prepare_old_capability_repaired = true;
+    receipts.late_prepare_live_binding_reopened = true;
+    popup = await openSyntheticDetail(context, popup, step);
     const lateMarker = "Shared acceptance late marker " + randomBytes(16).toString("hex");
     owner = new ForeignOwner(context, lateMarker);
     await owner.start();

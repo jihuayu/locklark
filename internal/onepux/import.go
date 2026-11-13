@@ -72,38 +72,41 @@ func MapLogins(raw []byte) (MappedLogins, error) {
 		return MappedLogins{}, ErrUnsupported
 	}
 	out := MappedLogins{Report: MappingReport{Profile: LoginProfile, Items: inventory.Items, Archived: inventory.Archived}, Items: make([]vault.Item, 0, inventory.Items)}
+	// Items appended before a failure are still owned here, never by a caller:
+	// releaseMappedItems wipes them before the error is reported.
 	for _, a := range root["accounts"].([]any) {
 		account := a.(map[string]any)
 		accountAttrs := account["attrs"].(map[string]any)
 		if extra(account, "attrs", "vaults") || extra(accountAttrs, "uuid", "accountName", "name", "avatar", "email", "domain") {
-			return MappedLogins{}, ErrUnsupported
+			return releaseMappedItems(&out), ErrUnsupported
 		}
 		for _, v := range account["vaults"].([]any) {
 			sourceVault := v.(map[string]any)
 			vaultAttrs := sourceVault["attrs"].(map[string]any)
 			if extra(sourceVault, "attrs", "items") || extra(vaultAttrs, "uuid", "desc", "avatar", "name", "type") {
-				return MappedLogins{}, ErrUnsupported
+				return releaseMappedItems(&out), ErrUnsupported
 			}
 			for _, i := range sourceVault["items"].([]any) {
 				source := i.(map[string]any)
 				item, e := mapLogin(source)
 				if e != nil {
-					return MappedLogins{}, e
+					return releaseMappedItems(&out), e
 				}
 				identity, _ := json.Marshal([]any{accountAttrs["uuid"], vaultAttrs["uuid"], source["uuid"]})
 				h := sha256.Sum256(append([]byte("locklark/import/1pux/login/v1\x00"), identity...))
 				item.ID = hex.EncodeToString(h[:16])
 				item.ImportSource, e = json.Marshal(map[string]any{"format": "locklark/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
 				if e != nil {
-					return MappedLogins{}, ErrInvalid
+					return releaseMappedItems(&out), ErrInvalid
 				}
 				out.Items = append(out.Items, item)
 			}
 		}
 	}
 	if vault.ValidateItems(nil, out.Items) != nil {
-		return MappedLogins{}, ErrLimit
+		return releaseMappedItems(&out), ErrLimit
 	}
+	// Ownership of out.Items transfers to the caller on this successful return.
 	return out, nil
 }
 

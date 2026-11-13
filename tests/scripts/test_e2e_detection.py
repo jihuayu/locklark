@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import http.client
 import os
 import shutil
+import ssl
 import struct
 import subprocess
 import sys
@@ -437,13 +440,24 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
         self.assertFalse(support.f13_cli_health_flags(ctx))
 
     def test_help_flags_alone_do_not_prove_the_hibp_client(self):
+        # The old `--check-breached`/`--hibp-endpoint` probes are stale; the
+        # landed option is the literal `--hibp true` pair advertised by the
+        # personal help surface.
         ctx = self._ctx(
             {},
-            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+            help_text="locklark help\n  health --file PATH [--hibp true]\n",
         )
         self.assertTrue(support.f13_cli_health_flags(ctx))
         self.assertFalse(support.f13_hibp_client_ready(ctx))
         self.assertFalse(support.f13_watchtower_ready(ctx))
+
+    def test_old_health_flags_are_not_evidence_of_the_landed_contract(self):
+        ctx = self._ctx(
+            {},
+            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+        self.assertFalse(support.f13_hibp_client_ready(ctx))
 
     def test_hibp_client_contract_detected_in_host_sources(self):
         ctx = self._ctx(
@@ -485,6 +499,268 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
         with mock.patch.object(support, "go_tool", lambda: None):
             with self.assertRaisesRegex(AssertionError, "validation blocked"):
                 support.go_package_test(ctx, "./internal/watchtower", "TestAnything")
+
+
+class F13CLIHIBPDetectionTests(unittest.TestCase):
+    """#103: the opt-in gate is the literal `--hibp true` pair, not old flags."""
+
+    def _ctx(self, responses: dict[tuple[str, ...], tuple[int, str, str]]) -> FakeContext:
+        return FakeContext(responses)
+
+    def test_personal_help_hibp_pair_detected(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "  health --file PATH [--hibp true]\n", ""),
+            }
+        )
+        self.assertTrue(support.f13_cli_health_flags(ctx))
+
+    def test_health_help_is_read_even_when_it_exits_non_zero(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+                ("personal", "health", "--help"): (
+                    1,
+                    "usage: locklark personal health --file PATH [--hibp true]\n",
+                    "",
+                ),
+            }
+        )
+        self.assertTrue(support.f13_cli_health_flags(ctx))
+
+    def test_stale_check_breached_and_endpoint_flags_are_not_evidence(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "  --check-breached\n  --hibp-endpoint URL\n", ""),
+                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+            }
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+
+    def test_bare_hibp_without_true_is_not_the_landed_contract(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "  health --file PATH [--hibp]\n", ""),
+            }
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+
+    def test_loopback_proxy_answers_both_prefixes_independently(self):
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is required for the loopback HIBP proxy")
+        ctx = mock.Mock()
+        ctx.temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
+
+        breached = "Synthetic-Breached-Pass!2026"
+        clean = "Synthetic-Clean-Pass!2026-Xy9"
+        breached_hash = hashlib.sha1(breached.encode("utf-8")).hexdigest().upper()
+        clean_hash = hashlib.sha1(clean.encode("utf-8")).hexdigest().upper()
+        responses = {
+            breached_hash[:5]: ((breached_hash[5:], 2),),
+            clean_hash[:5]: (),
+        }
+
+        proxy = support.local_hibp_range_proxy(ctx, responses)
+        self.addCleanup(proxy.close)
+        tls = ssl.create_default_context(cafile=str(proxy.cert))
+        bodies: dict[str, str] = {}
+        for prefix in responses:
+            conn = http.client.HTTPSConnection(
+                "127.0.0.1", proxy.proxy_port, context=tls, timeout=15
+            )
+            conn.set_tunnel(support.HIBP_FIXED_HOST, support.HIBP_HTTPS_PORT)
+            conn.request("GET", f"/range/{prefix}", headers={"Add-Padding": "true"})
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            bodies[prefix] = response.read().decode("ascii")
+            conn.close()
+
+        # The child environment only adds the loopback proxy and throwaway
+        # trust anchor: no hosts/DNS edit, no port 443 listener, no root.
+        self.assertEqual(
+            proxy.env["HTTPS_PROXY"], f"http://127.0.0.1:{proxy.proxy_port}"
+        )
+        self.assertEqual(proxy.env["https_proxy"], proxy.env["HTTPS_PROXY"])
+        self.assertEqual(proxy.env["NO_PROXY"], "")
+        self.assertEqual(proxy.env["no_proxy"], "")
+        self.assertNotEqual(proxy.proxy_port, 443)
+        self.assertNotEqual(proxy.port, 443)
+
+        records = {record["prefix"]: record for record in proxy.requests}
+        self.assertEqual(set(records), set(responses))
+        for prefix, expected_lines in responses.items():
+            served = tuple(
+                (line["suffix"], line["count"])
+                for line in records[prefix]["suffixes"]
+            )
+            self.assertEqual(served, expected_lines)
+            self.assertEqual(records[prefix]["body"], bodies[prefix])
+            for suffix, count in expected_lines:
+                self.assertIn(f"{suffix}:{count}\r\n", bodies[prefix])
+            self.assertTrue(bodies[prefix].endswith("0" * 35 + ":0\r\n"))
+        # Independent answers: the clean prefix must not receive the breached
+        # suffix or its count.
+        self.assertNotEqual(
+            bodies[breached_hash[:5]], bodies[clean_hash[:5]]
+        )
+        self.assertNotIn(breached_hash[5:], bodies[clean_hash[:5]])
+
+        # Any other CONNECT target is refused; only the fixed host is opened.
+        refused = http.client.HTTPSConnection(
+            "127.0.0.1", proxy.proxy_port, context=tls, timeout=15
+        )
+        refused.set_tunnel("example.test", 443)
+        with self.assertRaises(OSError):
+            refused.request("GET", "/")
+        self.assertIn("example.test:443", proxy.refused)
+
+    def test_route_that_never_reaches_the_proxy_is_pending_not_a_pass(self):
+        # No CONNECT ever arrived: the outcome must be "pending" so the caller
+        # reports PENDING_FEATURE, never PASS or a silent success.
+        ctx = mock.Mock()
+        ctx.temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
+
+        class DummyProxy:
+            def __init__(self) -> None:
+                self.connections: list[str] = []
+                self.requests: list[dict[str, object]] = []
+                self.refused: list[str] = []
+                self.env = {"HTTPS_PROXY": "http://127.0.0.1:1"}
+
+            def close(self) -> None:
+                pass
+
+        ctx.run_pty_cli.return_value = support.PTYResult(
+            1,
+            "",
+            "HIBP network check cancelled",
+            [],
+            True,
+        )
+        with mock.patch.object(
+            support, "local_hibp_range_proxy", lambda _ctx, _responses: DummyProxy()
+        ):
+            observed = support.f13_cli_hibp_range_lookups(
+                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}, {"ABCDE": ()}
+            )
+        self.assertEqual(observed["status"], "pending")
+        self.assertEqual(observed["connections"], [])
+
+    def _declined_opt_in(self, before, after):
+        ctx = mock.Mock()
+        ctx.run_cli.return_value = CLIResult(
+            1, "", "usage: locklark personal health --file PATH [--hibp true]", []
+        )
+        declined = support.PTYResult(
+            1,
+            "",
+            "输入 NETWORK 确认联网查询泄露前缀\r\nHIBP network check cancelled\r\n",
+            [],
+            True,
+        )
+        with (
+            mock.patch.object(support, "f13_cli_health_flags", return_value=True),
+            mock.patch.object(support, "audit_events", side_effect=[before, after]),
+            mock.patch.object(support, "pty", return_value=declined),
+        ):
+            observed = support.f13_cli_hibp_opt_in(
+                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}
+            )
+        return ctx, observed
+
+    def test_declined_consent_delta_ignores_audit_list_noise(self):
+        before = [{"action": "vault.create"}, {"action": "audit.list"}]
+        after = before + [{"action": "audit.list"}]
+        ctx, observed = self._declined_opt_in(before, after)
+        self.assertEqual(observed["declined_rc"], 1)
+        self.assertEqual(observed["declined_error"], "HIBP network check cancelled")
+        self.assertEqual(observed["audit_delta"], [])
+        ctx.require_feature.assert_called_once()
+        self.assertTrue(ctx.require_feature.call_args.args[1])
+
+    def test_declined_consent_rejects_any_unlock_or_hibp_audit_increment(self):
+        before = [{"action": "vault.create"}, {"action": "audit.list"}]
+        after = before + [
+            {"action": "audit.list"},
+            {"action": "desktop.unlock"},
+        ]
+        with self.assertRaisesRegex(AssertionError, "wrote audit events"):
+            self._declined_opt_in(before, after)
+
+
+class PyKeePassExportDetectionTests(unittest.TestCase):
+    def test_reader_keeps_export_password_off_argv_and_projects_entries(self):
+        projection = [
+            {
+                "title": "Corp SSO",
+                "username": "alice",
+                "password": "P@ssw0rd-2026",
+                "url": "https://sso.corp.example.test/login",
+                "notes": "",
+            }
+        ]
+        proc = mock.Mock(returncode=0, stdout=json.dumps(projection).encode(), stderr=b"")
+        with (
+            mock.patch.object(support, "pykeepass_peer", return_value="/peer/python"),
+            mock.patch.object(support.subprocess, "run", return_value=proc) as run,
+        ):
+            entries = support.read_kdbx_entries(
+                Path("/tmp/export.kdbx"), "export-pass-2026"
+            )
+        self.assertEqual(entries, projection)
+        argv = run.call_args.args[0]
+        self.assertNotIn("export-pass-2026", argv)
+        self.assertEqual(
+            json.loads(run.call_args.kwargs["input"]),
+            {"password": "export-pass-2026"},
+        )
+        self.assertEqual(argv[0], "/peer/python")
+        self.assertIn("from pykeepass import PyKeePass", argv[2])
+
+    def test_missing_pykeepass_peer_is_a_blocked_assertion(self):
+        with mock.patch.object(support, "pykeepass_peer", return_value=None):
+            with self.assertRaisesRegex(AssertionError, "validation blocked"):
+                support.read_kdbx_entries(Path("/tmp/export.kdbx"), "export-pass-2026")
+
+
+class F11CardFillAuthorizationDetectionTests(unittest.TestCase):
+    """T2_F11_05 is a component explicit-authorization contract.
+
+    It must not be described as page-load wiring evidence.
+    """
+
+    def _core(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "core.js"
+        path.write_text(
+            "module.exports = { fillCardDocument: function (origin, data) "
+            "{ return false; } };\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _run(self, harness_body: str) -> dict[str, object]:
+        ctx = mock.Mock()
+        ctx.temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
+        ctx.repo_root = ROOT
+        ctx.run_cli.return_value = CLIResult(
+            0, json.dumps({"beforeAuthorization": ["", "", "", ""]}), "", []
+        )
+        return support.card_fill_explicit_authorization_component(ctx, self._core())
+
+    def test_harness_is_executed_against_the_built_bundle(self):
+        observed = self._run("")
+        self.assertEqual(observed["beforeAuthorization"], ["", "", "", ""])
+
+    def test_pty_result_is_exported_for_detection_tests(self):
+        self.assertTrue(hasattr(support, "PTYResult"))
 
 
 class F5RefreshDetectionTests(unittest.TestCase):
@@ -714,6 +990,12 @@ class GuiSessionWrappingTests(unittest.TestCase):
 
         return mock.patch.object(harness.shutil, "which", fake)
 
+    def _linux_gui_command(self, target, *, env: dict[str, str], use_xvfb: bool):
+        """Build the command as if the harness ran on Linux (owned dbus session)."""
+
+        with mock.patch.object(harness.sys, "platform", "linux"):
+            return harness.owned_gui_command(target, env=env, use_xvfb=use_xvfb)
+
     def _assert_wrapped(self, command, *, dbus: bool, xvfb: bool, target: list[str]) -> None:
         self.assertEqual(command[0], "sh")
         self.assertEqual(command[1], "-c")
@@ -740,7 +1022,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
         ):
-            command = harness.owned_gui_command(target, env=env, use_xvfb=True)
+            command = self._linux_gui_command(target, env=env, use_xvfb=True)
         self._assert_wrapped(command, dbus=True, xvfb=True, target=target)
 
     def test_supplied_usable_bus_is_preserved(self):
@@ -770,13 +1052,15 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
         ):
-            command = harness.owned_gui_command(["host"], env={"DISPLAY": " "}, use_xvfb=True)
+            command = self._linux_gui_command(
+                ["host"], env={"DISPLAY": " "}, use_xvfb=True
+            )
         self._assert_wrapped(command, dbus=True, xvfb=True, target=["host"])
 
     def test_missing_dbus_wrapper_is_a_validation_blocked_error(self):
         with self._which({"xvfb-run": "/usr/bin/xvfb-run"}):
             with self.assertRaisesRegex(AssertionError, "validation blocked"):
-                harness.owned_gui_command(["host"], env={"DISPLAY": ""}, use_xvfb=True)
+                self._linux_gui_command(["host"], env={"DISPLAY": ""}, use_xvfb=True)
 
     def test_missing_xvfb_is_a_validation_blocked_error(self):
         with self._which({"dbus-run-session": "/usr/bin/dbus-run-session"}):
@@ -820,7 +1104,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": str(fake_xvfb), "dbus-run-session": str(fake_dbus)}
         ):
-            command = harness.owned_gui_command(
+            command = self._linux_gui_command(
                 target, env={"DISPLAY": ""}, use_xvfb=True
             )
         proc = subprocess.Popen(
@@ -841,6 +1125,106 @@ class GuiSessionWrappingTests(unittest.TestCase):
         self.assertEqual(stdout, expected)
         self.assertNotIn(b"AT-SPI", stdout)
         self.assertIn(b"AT-SPI", stderr)
+
+
+class T2F206FailureDiagnosticTests(unittest.TestCase):
+    """The oversized-passkey failure must expose fixed, bounded probe fields."""
+
+    CANARY = "CANARY-t2-f2-06-diagnostic"
+
+    def setUp(self):
+        from tests.e2e import tier2_f01_f08
+
+        self.module = tier2_f01_f08
+
+    class Probe:
+        def __init__(self, *, timed_out=False, returncode=1, frames=None):
+            self.timed_out = timed_out
+            self.returncode = returncode
+            self.frames = [] if frames is None else frames
+            self.raw_stdout = T2F206FailureDiagnosticTests.CANARY.encode("utf-8")
+            self.stderr = T2F206FailureDiagnosticTests.CANARY
+
+    def test_failure_message_is_bounded_and_never_exposes_probe_payloads(self):
+        class Exploding:
+            def __repr__(self):
+                raise RuntimeError("frame repr was touched")
+
+            __str__ = __repr__
+
+        frames = [
+            {
+                "type": "passkey-result",
+                "private": self.CANARY,
+                "danger": Exploding(),
+            }
+            for _ in range(20)
+        ]
+        probe = self.Probe(returncode=1, frames=frames)
+        with mock.patch.object(self.module, "native_probe", return_value=probe):
+            with self.assertRaises(AssertionError) as raised:
+                self.module.t2_f2_06(mock.Mock())
+
+        message = str(raised.exception)
+        self.assertEqual(
+            message,
+            "timed_out=False, exitState=EXIT_NONZERO, responseCount=16",
+        )
+        self.assertNotIn(self.CANARY, message)
+        self.assertNotIn("passkey-result", message)
+
+    def test_failure_diagnostic_is_not_built_for_a_passing_probe(self):
+        probe = self.Probe(
+            timed_out=False,
+            returncode=0,
+            frames=[{"type": "error", "error": "refused"}],
+        )
+        with mock.patch.object(
+            self.module, "native_probe", return_value=probe
+        ), mock.patch.object(
+            self.module, "_t2_f2_06_failure_diagnostic"
+        ) as diagnostic:
+            self.module.t2_f2_06(mock.Mock())
+        diagnostic.assert_not_called()
+
+    def test_exit_state_and_invalid_type_fallbacks_are_fixed(self):
+        def diagnose(probe):
+            return self.module._t2_f2_06_failure_diagnostic(probe)
+
+        cases = (
+            (True, 17, [], "timed_out=True, exitState=TIMEOUT, responseCount=0"),
+            (False, 0, [], "timed_out=False, exitState=EXIT_OK, responseCount=0"),
+            (False, 7, [], "timed_out=False, exitState=EXIT_NONZERO, responseCount=0"),
+            (False, -9, [], "timed_out=False, exitState=EXIT_SIGNALED, responseCount=0"),
+            (False, None, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (False, True, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (False, 1.0, [], "timed_out=False, exitState=EXIT_UNKNOWN, responseCount=0"),
+            (1, 0, [], "timed_out=False, exitState=EXIT_OK, responseCount=0"),
+            (
+                False,
+                0,
+                (self.CANARY,),
+                "timed_out=False, exitState=EXIT_OK, responseCount=unknown",
+            ),
+        )
+        for timed_out, returncode, frames, expected in cases:
+            with self.subTest(
+                timed_out=timed_out, returncode=returncode, frames=type(frames)
+            ):
+                probe = self.Probe(
+                    timed_out=timed_out, returncode=returncode, frames=frames
+                )
+                self.assertEqual(diagnose(probe), expected)
+
+        class UnboundedFrames(list):
+            def __len__(self):
+                raise RuntimeError("frame iteration was touched")
+
+        probe = self.Probe(returncode=0, frames=UnboundedFrames())
+        self.assertEqual(
+            diagnose(probe),
+            "timed_out=False, exitState=EXIT_OK, responseCount=unknown",
+        )
 
 
 if __name__ == "__main__":

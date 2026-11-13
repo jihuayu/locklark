@@ -24,6 +24,9 @@ var (
 	errUnavailable = errors.New("vault or authenticated system storage unavailable")
 	errExists      = errors.New("vault already exists; unlock the existing vault")
 	errCapacity    = errors.New("too many pending disclosures; clear an existing disclosure")
+	// errVaultCapacity is distinct from errInvalid: the vault is still
+	// unlocked and unchanged, but the item would exceed the stored vault size.
+	errVaultCapacity = errors.New("vault capacity exceeded; remove or shrink large items or attachments; nothing was saved")
 )
 
 const idle = 300 * time.Second
@@ -213,6 +216,10 @@ func sanitized(e error) error {
 		return errLocked
 	case errors.Is(e, personal.ErrOTPTime):
 		return errExpired
+	case errors.Is(e, personal.ErrSnapshotCapacity), errors.Is(e, personal.ErrImportCapacity):
+		// The vault stayed unlocked and unchanged; only the write is over its
+		// stored capacity, so point at the fix instead of "invalid request".
+		return errVaultCapacity
 	case errors.Is(e, personal.ErrMutationRefused), errors.Is(e, personal.ErrSearchQuery):
 		return errInvalid
 	case errors.Is(e, personal.ErrNotFound):
@@ -466,7 +473,7 @@ func (r *Rows) At(index int) (*Row, error) {
 func rowsResult(rows []personal.Row) *Rows {
 	out := &Rows{rows: make([]Row, 0, len(rows))}
 	for _, r := range rows {
-		if r.Kind == "ssh-key" {
+		if r.Kind != "login" {
 			continue
 		}
 		out.rows = append(out.rows, Row{r.ID, r.Revision, r.Title, r.State})

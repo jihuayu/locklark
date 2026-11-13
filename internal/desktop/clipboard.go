@@ -277,6 +277,21 @@ func clipboardStatusForOS(goos string, nativeCleanup bool, timeout time.Duration
 	return fmt.Sprintf("已复制到系统剪贴板 · %d 秒后尝试清理", int(timeout/time.Second))
 }
 
+// otpClipboardDeadline bounds a copied one-time code by both its own validity
+// (boundsDeadline, already capped by the OTP window in personal) and the
+// configured security.clipboard.clearAfterSeconds, whichever comes first. A
+// zero clear-after preference still keeps the OTP validity cap: an expired
+// code is never retained on the clipboard just because auto-clear is off.
+func otpClipboardDeadline(boundsDeadline time.Time, clearAfter time.Duration, now time.Time) time.Time {
+	deadline := boundsDeadline
+	if clearAfter > 0 {
+		if configured := now.Add(clearAfter); configured.Before(deadline) {
+			deadline = configured
+		}
+	}
+	return deadline
+}
+
 func clipboardStatus(timeout time.Duration) string {
 	return clipboardStatusForOS(runtime.GOOS, nativeclipboard.NativeLeaseSupported(), timeout)
 }

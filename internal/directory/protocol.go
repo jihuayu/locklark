@@ -151,6 +151,7 @@ func (c *Config) Genesis() Checkpoint {
 	return Checkpoint{Scope: c.scope}
 }
 func (c *Config) validCheckpoint(cp Checkpoint) bool {
+	// A nil config authorizes no scope, not even the zero checkpoint.
 	return c.valid() && cp.Scope == c.scope && cp.Version <= maxVersions && ((cp.Version == 0 && cp.Hash == "") || (cp.Version > 0 && hexSize(cp.Hash, 32)))
 }
 

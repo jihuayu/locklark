@@ -1859,7 +1859,6 @@ globalThis.LocklarkCore = (() => {
           "copied",
           "expires_in_seconds",
         ],
-        "fill-fields": ["v", "id", "type", "fields"],
         "attachment-transfer": [
           "v",
           "id",
@@ -2153,19 +2152,6 @@ globalThis.LocklarkCore = (() => {
         (m.history_id === undefined || /^[a-f0-9]{32}$/.test(m.history_id))
       );
     }
-    if (m.type === "fill-fields")
-      return (
-        m.fields &&
-        typeof m.fields === "object" &&
-        !Array.isArray(m.fields) &&
-        Object.keys(m.fields).length <= 100 &&
-        Object.entries(m.fields).every(
-          ([key, value]) =>
-            /^[A-Za-z0-9_.-]{1,128}$/.test(key) &&
-            typeof value === "string" &&
-            value.length <= 16384,
-        )
-      );
     if (m.type === "paired")
       return (
         /^[a-f0-9]{32}$/.test(m.capability || "") &&
@@ -2993,6 +2979,7 @@ globalThis.LocklarkCore = (() => {
     fields,
     deadlineMs,
     allowTop,
+    userAuthorized,
   ) {
     "use strict";
     const MAX_FIELD_BYTES = 16384;
@@ -3008,6 +2995,9 @@ globalThis.LocklarkCore = (() => {
       "cc-type": true,
     };
     const refuse = () => ({ filled: false, count: 0 });
+    // The worker sets this only after a trusted popup/content gesture and a
+    // fresh authorization check. A card fill must never run without it.
+    if (userAuthorized !== true) return refuse();
     const nowMs = () => Date.now();
     function utf8Length(value) {
       try {
@@ -3930,6 +3920,7 @@ globalThis.LocklarkCore = (() => {
     expiresAt,
     allowSubframe,
     categoryHint,
+    userAuthorized,
   ) {
     "use strict";
     try {
@@ -4178,6 +4169,9 @@ globalThis.LocklarkCore = (() => {
         else if (identityHits && !cardHits) category = "identity";
         else return false;
       }
+      // Card data is injected only by the worker after it consumed a fresh
+      // explicit user-gesture authorization; identity keeps its existing path.
+      if (category === "credit_card" && userAuthorized !== true) return false;
       const allowed = category === "identity" ? IDENTITY : CARD;
       const keys = Object.keys(data);
       if (keys.length > 32) return false;
