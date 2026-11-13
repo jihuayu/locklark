@@ -208,6 +208,21 @@ func TestLinuxPeerProofNilAndClosed(t *testing.T) {
 // identity over a real Unix socket. It does not run native approval, a lease,
 // or T4_06, and it never treats the child PID or path as caller authority.
 func TestLinuxPeerProofRealChildUnixSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		precloseTTY bool
+	}{
+		{"both-open", false},
+		{"tty-preclosed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linuxPeerProofRealChild(t, tc.precloseTTY)
+		})
+	}
+}
+
+func linuxPeerProofRealChild(t *testing.T, precloseTTY bool) {
+	t.Helper()
 	master, slave, slavePath, slaveDev := linuxPeerProofPTY(t)
 	_ = master
 	defer slave.Close()
@@ -285,31 +300,45 @@ func TestLinuxPeerProofRealChildUnixSocket(t *testing.T) {
 	if _, err := io.ReadFull(conn, nonce); err != nil || string(nonce) != linuxPeerProofFixedNonce {
 		t.Fatal("fixed nonce handshake failed")
 	}
-	ttyfd := linuxOwnedTTYFDForTest(t, proof.ttyfd)
-	if err := proof.ttyfd.Close(); err != nil {
-		t.Fatal("ttyfd-only close failed")
-	}
-	if !proof.pidfd.live() {
-		t.Fatal("pidfd liveness was lost with the tty fd")
-	}
-	if proof.live() {
-		t.Fatal("proof stayed live with only the pidfd held")
-	}
-	if _, err := unix.FcntlInt(uintptr(ttyfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
-		t.Fatal("ttyfd-only close left the tty fd open")
-	}
 	pidfd := linuxOwnedPidFDFDForTest(t, proof.pidfd)
-	if _, err := unix.FcntlInt(uintptr(pidfd), unix.F_GETFD, 0); err != nil {
-		t.Fatal("ttyfd-only close affected the pidfd")
+	ttyfd := linuxOwnedTTYFDForTest(t, proof.ttyfd)
+	foreign, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Fatal("foreign pidfd unavailable")
+	}
+	t.Cleanup(func() { _ = unix.Close(foreign) })
+	for name, fd := range map[string]int{"pidfd": pidfd, "ttyfd": ttyfd, "foreign": foreign} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
+			t.Fatalf("%s was not open before proof Close", name)
+		}
+	}
+	if !proof.pidfd.live() || !proof.ttyfd.valid() || !proof.live() {
+		t.Fatal("proof resources were not valid before close")
+	}
+	if precloseTTY {
+		if err := proof.ttyfd.Close(); err != nil {
+			t.Fatal("ttyfd-only close failed")
+		}
+		if !proof.pidfd.live() || proof.live() {
+			t.Fatal("proof liveness did not depend on the held tty")
+		}
+		if _, err := unix.FcntlInt(uintptr(ttyfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			t.Fatal("ttyfd-only close left the tty fd open")
+		}
+		if _, err := unix.FcntlInt(uintptr(pidfd), unix.F_GETFD, 0); err != nil {
+			t.Fatal("ttyfd-only close affected the pidfd")
+		}
 	}
 	if err := proof.Close(); err != nil || proof.live() {
 		t.Fatal("peer proof close did not retire both owned fds")
 	}
-	if _, err := unix.FcntlInt(uintptr(pidfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
-		t.Fatal("proof Close left the pidfd open")
+	for name, fd := range map[string]int{"pidfd": pidfd, "ttyfd": ttyfd} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			t.Fatalf("proof Close left the %s open", name)
+		}
 	}
-	if _, err := unix.FcntlInt(uintptr(ttyfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
-		t.Fatal("proof Close left the tty fd open")
+	if _, err := unix.FcntlInt(uintptr(foreign), unix.F_GETFD, 0); err != nil {
+		t.Fatal("proof Close affected a foreign fd")
 	}
 	if err := proof.Close(); err != nil {
 		t.Fatal("peer proof close was not idempotent")
@@ -352,7 +381,7 @@ func linuxPeerProofPTY(t *testing.T) (master, slave *os.File, path string, dev u
 	t.Helper()
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
-		t.Skip("pty unavailable")
+		t.Fatal("pty unavailable")
 	}
 	t.Cleanup(func() { _ = master.Close() })
 	if err := unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
