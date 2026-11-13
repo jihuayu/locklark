@@ -267,8 +267,9 @@ class GateOutcomeTests(unittest.TestCase):
                          ("prerequisites", None, {}, False))
         self.assertEqual(second.commands, [])
 
-    def raise_after(self, device, at, error):
-        """device.run, but adb runs the one command at `at`, then raises error.
+    def raise_after(self, device, errors):
+        """device.run, but adb runs the command named in `errors`, then raises
+        the error mapped to it: {"instrument": error, "restore": error}.
 
         The command has already reached the device (it is tracked, and its
         reply is built), but no reply is returned: an adb that acted and was
@@ -279,23 +280,32 @@ class GateOutcomeTests(unittest.TestCase):
             command = list(arguments)[3:]
             # The run's own write starts with org.locklark; the restore's put
             # brings the prior service back, and so does not.
-            hit = (at == "instrument" and command[:3] == ["shell", "am", "instrument"]) or \
-                (at == "restore" and command[:3] == ["shell", "settings", "put"] and
-                 not command[-1].startswith("org.locklark"))
+            hit = "instrument" if command[:3] == ["shell", "am", "instrument"] else \
+                "restore" if command[:3] == ["shell", "settings", "put"] and \
+                not command[-1].startswith("org.locklark") else None
             reply = run(arguments, **kwargs)
-            if hit:
-                raise error
+            if hit in errors:
+                raise errors[hit]
             return reply
         return answer
 
-    def case(self, *, runtime_fails=False, cleanup_fails=False, escaped=None):
-        """Run the real entrypoint(); escaped is (where, kind or instance)."""
+    def case(self, *, runtime_fails=False, cleanup_fails=False, escaped=None, primary=None):
+        """Run the real entrypoint(); escaped is (where, kind or instance).
+
+        primary: the exact instance adb raises at am instrument, so the test
+        can make it the runtime primary; escaped (where, kind) then names the
+        separate command that raises its own kind or instance.
+        """
         device = CleanDevice(runtime_fails=runtime_fails, cleanup_fails=cleanup_fails)
         self.addCleanup(device.close)
         run, raised = device.run, None
+        raise_at = {}
         if escaped is not None:
             where, kind = escaped
-            run = self.raise_after(device, where, kind() if isinstance(kind, type) else kind)
+            raise_at[where] = kind() if isinstance(kind, type) else kind
+        if primary is not None:
+            raise_at["instrument"] = primary
+        run = self.raise_after(device, raise_at) if raise_at else device.run
         try:
             code, printed = self.run_entry(gate, device, ENVIRONMENT, run)
         except BaseException as error:
@@ -388,6 +398,35 @@ class GateOutcomeTests(unittest.TestCase):
         self.assertEqual((code, stage, flag), (1, RESTORE_STAGE, True))
         self.fixed(printed, True)
 
+    def test_runtime_primary_survives_a_cleanup_interrupt_or_exit(self):
+        # The runtime primary is raised at am instrument, so the reached
+        # stage is "instrumentation"; the restore then raises KeyboardInterrupt
+        # or SystemExit(0/1) of its own. Neither may replace or re-raise the
+        # primary: main() re-raises the same instance at the same stage and
+        # records the restore's error as a failed cleanup; the entrypoint
+        # then prints its one fixed failure page and exits 1.
+        for error in (KeyboardInterrupt(), SystemExit(0), SystemExit(1)):
+            with self.subTest(cleanup_error=type(error).__name__, code=getattr(error, "code", None)):
+                primary = gate.RuntimeFailure("primary")
+                device = CleanDevice(runtime_fails=False)
+                self.addCleanup(device.close)
+                run = self.raise_after(device, {"instrument": primary, "restore": error})
+                with self.run_in(gate, device, ENVIRONMENT, run), \
+                        mock.patch("builtins.print"):
+                    with self.assertRaises(gate.RuntimeFailure) as raised:
+                        gate.main()
+                self.assertIs(raised.exception, primary)
+                self.assertEqual((gate.STAGE, gate.cleanup_failed), ("instrumentation", True))
+                # The restore's put acted before it raised: the prior service
+                # is back, and what failed is the reply.
+                self.assertEqual(device.setting, FakeDevice.PRIOR)
+                # The real entrypoint over the same primary: one page, exit 1.
+                code, printed, raised, stage, flag = self.case(
+                    primary=primary, escaped=("restore", error))
+                self.assertIsNone(raised)
+                self.assertEqual((code, stage, flag), (1, "instrumentation", True))
+                self.fixed(printed, True)
+
     def test_runtime_interrupt_escapes_main_as_its_instance(self):
         # The interrupt comes from the fake device at am instrument: that is
         # the runtime primary, not a cleanup result. main() lets it out as the
@@ -395,7 +434,7 @@ class GateOutcomeTests(unittest.TestCase):
         device = CleanDevice(runtime_fails=True)
         self.addCleanup(device.close)
         interrupt = KeyboardInterrupt()
-        with self.run_in(gate, device, ENVIRONMENT, self.raise_after(device, "instrument", interrupt)):
+        with self.run_in(gate, device, ENVIRONMENT, self.raise_after(device, {"instrument": interrupt})):
             with self.assertRaises(KeyboardInterrupt) as raised:
                 gate.main()
         self.assertIs(raised.exception, interrupt)
@@ -413,7 +452,7 @@ class GateOutcomeTests(unittest.TestCase):
         # failure: the interrupt is the failed cleanup, recorded as the bool.
         device = CleanDevice(runtime_fails=False)
         self.addCleanup(device.close)
-        run = self.raise_after(device, "restore", KeyboardInterrupt())
+        run = self.raise_after(device, {"restore": KeyboardInterrupt()})
         with self.run_in(gate, device, ENVIRONMENT, run):
             self.assertEqual(gate.main(), 1)
         self.assertEqual((gate.STAGE, gate.cleanup_failed), (RESTORE_STAGE, True))
