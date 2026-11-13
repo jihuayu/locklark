@@ -122,6 +122,9 @@ def safe_diagnostic(raw):
 
 def main():
     global STAGE, STATE, DIAGNOSTIC, cleanup_failed
+    # Every call starts from the entry state, so a second run in one process
+    # never inherits the previous run's stage, evidence, diagnosis or bool.
+    STAGE, STATE, DIAGNOSTIC, cleanup_failed = "prerequisites", None, {}, False
     root = Path(__file__).resolve().parents[1]
     sdk = Path(os.environ["ANDROID_HOME"])
     serial = os.environ["ANDROID_SERIAL"]
@@ -178,7 +181,7 @@ def main():
         # touches STAGE or raises. The bool is reported once, by whoever holds
         # the outcome: the caller on a runtime failure, or here when clean.
         cleanup_failed = globals()["cleanup_failed"] = restore_autofill(
-            secure_setting, normalized_autofill, prior_autofill, package, test_package)
+            adb, secure_setting, normalized_autofill, prior_autofill, package, test_package)
     if cleanup_failed:
         # Clean main: the restore is the only failure, so that one stage is
         # reported. A runtime failure is reported from its own reached STAGE
@@ -194,7 +197,7 @@ def main():
     return 0
 
 
-def restore_autofill(secure_setting, normalized_autofill, prior_autofill, package, test_package):
+def restore_autofill(adb, secure_setting, normalized_autofill, prior_autofill, package, test_package):
     """Restore the exact prior Autofill service, then clear own app data.
 
     Returns the fixed cleanup_failed bool and never raises.
