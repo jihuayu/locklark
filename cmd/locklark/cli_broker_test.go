@@ -18,22 +18,21 @@ import (
 
 const cliBrokerFixturePassword = "fixture-run-cli-password"
 
-// cliBrokerFixtureTTY is the declared TTY name every brokered fixture run
-// carries: one absolute path below the test's own private fixture directory,
-// so it is a host-native absolute name on every platform the tests run on. The
-// directory is created, so filepath.EvalSymlinks can resolve the name back to
-// the clean copy of that private directory the way a real console path
-// resolves. It is only a declared name for the request/expected checks; it
-// claims no real terminal, and the kernel TTY attestation is never reached by
-// these tests.
-func cliBrokerFixtureTTY(t *testing.T) string {
+// cliBrokerFixtureDir is the one private fixture directory a brokered fixture
+// derives first: it is created and then resolved with filepath.EvalSymlinks, so
+// every path the fixture names below it is the host's clean absolute copy of
+// the same directory. The TTY, the binding, its helper directory, the run
+// directory and the expected scope all come from that one value, so the
+// request and its expected copy are the same single set of names; nothing is
+// compared after normalizing one side.
+func cliBrokerFixtureDir(t *testing.T) string {
 	t.Helper()
 	dir := cliTestDir(t)
 	dir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal("fixture directory does not resolve:", err)
 	}
-	return filepath.Join(dir, "ttys-fixture")
+	return dir
 }
 
 // installCLIRunBrokerSeams replaces the Darwin gate and every broker seam for
@@ -41,9 +40,8 @@ func cliBrokerFixtureTTY(t *testing.T) string {
 // is replaced with one that subscribes to nothing, so no test ever delivers a
 // signal to the test process; a test that needs cancellation uses
 // cliRunBrokerSignalsAction.
-func installCLIRunBrokerSeams(t *testing.T, enabled bool) {
+func installCLIRunBrokerSeams(t *testing.T, enabled bool, tty string) {
 	t.Helper()
-	tty := cliBrokerFixtureTTY(t)
 	originalEnabled, originalTTY, originalRequest := cliRunBrokerEnabled, cliRunBrokerTTY, cliRunBrokerRequest
 	originalRandom, originalDescribe, originalSignals := cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerSignals
 	t.Cleanup(func() {
@@ -79,11 +77,14 @@ func cliRunBrokerSignalsAction(t *testing.T, act func()) {
 }
 
 // cliBrokerFixture is one validated CLI run whose binding points at a real
-// vault, so the committed request is exactly what runCLIRun derives.
+// vault, so the committed request is exactly what runCLIRun derives. tty is the
+// declared TTY name of the same fixture directory, handed to the TTY seam and
+// expected verbatim.
 type cliBrokerFixture struct {
 	binding clibinding.ToolBinding
 	request personal.RunBundleRequest
 	targets []personal.BundleTarget
+	tty     string
 	slotID  string
 	slotRev string
 	field   string
@@ -92,9 +93,13 @@ type cliBrokerFixture struct {
 func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	t.Helper()
 	program := cliTestExecutable(t)
+	// One private directory, resolved once: the binding, its helper directory
+	// and the declared TTY all live under it, and both the request and the
+	// expected scope name that same directory by its clean absolute copy.
+	dir := cliBrokerFixtureDir(t)
 	binding := clibinding.ToolBinding{
 		Profile:        "token",
-		VaultPath:      filepath.Join(cliTestDir(t), "owner.ll"),
+		VaultPath:      filepath.Join(dir, "owner.ll"),
 		Program:        program,
 		Targets:        []clibinding.SlotTarget{{Slot: "token", ID: cliTestID, Revision: cliTestRevision, Field: "password"}},
 		HelperPath:     []string{filepath.Dir(program)},
@@ -110,6 +115,9 @@ func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	if err = binding.Validate(); err != nil {
 		t.Fatal("binding fixture invalid:", err)
 	}
+	if err = os.Mkdir(filepath.Join(dir, "work"), 0700); err != nil {
+		t.Fatal("run directory unavailable:", err)
+	}
 	profile, ok := cliprofile.Lookup(binding.Profile)
 	if !ok {
 		t.Fatal("profile unavailable")
@@ -118,7 +126,7 @@ func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
 		Args:           []string{"-test.run=^$"},
-		Directory:      t.TempDir(),
+		Directory:      filepath.Join(dir, "work"),
 		TimeoutSeconds: binding.TimeoutSeconds,
 		HelperPath:     append([]string(nil), binding.HelperPath...),
 		Passthrough:    map[string]string{"NO_COLOR": "1"},
@@ -128,7 +136,7 @@ func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	if err = request.Validate(targets); err != nil {
 		t.Fatal("request fixture invalid:", err)
 	}
-	return cliBrokerFixture{binding: binding, request: request, targets: targets, slotID: cliTestID, slotRev: cliTestRevision, field: "password"}
+	return cliBrokerFixture{binding: binding, request: request, targets: targets, tty: filepath.Join(dir, "ttys-fixture"), slotID: cliTestID, slotRev: cliTestRevision, field: "password"}
 }
 
 // call replays the exact values runCLIRun hands the dispatcher.
@@ -196,7 +204,7 @@ func cloneCLIRunBrokerTestRequest(r personal.RunBundleRequest) personal.RunBundl
 // which exists when the request is made.
 func TestCLIRunBrokerScopeBindsCommittedRun(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	callRequests := cloneCLIRunBrokerTestRequest(f.call().Request)
 	var sent []browserhost.CLIRunBrokerRequest
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
@@ -218,7 +226,7 @@ func TestCLIRunBrokerScopeBindsCommittedRun(t *testing.T) {
 	req := sent[0]
 	want := browserhost.CLIRunScope{
 		Profile:     "token",
-		TTY:         cliBrokerFixtureTTY(t),
+		TTY:         f.tty,
 		TTYPeerID:   "",
 		TTYPlatform: browserhost.CLIRunTTYPlatform(),
 		Nonce:       req.Scope.Nonce,
@@ -268,7 +276,7 @@ func TestCLIRunBrokerNonceIsFreshPerRequest(t *testing.T) {
 	}
 
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	var nonces []string
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 		nonces = append(nonces, req.Scope.Nonce)
@@ -298,7 +306,7 @@ func TestCLIRunBrokerNonceIsFreshPerRequest(t *testing.T) {
 func dispatchCLIRunBrokerShim(t *testing.T, code int) (sent browserhost.CLIRunScope, err error) {
 	t.Helper()
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	shim := filepath.Join(t.TempDir(), "locklark.test")
 	if e := os.WriteFile(shim, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", code)), 0700); e != nil {
 		t.Fatal("shim program unavailable")
@@ -358,7 +366,7 @@ func TestCLIRunBrokerDispatcherChildExitStatus(t *testing.T) {
 // executed child, and the receipt is returned.
 func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	shim := filepath.Join(t.TempDir(), "locklark.test")
 	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal("shim program unavailable")
@@ -413,7 +421,7 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
-			installCLIRunBrokerSeams(t, true)
+			installCLIRunBrokerSeams(t, true, f.tty)
 			shim := filepath.Join(t.TempDir(), "locklark.test")
 			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 				t.Fatal("shim program unavailable")
@@ -482,7 +490,7 @@ func TestCLIRunBrokerRequestClearedAfterReturn(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
-			installCLIRunBrokerSeams(t, true)
+			installCLIRunBrokerSeams(t, true, f.tty)
 			shim := filepath.Join(t.TempDir(), "locklark.test")
 			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 				t.Fatal("shim program unavailable")
@@ -581,7 +589,7 @@ func TestCLIRunBrokerMalformedSuccessIsTerminal(t *testing.T) {
 		}(),
 	} {
 		f := newCLIBrokerFixture(t)
-		installCLIRunBrokerSeams(t, true)
+		installCLIRunBrokerSeams(t, true, f.tty)
 		cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 			return reply, nil
 		}
@@ -599,7 +607,7 @@ func TestCLIRunBrokerMalformedSuccessIsTerminal(t *testing.T) {
 // as before.
 func TestCLIRunBrokerExactUnavailableFallsBackOnce(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	requests, opens := 0, 0
 	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 		requests++
@@ -659,7 +667,7 @@ func TestCLIRunBrokerCancellationIsTerminal(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
-			installCLIRunBrokerSeams(t, true)
+			installCLIRunBrokerSeams(t, true, f.tty)
 			requests, opens := 0, 0
 			cliRunBrokerRequest = func(ctx context.Context, _ browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 				requests++
@@ -715,7 +723,7 @@ func TestCLIRunBrokerCancellationIsTerminal(t *testing.T) {
 // back.
 func TestCLIRunBrokerChildCancelledBySignal(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	shim := filepath.Join(t.TempDir(), "locklark.test")
 	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 600\n"), 0700); err != nil {
 		t.Fatal("shim program unavailable")
@@ -760,7 +768,7 @@ func TestCLIRunBrokerChildCancelledBySignal(t *testing.T) {
 // the test process.
 func TestCLIRunBrokerQueuedSignalBeforeUnavailableIsTerminal(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, true)
+	installCLIRunBrokerSeams(t, true, f.tty)
 	// The broker subscribes the test's channel; the request queues one signal
 	// in it before it returns, exactly as the process handler would have.
 	signals := make(chan chan<- os.Signal, 1)
@@ -905,7 +913,7 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
-			installCLIRunBrokerSeams(t, true)
+			installCLIRunBrokerSeams(t, true, f.tty)
 			if tc.outcome.tty != nil {
 				cliRunBrokerTTY = tc.outcome.tty
 			}
@@ -940,7 +948,7 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 // directly and no broker request is made or subscribed.
 func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 	f := newCLIBrokerFixture(t)
-	installCLIRunBrokerSeams(t, false)
+	installCLIRunBrokerSeams(t, false, f.tty)
 	requests, opens, subscriptions := 0, 0, 0
 	cliRunBrokerSignalsAction(t, func() { subscriptions++ })
 	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {

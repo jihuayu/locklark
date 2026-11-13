@@ -547,11 +547,17 @@ func TestCLIRunApprovalViewRacesFinish(t *testing.T) {
 	}
 }
 
+// desktopHandlerFixtureDirs are the private directories the handler fixture
+// creates below its one resolved root.
+var desktopHandlerFixtureDirs = []string{"bin", "work", "helpers-one", "helpers-two"}
+
 // desktopCLIRunFixture unlocks a fresh app, seeds one login in its vault, and
 // binds the broker to that unlocked session. It returns the exact request: the
 // desktopCLI* fixtures with the wire target ID and revision taken from the
-// seeded row, which the preparation path needs to find, and a real private
-// temporary run root, which preparation validates and binds.
+// seeded row, which the preparation path needs to find, and host-native
+// private names (TTY, program, working directory, helper directories and the
+// real run root) under one resolved private root, which preparation validates
+// and binds.
 func desktopCLIRunFixture(t *testing.T) (*App, browserhost.BrokerCLIRequest) {
 	t.Helper()
 	a := dailyAppFixture(t)
@@ -564,10 +570,38 @@ func desktopCLIRunFixture(t *testing.T) (*App, browserhost.BrokerCLIRequest) {
 	}
 	a.notifyBrowserBrokerUnlocked()
 	scope := desktopCLIScopeFixture()
-	// Preparation binds the private run root it validates, so only this
-	// handler fixture points it at a real directory. Summary-only fixtures keep
-	// the fixed /fixture/run-root string for their expected display text.
-	scope.TempRoot = t.TempDir()
+	// Preparation binds the private run root it validates and executes the
+	// request, so only this handler fixture replaces every POSIX display name
+	// with a host-native name below one private, resolved directory: the
+	// declared TTY, the program (.exe on Windows), the working directory, the
+	// helper directories and the real run root. Every one is absolute and
+	// clean under the host's own filepath rules, and each exists. Summary-only
+	// fixtures keep the fixed /fixture/ names for their expected display text;
+	// live-request tests that need the real terminal replace the TTY later.
+	root, e := filepath.EvalSymlinks(t.TempDir())
+	if e != nil {
+		t.Fatal("private root:", e)
+	}
+	dirs := make(map[string]string, len(desktopHandlerFixtureDirs))
+	for _, name := range desktopHandlerFixtureDirs {
+		dir := filepath.Join(root, name)
+		if e := os.Mkdir(dir, 0700); e != nil {
+			t.Fatal("private fixture directory:", e)
+		}
+		dirs[name] = dir
+	}
+	program := filepath.Join(dirs["bin"], "gh")
+	if runtime.GOOS == "windows" {
+		program += ".exe"
+	}
+	if e := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0700); e != nil {
+		t.Fatal("fixture program:", e)
+	}
+	scope.TTY = filepath.Join(root, "ttys-fixture")
+	scope.Program = program
+	scope.CWD = dirs["work"]
+	scope.Helper = []string{dirs["helpers-one"], dirs["helpers-two"]}
+	scope.TempRoot = filepath.Join(root, "run-root")
 	// A live request needs a fresh single-use nonce for every test: the broker
 	// consumes it per peer for the whole process. Summary-only fixtures keep
 	// the static one because they never reach the broker.
