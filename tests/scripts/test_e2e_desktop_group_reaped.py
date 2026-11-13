@@ -1,15 +1,14 @@
 """Focused tests for ``support.desktop_group_reaped``.
 
 The owned session is a real ``subprocess.Popen`` with ``start_new_session=True``
-so its group id is its pid. Only the ``killpg(pid, 0)`` *probe* is mocked, and
-after the mock is removed the cleanup signal is sent deliberately (SIGKILL to
-this test's own group) so no real group is ever signalled with a fake status.
+so its group id is its pid. Only the ``killpg(pid, 0)`` *probe* is mocked; no
+group signal is ever sent. Cleanup uses only ``Popen.kill()``/``wait()`` on the
+children this file created, which spawn no descendants.
 """
 
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -43,21 +42,18 @@ class DesktopGroupReapedTests(unittest.TestCase):
 
     def _exited(self) -> subprocess.Popen:
         proc = self._spawn()
-        # This test's own child only: never a real group signal here.
+        # This file's own child only: a per-process kill, never a group signal.
         proc.kill()
         proc.wait(timeout=30)
         self.assertIsNotNone(proc.poll())
         return proc
 
     def _cleanup(self) -> None:
-        # Only the Popen objects this test created are reaped; a real group
-        # signal is only ever sent to this test's own start_new_session group.
+        # Only this file's own Popen objects are reaped, via Popen.kill() with a
+        # bounded wait. No group signal is sent: these children have no
+        # descendants, so their own process is all there is to reap.
         for proc in self.procs:
             if proc.poll() is None:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
                 try:
                     proc.kill()
                 except OSError:
