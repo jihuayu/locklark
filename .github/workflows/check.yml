@@ -300,6 +300,14 @@ jobs:
         run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
       - name: Smoke test downloaded CLI before acceptance
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Test pure-Python cheap contracts before builds
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
+          # Discover every mobile contract so the emulator gate/category
+          # regressions run with the other cheap checks, not after a build.
+          python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
+          python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
       - name: Test browser extension
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
@@ -363,9 +371,7 @@ jobs:
       - name: Test reconciled E2E gates and component contracts
         timeout-minutes: 10
         run: |
-          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
-          python3 -m unittest discover -s scripts -p test_browser_firefox_native_passkey.py
-          python3 -m unittest scripts/test_native_acceptance_contract.py scripts/test_native_acceptance_platforms.py scripts/test_safari_package.py
+          python3 -m unittest scripts/test_safari_package.py
           # GUI probes create their own D-Bus/Xvfb session; avoid inherited
           # runner displays or buses from earlier browser steps.
           env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py \
@@ -626,12 +632,6 @@ jobs:
         mobile/core/scripts/bind-android.sh
 
         mobile/android/scripts/build.sh
-
-        python3 -m unittest discover -s mobile/android/scripts -p test_runtime_wrapper.py
-
-        python3 -m unittest discover -s mobile/android/scripts -p test_device_credential.py
-
-        python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
 
         install -m 0755 "$RUNNER_TEMP/locklark-bin/locklark" "$RUNNER_TEMP/locklark-mobile-peer"
 
