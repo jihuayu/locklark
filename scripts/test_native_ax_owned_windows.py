@@ -24,6 +24,9 @@ OTHER_PID = 4243
 KAX_ERROR_SUCCESS = 0
 KAX_ERROR_MISMATCH = -25204
 AX_WINDOWS = "AXWindows"
+AX_ROLE = "AXRole"
+AX_WINDOW = "AXWindow"
+AX_APPLICATION = "AXApplication"
 FORBIDDEN_CALLS = {"CGWindowListCopyWindowInfo", "CGWindowListCreateImage",
                    "CGEventPost", "CGGetActiveDisplayList"}
 # Marks a missing out-argument slot for the strict AXUIElementGetPid binding.
@@ -53,9 +56,12 @@ class FakeApplicationServices:
     and ``getpid`` may also be callables taking the element.
     """
 
-    def __init__(self, windows, getpid=None, windows_answer=_DEFAULT):
+    def __init__(self, windows, getpid=None, windows_answer=_DEFAULT, roles=None):
         self.windows, self.getpid = windows, dict(getpid or {})
         self.windows_answer = windows_answer
+        # Raw AXRole answers per handle; the default is a real "AXWindow".
+        # (The application root stays "AXApplication", as in the C API.)
+        self.roles = dict(roles or {})
         self.calls = []
         self.application = Handle(owner=OWNED_PID)
 
@@ -66,10 +72,14 @@ class FakeApplicationServices:
 
     def AXUIElementCopyAttributeValue(self, element, name, out):
         self.calls.append(("copy", element, name, out))
-        if self.windows_answer is not _DEFAULT:
+        if element is self.application and name == AX_ROLE:
+            answer = (KAX_ERROR_SUCCESS, AX_APPLICATION)
+        elif self.windows_answer is not _DEFAULT and name == AX_WINDOWS:
             answer = self.windows_answer
         elif element is self.application and name == AX_WINDOWS:
             answer = (0, list(self.windows))
+        elif name == AX_ROLE:
+            answer = self.roles.get(element, (KAX_ERROR_SUCCESS, AX_WINDOW))
         else:
             answer = (KAX_ERROR_MISMATCH, None)
         if callable(answer):
@@ -136,10 +146,12 @@ class OwnedWindowsTests(unittest.TestCase):
         self.assertEqual(result, [first, second])
         self.assertIs(result[0], first)
         self.assertIs(result[1], second)
-        # Exactly one explicit creation, then AXWindows, then one GetPid each.
-        self.assertEqual(fake.names(), ["create", "copy", "getpid", "getpid"])
+        # Exactly one explicit creation, then AXWindows, then per element the
+        # GetPid ownership proof immediately followed by its AXRole read.
+        self.assertEqual(fake.names(), ["create", "copy", "getpid", "copy",
+                                        "getpid", "copy"])
         self.assertEqual(fake.pids_asked(), [OWNED_PID])
-        self.assertEqual(fake.attributes(), [AX_WINDOWS])
+        self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
         self.assertEqual([call[1] for call in fake.calls if call[0] == "getpid"],
                          [first, second])
 
@@ -175,9 +187,11 @@ class OwnedWindowsTests(unittest.TestCase):
             with self.subTest(expected_getpid_calls=expected):
                 fake = FakeApplicationServices(list(windows))
                 self.assertRefused(fake)
-                # Every listed window was checked; the refusal is the mismatch.
+                # Every listed window was checked; the refusal is the mismatch,
+                # and a foreign handle never gets its role read.
                 self.assertEqual(fake.names().count("getpid"), expected)
-                self.assertEqual(fake.attributes(), [AX_WINDOWS])
+                self.assertEqual(fake.attributes(),
+                                 [AX_WINDOWS] + [AX_ROLE] * (expected - 1))
 
     def test_getpid_is_called_with_the_out_argument_slot(self):
         handle = Handle()
@@ -334,8 +348,9 @@ class OwnedWindowsTests(unittest.TestCase):
         before = set(vars(api))
         self.assertEqual(api.owned_windows(OWNED_PID), [first, second])
         self.assertEqual(set(vars(api)) - before, set())
-        self.assertEqual(guarded.attributes(), [AX_WINDOWS])
-        for forbidden in ("AXTitle", "AXDescription", "AXRole", "AXChildren",
+        # AXWindows, then exactly one AXRole per owned element - no more.
+        self.assertEqual(guarded.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
+        for forbidden in ("AXTitle", "AXDescription", "AXChildren",
                           "AXValue", "AXSelectedText", "AXPosition", "AXSize",
                           "AXFrame", "AXFocused", "AXEnabled"):
             self.assertNotIn(forbidden, guarded.attributes())
@@ -365,7 +380,7 @@ class OwnedWindowsTests(unittest.TestCase):
                 fake = FakeApplicationServices([handle],
                                                windows_answer=hostile((0, [handle])))
                 self.assertEqual(api_for(fake).owned_windows(OWNED_PID), [handle])
-                self.assertEqual(fake.attributes(), [AX_WINDOWS])
+                self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE])
             with self.subTest(where="GetPid", kind=hostile.__name__):
                 fake = FakeApplicationServices(
                     [handle], getpid={handle: hostile((KAX_ERROR_SUCCESS, OWNED_PID))})
@@ -413,6 +428,131 @@ class OwnedWindowsTests(unittest.TestCase):
         cg = source[source.index("    def list_windows(self):"):]
         cg = cg[:cg.index("def _ax_title")]
         self.assertNotIn("owned_windows", cg)
+
+
+class OwnedWindowRoleTests(unittest.TestCase):
+    """AXRole must be a genuine AXWindow AFTER ownership, before any handle."""
+
+    def run_helper(self, fake, pid=OWNED_PID):
+        return api_for(fake).owned_windows(pid)
+
+    def assertRefused(self, fake, pid=OWNED_PID):
+        error = refusal(self, lambda: api_for(fake).owned_windows(pid))
+        self.assertIs(type(error), contract.ContractError)
+        self.assertEqual(error.code, "a11y-query")
+        self.assertEqual(error.guard, {})
+        self.assertEqual(str(error), contract.ERROR_MESSAGES["a11y-query"])
+        for name in FORBIDDEN_CALLS:
+            self.assertNotIn(name, fake.names())
+        return error
+
+    def test_valid_axwindow_elements_pass(self):
+        first, second = Handle(), Handle()
+        fake = FakeApplicationServices([first, second])
+        self.assertEqual(self.run_helper(fake), [first, second])
+        self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
+
+    def test_native_string_role_is_copied_to_exact_str_and_passes(self):
+        class NativeNSString(str):
+            pass
+
+        handle = Handle()
+        fake = FakeApplicationServices([handle], roles={handle: (0, NativeNSString(AX_WINDOW))})
+        self.assertEqual(self.run_helper(fake), [handle])
+
+    def test_application_root_role_refuses(self):
+        # The observed native shape: the list contained the application root.
+        app_root = Handle()
+        fake = FakeApplicationServices([app_root],
+                                       roles={app_root: (0, AX_APPLICATION)})
+        self.assertRefused(fake)
+
+    def test_wrong_string_roles_refuse_without_normalisation(self):
+        for role in ("AXSheet", "AXDialog", "axwindow", "AXWindow ", " AXWindow",
+                     AX_WINDOW + "\x00", "AXWindow2"):
+            with self.subTest(role=role):
+                handle = Handle()
+                fake = FakeApplicationServices([handle], roles={handle: (0, role)})
+                self.assertRefused(fake)
+
+    def test_non_string_roles_refuse(self):
+        for role in (None, "", b"AXWindow", 1, True, 0.0, [AX_WINDOW],
+                     (AX_WINDOW,), {"role": AX_WINDOW}, object(), _Bool(1)):
+            with self.subTest(role=repr(role)):
+                handle = Handle()
+                fake = FakeApplicationServices([handle], roles={handle: (0, role)})
+                self.assertRefused(fake)
+
+    def test_role_status_shape_refuses(self):
+        malformed = (
+            None, AX_WINDOW, KAX_ERROR_SUCCESS, True, 0.0,
+            (0,), (0, AX_WINDOW, None), [0, AX_WINDOW],
+            {"code": 0, "role": AX_WINDOW}, (True, AX_WINDOW),
+            (0.0, AX_WINDOW), ("0", AX_WINDOW), (None, AX_WINDOW),
+        )
+        for answer in malformed:
+            with self.subTest(answer=repr(answer)):
+                handle = Handle()
+                fake = FakeApplicationServices([handle], roles={handle: answer})
+                self.assertRefused(fake)
+
+    def test_nonzero_role_status_refuses(self):
+        for code in (KAX_ERROR_MISMATCH, -25212, 1, -25205):
+            with self.subTest(code=code):
+                handle = Handle()
+                fake = FakeApplicationServices([handle], roles={handle: (code, AX_WINDOW)})
+                self.assertRefused(fake)
+
+    def test_raised_role_read_refuses_without_leaking(self):
+        marker = "private role text /tmp/llcb-role"
+
+        class RaisingRole(FakeApplicationServices):
+            def AXUIElementCopyAttributeValue(self, element, name, out):
+                if name == AX_ROLE and element is not self.application:
+                    self.calls.append(("copy", element, name, out))
+                    raise OSError(marker)
+                return super().AXUIElementCopyAttributeValue(element, name, out)
+
+        error = self.assertRefused(RaisingRole([Handle()]))
+        self.assertNotIn(marker, str(error))
+        self.assertNotIn(marker, repr(error.guard))
+
+    def test_missing_role_answer_refuses(self):
+        handle = Handle()
+        # The binding answers a bare constant instead of the documented tuple.
+        fake = FakeApplicationServices([handle], roles={handle: -25212})
+        self.assertRefused(fake)
+
+    def test_second_bad_role_refuses_the_whole_list(self):
+        good, bad = Handle(), Handle()
+        fake = FakeApplicationServices([good, bad], roles={bad: (0, AX_APPLICATION)})
+        self.assertRefused(fake)
+        # The first owned window passed, but only AFTER all listed elements are
+        # validated is anything returned: the helper never yielded it.
+        self.assertEqual(fake.attributes(), [AX_WINDOWS, AX_ROLE, AX_ROLE])
+
+    def test_ownership_is_proven_before_the_role_is_read(self):
+        foreign, owned = Handle(owner=OTHER_PID), Handle()
+        fake = FakeApplicationServices([foreign, owned])
+        self.assertRefused(fake)
+        # The foreign handle got GetPid and NO role read at all.
+        self.assertEqual(fake.attributes(), [AX_WINDOWS])
+
+    def test_ownership_before_role_for_each_element(self):
+        first, second = Handle(), Handle()
+        fake = FakeApplicationServices([first, second])
+        self.run_helper(fake)
+        order = [call[0] if call[0] != "copy" else call[2] for call in fake.calls]
+        self.assertEqual(order, ["create", AX_WINDOWS,
+                                 "getpid", AX_ROLE, "getpid", AX_ROLE])
+        roles_read = [call[1] for call in fake.calls if call[0] == "copy"
+                      and call[2] == AX_ROLE]
+        self.assertEqual(roles_read, [first, second])
+
+    def test_malformed_pid_refuses_before_any_ax_call(self):
+        fake = FakeApplicationServices([Handle()])
+        self.assertRefused(fake, pid=True)
+        self.assertEqual(fake.names(), [])
 
 
 def _Bool(value):

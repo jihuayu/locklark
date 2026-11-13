@@ -645,17 +645,26 @@ class QuartzApi:
         AXWindows is obtained ONLY from
         ``ApplicationServices.AXUIElementCreateApplication(pid)`` for the one
         caller-supplied positive owned PID, through the documented PyObjC
-        out-argument contract. Every returned AX window must then prove its
-        ownership: ``AXUIElementGetPid(element, None)`` must answer the
-        ``(AXError, pid)`` tuple with exact status 0 and an exact built-in
-        ``int`` pid equal to the requested PID. Only the opaque AX handles are
-        returned, in AX order and bounded by ``MAX_AX_WINDOWS``.
+        out-argument contract. Every listed element must then prove, in this
+        exact order and BEFORE any handle leaves this method:
 
-        Nothing else is read here: no CoreGraphics window inventory and no AX
-        title, bounds, role, control, value or text attribute. Any malformed
-        PID, creation/list/GetPid shape, nonzero status, mismatched PID or
-        raised native call fails closed with the existing sanitized
-        ``a11y-query`` refusal - never a stringified exception or a payload.
+        1. ownership: ``AXUIElementGetPid(element, None)`` answers the
+           ``(AXError, pid)`` tuple with exact status 0 and an exact built-in
+           ``int`` pid equal to the requested PID;
+        2. role: ``AXUIElementCopyAttributeValue(element, "AXRole", None)``
+           answers a strict ``(AXError, value)`` tuple with exact status 0 whose
+           value is exactly ``"AXWindow"`` (an empty string copied to an exact
+           built-in ``str``). A genuine native list has been observed to carry
+           the application root (whose role is ``"AXApplication"``), so no
+           non-window role is ever returned, skipped or re-labelled.
+
+        Only the opaque AX handles are returned, in AX order and bounded by
+        ``MAX_AX_WINDOWS``. Nothing else is read here: no CoreGraphics window
+        inventory and no AX title, bounds, control, value or text attribute.
+        Any malformed PID, creation/list/GetPid/role shape, nonzero status,
+        mismatched PID, wrong or non-string role, or raised native call fails
+        closed with the existing sanitized ``a11y-query`` refusal - never a
+        stringified exception or a payload.
         """
         if not _exact_status(pid) or pid <= 0:
             raise _a11y_query()
@@ -700,6 +709,17 @@ class QuartzApi:
                 raise _a11y_query()
             owner = decoded[1]
             if not _exact_status(owner) or owner != pid:
+                raise _a11y_query()
+            # Ownership is proven first; only then is the role read, and only
+            # an exact success carrying exactly AXWindow may join the handles.
+            try:
+                answer = self.ax.AXUIElementCopyAttributeValue(element, "AXRole", None)
+            except Exception:
+                raise _a11y_query()
+            decoded = _ax_result(answer)
+            if decoded is None or decoded[0] != 0:
+                raise _a11y_query()
+            if _native_text(decoded[1]) != "AXWindow":
                 raise _a11y_query()
             handles.append(element)
         return handles

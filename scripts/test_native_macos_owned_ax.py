@@ -145,7 +145,8 @@ class FakeFrameworks:
                             if self._node(w).attributes["_pid"] == application])
             if name == "AXFocusedWindow":
                 return (0, self.focused) if self.focused is not None else (NO_VALUE, None)
-            return (NO_VALUE, None)
+            # The application root reports AXApplication exactly as in the C API.
+            return (0, "AXApplication") if name == "AXRole" else (NO_VALUE, None)
         value = element.attributes.get(name)
         return (NO_VALUE, None) if value is None else (0, value)
 
