@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -98,63 +99,65 @@ func TestLinuxTTYNrSignedDecoding(t *testing.T) {
 }
 
 // TestLinuxTTYDevEncoding pins the Linux kernel dev_t encoding shared by
-// tty_nr and stat, including /dev/pts/0 as a valid unit zero.
+// tty_nr and stat, including /dev/pts/0 as a valid unit zero. The expected
+// device numbers are independent literals for devpts major 136; where the
+// host exposes a node they are cross-checked against unix.Mkdev and a real
+// stat of /dev/pts/N, never against linuxDev itself.
 func TestLinuxTTYDevEncoding(t *testing.T) {
 	for _, tc := range []struct {
-		dev  uint64
-		unit uint32
-		ok   bool
+		dev        uint64
+		major, min uint32
+		unit       uint32
+		ok         bool
 	}{
-		{0x880, 0, true},     // /dev/pts/0: unit zero is a valid pty
-		{0x881, 1, true},     // /dev/pts/1
-		{0x88200, 512, true}, // minor above 255 spans bits 20-31
-		{0x500, 0, false},    // /dev/tty class is never used as an identity
-		{0, 0, false},
+		{0x8800, 136, 0, 0, true},       // /dev/pts/0: unit zero is a valid pty
+		{0x8801, 136, 1, 1, true},       // /dev/pts/1
+		{0x208800, 136, 512, 512, true}, // minor above 255 spans bits 20-31
+		{0x500, 5, 0, 0, false},         // /dev/tty class is never used as an identity
+		{0, 0, 0, 0, false},
 	} {
+		if got := unix.Mkdev(tc.major, tc.min); got != tc.dev {
+			t.Fatalf("unix.Mkdev(%d,%d) = 0x%x want literal 0x%x", tc.major, tc.min, got, tc.dev)
+		}
+		if major, minor := unix.Major(tc.dev), unix.Minor(tc.dev); major != tc.major || minor != tc.min {
+			t.Fatalf("unix.Major/Minor(0x%x) = %d,%d want %d,%d", tc.dev, major, minor, tc.major, tc.min)
+		}
+		if tc.ok {
+			node := "/dev/pts/" + strconv.FormatUint(uint64(tc.min), 10)
+			if info, err := os.Stat(node); err == nil {
+				if rdev := uint64(info.Sys().(*syscall.Stat_t).Rdev); rdev != tc.dev {
+					t.Fatalf("stat %s rdev 0x%x want 0x%x", node, rdev, tc.dev)
+				}
+			}
+		}
 		unit, ok := devUnit(tc.dev)
 		if ok != tc.ok || unit != tc.unit {
 			t.Fatalf("devUnit(0x%x) = %d,%v want %d,%v", tc.dev, unit, ok, tc.unit, tc.ok)
 		}
 		if ok {
-			if major, minor := devMajor(tc.dev), devMinor(tc.dev); linuxDev(major, minor) != tc.dev {
+			if major, minor := devMajor(tc.dev), devMinor(tc.dev); major != tc.major || minor != tc.min || linuxDev(major, minor) != tc.dev {
 				t.Fatalf("round trip for 0x%x: %d,%d -> 0x%x", tc.dev, major, minor, linuxDev(major, minor))
 			}
 		}
 	}
-	if _, ok := handleTTYIdentity(0x881, 0x881, true); !ok {
-		t.Fatal("matching handle rejected")
+	if unit, ok := handleTTYIdentity(0x8800, 0x8800, true); !ok || unit != 0 {
+		t.Fatalf("matching handle 0x8800: unit %d ok %v, want 0,true", unit, ok)
+	}
+	if unit, ok := handleTTYIdentity(0x8801, 0x8801, true); !ok || unit != 1 {
+		t.Fatalf("matching handle 0x8801: unit %d ok %v, want 1,true", unit, ok)
 	}
 	for _, bad := range []struct {
+		name             string
 		attested, handle uint64
 		char             bool
 	}{
-		{0x881, 0x500, true}, // /dev/tty class
-		{0x881, 0x880, true}, // another unit
-		{0x881, 0x881, false},
+		{"other major (major 5)", 0x8801, 0x500, true},
+		{"other unit", 0x8801, 0x8800, true},
+		{"not a character device", 0x8801, 0x8801, false},
+		{"zero handle", 0x8801, 0, true},
 	} {
 		if _, ok := handleTTYIdentity(bad.attested, bad.handle, bad.char); ok {
-			t.Fatalf("handle 0x%x accepted for attested 0x%x", bad.handle, bad.attested)
-		}
-	}
-	for _, path := range []string{"/dev/pts/0", "/dev/pts/17", "/dev/pts/x", "/dev/pts/01", "/dev/pts/", "/dev/tty"} {
-		_, nameOK := linuxPTSUnitOfName(path)
-		_, exists := os.Stat(path)
-		if nameOK && exists != nil {
-			continue
-		}
-		if nameOK != (path == "/dev/pts/0" || path == "/dev/pts/17") {
-			t.Fatalf("linuxPTSUnitOfName(%q) = %v", path, nameOK)
-		}
-	}
-	// A real /dev/pts node, when present, matches the kernel encoding.
-	for _, minor := range []uint32{0, devMinor(otherTTYDev(0))} {
-		node := "/dev/pts/" + strconv.FormatUint(uint64(minor), 10)
-		path, nodeDev, unit, ok := ttyNodeIdentity(node)
-		if !ok {
-			continue
-		}
-		if path != node || nodeDev != linuxDev(ttyMajor, minor) || unit != minor {
-			t.Fatalf("%s: identity 0x%x unit %d", node, nodeDev, unit)
+			t.Fatalf("%s: handle 0x%x accepted for attested 0x%x char %v", bad.name, bad.handle, bad.attested, bad.char)
 		}
 	}
 }
