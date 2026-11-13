@@ -206,14 +206,18 @@ os._exit(0)
 """
 )
 
-# The write-then-restore variant: in the window, after the nudge, it captures
-# the vault's original bytes and rewrites the vault with ``fsync``; the helper's
-# in-window digest must see that change. Its real SIGTERM handler then restores
-# exactly those original bytes with ``fsync`` and re-reads them before reporting
-# ``restored``/``done``, so the helper's post-teardown digest sees the original
-# bytes again and records post=False. The handler is installed before the launch
-# report and the process exits only after that handler completes -- no exec,
-# no fixed outcome, and no wait/reap by the test.
+# The write-then-restore variant: after the shared preamble's ``launch``
+# report, it captures the vault's original bytes, initializes its stop flag,
+# installs the real SIGTERM handler and only then reports ``handler-ready``.
+# The collector releases the nudge on exactly that report, so the handler is
+# live before the in-window write; the shared preamble itself never waits, so
+# parent and child cannot deadlock. After the nudge it rewrites the vault with
+# ``fsync`` (the helper's in-window digest must see that change), and its
+# handler restores the captured original bytes with ``fsync`` and re-reads them
+# before reporting ``restored``/``done``. The helper's post-teardown digest then
+# sees the original bytes again and records post=False. The process exits only
+# after that handler completes -- no exec, no fixed outcome, and no wait/reap
+# by the test.
 _WRITE_RESTORE_STAND_IN = (
     _SEEDED_STAND_IN_PREAMBLE
     + f"""
@@ -225,6 +229,10 @@ def _owned_now():
 # bytes it replaced rather than a literal copied from the test.
 with open(_vault, "rb") as _vault_file:
     _original = _vault_file.read()
+
+# Bound before the handler is installed: a SIGTERM arriving immediately after
+# ``signal.signal`` must never see the stop flag undefined.
+_vh_stopping = False
 
 
 def _on_sigterm(signum, frame):
@@ -249,10 +257,10 @@ def _on_sigterm(signum, frame):
     os.write(1, b"done\\n")
 
 
-# Installed before the launch report and before the nudge wait: the helper's
-# real SIGTERM is the only teardown this process sees.
-_vh_stopping = False
+# Install and announce the handler before waiting for the nudge. Only this
+# variant reports ``handler-ready``; the shared preamble never waits for it.
 signal.signal(signal.SIGTERM, _on_sigterm)
+os.write(1, b"handler-ready\\n")
 while not os.path.exists(_nudge[0]):
     time.sleep(0.01)
 # Ownership again right before the write, without a group signal: only the
@@ -1166,14 +1174,19 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assert_launch_owned_and_reaped(reports, required=set(reports))
 
     def test_window_write_then_sigterm_restore_still_reports_pre_mutation(self):
-        # The owned child changes the vault inside the window (after the
-        # helper's ``before`` digest), and only its real SIGTERM handler puts
-        # the captured original bytes back. The helper's own facts must
-        # therefore be pre=True and post=False: the in-window digest saw the
-        # write, the post-teardown digest saw the restore, and the mutation
-        # verdict still wins. Neither digest nor the outcome is mocked, and
-        # this test never waits on or reaps the Popen itself.
-        self._nudge_after = "launch"
+        # The shared preamble reports ``launch`` without waiting. This
+        # variant then installs its handler and reports ``handler-ready``,
+        # the only report that releases the nudge; the wait stays here so the
+        # parent and child cannot deadlock on the shared preamble.
+        #
+        # The owned child then changes the vault inside the window, and only
+        # its real SIGTERM handler puts the captured original bytes back. The
+        # helper's own facts must therefore be pre=True and post=False: the
+        # in-window digest saw the write, the post-teardown digest saw the
+        # restore, and the mutation verdict still wins. Neither digest nor the
+        # outcome is mocked, and this test never waits on or reaps the Popen
+        # itself.
+        self._nudge_after = "handler-ready"
         before = _sha256(self.vault)
         teardown = self.observe_owned_teardown()
         outcomes = self.observe_smoke_outcome()
@@ -1202,7 +1215,7 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assert_reports_drained()
         self.assertEqual(
             set(reports),
-            {"launch", "mutated", "alive", "restored", "done"},
+            {"launch", "handler-ready", "mutated", "alive", "restored", "done"},
             reports,
         )
         self.assertEqual(self.reports, reports, "reports changed after draining")
