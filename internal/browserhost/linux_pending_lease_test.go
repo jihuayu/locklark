@@ -130,12 +130,9 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 					expiry := record.expiry
 					store.mu.Unlock()
 					var duplicateFD atomic.Int32
-					oldHook := linuxLeaseAnchorCreatedHook
-					linuxLeaseAnchorCreatedHook = func(anchor *linuxLeaseAnchor) {
-						duplicateFD.Store(int32(anchor.file.Fd()))
-					}
+					store.anchorCreated = func(fd int) { duplicateFD.Store(int32(fd)) }
+					defer func() { store.anchorCreated = nil }()
 					duplicate := !store.Add(req, peer, req.VaultPath, session, 7, deadline)
-					linuxLeaseAnchorCreatedHook = oldHook
 					store.mu.Lock()
 					duplicateNoRenew.Store(duplicate && len(store.records) == 1 &&
 						store.records[0].expiry.Equal(expiry) && linuxPendingFDClosed(duplicateFD.Load()))
@@ -171,17 +168,16 @@ func TestLinuxPendingLeaseBrokerHelper(t *testing.T) {
 					capacityFD.Store(linuxPendingFD(capacityStore))
 				}
 				var rejectedFD atomic.Int32
-				oldHook := linuxLeaseAnchorCreatedHook
-				linuxLeaseAnchorCreatedHook = func(anchor *linuxLeaseAnchor) {
-					rejectedFD.Store(int32(anchor.file.Fd()))
-				}
+				capacityStore.anchorCreated = func(fd int) { rejectedFD.Store(int32(fd)) }
+				defer func() { capacityStore.anchorCreated = nil }()
 				capacityB := capacityStore.Add(req, peer, "capacity-b", session, 7, deadline)
-				linuxLeaseAnchorCreatedHook = oldHook
 				capacityStore.mu.Lock()
 				capacityRecords := len(capacityStore.records)
+				capacityLive := capacityRecords == 1 && capacityStore.records[0].anchor.live()
 				capacityStore.mu.Unlock()
+				capacityOpen := !linuxPendingFDClosed(capacityFD.Load())
 				capacityStore.Clear()
-				capacityOK.Store(capacityA && !capacityB && capacityRecords == 1 &&
+				capacityOK.Store(capacityA && !capacityB && capacityRecords == 1 && capacityLive && capacityOpen &&
 					linuxPendingFDClosed(capacityFD.Load()) && linuxPendingFDClosed(rejectedFD.Load()))
 
 				newerStore := newLinuxPendingLeaseStore(2)

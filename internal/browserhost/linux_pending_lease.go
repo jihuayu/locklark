@@ -33,11 +33,6 @@ type linuxPendingLeaseRecord struct {
 	expiry time.Time
 }
 
-// linuxLeaseAnchorCreatedHook is a test-only observation point for the
-// freshly created anchor before Add decides to keep or reject it. It never
-// grants authority and is nil outside tests.
-var linuxLeaseAnchorCreatedHook func(*linuxLeaseAnchor)
-
 // linuxPendingLeaseStore is a fixed-capacity, non-authorizing qualification
 // cache. No production caller uses it and it never approves or discloses
 // values. It exists only to bind a pending lease to a sealed proof and an
@@ -48,6 +43,9 @@ type linuxPendingLeaseStore struct {
 	now      func() time.Time
 	records  []linuxPendingLeaseRecord
 	closed   bool
+	// anchorCreated is a test-only per-store observation of a newly created
+	// anchor fd. It is nil in production and never grants authority.
+	anchorCreated func(int)
 }
 
 func newLinuxPendingLeaseStore(capacity int) *linuxPendingLeaseStore {
@@ -81,8 +79,8 @@ func (s *linuxPendingLeaseStore) Add(req CLIRunBrokerRequest, peer Peer, vault s
 	if !ok {
 		return false
 	}
-	if linuxLeaseAnchorCreatedHook != nil {
-		linuxLeaseAnchorCreatedHook(anchor)
+	if s.anchorCreated != nil {
+		s.anchorCreated(int(anchor.file.Fd()))
 	}
 	key := linuxPendingLeaseKey{
 		vault: vault, session: session, epoch: epoch,
