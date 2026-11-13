@@ -450,10 +450,6 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.scrapers_started = 0
         self.scrapers_drained = 0
         self.reports: dict[str, str] = {}
-        # The real exit status (``Popen.returncode``) of every helper desktop
-        # spawn, read once its stdout collector saw EOF. Empty unless a case
-        # asserts on it; recording it changes no helper behaviour.
-        self.desktop_exits: list[int | None] = []
         self.nudge = self.temp_dir / "stand-in-nudge"
         self.launched_pid = self.temp_dir / "stand-in-pid"
         # Fixed, not overridden: the plain stand-in's ``launch`` is the only
@@ -593,13 +589,54 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.assertEqual(self.scrapers_drained, self.scrapers_started)
         for scraper in self.scrapers:
             if not _wait_until_dead(scraper, 5.0):
-                self.fail("a stdout collector or exit recorder outlived its desktop's pipe")
+                self.fail("a stdout collector outlived its desktop's pipe")
             if scraper.is_alive():  # cannot be true after a dead read; kept explicit
-                self.fail("a stdout collector or exit recorder raced the reports read")
-        # Same for the exit-status recorders: one per launched spawn.
-        self.assertEqual(
-            len(self.desktop_exits), launches, "a spawn's exit status was not recorded"
-        )
+                self.fail("a stdout collector raced the reports read")
+
+    def observe_owned_teardown(self) -> dict:
+        """Record the helper's own teardown; never wait, kill or assert here.
+
+        ``real`` is captured before the patch, so the wrapper always delegates
+        to the genuine ``support.terminate_process_group``: exactly what the
+        helper would have called. Around that call it only records the
+        ``Popen.poll() is None`` fact (still running right before teardown) and
+        then reads ``Popen.returncode``. Reading the status the helper's own
+        teardown produced is not the test reaping anything: a ``None`` here
+        means the helper did *not* reap, which the test then reports.
+        """
+
+        real = support.terminate_process_group
+        observed: dict = {"poll_before": [], "returncode": []}
+
+        def observe(process, *, grace, owned_group):
+            observed["poll_before"].append(process.poll() is None)
+            result = real(process, grace=grace, owned_group=owned_group)
+            observed["returncode"].append(process.returncode)
+            return result
+
+        patcher = mock.patch.object(support, "terminate_process_group", observe)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return observed
+
+    def observe_smoke_outcome(self) -> list[dict]:
+        """Record the helper's real ``_smoke_outcome`` facts; change nothing.
+
+        The spy delegates to the genuine decision function with the very facts
+        the helper collected, so the priority under test is still the helper's.
+        """
+
+        real = support._smoke_outcome
+        seen: list[dict] = []
+
+        def observe(facts, primary):
+            seen.append(dict(facts))
+            return real(facts, primary)
+
+        patcher = mock.patch.object(support, "_smoke_outcome", observe)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return seen
 
     def _observe(self, real_popen):
         """Pipe stdout only for the helper's own desktop spawn.
@@ -626,22 +663,11 @@ class DesktopSmokeFixture(unittest.TestCase):
             # to the desktop's log; every other spawn argument is untouched.
             process = real_popen(command, **{**kwargs, "stdout": subprocess.PIPE})
             stream = process.stdout
-            stream_closed = threading.Event()
             scraper = threading.Thread(
-                target=self._scrape, args=(stream, stream_closed), daemon=True
+                target=self._scrape, args=(stream,), daemon=True
             )
-            # Recorded only after the collector closed the pipe at EOF, then
-            # joined the helper's own ``process.wait()``: the status is the
-            # real reaped ``Popen.returncode``, never ``None``.
-            recorder = threading.Thread(
-                target=self._record_desktop_exit,
-                args=(stream_closed, process),
-                daemon=True,
-            )
-            self.scrapers.append(recorder)
             self.scrapers.append(scraper)
             self.scrapers_started += 1
-            recorder.start()
             scraper.start()
             # The helper's contract never handles stdout, and the collector
             # owns the pipe from here (closing it once the child is gone).
@@ -668,20 +694,11 @@ class DesktopSmokeFixture(unittest.TestCase):
             return False
         return os.path.realpath(str(kwargs.get("cwd") or "")) == root
 
-    def _scrape(self, stream, stream_closed: threading.Event) -> None:
+    def _scrape(self, stream) -> None:
         try:
             self._collect(stream)
         finally:
             stream.close()
-            stream_closed.set()
-
-    def _record_desktop_exit(self, stream_closed: threading.Event, process) -> None:
-        """Append the spawn's real exit status once its pipe saw EOF."""
-
-        stream_closed.wait()
-        # The helper owns the Popen object; wait() after the pipe's EOF never
-        # blocks on output and only guarantees the status is reaped.
-        self.desktop_exits.append(process.wait())
 
     def _collect(self, stream) -> None:
         # Private 0600 signals of the tests' own, created 0600 at creation
@@ -1010,6 +1027,7 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # on the test side. The collector starts with the spawn, so the
         # reports are read only after it, and the child's stdout EOF, are
         # proven -- never before (see ``mutation_launch``).
+        teardown = self.observe_owned_teardown()
         reports, error = self.mutation_launch(
             _MUTATING_STAND_IN, harness_pid=os.getpid()
         )
@@ -1025,11 +1043,14 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assert_reports_drained()
         self.assertEqual(set(reports), {"launch", "mutated", "alive"}, reports)
         self.assert_private_signals()
-        # The helper really exited this owned desktop (its recorded status is
-        # neither the exit-2 refusal nor a missing status), and that same pid
-        # and its group are then proven reaped below.
-        (exit_status,) = self.desktop_exits
-        self.assertIsNotNone(exit_status, "the owned desktop's exit was never observed")
+        # The helper's own teardown observed the child still running (the
+        # ``alive`` report alone is no proof of that), then really reaped it:
+        # the status the helper produced is present -- no wait() by this test
+        # ever competed for it -- and it is not the exit-2 refusal.
+        self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
+        self.assertEqual(len(teardown["returncode"]), 1)
+        (exit_status,) = teardown["returncode"]
+        self.assertIsNotNone(exit_status, "the helper did not reap the owned desktop")
         self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
         self.assert_launch_owned_and_reaped(reports)
 
@@ -1042,6 +1063,7 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # digest can see it -- a real teardown-only mutation, not a pre one.
         self._nudge_after = "handler-ready"
         before = _sha256(self.vault)
+        teardown = self.observe_owned_teardown()
 
         reports, error = self.mutation_launch(
             _TEARDOWN_MUTATING_STAND_IN, harness_pid=os.getpid()
@@ -1068,10 +1090,13 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # mutation and the final byte check both come after that report.
         self.assertNotEqual(before, _sha256(self.vault), "the vault did not change")
         self.assertEqual(self.vault.read_bytes(), _MUTATION)
-        # The helper really exited the owned desktop (not the exit-2 refusal,
-        # not an unobserved exit), and that pid and its group are proven gone.
-        (exit_status,) = self.desktop_exits
-        self.assertIsNotNone(exit_status, "the owned desktop's exit was never observed")
+        # The write is teardown-only only if the child was still running at the
+        # helper's own teardown; the helper then really reaped it (the status
+        # exists and is not the exit-2 refusal), and its pid and group are gone.
+        self.assertEqual(teardown["poll_before"], [True], "the child had exited before teardown")
+        self.assertEqual(len(teardown["returncode"]), 1)
+        (exit_status,) = teardown["returncode"]
+        self.assertIsNotNone(exit_status, "the helper did not reap the owned desktop")
         self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
         self.assert_launch_owned_and_reaped(reports, required=set(reports))
 
@@ -1091,14 +1116,30 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # and rc=2 -- and its fixed priority must report the mutation, not the
         # usage refusal, while the teardown still reaps the owned group.
         launches = self.record_of_launch_count()
+        teardown = self.observe_owned_teardown()
+        outcomes = self.observe_smoke_outcome()
         reports, error = self.mutation_launch(
             _MUTATING_EXIT2_STAND_IN, harness_pid=os.getpid()
         )
-        # Exactly one helper launch happened, and its real Popen exit status
-        # was 2 (never a signal or a timeout kill), even though the helper
-        # itself raised the mutation error and returned no liveness verdict.
+        # Exactly one helper launch happened. The helper's own decision saw the
+        # real facts -- child exited 2, mutation both in and after the window,
+        # reaped -- before its fixed priority chose the mutation error over the
+        # usage refusal; nothing here reaped or judged in the helper's place.
         self.assertEqual(self.record_of_launch_count(), launches + 1)
-        self.assertEqual(self.desktop_exits, [2])
+        self.assertEqual(len(outcomes), 1, "the helper's outcome was not recorded")
+        (facts,) = outcomes
+        self.assertIs(type(facts["exit_code"]), int)
+        self.assertEqual(facts["exit_code"], 2)
+        self.assertIs(facts["pre_mutated"], True)
+        self.assertIs(facts["post_mutated"], True)
+        self.assertIs(facts["reaped"], True)
+        self.assertIsNone(facts["teardown_error"])
+        self.assertIsNone(facts["hash_error"])
+        # The child had already exited (rc=2) by teardown, and the helper's own
+        # reaping call produced exactly that status -- not a signal or a timeout.
+        self.assertEqual(len(teardown["returncode"]), 1)
+        (exit_status,) = teardown["returncode"]
+        self.assertEqual(exit_status, 2, "the helper did not observe/reap the real rc=2")
 
         self.assertIsInstance(error, AssertionError)
         self.assert_mutation_error(error, pre=True, post=True)
