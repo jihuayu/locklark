@@ -391,11 +391,14 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		}
 	case "control":
 		resp, control, err := RequestCLIRunControl(ctx, req)
-		if err != nil || control == nil || len(resp.PreparedValues) == 0 {
+		if err != nil || control == nil || len(resp.PreparedValues) == 0 || !validCLIRunControlChallenge(control.challenge) {
+			os.Exit(2)
+		}
+		_ = control.Close()
+		if control.challenge != "" {
 			os.Exit(2)
 		}
 		signal('R')
-		_ = control.Close()
 	case "control-refused":
 		_, control, err := RequestCLIRunControl(ctx, req)
 		if !errors.Is(err, ErrCLIRunRefused) || control != nil {
@@ -465,12 +468,18 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		}
 		challengeA := controlA.challenge
 		_ = controlA.Close()
+		if controlA.challenge != "" {
+			os.Exit(2)
+		}
 		_, controlB, err := RequestCLIRunControl(ctx, reqB)
 		if err != nil || controlB == nil {
 			os.Exit(2)
 		}
 		challengeB := controlB.challenge
 		_ = controlB.Close()
+		if controlB.challenge != "" {
+			os.Exit(2)
+		}
 		if challengeA == challengeB || challengeA == reqA.Scope.Nonce || challengeB == reqB.Scope.Nonce {
 			os.Exit(2)
 		}

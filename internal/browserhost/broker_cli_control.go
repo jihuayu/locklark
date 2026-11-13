@@ -51,6 +51,7 @@ func (c *CLIRunControl) Close() error {
 		return nil
 	}
 	c.once.Do(func() {
+		c.challenge = ""
 		if c.stop != nil {
 			c.stop()
 		}
