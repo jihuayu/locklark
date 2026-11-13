@@ -18,6 +18,10 @@ import (
 // does not own a PTY; it does not attest a kernel CTTY and is not a cross-PID
 // or native-approval smoke.
 func TestCLIRunNonceReplayRealUnixPeerRefusedBeforeTTYGate(t *testing.T) {
+	runLegacyNoCTTYTest(t, "TestCLIRunNonceReplayRealUnixPeerRefusedBeforeTTYGate", testCLIRunNonceReplayRealUnixPeerRefusedBeforeTTYGateBody)
+}
+
+func testCLIRunNonceReplayRealUnixPeerRefusedBeforeTTYGateBody(t *testing.T) {
 	savedCache := brokerCLIRunNonces
 	brokerCLIRunNonces = replayCache(4, time.Minute, newReplayClock())
 	t.Cleanup(func() { brokerCLIRunNonces = savedCache })
