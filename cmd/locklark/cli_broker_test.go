@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -300,18 +301,28 @@ func TestCLIRunBrokerNonceIsFreshPerRequest(t *testing.T) {
 	}
 }
 
-// dispatchCLIRunBrokerShim runs one brokered run of a shim child that exits
-// with code through the production dispatcher. The broker seam returns the
-// audited reply and captures the exact scope that was sent.
+// dispatchCLIRunBrokerShim runs one brokered run of a child that exits with
+// code through the production dispatcher. The child is this real test binary:
+// main_test.go's TestMain exits with code for the exact two-argument mode, so
+// the run is a host-native child on every platform. The broker seam returns
+// the audited reply and captures the exact scope that was sent.
 func dispatchCLIRunBrokerShim(t *testing.T, code int) (sent browserhost.CLIRunScope, err error) {
 	t.Helper()
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true, f.tty)
-	shim := filepath.Join(t.TempDir(), "locklark.test")
-	if e := os.WriteFile(shim, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", code)), 0700); e != nil {
-		t.Fatal("shim program unavailable")
+	program := cliTestExecutable(t)
+	sum, e := clibinding.ComputeProgramSHA256(program)
+	if e != nil {
+		t.Fatal("child program digest unavailable")
 	}
-	f.request.Program, f.request.Args = shim, nil
+	f.binding.Program, f.binding.ProgramSHA256 = program, sum
+	if e = f.binding.Validate(); e != nil {
+		t.Fatal("child binding fixture invalid:", e)
+	}
+	f.request.Program, f.request.Args = program, []string{"locklark-test-child-exit", strconv.Itoa(code)}
+	if e = f.request.Validate(f.targets); e != nil {
+		t.Fatal("child request fixture invalid:", e)
+	}
 	t.Setenv("LOCKLARK_TEST_TOKEN", "")
 	requests := 0
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {

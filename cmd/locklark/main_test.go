@@ -2,10 +2,23 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain makes this binary usable as a real brokered child on every
+// platform: only the exact two-argument mode form with exit status 0 or 7
+// exits with that status, and every other invocation runs the suite normally.
+func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "locklark-test-child-exit" {
+		if code := os.Args[2]; code == "0" || code == "7" {
+			os.Exit(int(code[0] - '0'))
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestDemoThenExplicitExport(t *testing.T) {
 	dir := t.TempDir()
