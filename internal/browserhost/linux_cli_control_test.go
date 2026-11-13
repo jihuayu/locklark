@@ -93,7 +93,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	stage = "S-receipt"
 	receipt := cliRunReceiptFromFixture(t)
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
-	var closeOK, cancelOK, eofOK, defaultEOFOK atomic.Bool
+	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
 	var count atomic.Int32
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
@@ -229,6 +229,10 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	eofOK.Store(eofEvent == 'E' && eofClosed)
 	defaultEvent, _, _, defaultClosed := runEvent("default-hold", strings.Repeat("c9", 32), false)
 	defaultEOFOK.Store(defaultEvent == 'F' && defaultClosed)
+	sentinelEvent, _, _, sentinelClosed := runEvent("control-sentinel", strings.Repeat("d0", 32), false)
+	sentinelOK.Store(sentinelEvent == 'S' && sentinelClosed)
+	preByteEvent, _, _, preByteClosed := runEvent("pre-byte", strings.Repeat("e1", 32), false)
+	preByteOK.Store(preByteEvent == 'P' && preByteClosed)
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -261,6 +265,14 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	}
 	if !defaultEOFOK.Load() {
 		stage = "S-assert-default-eof"
+		fail()
+	}
+	if !sentinelOK.Load() {
+		stage = "S-assert-sentinel"
+		fail()
+	}
+	if !preByteOK.Load() {
+		stage = "S-assert-pre-byte"
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIControlOK); err != nil {
@@ -369,6 +381,76 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		signal('F')
+		_ = conn.Close()
+	case "control-sentinel":
+		endpoint, err := DefaultBrokerEndpoint()
+		if err != nil {
+			os.Exit(2)
+		}
+		conn, err := dialLocal(ctx, endpoint)
+		if err != nil {
+			os.Exit(2)
+		}
+		req.DeliveryControl = true
+		if _, err := cliRunExchange(ctx, conn, req); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if err := readCLIRunControlReady(conn); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if err := writeFrame(conn, []byte{0xAA, 0xBB, 0xCC}); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		raw, err := readFrame(conn, MaxOutput)
+		clear(raw)
+		if err == nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		signal('S')
+		_ = conn.Close()
+	case "pre-byte":
+		endpoint, err := DefaultBrokerEndpoint()
+		if err != nil {
+			os.Exit(2)
+		}
+		conn, err := dialLocal(ctx, endpoint)
+		if err != nil {
+			os.Exit(2)
+		}
+		hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
+		if err := writeFrame(conn, hello); err != nil {
+			clear(hello)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(hello)
+		req.DeliveryControl = true
+		rawReq, _ := json.Marshal(req)
+		if err := writeFrame(conn, rawReq); err != nil {
+			clear(rawReq)
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		clear(rawReq)
+		if _, err := conn.Write([]byte{0x7F}); err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		resp, err := readFrame(conn, MaxOutput)
+		clear(resp)
+		if err != nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		if err := readCLIRunControlReady(conn); err == nil {
+			_ = conn.Close()
+			os.Exit(2)
+		}
+		signal('P')
 		_ = conn.Close()
 	default:
 		os.Exit(2)

@@ -571,10 +571,9 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		defer controlTimer.Stop()
 	}
 	stop := make(chan struct{})
-	watchDone := make(chan struct{})
+	watchExit := make(chan bool, 1)
 	go func() {
-		watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
-		close(watchDone)
+		watchExit <- watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
 	}()
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, callbackReq)
 	// Everything the callback returned that is not transferred is cleared on
@@ -653,13 +652,19 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	// alive to detect the client's Close, EOF, or cancellation; this handler
 	// then closes the retained socket. No lease is activated here.
 	if req.DeliveryControl && transferred && bindErr == nil && writeErr == nil {
+		// Stop the pre-ready monitor before writing the ready frame. The
+		// deadline wake bounds this; a byte it already read is a refusal. Only
+		// after its Read has exited does the single new reader touch the conn.
+		if !stopCLIRunMonitor(conn, stop, watchExit) {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
 		if e := writeCLIRunControlReady(conn); e != nil {
-			close(stop)
 			_ = conn.Close()
 			return e
 		}
-		<-watchDone
-		close(stop)
+		raw, _ := readFrame(conn, MaxOutput)
+		clear(raw)
 		_ = conn.Close()
 		return nil
 	}
@@ -674,28 +679,60 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 // callback is pending and calls cancel on EOF, on any unexpected inbound byte,
 // or on any non-timeout read failure. An idle read timeout is not a
 // cancellation: it only bounds each read (so the monitor wakes to observe
-// stop), after which the monitor keeps reading. Once stop is closed the
-// handler has completed and closes the connection itself, so the monitor may
-// exit without cancelling. The watcher never writes.
-func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}, idle time.Duration) {
+// stop), after which the monitor keeps reading. Closing stop is used for the
+// control handoff: the monitor exits without consuming or cancelling, and the
+// handler does not write control-ready until that Read has exited. The watcher
+// never writes.
+func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}, idle time.Duration) bool {
 	var in [1]byte
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 		n, e := conn.Read(in[:])
 		if n > 0 {
-			break // unexpected input, even alongside a timeout error
+			cancel() // unexpected input, even alongside a timeout error
+			return true
 		}
 		if !cliRunMonitorTimeout(e) {
 			cancel()
-			return
+			return true
 		}
 		select {
 		case <-stop:
-			return
+			return false
 		default:
 		}
 	}
-	cancel()
+}
+
+const cliRunControlHandoffLimit = 2 * time.Second
+
+// stopCLIRunMonitor wakes the sole pre-ready reader with a deadline, confirms
+// its Read has exited, and resets the deadline before the new owner reads.
+// It returns false on a pre-ready byte/disconnect or if the bounded handoff
+// does not complete.
+func stopCLIRunMonitor(conn net.Conn, stop chan struct{}, exit <-chan bool) bool {
+	close(stop)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	limit := time.NewTimer(cliRunControlHandoffLimit)
+	defer limit.Stop()
+	deadline := time.Now()
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		select {
+		case canceled := <-exit:
+			if canceled {
+				return false
+			}
+			if conn.SetReadDeadline(time.Time{}) != nil {
+				return false
+			}
+			return true
+		case <-ticker.C:
+		case <-limit.C:
+			return false
+		}
+	}
 }
 
 // cliRunMonitorTimeout reports whether a read error is an idle deadline, not a
