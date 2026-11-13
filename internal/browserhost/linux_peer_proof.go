@@ -22,13 +22,14 @@ import (
 var errLinuxPeerProofUnavailable = errors.New("linux peer proof unavailable")
 
 // linuxPeerProof is one private, unexported kernel proof of a Unix-socket
-// peer. It owns the peer pidfd until Close. It is not wired into
+// peer. It owns the peer pidfd and CTTY fd until Close. It is not wired into
 // authenticatedPeer, the broker, or any approval/lease path, and it cannot
 // authorize a request by itself.
 type linuxPeerProof struct {
 	uid   uint32
 	pid   int
 	pidfd *linuxOwnedPidFD
+	ttyfd *linuxOwnedTTY
 	stat  linuxPeerStat
 	exe   linuxPeerExecIdentity
 	tty   linuxPeerTTYIdentity
@@ -96,13 +97,14 @@ func (p *linuxPeerProof) Close() error {
 	if p == nil {
 		return nil
 	}
-	return p.pidfd.Close()
+	return errors.Join(p.pidfd.Close(), p.ttyfd.Close())
 }
 
-// live reports whether the peer pidfd has no exit event. A closed proof, a
-// failed poll, or any event is not live.
+// live reports whether the peer is still running and the owned terminal object
+// is still valid. Before the terminal is acquired only the pidfd is checked;
+// a published proof always has both.
 func (p *linuxPeerProof) live() bool {
-	return p != nil && p.pidfd.live()
+	return p != nil && p.pidfd.live() && p.ttyfd.valid()
 }
 
 type linuxPeerStat struct {
@@ -125,6 +127,58 @@ type linuxPeerTTYIdentity struct {
 	uid  uint32
 	gid  uint32
 	mode uint32
+}
+
+// linuxOwnedTTY pins the peer CTTY object for the proof lifetime. Fstat and
+// identity checks run under the same mutex as Close; no raw descriptor accessor
+// exists.
+type linuxOwnedTTY struct {
+	mu       sync.Mutex
+	file     *os.File
+	identity linuxPeerTTYIdentity
+	closed   bool
+}
+
+func (p *linuxOwnedTTY) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	if p.file == nil {
+		return nil
+	}
+	err := p.file.Close()
+	p.file = nil
+	return err
+}
+
+func (p *linuxOwnedTTY) valid() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil || !trustedTTYDevice(p.identity.path) {
+		return false
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(int(p.file.Fd()), &opened) != nil || !validLinuxPeerTTYStat(&opened, p.identity.dev, p.identity.uid) {
+		return false
+	}
+	if uint64(opened.Rdev) != p.identity.dev || uint64(opened.Ino) != p.identity.ino ||
+		opened.Uid != p.identity.uid || opened.Gid != p.identity.gid || opened.Mode != p.identity.mode {
+		return false
+	}
+	var path unix.Stat_t
+	if unix.Stat(p.identity.path, &path) != nil || !sameLinuxPeerTTYStat(&opened, &path) {
+		return false
+	}
+	return true
 }
 
 type linuxPeerIdentity struct {
@@ -181,7 +235,7 @@ func linuxPeerProofFromConn(conn *net.UnixConn) (*linuxPeerProof, error) {
 		_ = proof.Close()
 		return nil, errLinuxPeerProofUnavailable
 	}
-	if !proof.live() {
+	if !pidfd.live() {
 		return fail()
 	}
 	before, ok := readLinuxPeerIdentity(proof.pid, proof.uid)
@@ -192,22 +246,27 @@ func linuxPeerProofFromConn(conn *net.UnixConn) (*linuxPeerProof, error) {
 	// stable starttime/exe snapshots, and the dev/inode/owner check below are
 	// what turn that parse into a peer proof; production trust stays disabled.
 	path, dev, _, ok := peerControllingTerminal(proof.pid)
-	if !ok || !proof.live() {
+	if !ok || !pidfd.live() {
 		return fail()
 	}
 	middle, ok := readLinuxPeerIdentity(proof.pid, proof.uid)
 	if !ok || before != middle || middle.stat.ttyDev != dev {
 		return fail()
 	}
+	if !pidfd.live() {
+		return fail()
+	}
 	tty, ok := openLinuxPeerTTY(path, dev, proof.uid)
 	if !ok {
 		return fail()
 	}
+	proof.ttyfd = tty
+	proof.tty = tty.identity
 	after, ok := readLinuxPeerIdentity(proof.pid, proof.uid)
 	if !ok || middle != after || !proof.live() {
 		return fail()
 	}
-	proof.stat, proof.exe, proof.tty = after.stat, after.exe, tty
+	proof.stat, proof.exe = after.stat, after.exe
 	return proof, nil
 }
 
@@ -283,30 +342,43 @@ func readLinuxPeerExecIdentity(pid int, uid uint32) (linuxPeerExecIdentity, bool
 	}, true
 }
 
-func openLinuxPeerTTY(path string, wantDev uint64, uid uint32) (linuxPeerTTYIdentity, bool) {
+func openLinuxPeerTTY(path string, wantDev uint64, uid uint32) (*linuxOwnedTTY, bool) {
 	if !trustedTTYDevice(path) {
-		return linuxPeerTTYIdentity{}, false
+		return nil, false
 	}
 	var before unix.Stat_t
 	if unix.Stat(path, &before) != nil || !validLinuxPeerTTYStat(&before, wantDev, uid) {
-		return linuxPeerTTYIdentity{}, false
+		return nil, false
 	}
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return linuxPeerTTYIdentity{}, false
+		return nil, false
 	}
-	defer unix.Close(fd)
+	keep := false
+	defer func() {
+		if !keep {
+			_ = unix.Close(fd)
+		}
+	}()
 	var opened unix.Stat_t
 	if unix.Fstat(fd, &opened) != nil || !validLinuxPeerTTYStat(&opened, wantDev, uid) || !sameLinuxPeerTTYStat(&before, &opened) {
-		return linuxPeerTTYIdentity{}, false
+		return nil, false
 	}
 	var after unix.Stat_t
 	if unix.Stat(path, &after) != nil || !sameLinuxPeerTTYStat(&opened, &after) {
-		return linuxPeerTTYIdentity{}, false
+		return nil, false
 	}
-	return linuxPeerTTYIdentity{
-		path: path, dev: uint64(opened.Rdev), ino: uint64(opened.Ino),
-		uid: opened.Uid, gid: opened.Gid, mode: opened.Mode,
+	file := os.NewFile(uintptr(fd), "locklark-linux-peer-tty")
+	if file == nil {
+		return nil, false
+	}
+	keep = true
+	return &linuxOwnedTTY{
+		file: file,
+		identity: linuxPeerTTYIdentity{
+			path: path, dev: uint64(opened.Rdev), ino: uint64(opened.Ino),
+			uid: opened.Uid, gid: opened.Gid, mode: opened.Mode,
+		},
 	}, true
 }
 

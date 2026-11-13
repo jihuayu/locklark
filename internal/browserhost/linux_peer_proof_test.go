@@ -144,6 +144,48 @@ func TestLinuxOwnedPidFDLiveCloseConcurrent(t *testing.T) {
 	}
 }
 
+func TestLinuxOwnedTTYCloseIsIdempotent(t *testing.T) {
+	master, slave, path, dev := linuxPeerProofPTY(t)
+	_ = master
+	t.Cleanup(func() { _ = slave.Close() })
+	owned, ok := openLinuxPeerTTY(path, dev, uint32(os.Geteuid()))
+	if !ok {
+		t.Fatal("owned tty unavailable")
+	}
+	t.Cleanup(func() { _ = owned.Close() })
+	foreign, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal("foreign tty unavailable")
+	}
+	t.Cleanup(func() { _ = unix.Close(foreign) })
+	ownedFD := linuxOwnedTTYFDForTest(t, owned)
+	if _, err := unix.FcntlInt(uintptr(ownedFD), unix.F_GETFD, 0); err != nil {
+		t.Fatal("owned tty was not open before Close")
+	}
+	if !owned.valid() {
+		t.Fatal("owned tty is not valid")
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.FcntlInt(uintptr(ownedFD), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatal("Close did not close the owned tty descriptor")
+	}
+	if owned.valid() {
+		t.Fatal("closed owned tty is still valid")
+	}
+	if _, err := unix.FcntlInt(uintptr(foreign), unix.F_GETFD, 0); err != nil {
+		t.Fatal("Close affected a foreign tty fd")
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var nilTTY *linuxOwnedTTY
+	if nilTTY.valid() || nilTTY.Close() != nil {
+		t.Fatal("nil owned tty is valid or not closeable")
+	}
+}
+
 func TestLinuxPeerProofNilAndClosed(t *testing.T) {
 	var proof *linuxPeerProof
 	if proof.live() || proof.Close() != nil {
@@ -226,6 +268,9 @@ func TestLinuxPeerProofRealChildUnixSocket(t *testing.T) {
 	if !proof.live() || proof.stat.startTime == 0 || proof.exe.ino == 0 || proof.tty.ino == 0 {
 		t.Fatal("peer proof lacks live process or terminal identity")
 	}
+	if proof.ttyfd == nil || !proof.ttyfd.valid() {
+		t.Fatal("peer proof did not retain a live tty")
+	}
 	if proof.tty.path != slavePath || proof.tty.dev != slaveDev || proof.tty.uid != 0 && proof.tty.uid != uint32(os.Geteuid()) {
 		t.Fatal("peer proof did not match the real PTY")
 	}
@@ -240,8 +285,16 @@ func TestLinuxPeerProofRealChildUnixSocket(t *testing.T) {
 	if _, err := io.ReadFull(conn, nonce); err != nil || string(nonce) != linuxPeerProofFixedNonce {
 		t.Fatal("fixed nonce handshake failed")
 	}
+	pidfd := linuxOwnedPidFDFDForTest(t, proof.pidfd)
+	ttyfd := linuxOwnedTTYFDForTest(t, proof.ttyfd)
 	if err := proof.Close(); err != nil || proof.live() {
-		t.Fatal("peer proof close did not retire the pidfd")
+		t.Fatal("peer proof close did not retire both owned fds")
+	}
+	if _, err := unix.FcntlInt(uintptr(pidfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatal("proof Close left the pidfd open")
+	}
+	if _, err := unix.FcntlInt(uintptr(ttyfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatal("proof Close left the tty fd open")
 	}
 	if err := proof.Close(); err != nil {
 		t.Fatal("peer proof close was not idempotent")
@@ -305,6 +358,26 @@ func linuxPeerProofPTY(t *testing.T) (master, slave *os.File, path string, dev u
 		t.Fatal(err)
 	}
 	return master, slave, path, uint64(stat.Rdev)
+}
+
+func linuxOwnedPidFDFDForTest(t *testing.T, p *linuxOwnedPidFD) int {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil {
+		t.Fatal("owned pidfd unavailable")
+	}
+	return int(p.file.Fd())
+}
+
+func linuxOwnedTTYFDForTest(t *testing.T, p *linuxOwnedTTY) int {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.file == nil {
+		t.Fatal("owned tty unavailable")
+	}
+	return int(p.file.Fd())
 }
 
 func linuxPeerStdioPipeCount(pid int) int {
