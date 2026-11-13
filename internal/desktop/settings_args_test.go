@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -92,9 +93,17 @@ func TestDesktopArgsRejectsInvalidArguments(t *testing.T) {
 func TestValidateSettingsFilePath(t *testing.T) {
 	dir := t.TempDir()
 	abs := filepath.Join(dir, "settings.json")
-	for _, path := range []string{abs, filepath.Join(dir, "nested", ".settings.json"), "/settings.json"} {
+	// "/settings.json" is absolute on Unix but not on Windows, where an
+	// absolute path needs a volume such as "C:". Build a volume-aware root.
+	rootSettings := filepath.Join(filepath.VolumeName(abs)+string(filepath.Separator), "settings.json")
+	for _, path := range []string{abs, filepath.Join(dir, "nested", ".settings.json"), rootSettings} {
 		if got, err := validateSettingsFilePath(path); err != nil || got != path {
 			t.Errorf("validateSettingsFilePath(%q) = %q, %v", path, got, err)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if _, err := validateSettingsFilePath("/settings.json"); !errors.Is(err, ErrSettingsPath) {
+			t.Errorf("validateSettingsFilePath(%q) error = %v, want ErrSettingsPath on Windows", "/settings.json", err)
 		}
 	}
 	for _, path := range []string{"", "settings.json", "./settings.json", "../settings.json", abs + "/..", abs + "/.", abs + "/", "/", dir, abs + "\x00"} {
