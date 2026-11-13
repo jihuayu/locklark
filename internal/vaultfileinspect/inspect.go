@@ -1,6 +1,6 @@
-// Command locklark-vaultfile-inspect performs a read-only, caller-pinned
-// policy and content-signature inspection of one sealed vault file. It never
-// decrypts or authenticates the KDBX payload.
+// Package vaultfileinspect performs a read-only, caller-pinned policy and
+// content-signature inspection of one sealed vault file for the vaultfile
+// command. It never decrypts or authenticates the KDBX payload.
 package vaultfileinspect
 
 import (
@@ -52,7 +52,7 @@ func Run(args []string, out io.Writer) error {
 }
 
 func run(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("locklark-vaultfile-inspect", flag.ContinueOnError)
+	fs := flag.NewFlagSet("vaultfile inspect", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	filePath := fs.String("file", "", "sealed vault file")
 	checkpointPath := fs.String("checkpoint", "", "caller-pinned checkpoint JSON")

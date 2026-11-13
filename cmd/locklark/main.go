@@ -130,6 +130,7 @@ NOTES
   - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
   - onedrive login|status|logout store only a OneDrive refresh token, in the OS credential store, never a plaintext fallback.
   - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
+  - vaultfile inspect does not use a profile, session, account, TTY, or unlock path.
   - The metadata request command accepts only ` + preview.FixtureRef + `.
   - request records a pending request. It cannot release any credential.
 `
