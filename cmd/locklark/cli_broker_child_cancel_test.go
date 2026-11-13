@@ -17,6 +17,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/clibinding"
+	"github.com/jihuayu/locklark/internal/personal"
 )
 
 const (
@@ -35,9 +36,15 @@ const (
 	// connect. It is the readiness barrier, never a process-start sleep.
 	cliBrokerReadyChildAcceptWait = 10 * time.Second
 
+	// cliBrokerReadyChildLiveWait is a short positive liveness probe after the
+	// ready handshake: the child must still hold the connection and send
+	// nothing, so the read must end in a timeout rather than data or EOF.
+	cliBrokerReadyChildLiveWait = 250 * time.Millisecond
+
 	// cliBrokerReadyChildCancelWait is shorter than the fixture's request
 	// timeout, so a signal that never reached the watcher cannot be masked by
-	// the ordinary run timeout killing the child.
+	// the ordinary run timeout killing the child. The probe and the return wait
+	// share this bound.
 	cliBrokerReadyChildCancelWait = 5 * time.Second
 
 	// cliBrokerReadyChildExitWait is the short deadline used after the SUT
@@ -92,26 +99,6 @@ func validCLIBrokerReadyAddr(addr string) bool {
 	return err == nil && number > 0 && number <= 65535
 }
 
-// holdCLIChildIndependentStdin gives the child a stream that cannot reach end
-// of file during the test. The brokered runner hands the child this process's
-// os.Stdin, so the test owns one end of a pipe and leaves the other end open;
-// the child never reads it. This is a stdin fixture, not a synchronization
-// helper: readiness is proven only by the listener handshake.
-func holdCLIChildIndependentStdin(t *testing.T) {
-	t.Helper()
-	readEnd, writeEnd, err := os.Pipe()
-	if err != nil {
-		t.Fatal("independent child stdin unavailable")
-	}
-	original := os.Stdin
-	os.Stdin = readEnd
-	t.Cleanup(func() {
-		os.Stdin = original
-		readEnd.Close()
-		writeEnd.Close()
-	})
-}
-
 // TestCLIRunBrokerChildCancellationClosesRealProcess is the complete
 // replacement for the removed shell/sleep-based
 // TestCLIRunBrokerChildCancelledBySignal. It drives the production dispatcher,
@@ -123,7 +110,9 @@ func holdCLIChildIndependentStdin(t *testing.T) {
 // nonce and PID, the non-blocking signal seam delivers Interrupt. The SUT must
 // return the typed terminal broker failure with no local fallback, and a short
 // read deadline must observe EOF, proving the child exited. No second
-// shell-based child cancellation case is retained.
+// shell-based child cancellation case is retained. The child holds only its
+// owned ready connection: this case makes no stdin claim, and the existing
+// personal stdin unit is untouched.
 func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	var random [32]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -145,11 +134,7 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 	if !ok {
 		t.Fatal("child readiness listener is not TCP")
 	}
-	if err = tcpListener.SetDeadline(time.Now().Add(cliBrokerReadyChildAcceptWait)); err != nil {
-		t.Fatal("child readiness deadline unavailable")
-	}
 
-	holdCLIChildIndependentStdin(t)
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true, f.tty)
 	program := cliTestExecutable(t)
@@ -207,6 +192,11 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 		result <- executeCLIAuthenticatedWithBroker(context.Background(), "brokertool", f.binding, f.targets, f.call().Request)
 	}()
 
+	// Every fixture and seam is in place. Refresh the Accept deadline now,
+	// immediately before the real child is allowed to connect.
+	if err = tcpListener.SetDeadline(time.Now().Add(cliBrokerReadyChildAcceptWait)); err != nil {
+		t.Fatal("child readiness deadline unavailable")
+	}
 	conn, err := listener.Accept()
 	if err != nil {
 		t.Fatal("real child did not connect to the readiness listener")
@@ -225,10 +215,46 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 		t.Fatal("real child readiness PID is not a distinct child")
 	}
 
+	// The readiness handshake starts the one bound that covers the liveness
+	// probe, cancellation, and the dispatcher's return.
+	cancelBy := time.Now().Add(cliBrokerReadyChildCancelWait)
 	select {
 	case brokerSignals = <-subscribed:
-	case <-time.After(cliBrokerReadyChildCancelWait):
+	case <-time.After(time.Until(cancelBy)):
 		t.Fatal("broker signal seam was not subscribed")
+	}
+
+	// The child has announced readiness and is blocked on its owned
+	// connection. A read before cancellation must time out with no byte and no
+	// EOF; that proves the connection is still live rather than already closed.
+	probeWait := cliBrokerReadyChildLiveWait
+	if remaining := time.Until(cancelBy); remaining < probeWait {
+		probeWait = remaining
+	}
+	if probeWait <= 0 {
+		t.Fatal("cancellation bound expired before the liveness probe")
+	}
+	if err = conn.SetReadDeadline(time.Now().Add(probeWait)); err != nil {
+		t.Fatal("child liveness deadline unavailable")
+	}
+	var probe [1]byte
+	n, probeErr := conn.Read(probe[:])
+	var timeout net.Error
+	if n != 0 || !errors.As(probeErr, &timeout) || !timeout.Timeout() {
+		t.Fatal("ready child connection was not live before cancellation")
+	}
+	// Restore the connection before delivering the signal; the EOF proof below
+	// sets its own short deadline after the dispatcher returns.
+	if err = conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal("child liveness deadline could not be cleared")
+	}
+	select {
+	case err = <-result:
+		t.Fatal("dispatcher returned before cancellation")
+	default:
+	}
+	if time.Until(cancelBy) <= 0 {
+		t.Fatal("cancellation bound expired before delivery")
 	}
 	select {
 	case brokerSignals <- os.Interrupt:
@@ -236,15 +262,26 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 		t.Fatal("broker signal seam did not accept Interrupt")
 	}
 
+	remaining := time.Until(cancelBy)
+	if remaining <= 0 {
+		t.Fatal("cancellation bound expired before the dispatcher returned")
+	}
 	select {
 	case err = <-result:
-	case <-time.After(cliBrokerReadyChildCancelWait):
+	case <-time.After(remaining):
 		t.Fatal("cancelled child run did not return")
 	}
 	var terminal cliRunBrokerFailedError
 	var exit *childExitStatus
-	if !errors.As(err, &terminal) || terminal.cause == nil || errors.As(err, &exit) || err == errCLIRunBrokerAbsent || opens != 0 || requests != 1 {
+	if !errors.As(err, &terminal) || errors.As(err, &exit) || err == errCLIRunBrokerAbsent || err == errRunCLIConsole || opens != 0 || requests != 1 {
 		t.Fatal("cancelled child run was not a typed terminal failure without fallback")
+	}
+	// executeRunBundle maps a cancellation after Start to personal.ErrRunResult.
+	// The outer broker failure deliberately keeps its cause opaque (its Is
+	// exposes only cancellation and deadline), so check that exact sentinel on
+	// the cause rather than demanding context.Canceled from the outer error.
+	if terminal.cause == nil || !errors.Is(terminal.cause, personal.ErrRunResult) {
+		t.Fatal("started child cancellation did not retain the result sentinel")
 	}
 	if sent.Program != program || sent.ProgramSH != programSHA {
 		t.Fatal("broker child program binding is stale")
