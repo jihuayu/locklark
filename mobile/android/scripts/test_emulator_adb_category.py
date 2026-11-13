@@ -19,6 +19,7 @@ SERIAL = ["-s", old.ENVIRONMENT["ANDROID_SERIAL"]]
 GETPROP = ["shell", "getprop"]
 INSTALL = ["install", "-t", "-r"]
 INSTRUMENT = ["shell", "am", "instrument"]
+SETTINGS = ["shell", "settings"]
 
 
 def reply(*, stderr=b"", returncode=1, stdout=b"FAILURES!!!\nINSTRUMENTATION_STATUS_CODE: -2\n"):
@@ -140,6 +141,54 @@ class EntryTests(unittest.TestCase):
                 device = self.device()
                 code, printed = self.attempt(device, self.at(device, ["shell", "pm", "clear"], lambda: reply(stderr=stderr)))
                 self.page(code, printed, "install", category)
+
+    def test_settings_refusals_are_fixed_categories(self):
+        # The prior read is before main()'s own try; the put and the readback
+        # are inside it. All three are the same classified, private call.
+        for error, category in ((TIMEOUT, "timeout"), (FileNotFoundError, "missing")):
+            with self.subTest(where="prior-read", category=category):
+                device = self.device()
+                def answer(error=error):
+                    raise error()
+                code, printed = self.attempt(device, self.at(device, SETTINGS + ["get"], answer))
+                # main() has already reached its install stage by this read.
+                self.page(code, printed, "install", category)
+        device = self.device()
+        code, printed = self.attempt(
+            device, self.at(device, SETTINGS + ["put"], lambda: reply(stderr=b"error: device offline\n")))
+        # The restore's own put is refused too: the primary keeps its category.
+        self.page(code, printed, "autofill-setting", "offline", flag=True)
+        # Private: neither the prior nor the own autofill value reached the log.
+        logged = (gate.STATE / "controller.log").read_bytes()
+        self.assertFalse(old.FakeDevice.PRIOR.encode() in logged, "prior service leaked")
+        self.assertFalse(b"org.locklark.android/.autofill" in logged, "own service leaked")
+        # The readback inside the try, refused once the prior read succeeded.
+        device = self.device()
+        seen = []
+        def readback():
+            seen.append(1)
+            if len(seen) == 1:
+                return old.FakeDevice.run(device, ["adb", *SERIAL, *SETTINGS, "get", "secure", "autofill_service"])
+            return reply(stderr=b"device unauthorized\n")
+        code, printed = self.attempt(device, self.at(device, SETTINGS + ["get"], readback))
+        self.page(code, printed, "autofill-setting", "unauthorized", flag=True)
+
+    def test_canary_refusal_is_a_fixed_category(self):
+        # required=False, then the manual non-zero check keeps the category.
+        device = self.device()
+        canary = ["exec-out", "run-as"]
+        code, printed = self.attempt(
+            device, self.at(device, canary, lambda: reply(stderr=b"error: device offline\n")))
+        self.page(code, printed, "private-canary-scan", "offline")
+        self.assertEqual((gate.STATE / "controller.log").stat().st_mode & 0o777, 0o600)
+
+    def test_instrument_clean_but_incomplete_writes_no_category(self):
+        # rc0 with a short count is a failed run, not an adb refusal.
+        device = self.device()
+        clean_but_short = lambda: reply(returncode=0, stdout=b"OK (5 tests)\nINSTRUMENTATION_CODE: -1\n")
+        code, printed = self.attempt(device, self.at(device, INSTRUMENT, clean_but_short))
+        self.page(code, printed, "complete-test-count", "absent")
+        self.assertNotIn("adb_category", gate.DIAGNOSTIC)
 
     def test_non_adb_primary_adds_no_field(self):
         # The old Interrupt is the primary but carries no adb category: the

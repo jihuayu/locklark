@@ -184,13 +184,9 @@ def main():
     command(["shell", "pm", "clear", package]); command(["shell", "pm", "clear", test_package])
     autofill_service = package + "/" + package + ".autofill.AutofillAuthService"
     def secure_setting(arguments):
-        setting = subprocess.run(
-            adb + ["shell", "settings"] + arguments,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
-        )
-        if setting.returncode:
-            raise RuntimeFailure()
-        return setting.stdout.strip()
+        # The same classified call, private: the autofill value is never
+        # written to the log, and a refused read/write is one fixed category.
+        return command(["shell", "settings"] + arguments, private=True).stdout.strip()
     def normalized_autofill():
         value = secure_setting(["get", "secure", "autofill_service"])
         return b"" if value in (b"", b"null") else value
@@ -325,7 +321,7 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
     # release app code has no fixture loader or secret-observation endpoint.
     canary = command(["exec-out", "run-as", package, "cat", "cache/instrumentation-canaries.json"], private=True, required=False)
     if canary.returncode:
-        raise RuntimeFailure()
+        raise RuntimeFailure(adb_category(canary.stderr))
     values = json.loads(canary.stdout)
     with os.fdopen(os.open(state / "fixture.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as private_fixture:
         private_fixture.write(canary.stdout)
@@ -337,7 +333,10 @@ def run_gate(state, adb, root, package, test_package, log, *, autofill_only=Fals
     # BoundOperationTest 1 + OfflineVaultTest 3 + AutofillHandoffTest 2.
     expected_tests = AUTOFILL_TESTS if autofill_only else 6
     if result is None or not complete_pass(result.returncode, result.stdout, expected_tests):
-        DIAGNOSTIC["adb_category"] = "timeout" if result is None else adb_category(result.stderr)
+        if result is None:
+            DIAGNOSTIC["adb_category"] = "timeout"
+        elif result.returncode:
+            DIAGNOSTIC["adb_category"] = adb_category(result.stderr)
         raise RuntimeFailure()
     command(["shell", "run-as", package, "rm", "cache/instrumentation-canaries.json"], private=True)
 
