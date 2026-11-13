@@ -374,15 +374,25 @@ func TestCLIRunBrokerDispatcherChildExitStatus(t *testing.T) {
 // TestCLIRunBrokerSuccessRendersAndExecutes proves a brokered success runs
 // through the audited lifecycle: the callback receives the private root, the
 // brokered value is rendered into the token environment of a directly
-// executed child, and the receipt is returned.
+// executed child, and the receipt is returned. The child is this real test
+// binary in main_test.go's two-argument exit mode, so it is host-native on
+// every platform.
 func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true, f.tty)
-	shim := filepath.Join(t.TempDir(), "locklark.test")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-		t.Fatal("shim program unavailable")
+	program := cliTestExecutable(t)
+	sum, err := clibinding.ComputeProgramSHA256(program)
+	if err != nil {
+		t.Fatal("child program digest unavailable")
 	}
-	f.request.Program, f.request.Args = shim, nil
+	f.binding.Program, f.binding.ProgramSHA256 = program, sum
+	if err = f.binding.Validate(); err != nil {
+		t.Fatal("child binding fixture invalid:", err)
+	}
+	f.request.Program, f.request.Args = program, []string{"locklark-test-child-exit", "0"}
+	if err = f.request.Validate(f.targets); err != nil {
+		t.Fatal("child request fixture invalid:", err)
+	}
 	t.Setenv("LOCKLARK_TEST_TOKEN", "")
 	var root string
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
@@ -413,7 +423,9 @@ func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 // the request's element copies are the only thing that can still hold them.
 // Those copies are themselves blanked once prepare returns (covered by
 // TestCLIRunBrokerRequestClearedAfterReturn), so each seam captures its own
-// copies of the containers it must inspect later.
+// copies of the containers it must inspect later. The program is this real
+// test binary in main_test.go's two-argument exit mode, so the child is
+// host-native on every platform.
 func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 	type replyFunc func() (browserhost.CLIRunBrokerResponse, error)
 	for name, reply := range map[string]replyFunc{
@@ -433,15 +445,20 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
 			installCLIRunBrokerSeams(t, true, f.tty)
-			shim := filepath.Join(t.TempDir(), "locklark.test")
-			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-				t.Fatal("shim program unavailable")
+			program := cliTestExecutable(t)
+			sum, err := clibinding.ComputeProgramSHA256(program)
+			if err != nil {
+				t.Fatal("child program digest unavailable")
+			}
+			f.binding.Program, f.binding.ProgramSHA256 = program, sum
+			if err = f.binding.Validate(); err != nil {
+				t.Fatal("child binding fixture invalid:", err)
 			}
 			// A positional argument and a helper directory make both element
 			// arrays observable.
-			f.request.Program, f.request.Args = shim, []string{"--fixture-arg"}
+			f.request.Program, f.request.Args = program, []string{"locklark-test-child-exit", "0"}
 			f.request.HelperPath = []string{t.TempDir()}
-			if err := f.request.Validate(f.targets); err != nil {
+			if err = f.request.Validate(f.targets); err != nil {
 				t.Fatal("request fixture invalid:", err)
 			}
 			t.Setenv("LOCKLARK_TEST_TOKEN", "")
@@ -467,7 +484,8 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 			_, _ = f.call().run(context.Background())
 			wantTargets := []personal.CLIBrokerTarget{{Slot: "token", ID: f.slotID, Revision: f.slotRev, Field: f.field}}
 			whole := func(scope browserhost.CLIRunScope, targets []personal.CLIBrokerTarget) bool {
-				return scope.Program == shim && reflect.DeepEqual(scope.Args, []string{"--fixture-arg"}) &&
+				return scope.Program == program && scope.ProgramSH == f.binding.ProgramSHA256 &&
+					reflect.DeepEqual(scope.Args, []string{"locklark-test-child-exit", "0"}) &&
 					reflect.DeepEqual(scope.Helper, f.request.HelperPath) && reflect.DeepEqual(scope.Passthru, map[string]string{"NO_COLOR": "1"}) &&
 					isFreshNonce(scope.Nonce) && reflect.DeepEqual(targets, wantTargets)
 			}
@@ -485,7 +503,10 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 // transport receives is blanked on every reply path once prepare returns:
 // the sent Args and Helper elements, passthrough entries, and target elements
 // are cleared in place through the captured backing containers. A successful
-// PreparedValues set is still returned to RunBrokeredBundle untouched.
+// PreparedValues set is still returned to RunBrokeredBundle untouched. The
+// program is this real test binary in main_test.go's two-argument exit mode,
+// so its helper directory is a real one and the child is host-native on every
+// platform.
 func TestCLIRunBrokerRequestClearedAfterReturn(t *testing.T) {
 	type replyFunc func() (browserhost.CLIRunBrokerResponse, error)
 	for name, reply := range map[string]replyFunc{
@@ -502,14 +523,19 @@ func TestCLIRunBrokerRequestClearedAfterReturn(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newCLIBrokerFixture(t)
 			installCLIRunBrokerSeams(t, true, f.tty)
-			shim := filepath.Join(t.TempDir(), "locklark.test")
-			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
-				t.Fatal("shim program unavailable")
+			program := cliTestExecutable(t)
+			sum, err := clibinding.ComputeProgramSHA256(program)
+			if err != nil {
+				t.Fatal("child program digest unavailable")
 			}
-			f.request.Program, f.request.Args = shim, []string{"--fixture-arg", "--fixture-arg-two"}
-			f.request.HelperPath = []string{t.TempDir(), filepath.Dir(shim)}
+			f.binding.Program, f.binding.ProgramSHA256 = program, sum
+			if err = f.binding.Validate(); err != nil {
+				t.Fatal("child binding fixture invalid:", err)
+			}
+			f.request.Program, f.request.Args = program, []string{"locklark-test-child-exit", "0"}
+			f.request.HelperPath = []string{t.TempDir(), filepath.Dir(program)}
 			f.request.Passthrough = map[string]string{"NO_COLOR": "1", "TERM": "dumb"}
-			if err := f.request.Validate(f.targets); err != nil {
+			if err = f.request.Validate(f.targets); err != nil {
 				t.Fatal("request fixture invalid:", err)
 			}
 			t.Setenv("LOCKLARK_TEST_TOKEN", "")
