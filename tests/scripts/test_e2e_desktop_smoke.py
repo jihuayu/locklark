@@ -120,8 +120,8 @@ os.write(1, b"launch " + str(os.getpid()).encode() + b"\\n")
 
 # The in-window variant waits for the nudge (released on ``launch``) and then
 # rewrites the vault only while the helper's window is still open (reported as
-# ``mutated``/``alive`` before it becomes the plain stand-in), so both digests
-# see the change.
+# ``mutated``/``alive`` before it falls through into the plain keep-running
+# loop), so both digests see the change.
 _MUTATING_STAND_IN = (
     _SEEDED_STAND_IN_PREAMBLE
     + f"""
@@ -139,16 +139,19 @@ with open(_vault, "r+b") as _vault_file:
     os.fsync(_vault_file.fileno())
 os.write(1, b"mutated\\n")
 os.write(1, b"alive\\n")
-os.execv(sys.executable, [sys.executable] + list(_launch_argv))
+# Never ``exec`` here: the argv's first item is the stand-in's *record*, so
+# re-running it as a program would spawn a child that argv-refuses with
+# status 2. Control just falls through into the ``_keep_running`` loop the
+# stand-in appends, so this same owned process is the one still alive at
+# teardown (and the one whose real exit status the helper observes).
 """
 )
 
 # The teardown-only variant leaves the vault untouched for the whole window and
 # reports ``handler-ready`` only once its SIGTERM handler is installed; the
-# handler is the child's *only* writer of the vault. It does not exec the plain
-# stand-in: ``execv`` reuses the pid (the helper's group leader) and a success
-# from there would defeat the "still alive" liveness result, so it keeps the
-# seeded process itself running. The handler completes within the signal frame
+# handler is the child's *only* writer of the vault. It never exec's either
+# (same record-as-argv hazard as above): the seeded process itself keeps
+# running. The handler completes within the signal frame
 # itself -- no ``sys.exit`` or ``raise`` that could be caught by the loop -- and
 # the loop exits only after the handler's own ``done`` report, which is written
 # after the re-read proves the bytes: no exit can race the handler's write.
@@ -184,14 +187,16 @@ def _on_sigterm(signum, frame):
     os.write(1, b"done\\n")
 
 
-signal.signal(signal.SIGTERM, _on_sigterm)
-# Set only now that our handler is the live one: ``_on_sigterm`` runs in the
-# seeded process itself (no exec), so the loop exits only after a SIGTERM
-# reached the handler, whose report was written after its own re-read. The
-# ``handler-ready`` report comes before the nudge wait, because the collector
-# releases the nudge on exactly that report: waiting for it any earlier would
-# wait for a report that can never be made until the wait is over.
+# Initialised before the handler is installed: the handler reads it first,
+# and a SIGTERM landing between the two bindings must never see it undefined.
 _vh_stopping = False
+signal.signal(signal.SIGTERM, _on_sigterm)
+# ``_on_sigterm`` runs in the seeded process itself (no exec), so the loop
+# exits only after a SIGTERM reached the handler, whose report was written
+# after its own re-read. The ``handler-ready`` report comes before the nudge
+# wait, because the collector releases the nudge on exactly that report:
+# waiting for it any earlier would wait for a report that cannot be made
+# until the wait is over.
 os.write(1, b"handler-ready\\n")
 while not os.path.exists(_nudge[0]):
     time.sleep(0.01)
@@ -1020,6 +1025,12 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         self.assert_reports_drained()
         self.assertEqual(set(reports), {"launch", "mutated", "alive"}, reports)
         self.assert_private_signals()
+        # The helper really exited this owned desktop (its recorded status is
+        # neither the exit-2 refusal nor a missing status), and that same pid
+        # and its group are then proven reaped below.
+        (exit_status,) = self.desktop_exits
+        self.assertIsNotNone(exit_status, "the owned desktop's exit was never observed")
+        self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
         self.assert_launch_owned_and_reaped(reports)
 
     def test_mutation_written_only_from_the_sigterm_handler_fails_post(self):
@@ -1057,6 +1068,11 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # mutation and the final byte check both come after that report.
         self.assertNotEqual(before, _sha256(self.vault), "the vault did not change")
         self.assertEqual(self.vault.read_bytes(), _MUTATION)
+        # The helper really exited the owned desktop (not the exit-2 refusal,
+        # not an unobserved exit), and that pid and its group are proven gone.
+        (exit_status,) = self.desktop_exits
+        self.assertIsNotNone(exit_status, "the owned desktop's exit was never observed")
+        self.assertNotEqual(exit_status, 2, "the owned desktop exited as the exit-2 refusal")
         self.assert_launch_owned_and_reaped(reports, required=set(reports))
 
     def test_early_exit_is_false_not_a_liveness_pass(self):
