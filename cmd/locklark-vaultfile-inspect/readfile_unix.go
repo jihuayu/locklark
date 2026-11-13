@@ -10,10 +10,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readRegular opens one no-follow descriptor with O_NONBLOCK, fstats that
-// exact handle as a regular file, and only then performs a bounded read.
+// readRegular opens one final-component no-follow descriptor with O_NOCTTY
+// and O_NONBLOCK, fstats that exact handle as a regular file, and only then
+// performs a bounded read. O_NOFOLLOW is intentionally final-component only:
+// legitimate intermediate directory symlinks (for example /tmp or /var on
+// macOS) remain usable. The explicit path grants no policy authority; the
+// caller-pinned checkpoint is the trust input.
 func readRegular(path string, max int64) ([]byte, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOCTTY, 0)
 	if err != nil {
 		return nil, errors.New("input")
 	}

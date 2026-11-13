@@ -24,10 +24,30 @@ func TestReadRegularRejectsSymlinkAndFIFO(t *testing.T) {
 	}
 	before := sha256.Sum256(mustRead(t, target))
 	if _, err := readRegular(link, 64); err == nil {
-		t.Fatal("symlink input was accepted")
+		t.Fatal("final symlink input was accepted")
 	}
 	if after := sha256.Sum256(mustRead(t, target)); after != before {
 		t.Fatal("symlink read changed the target")
+	}
+
+	realDir := filepath.Join(dir, "real-dir")
+	if err := os.Mkdir(realDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(realDir, "file")
+	if err := os.WriteFile(inside, []byte("inside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(dir, "link-dir")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readRegular(filepath.Join(linkDir, "file"), 6)
+	if err != nil || string(got) != "inside" {
+		t.Fatalf("intermediate directory symlink was not allowed: %v", err)
+	}
+	if after := sha256.Sum256(mustRead(t, inside)); after != sha256.Sum256([]byte("inside")) {
+		t.Fatal("intermediate symlink read changed the file")
 	}
 
 	fifo := filepath.Join(dir, "fifo")
