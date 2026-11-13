@@ -94,6 +94,8 @@ _MUTATION = b"mutated by the stand-in desktop\n"
 # file. Only then does it rewrite its own vault, report ``mutated``/``alive``
 # and ``exec`` the plain stand-in, which keeps running until teardown. Reports
 # go out one at a time with ``os.write`` so no stdio buffer can hold one back.
+# Its only wait is the nudge: it re-checks for the file every 0.01s until it
+# appears (bounded by the helper's own window and teardown, never by the test).
 # ``_OWNED_EXIT`` is the status both the session check and the vault rewrite's
 # ownership check use. ``_harness_pid``, ``_nudge``, ``_vault_path`` and
 # ``_launch_argv`` are filled in by the test.
@@ -136,7 +138,7 @@ _MUTATION_ERROR = (
 
 # Everything the helper may change in the launch environment: ``TMPDIR`` is
 # redirected to the private root. Nothing else is added, dropped or overridden.
-_FIXED_ENVIRON_DELTA = {"TMPDIR", "CODEX_HOME"}
+_FIXED_ENVIRON_DELTA = {"TMPDIR"}
 
 
 def _parent_environ() -> dict[str, str]:
@@ -291,9 +293,19 @@ def _await_thread(test_case: unittest.TestCase, worker: threading.Thread, what: 
 
 
 def _wait_until_dead(worker: threading.Thread, window: float) -> bool:
+    """Wait until ``worker`` reports not alive; completion is read, not slept in.
+
+    ``join(timeout)`` returns once the thread ended (``is_alive`` false) or the
+    slice elapsed; the read of ``is_alive`` is what decides, and the deadline
+    only bounds the wait, so a finished thread is never waited on further.
+    """
+
     deadline = time.monotonic() + window
-    while worker.is_alive() and time.monotonic() < deadline:
-        time.sleep(_WORKER_TICK)
+    while worker.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        worker.join(min(remaining, _WORKER_TICK))
     return not worker.is_alive()
 
 
@@ -326,6 +338,10 @@ class DesktopSmokeFixture(unittest.TestCase):
         # ``_observe`` carries the same real spawn out with a pipe instead,
         # without mocking anything downstream of it.
         self.scrapers: list[threading.Thread] = []
+        # Scrapers started so far; ``_drained_scrapers`` counts the ones whose
+        # pipe is proven finished, so a reports read waits only for new ones.
+        self.scrapers_started = 0
+        self.scrapers_drained = 0
         self.reports: dict[str, str] = {}
         self.nudge = self.temp_dir / "stand-in-nudge"
         self.launched_pid = self.temp_dir / "stand-in-pid"
@@ -345,15 +361,33 @@ class DesktopSmokeFixture(unittest.TestCase):
         )
         observer.start()
         self.addCleanup(observer.stop)
+        # Fallback only: tests that read ``reports`` drain first; this bounds
+        # a collector left running by a test that failed before doing so.
         self.addCleanup(self._wait_for_scrapers)
 
     def _wait_for_scrapers(self) -> None:
-        # Each collector ends when its pipe reaches EOF (the owned group is
-        # gone by then); one that does not is reported, never waited on
-        # forever, so it cannot leak into the next test's cleanup.
-        for scraper in self.scrapers:
+        """Bounded proof that no started collector is still filling ``reports``.
+
+        Each collector ends on its pipe's EOF (the owned group is gone by then)
+        and is proven with ``is_alive``, never assumed; one that does not end is
+        reported -- so neither a read of ``reports`` nor the next test's cleanup
+        can race a still-running scraper -- and the ones proven done are not
+        waited on again.
+        """
+
+        while self.scrapers_drained < self.scrapers_started:
+            scraper = self.scrapers[self.scrapers_drained]
             if not _wait_until_dead(scraper, 5.0):
                 self.fail("a stdout collector outlived its desktop's pipe")
+            if scraper.is_alive():  # cannot be true after a dead read; kept explicit
+                self.fail("a stdout collector was not proven finished")
+            self.scrapers_drained += 1
+
+    def drained_reports(self) -> dict[str, str]:
+        """``reports`` only after every collector started so far is proven done."""
+
+        self._wait_for_scrapers()
+        return dict(self.reports)
 
     def _observe(self, real_popen):
         """Pipe stdout only for the helper's own desktop spawn.
@@ -383,6 +417,7 @@ class DesktopSmokeFixture(unittest.TestCase):
                 target=self._scrape, args=(process.stdout,), daemon=True
             )
             self.scrapers.append(scraper)
+            self.scrapers_started += 1
             scraper.start()
             # The helper's contract never handles stdout, and the collector
             # owns the pipe from here (closing it once the child is gone).
@@ -422,11 +457,23 @@ class DesktopSmokeFixture(unittest.TestCase):
             if head == "launch":
                 # Private 0600 files of their own: the nudge releases the
                 # seeded stand-in's rewrite, and the pid lets the test prove
-                # the group was owned without relying on the live record.
-                self.nudge.write_bytes(b"")
-                self.nudge.chmod(0o600)
-                self.launched_pid.write_text(rest, encoding="utf-8")
-                self.launched_pid.chmod(0o600)
+                # the group was owned without relying on the live record. Both
+                # are created 0600 at creation (``os.open`` mode is applied by
+                # the kernel, bounded by the umask), never widened by a later
+                # ``chmod`` of an already-readable file.
+                _private_fd = os.open(
+                    self.nudge, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+                )
+                os.close(_private_fd)
+                _private_fd = os.open(
+                    self.launched_pid, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+                )
+                try:
+                    _written = os.write(_private_fd, rest.encode("utf-8"))
+                    if _written != len(rest.encode("utf-8")):
+                        raise OSError(f"short pid write: {_written} bytes")
+                finally:
+                    os.close(_private_fd)
 
     def _mkdtemp(self) -> Path:
         directory = Path(tempfile.mkdtemp(prefix="ll-desktop-smoke-"))
@@ -628,8 +675,8 @@ class PrivateSettingsTests(DesktopSmokeFixture):
 
     def test_launch_environment_differs_only_in_the_redirected_tmpdir(self):
         # The recorded TMPDIR shows the redirect; the parent's full environment
-        # is unchanged before/after, and every key the launch can change is a
-        # declared fixed key (HOME/XDG_*/CODEX_HOME keep their values).
+        # is unchanged before/after, and the only key the launch may change is
+        # the declared TMPDIR: HOME, XDG_* and CODEX_HOME keep their values.
         before = _parent_environ()
         self.assertTrue(self.launch())
         self.assertEqual(_parent_environ(), before, "the launch changed the parent's environment")
@@ -724,6 +771,8 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # bound, which the helper writes after taking its ``before`` digest.
         # Ordering to the child rides on its own stdout (which the real helper
         # redirects into a pipe) and a private nudge file: no polling sleeps.
+        # The collector starts with the spawn, so the reports are read only
+        # after it, and the child's stdout EOF, are proven -- not before.
         seed = (
             f"_harness_pid = {os.getpid()}\n"
             f"_nudge = [{str(self.nudge)!r}]\n"
@@ -765,16 +814,28 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
             self.assertIsNotNone(mutated, f"unexpected mutation error {str(error)!r}")
         finally:
             # A reported failure still reaps: bounded, and only the own
-            # thread; nothing here ever signals a process group.
+            # thread; nothing here ever signals a process group. The collector
+            # is drained here too, so a failing assertion above never reaches
+            # the cleanup with a scraper still writing ``reports``.
             _wait_until_dead(worker, _WORKER_REAP)
+            self._wait_for_scrapers()
 
         # The child's own byte-level handshake: it announced its pid, changed
         # the vault and was still running when the helper reaped it. No static
         # substring stands in for the helper's post-window digest.
         self.assertEqual(self.vault.read_bytes(), _MUTATION)
-        self.assertEqual(set(self.reports), {"launch", "mutated", "alive"}, self.reports)
+        self.assertEqual(self.scrapers_started, 1, "the mutation launch was not observed")
+        self.assertEqual(self.scrapers_drained, self.scrapers_started)
+        for scraper in self.scrapers:
+            self.assertFalse(scraper.is_alive(), "a stdout collector raced the reports read")
+        reports = self.drained_reports()
+        self.assertEqual(set(reports), {"launch", "mutated", "alive"}, reports)
+        # Created 0600 by the collector itself; no chmod runs after creation.
+        for private in (self.nudge, self.launched_pid):
+            self.assertTrue(private.is_file() and not private.is_symlink())
+            self.assertEqual(_mode(private), 0o600, f"{private.name} was not created 0600")
         pid = int(self.launched_pid.read_text(encoding="utf-8"))
-        self.assertEqual(self.reports["launch"], str(pid))
+        self.assertEqual(reports["launch"], str(pid))
         # The shim recorded the helper's session leader, which exec'd the
         # stand-in in place: same pid, and the owned group is that pid.
         self.assertEqual(int(self.executed.read_text(encoding="utf-8")), pid)
