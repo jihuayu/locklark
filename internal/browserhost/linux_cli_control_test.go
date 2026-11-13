@@ -101,7 +101,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 				return BrokerCLIResponse{}, ErrCLIRunRefused
 			}
 			if n == 5 {
-				time.Sleep(60 * time.Millisecond)
+				time.Sleep(5 * time.Second)
 			}
 			if req.DeliveryControl {
 				seenControl.Store(true)
@@ -111,7 +111,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 			return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{"token": []byte("transport-only")}, Receipt: receipt}, nil
 		},
 	})
-	b.cliRunControlLifetime = 120 * time.Millisecond
+	b.cliRunControlLifetime = 8 * time.Second
 	stage = "S-listen"
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
 	if err != nil {
@@ -137,18 +137,17 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		if err != nil {
 			fail()
 		}
-		start := time.Now()
 		b.serve(conn)
-		elapsed := time.Since(start)
-		if mode == "control-deadline" {
-			deadlineOK.Store(elapsed < 110*time.Millisecond)
-		}
 		if err := cli.Wait(); err != nil {
 			fail()
 		}
 	}
-	runHold := func(mode, nonce string) {
+	runEvent := func(mode, nonce string, hold bool) (byte, time.Duration, time.Duration) {
 		stage = "S-client-" + mode
+		stdoutR, stdoutW, err := os.Pipe()
+		if err != nil {
+			fail()
+		}
 		cli := exec.Command(os.Args[0], "-test.run=^TestLinuxCLIRunControlClientHelper$", "-test.count=1")
 		cli.Env = append(os.Environ(),
 			linuxCLIControlModeEnv+"="+linuxCLIControlClient,
@@ -157,33 +156,67 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 			"LOCKLARK_BROWSER_SOCKET="+endpoint,
 			"LOCKLARK_LINUX_CLI_CONTROL_CLIENT_MODE="+mode,
 		)
-		stdin, err := cli.StdinPipe()
-		if err != nil {
-			fail()
+		cli.Stdout, cli.Stderr = stdoutW, io.Discard
+		var stdin io.WriteCloser
+		if hold {
+			stdin, err = cli.StdinPipe()
+			if err != nil {
+				fail()
+			}
+		} else {
+			cli.Stdin = strings.NewReader("")
 		}
-		cli.Stdout = io.Discard
-		cli.Stderr = io.Discard
 		if err := cli.Start(); err != nil {
 			fail()
 		}
+		_ = stdoutW.Close()
 		conn, err := listener.AcceptUnix()
 		if err != nil {
 			fail()
 		}
 		start := time.Now()
-		b.serve(conn)
+		serveDone := make(chan struct{})
+		go func() {
+			b.serve(conn)
+			close(serveDone)
+		}()
+		events := make(chan byte, 1)
+		go func() {
+			var one [1]byte
+			n, _ := stdoutR.Read(one[:])
+			if n == 1 {
+				events <- one[0]
+			} else {
+				events <- 0
+			}
+		}()
+		var event byte
+		select {
+		case event = <-events:
+		case <-time.After(20 * time.Second):
+			fail()
+		}
+		readyAt := time.Since(start)
+		<-serveDone
 		elapsed := time.Since(start)
-		_ = stdin.Close()
+		if hold {
+			_ = stdin.Close()
+		}
 		if err := cli.Wait(); err != nil {
 			fail()
 		}
-		hardCapOK.Store(elapsed < 160*time.Millisecond)
+		_ = stdoutR.Close()
+		return event, readyAt, elapsed
 	}
 	run("control", strings.Repeat("a1", 32))
 	run("default", strings.Repeat("b2", 32))
 	run("control-refused", strings.Repeat("c3", 32))
-	run("control-deadline", strings.Repeat("d4", 32))
-	runHold("control-hold", strings.Repeat("e5", 32))
+	deadlineEvent, deadlineReady, deadlineElapsed := runEvent("control-deadline", strings.Repeat("d4", 32), false)
+	deadlineOK.Store(deadlineEvent == 'D' && deadlineReady >= 3*time.Second &&
+		deadlineElapsed >= 3*time.Second && deadlineElapsed < 6*time.Second)
+	holdEvent, holdReady, holdElapsed := runEvent("control-hold", strings.Repeat("e5", 32), true)
+	hardCapOK.Store(holdEvent == 'R' && holdElapsed >= 7*time.Second && holdElapsed < 10500*time.Millisecond &&
+		holdElapsed-holdReady < 7*time.Second)
 	_ = listener.Close()
 	stage = "S-assert"
 	if !seenControl.Load() {
@@ -223,8 +256,16 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 	req.Scope.TTYPeerID = ""
 	req.Scope.Nonce = os.Getenv(linuxCLIControlNonceEnv)
 	mode := os.Getenv("LOCKLARK_LINUX_CLI_CONTROL_CLIENT_MODE")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	timeout := 5 * time.Second
+	if mode == "control-hold" {
+		timeout = 20 * time.Second
+	}
+	if mode == "control-deadline" {
+		timeout = 4 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	signal := func(b byte) { _, _ = os.Stdout.Write([]byte{b}) }
 	switch mode {
 	case "default":
 		resp, err := RequestCLIRun(ctx, req)
@@ -236,6 +277,7 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		if err != nil || control == nil || len(resp.PreparedValues) == 0 {
 			os.Exit(2)
 		}
+		signal('R')
 		_ = control.Close()
 	case "control-refused":
 		_, control, err := RequestCLIRunControl(ctx, req)
@@ -243,18 +285,18 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			os.Exit(2)
 		}
 	case "control-deadline":
-		deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-		defer deadlineCancel()
-		_, control, err := RequestCLIRunControl(deadlineCtx, req)
+		_, control, err := RequestCLIRunControl(ctx, req)
 		if err != nil || control == nil {
 			os.Exit(2)
 		}
-		<-deadlineCtx.Done()
+		<-ctx.Done()
+		signal('D')
 	case "control-hold":
 		_, control, err := RequestCLIRunControl(ctx, req)
 		if err != nil || control == nil {
 			os.Exit(2)
 		}
+		signal('R')
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		_ = control.Close()
 	default:
