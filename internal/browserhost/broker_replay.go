@@ -20,12 +20,13 @@ const (
 )
 
 // cliRunNonceCache consumes each CLI-run nonce at most once per authenticated
-// peer. A nonce is recorded atomically under a mutex before any later approval
-// result, and recording it is final: no outcome (approved, refused, cancelled,
-// timed out, or never delivered) ever removes or shortens it.
+// OS user, independent of a process's PID or executable path. A nonce is
+// recorded atomically under a mutex before any later approval result, and
+// recording it is final: no outcome (approved, refused, cancelled, timed out,
+// or never delivered) ever removes or shortens it.
 //
-// Only a digest of the authenticated peer and the case-folded nonce is kept,
-// never the raw nonce.
+// Only a digest of the authenticated user label and the case-folded nonce is
+// kept, never the raw nonce.
 //
 // Expiry is elapsed time measured as now.Sub(created). The production clock
 // (time.Now) gives time values that carry a Go monotonic reading, so both
@@ -117,16 +118,14 @@ func cliRunNonceDigest(key string) [sha256.Size]byte {
 	return sha256.Sum256([]byte("locklark/cli-run/nonce/v1\x00" + key))
 }
 
-// cliRunNonceKey binds a case-folded nonce to one authenticated peer. Only the
-// authenticated OS peer fields are used; the length prefix keeps distinct
+// cliRunNonceKey binds a case-folded nonce to the authenticated OS user. The
+// user label comes from the transport-authenticated Peer, never from request
+// data. PID and Process are deliberately absent: a new process run by the same
+// user may use a fresh nonce, but it must not be able to replay a nonce already
+// consumed by another process of that user. The length prefix keeps distinct
 // pairs from colliding.
 func cliRunNonceKey(peer Peer, nonce string) string {
-	return cliRunNonceLabel(peer) + "\x00" + strconv.Itoa(len(nonce)) + ":" + strings.ToLower(nonce)
-}
-
-// cliRunNonceLabel is the cache label for one authenticated peer.
-func cliRunNonceLabel(peer Peer) string {
-	return peer.User + "\x00" + strconv.FormatUint(uint64(peer.PID), 10) + "\x00" + peer.Process
+	return peer.User + "\x00" + strconv.Itoa(len(nonce)) + ":" + strings.ToLower(nonce)
 }
 
 // CLIRun nonce shape: 16 to 64 bytes of hex.
@@ -153,12 +152,13 @@ func cliRunNonceHexDigit(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
-// consumeCLIRunNonce records nonce for peer before any approval result. A
-// malformed nonce is rejected before the cache is touched, so it consumes no
-// capacity. It returns errCLIRunInvalid for a malformed or replayed nonce, a
-// full cache, or an unavailable clock: the request is refused in every case.
+// consumeCLIRunNonce records nonce for the authenticated OS user before any
+// approval result. A missing authenticated user label or a malformed nonce is
+// rejected before the cache is touched, so it consumes no capacity. It returns
+// errCLIRunInvalid for a malformed, unauthenticated, or replayed nonce, a full
+// cache, or an unavailable clock: the request is refused in every case.
 func consumeCLIRunNonce(peer Peer, nonce string) error {
-	if !validCLIRunNonce(nonce) {
+	if peer.User == "" || !validCLIRunNonce(nonce) {
 		return errCLIRunInvalid
 	}
 	if !brokerCLIRunNonces.reserve(cliRunNonceDigest(cliRunNonceKey(peer, nonce))) {
