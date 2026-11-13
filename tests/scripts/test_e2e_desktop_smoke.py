@@ -201,6 +201,33 @@ os._exit(0)
 """
 )
 
+# The mutation-then-exit-2 variant: in the window, after the nudge, it rewrites
+# its own vault exactly like the in-window variant, reports ``mutated``/``exit2``
+# and then really ends with status 2 (the desktop's usage refusal) -- no exec.
+# The helper has already taken its ``before`` digest before the settings read in
+# the preamble, so the child's change is in the window; the helper's window then
+# records rc=2 too. Both fixed facts hold, and the mutation must still win.
+_MUTATING_EXIT2_STAND_IN = (
+    _SEEDED_STAND_IN_PREAMBLE
+    + f"""
+while not os.path.exists(_nudge[0]):
+    time.sleep(0.01)
+# Ownership again right before the write, without a group signal: only the
+# helper's own session (and this process as its leader) may reach the vault.
+if os.getppid() != _harness_pid or os.getsid(0) != os.getpid():
+    os._exit({_OWNED_EXIT})
+with open(_vault, "r+b") as _vault_file:
+    _vault_file.seek(0)
+    _vault_file.truncate()
+    _vault_file.write({_MUTATION!r})
+    _vault_file.flush()
+    os.fsync(_vault_file.fileno())
+os.write(1, b"mutated\\n")
+os.write(1, b"exit2\\n")
+os._exit(2)
+"""
+)
+
 _FORBIDDEN_IN_ARGV = ("--file", "--settings=")
 
 # The helper's fixed error once the vault changed. The helper keeps the two
@@ -418,6 +445,10 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.scrapers_started = 0
         self.scrapers_drained = 0
         self.reports: dict[str, str] = {}
+        # The real exit status (``Popen.returncode``) of every helper desktop
+        # spawn, read once its stdout collector saw EOF. Empty unless a case
+        # asserts on it; recording it changes no helper behaviour.
+        self.desktop_exits: list[int | None] = []
         self.nudge = self.temp_dir / "stand-in-nudge"
         self.launched_pid = self.temp_dir / "stand-in-pid"
         # Fixed, not overridden: the plain stand-in's ``launch`` is the only
@@ -556,7 +587,14 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.assertEqual(self.scrapers_started, launches, "the launch was not observed")
         self.assertEqual(self.scrapers_drained, self.scrapers_started)
         for scraper in self.scrapers:
-            self.assertFalse(scraper.is_alive(), "a stdout collector raced the reports read")
+            if not _wait_until_dead(scraper, 5.0):
+                self.fail("a stdout collector or exit recorder outlived its desktop's pipe")
+            if scraper.is_alive():  # cannot be true after a dead read; kept explicit
+                self.fail("a stdout collector or exit recorder raced the reports read")
+        # Same for the exit-status recorders: one per launched spawn.
+        self.assertEqual(
+            len(self.desktop_exits), launches, "a spawn's exit status was not recorded"
+        )
 
     def _observe(self, real_popen):
         """Pipe stdout only for the helper's own desktop spawn.
@@ -582,11 +620,23 @@ class DesktopSmokeFixture(unittest.TestCase):
             # Only stdout becomes a pipe, which is what a real GUI session does
             # to the desktop's log; every other spawn argument is untouched.
             process = real_popen(command, **{**kwargs, "stdout": subprocess.PIPE})
+            stream = process.stdout
+            stream_closed = threading.Event()
             scraper = threading.Thread(
-                target=self._scrape, args=(process.stdout,), daemon=True
+                target=self._scrape, args=(stream, stream_closed), daemon=True
             )
+            # Recorded only after the collector closed the pipe at EOF, then
+            # joined the helper's own ``process.wait()``: the status is the
+            # real reaped ``Popen.returncode``, never ``None``.
+            recorder = threading.Thread(
+                target=self._record_desktop_exit,
+                args=(stream_closed, process),
+                daemon=True,
+            )
+            self.scrapers.append(recorder)
             self.scrapers.append(scraper)
             self.scrapers_started += 1
+            recorder.start()
             scraper.start()
             # The helper's contract never handles stdout, and the collector
             # owns the pipe from here (closing it once the child is gone).
@@ -613,11 +663,20 @@ class DesktopSmokeFixture(unittest.TestCase):
             return False
         return os.path.realpath(str(kwargs.get("cwd") or "")) == root
 
-    def _scrape(self, stream) -> None:
+    def _scrape(self, stream, stream_closed: threading.Event) -> None:
         try:
             self._collect(stream)
         finally:
             stream.close()
+            stream_closed.set()
+
+    def _record_desktop_exit(self, stream_closed: threading.Event, process) -> None:
+        """Append the spawn's real exit status once its pipe saw EOF."""
+
+        stream_closed.wait()
+        # The helper owns the Popen object; wait() after the pipe's EOF never
+        # blocks on output and only guarantees the status is reaped.
+        self.desktop_exits.append(process.wait())
 
     def _collect(self, stream) -> None:
         # Private 0600 signals of the tests' own, created 0600 at creation
@@ -1008,6 +1067,41 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         quick.chmod(0o700)
         self.ctx.desktop_bin = quick
         self.assertFalse(self.launch(seconds=1.0), "a quick exit was reported as alive")
+
+    def test_window_mutation_then_exit2_reports_mutation_not_usage_refusal(self):
+        # The owned child changes the vault inside the window and then really
+        # ends with ``os._exit(2)``: no exec, no restored bytes, no SIGTERM
+        # handler. The helper therefore sees both facts -- the in-window change
+        # and rc=2 -- and its fixed priority must report the mutation, not the
+        # usage refusal, while the teardown still reaps the owned group.
+        launches = self.record_of_launch_count()
+        reports, error = self.mutation_launch(
+            _MUTATING_EXIT2_STAND_IN, harness_pid=os.getpid()
+        )
+        # Exactly one helper launch happened, and its real Popen exit status
+        # was 2 (never a signal or a timeout kill), even though the helper
+        # itself raised the mutation error and returned no liveness verdict.
+        self.assertEqual(self.record_of_launch_count(), launches + 1)
+        self.assertEqual(self.desktop_exits, [2])
+
+        self.assertIsInstance(error, AssertionError)
+        self.assert_mutation_error(error, pre=True, post=True)
+        self.assertNotIn(support.DESKTOP_SMOKE_REFUSAL, str(error))
+        self.assertNotRegex(str(error), r"rc=2|\(rc=")
+        self.assertIsNone(getattr(error, "__notes__", None))
+        self.assertNotIn(support.DESKTOP_SMOKE_CLEANUP_FAILED, repr(error))
+
+        # The child's own handshake: it announced its pid, rewrote the vault,
+        # announced the exit and exited 2; the bytes changed and stay changed.
+        self.assert_reports_drained()
+        self.assertEqual(set(reports), {"launch", "mutated", "exit2"}, reports)
+        self.assertEqual(self.reports, reports, "reports changed after draining")
+        self.assertEqual(self.vault.read_bytes(), _MUTATION)
+        self.assertNotEqual(
+            self.vault.read_bytes(), _VAULT_BYTES, "the vault bytes did not change"
+        )
+        self.assert_private_signals()
+        self.assert_launch_owned_and_reaped(reports, required={"launch"})
 
 
 class ProductContractTests(unittest.TestCase):
