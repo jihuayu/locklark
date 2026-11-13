@@ -826,6 +826,84 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "failureRecordState": "rejected", "wrapperFamily": "unknown"},
         )
 
+    def test_picker_status_is_an_optional_fixed_enum(self):
+        names = support._CHECKOUT_SOURCE_FILES
+        picker = "checkout-picker-cancel:picker"
+
+        def diagnostic(**fields):
+            payload = {
+                "stage": picker,
+                "reason": "CANARY-9f3a1c /home/runner/x Checkout origin picker "
+                "missing: popup status other (unrecognised public status)",
+                **fields,
+            }
+            return support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(payload)
+
+        base = {
+            "stage": picker,
+            "kind": "acceptance-failure",
+            "native": None,
+            "exit": "exited 7",
+            "startupPhase": "unknown",
+            "failureRecordState": "accepted",
+            "wrapperFamily": "unknown",
+        }
+        self.assertEqual(
+            set(support.CHECKOUT_PICKER_STATUSES),
+            {"no-gesture", "unavailable", "unsupported", "list-failed",
+             "selected", "cancelled", "other"},
+        )
+        # Every fixed enum value is projected beside the existing fields.
+        for value in support.CHECKOUT_PICKER_STATUSES:
+            with self.subTest(pickerStatus=value):
+                record, message = self._nonzero(
+                    diagnostic(pickerStatus=value, frames=[f"{names[1]}:1:1"]))
+                self._assert_no_canary(record, message)
+                self.assertEqual(
+                    record,
+                    {**base, "pickerStatus": value,
+                     "sourceFrames": [{"file": names[1], "line": 1, "column": 1}]},
+                )
+        # Absent, null or empty keeps the existing projection unchanged.
+        for fields in ({}, {"pickerStatus": None}, {"pickerStatus": ""}):
+            with self.subTest(fields=fields):
+                self.assertEqual(self._nonzero(diagnostic(**fields))[0], base)
+        # Anything not in the fixed enum (raw popup text, a recognisable but
+        # unmapped line, wrong types or case) rejects the whole record.
+        rejected = (
+            "不会自动选择",
+            "本次请求被拒绝",
+            "selected CANARY-9f3a1c",
+            "Selected",
+            " selected",
+            True,
+            1,
+            ["selected"],
+            {"status": "selected"},
+        )
+        for value in rejected:
+            with self.subTest(value=value):
+                record, message = self._nonzero(diagnostic(pickerStatus=value))
+                self._assert_no_canary(record, message)
+                self.assertEqual(
+                    record,
+                    {"stage": "unclassified", "kind": "unclassified",
+                     "native": None, "exit": "exited 7",
+                     "startupPhase": "unknown",
+                     "failureRecordState": "rejected",
+                     "wrapperFamily": "unknown"},
+                )
+        # A stage outside the allowlist still exposes no picker status, so the
+        # enum is never attributed to a failure the picker did not set.
+        self.assertEqual(
+            self._nonzero(
+                diagnostic(stage="checkout-picker-cancel",
+                           pickerStatus="other"))[0],
+            {"stage": "unclassified", "kind": "unclassified", "native": None,
+             "exit": "exited 7", "startupPhase": "unknown",
+             "failureRecordState": "rejected", "wrapperFamily": "unknown"},
+        )
+
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX
         diag = support._CHECKOUT_DIAGNOSTIC_PREFIX

@@ -15,6 +15,7 @@ import {
   checkoutRouteCase,
   chooseChildOrigin,
   openCheckoutPicker,
+  CHECKOUT_PICKER_STATUSES,
   assertProgrammaticClickRefused,
   acceptCheckoutFrames,
   runLockDuringReviewJourney,
@@ -240,7 +241,11 @@ function pickerPopup(labels, options = {}) {
       if (selector === "#checkout-status")
         return "请选择一个结账表单来源；不会自动选择，也不会自动提交";
       if (selector === "#status")
-        return options.status === undefined ? "已连接" : options.status;
+        return options.emptyStatus === true
+          ? ""
+          : options.status === undefined
+            ? "已连接"
+            : options.status;
       const match = selector.match(/:nth-child\((\d+)\)$/);
       if (match) return labels[Number(match[1]) - 1];
       return "";
@@ -377,12 +382,13 @@ test("the picker is requested by exactly one trusted fill click", async () => {
 });
 
 test("a picker that never appears is never reported as cancelled", async () => {
-  // A fixed public status is carried on the same bounded reason so the red
-  // stage stays diagnosable, while an unrecognised status is never echoed.
+  // A fixed public status is carried on the same bounded reason, followed by
+  // its fixed enum, so the red stage stays diagnosable while an unrecognised
+  // status is never echoed. An empty line is the picker's absent status.
   for (const [line, shown] of [
-    ["请选择要填充的结账表单来源；不会自动选择", "不会自动选择"],
-    ["当前原生宿主或浏览器不支持选择结账表单", "不支持选择结账表单"],
-    ["无法列出当前页面的结账表单", "无法列出当前页面的结账表单"],
+    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture (不会自动选择)"],
+    ["当前原生宿主或浏览器不支持选择结账表单", "unsupported (不支持选择结账表单)"],
+    ["无法列出当前页面的结账表单", "list-failed (无法列出当前页面的结账表单)"],
     ["本次请求被拒绝", "other (unrecognised public status)"],
     [undefined, "other (unrecognised public status)"],
     ["", "unavailable"],
@@ -390,7 +396,11 @@ test("a picker that never appears is never reported as cancelled", async () => {
     await assert.rejects(
       () =>
         chooseChildOrigin(
-          pickerPopup([TOP_LABEL], { status: line, noPicker: true }),
+          pickerPopup([TOP_LABEL], {
+            status: line,
+            noPicker: true,
+            emptyStatus: line === "",
+          }),
           TOP_ORIGIN,
           CARD_ORIGIN,
           eventually,
@@ -416,6 +426,57 @@ test("a picker that never appears is never reported as cancelled", async () => {
   );
   // No cancel control may be pressed when the picker never appeared.
   assert.deepEqual(unreadable.clicked, ["#detail-fill"]);
+});
+
+test("a missing picker carries only the fixed status enum", async () => {
+  const cases = [
+    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture"],
+    ["当前原生宿主或浏览器不支持选择结账表单", "unsupported"],
+    ["无法列出当前页面的结账表单", "list-failed"],
+    ["已选择结账表单", "selected"],
+    ["已取消本次填充", "cancelled"],
+    ["本次请求被拒绝", "other"],
+    [null, "unavailable"],
+    ["", "unavailable"],
+  ];
+  for (const [line, expected] of cases) {
+    const popup = pickerPopup([TOP_LABEL], {
+      noPicker: true,
+      status: line === null ? null : line,
+      emptyStatus: line === "",
+    });
+    await assert.rejects(
+      () => openCheckoutPicker(popup, eventually),
+      (error) => {
+        assert.equal(error.pickerStatus, expected, String(line));
+        assert.ok(CHECKOUT_PICKER_STATUSES.includes(error.pickerStatus));
+        return true;
+      },
+    );
+    assert.deepEqual(popup.clicked, ["#detail-fill"]);
+  }
+  const unreadable = pickerPopup([TOP_LABEL], { noPicker: true });
+  unreadable.text = async (selector) => {
+    if (selector === "#status") throw Error("Popup inspection failed");
+    return "";
+  };
+  await assert.rejects(
+    () => openCheckoutPicker(unreadable, eventually),
+    (error) => error.pickerStatus === "unavailable",
+  );
+  // The classification never echoes the popup text itself.
+  await assert.rejects(
+    () =>
+      openCheckoutPicker(
+        pickerPopup([TOP_LABEL], { noPicker: true, status: "本次请求被拒绝" }),
+        eventually,
+      ),
+    (error) =>
+      !error.message.includes("本次请求被拒绝") &&
+      error.message ===
+        "Checkout origin picker missing: popup status " +
+          "other (unrecognised public status)",
+  );
 });
 
 test("picker cancellation presses only the real cancel control", async () => {

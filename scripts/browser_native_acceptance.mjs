@@ -27,7 +27,7 @@ import {
   prepareSharedEnvironment,
   PrivateClipboard,
 } from "./browser_shared_clipboard_acceptance.mjs";
-import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
+import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase, CHECKOUT_PICKER_STATUSES } from "./browser_checkout_acceptance.mjs";
 import {
   EDGE_BACKGROUND_URL,
   EDGE_EXTENSION_ID,
@@ -3431,6 +3431,16 @@ try {
           ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
           : [],
       stage,
+      // The picker's own fixed status enum, present only when the trusted
+      // fill click never opened the picker, and never beside a native helper
+      // error or an Edge classification (the helper call is the original
+      // failure); never raw text.
+      ...(CHECKOUT_PICKER_STATUSES.includes(error?.pickerStatus) &&
+      !nativeHelperError &&
+      !edgeInstallOnly &&
+      !edgePairDisconnect
+        ? { pickerStatus: error.pickerStatus }
+        : {}),
       // Only the last helper call's fixed contract fields, never raw stderr.
       ...(nativeHelperError ? { nativeError: nativeHelperError } : {}),
       // Latest fixed-enum route-page observation from the bounded native-label

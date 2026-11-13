@@ -538,41 +538,69 @@ async function openCardDetail(popup, fixture, eventually) {
 
 // The popup's bounded public status lines that only a card form picker can
 // set: the list was offered, the native host refused or does not support the
-// picker, or the one-time gesture was not accepted for this document.
+// picker, or the one-time gesture was not accepted for this document. Each
+// line maps to one fixed enum copied into the failure diagnostic.
 const CHECKOUT_PICKER_STATUS = [
-  "不会自动选择",
-  "不支持选择结账表单",
-  "无法列出当前页面的结账表单",
-  "已选择结账表单",
-  "已取消本次填充",
+  ["不会自动选择", "no-gesture"],
+  ["不支持选择结账表单", "unsupported"],
+  ["无法列出当前页面的结账表单", "list-failed"],
+  ["已选择结账表单", "selected"],
+  ["已取消本次填充", "cancelled"],
 ];
+// An absent status is "unavailable" and an unrecognised one "other"; a
+// recognisable line outside this set is still never echoed.
+export const CHECKOUT_PICKER_STATUSES = Object.freeze([
+  "no-gesture",
+  "unavailable",
+  "unsupported",
+  "list-failed",
+  "selected",
+  "cancelled",
+  "other",
+]);
 
 // Requests the metadata frame picker with one explicit trusted pointer click
 // on the real "#detail-fill" control. The popup only enumerates frames from a
 // trusted gesture with an active user activation, so this control must not be
 // clicked programmatically and the click must not be repeated: a second click
 // would either be swallowed by the in-flight request or reveal a different
-// failure. When no picker appears, the fixed public status is attached to the
-// same "Checkout origin picker missing" reason so the stage stays diagnosable.
+// failure. When no picker appears, the classified public status is attached
+// to the same "Checkout origin picker missing" reason as the fixed
+// `pickerStatus` enum, so the stage stays diagnosable.
 export async function openCheckoutPicker(popup, eventually) {
   await popup.click("#detail-fill");
   let shown = false;
+  const pickerMissing = "Checkout origin picker missing";
   try {
     await eventually(async () => {
       shown = (await popup.visible("#checkout-picker")) === true;
       return shown;
-    }, "Checkout origin picker missing");
+    }, pickerMissing);
   } catch (error) {
     let status = "";
+    let readable = false;
     try {
-      status = String((await popup.text("#status")) || "");
+      const text = await popup.text("#status");
+      readable = text !== null && text !== undefined;
+      status = String(text || "");
     } catch {}
-    const known = CHECKOUT_PICKER_STATUS.find((line) => status.includes(line));
-    assert(!shown, "Checkout origin picker missing");
-    throw Error(status
-      ? "Checkout origin picker missing: popup status " +
-        (known || "other (unrecognised public status)")
-      : "Checkout origin picker missing: popup status unavailable");
+    const match = CHECKOUT_PICKER_STATUS.find(([line]) =>
+      status.includes(line),
+    );
+    const known = match ? match[1] : "";
+    const pickerStatus = !readable || status === ""
+      ? "unavailable"
+      : known || "other";
+    assert(!shown, pickerMissing);
+    throw Object.assign(
+      Error(status
+        ? pickerMissing + ": popup status " +
+          (known
+            ? `${known} (${match[0]})`
+            : "other (unrecognised public status)")
+        : pickerMissing + ": popup status unavailable"),
+      { pickerStatus },
+    );
   }
 }
 

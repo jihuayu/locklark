@@ -2401,6 +2401,18 @@ _CHECKOUT_SOURCE_FILES = (
     "browser_passkey_acceptance.mjs",
 )
 _CHECKOUT_SOURCE_FRAMES_MAX = 16
+# The picker's fixed bounded public statuses, as the module's enum values. A
+# value outside this set rejects the whole record; an absent one keeps the
+# existing projection.
+CHECKOUT_PICKER_STATUSES = (
+    "no-gesture",
+    "unavailable",
+    "unsupported",
+    "list-failed",
+    "selected",
+    "cancelled",
+    "other",
+)
 _CHECKOUT_SOURCE_FRAME = re.compile(
     r"(" + "|".join(re.escape(name) for name in _CHECKOUT_SOURCE_FILES) + r")"
     r":[0-9]{1,6}:[0-9]{1,5}"
@@ -3086,6 +3098,20 @@ def _checkout_diagnostic_streams(
     return (str(stdout or ""), str(stderr or ""))
 
 
+_PICKER_STATUS_INVALID = object()
+
+
+def _checkout_picker_status(diagnostic: dict[str, Any]) -> Any:
+    """The optional fixed picker enum, ``None`` when absent, or the sentinel."""
+
+    value = diagnostic.get("pickerStatus")
+    if value is None or value == "":
+        return None
+    if isinstance(value, str) and value in CHECKOUT_PICKER_STATUSES:
+        return value
+    return _PICKER_STATUS_INVALID
+
+
 def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | None:
     """Reduce the one fixed diagnostic line across ``streams``; ``None`` if unusable."""
 
@@ -3125,13 +3151,22 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     source_frames = _checkout_source_frames(diagnostic.get("frames"))
     if not absent_frames and source_frames is None:
         return None
+    # An absent, null or empty picker status keeps the existing projection;
+    # only its fixed enum survives and any other value rejects the record.
+    picker_status = _checkout_picker_status(diagnostic)
+    if picker_status is _PICKER_STATUS_INVALID:
+        return None
     native = _checkout_failed_native(diagnostic.get("nativeError"))
     # The human "reason" text is never copied; it only selects a fixed kind
     # for an allowlisted stage. A stage outside the allowlist is unclassified.
     stage = diagnostic.get("stage")
     if not isinstance(stage, str) or stage not in _CHECKOUT_FAILED_STAGES:
+        # The record is already known to be unusable: no optional field is
+        # attributed to it, including a picker status no picker failure set.
         return {"stage": "unclassified", "kind": "unclassified", "native": None}
     optional = {"sourceFrames": source_frames} if source_frames else {}
+    if picker_status is not None:
+        optional["pickerStatus"] = picker_status
     if native is not None:
         return {
             "stage": stage, "kind": "native-helper", "native": native,
