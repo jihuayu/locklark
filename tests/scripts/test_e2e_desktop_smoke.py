@@ -100,7 +100,14 @@ _MUTATION = b"mutated by the stand-in desktop\n"
 # ownership check use. ``_harness_pid``, ``_nudge``, ``_vault_path`` and
 # ``_launch_argv`` are filled in by the test.
 _OWNED_EXIT = 78
-_MUTATING_STAND_IN = f"""
+
+# Both seeded variants share one preamble: splice the vault path in after the
+# record (so the settings file reads ``argv[3]``), prove this launch is owned,
+# read the helper's settings and announce ``launch PID``. The nudge wait is the
+# variant's own step, never shared: each variant waits only for the report the
+# collector was told to release the nudge on, and the teardown variant emits
+# that report from its handler, which must already be installed by then.
+_SEEDED_STAND_IN_PREAMBLE = f"""
 # argv is [record, "--settings", path]; splice in the vault after the record.
 _launch_argv.insert(1, _vault_path[0])
 _vault = _launch_argv[1]
@@ -109,6 +116,15 @@ if os.getppid() != _harness_pid or os.getsid(0) != os.getpid():
 with open(sys.argv[3], "r", encoding="utf-8") as _settings:
     json.load(_settings)
 os.write(1, b"launch " + str(os.getpid()).encode() + b"\\n")
+"""
+
+# The in-window variant waits for the nudge (released on ``launch``) and then
+# rewrites the vault only while the helper's window is still open (reported as
+# ``mutated``/``alive`` before it becomes the plain stand-in), so both digests
+# see the change.
+_MUTATING_STAND_IN = (
+    _SEEDED_STAND_IN_PREAMBLE
+    + f"""
 while not os.path.exists(_nudge[0]):
     time.sleep(0.01)
 # Ownership again right before the write, without a group signal: only the
@@ -125,6 +141,65 @@ os.write(1, b"mutated\\n")
 os.write(1, b"alive\\n")
 os.execv(sys.executable, [sys.executable] + list(_launch_argv))
 """
+)
+
+# The teardown-only variant leaves the vault untouched for the whole window and
+# reports ``handler-ready`` only once its SIGTERM handler is installed; the
+# handler is the child's *only* writer of the vault. It does not exec the plain
+# stand-in: ``execv`` reuses the pid (the helper's group leader) and a success
+# from there would defeat the "still alive" liveness result, so it keeps the
+# seeded process itself running. The handler completes within the signal frame
+# itself -- no ``sys.exit`` or ``raise`` that could be caught by the loop -- and
+# the loop exits only after the handler's own ``done`` report, which is written
+# after the re-read proves the bytes: no exit can race the handler's write.
+_TEARDOWN_MUTATING_STAND_IN = (
+    _SEEDED_STAND_IN_PREAMBLE
+    + f"""
+def _owned_now():
+    return os.getppid() == _harness_pid and os.getsid(0) == os.getpid()
+
+
+def _write_vault():
+    with open(_vault, "r+b") as _vault_file:
+        _vault_file.seek(0)
+        _vault_file.truncate()
+        _vault_file.write({_MUTATION!r})
+        _vault_file.flush()
+        os.fsync(_vault_file.fileno())
+    with open(_vault, "rb") as _vault_file:
+        return _vault_file.read() == {_MUTATION!r}
+
+
+def _on_sigterm(signum, frame):
+    global _vh_stopping
+    if _vh_stopping:
+        return
+    _vh_stopping = True
+    # No vault write at all unless this is still the helper's own session.
+    if not _owned_now():
+        os._exit({_OWNED_EXIT})
+    os.write(1, b"vh-written " + (b"ok" if _write_vault() else b"bad") + b"\\n")
+    if not _owned_now():
+        os._exit({_OWNED_EXIT})
+    os.write(1, b"done\\n")
+
+
+signal.signal(signal.SIGTERM, _on_sigterm)
+# Set only now that our handler is the live one: ``_on_sigterm`` runs in the
+# seeded process itself (no exec), so the loop exits only after a SIGTERM
+# reached the handler, whose report was written after its own re-read. The
+# ``handler-ready`` report comes before the nudge wait, because the collector
+# releases the nudge on exactly that report: waiting for it any earlier would
+# wait for a report that can never be made until the wait is over.
+_vh_stopping = False
+os.write(1, b"handler-ready\\n")
+while not os.path.exists(_nudge[0]):
+    time.sleep(0.01)
+while not _vh_stopping:
+    time.sleep(0.05)
+os._exit(0)
+"""
+)
 
 _FORBIDDEN_IN_ARGV = ("--file", "--settings=")
 
@@ -345,6 +420,9 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.reports: dict[str, str] = {}
         self.nudge = self.temp_dir / "stand-in-nudge"
         self.launched_pid = self.temp_dir / "stand-in-pid"
+        # Fixed, not overridden: the plain stand-in's ``launch`` is the only
+        # report that may release the nudge.
+        self._nudge_after = "launch"
         # A fake GUI session: no Xvfb, no D-Bus, no display. The helper still
         # runs its real settings writing, spawn and teardown code.
         patcher = mock.patch.object(
@@ -388,6 +466,97 @@ class DesktopSmokeFixture(unittest.TestCase):
 
         self._wait_for_scrapers()
         return dict(self.reports)
+
+    def mutation_launch(
+        self, seed: str, *, harness_pid: int
+    ) -> tuple[dict[str, str], BaseException | None]:
+        """Run one seeded mutation launch; return its drained reports and error.
+
+        The launch runs on a worker so its outcome never races the reports: the
+        worker is proven finished (``is_alive``, bounded), the collector is
+        drained before ``reports`` is read, and both happen in ``finally`` so a
+        failure above never reaches cleanup with a scraper still writing.
+        """
+
+        seed = (
+            f"_harness_pid = {harness_pid}\n"
+            f"_nudge = [{str(self.nudge)!r}]\n"
+            f"_vault_path = [{str(self.vault)!r}]\n"
+            f"_launch_argv = [{str(self.records[-1])!r}, *sys.argv[2:]]\n"
+            + seed
+        )
+        self.ctx.desktop_bin = self._install_stand_in(seed)
+        observed: queue.Queue[tuple[bool, BaseException | None]] = queue.Queue()
+
+        def launch() -> None:
+            try:
+                observed.put((bool(self.launch(seconds=2.0)), None))
+            except BaseException as exc:  # reported on the main thread
+                observed.put((False, exc))
+
+        worker = threading.Thread(target=launch, daemon=True)
+        worker.start()
+        try:
+            # Completion is ``is_alive`` going false, never ``join() is None``
+            # (which is also what a timed-out join returns); the wait is bounded.
+            _await_thread(self, worker, "desktop smoke helper")
+            if observed.empty():
+                self.fail("desktop smoke helper reported no outcome")
+            alive, error = observed.get_nowait()
+            self.assertIsInstance(error, AssertionError, f"unexpected outcome {alive!r}")
+        finally:
+            # A reported failure still reaps: bounded, and only the own
+            # thread; nothing here ever signals a process group. The collector
+            # is drained here too, so a failing assertion above never reaches
+            # the cleanup with a scraper still writing ``reports``.
+            _wait_until_dead(worker, _WORKER_REAP)
+            self._wait_for_scrapers()
+        return self.drained_reports(), error
+
+    def assert_mutation_error(self, error: BaseException, *, pre: bool, post: bool) -> None:
+        """One fixed, path-free mutation error carrying exactly these digest facts.
+
+        A cleanup note attached to it means the teardown, the final hash or the
+        reaping failed, and would fail below with the note's own text.
+        """
+
+        self.assertIsNone(getattr(error, "__notes__", None))
+        expected = re.escape(_MUTATION_ERROR.format(pre=pre, post=post))
+        self.assertIsNotNone(
+            re.fullmatch(expected, str(error)), f"unexpected mutation error {str(error)!r}"
+        )
+        # No raw vault path and no cleanup note share the mutation error.
+        self.assertNotIn(str(self.vault), str(error))
+        self.assertNotIn(self.temp_dir.name, str(error))
+
+    def assert_launch_owned_and_reaped(
+        self, reports: dict[str, str], required: frozenset[str] | set[str] = frozenset({"launch", "alive"})
+    ) -> None:
+        """The child's pid handshake, then its process and group proven gone."""
+
+        self.assertTrue(set(required) <= set(reports), reports)
+        pid = int(self.launched_pid.read_text(encoding="utf-8"))
+        self.assertEqual(reports["launch"], str(pid))
+        # The shim recorded the helper's session leader, which exec'd the
+        # stand-in in place: same pid, and the owned group is that pid.
+        self.assertEqual(int(self.executed.read_text(encoding="utf-8")), pid)
+        self.assertFalse(_alive(pid), "a failing smoke must still reap its owned desktop")
+        self.assertFalse(
+            harness._group_has_members(pid),
+            "a failing smoke must still reap its owned process group",
+        )
+
+    def assert_private_signals(self) -> None:
+        # Created 0600 by the collector itself; no chmod runs after creation.
+        for private in (self.nudge, self.launched_pid):
+            self.assertTrue(private.is_file() and not private.is_symlink())
+            self.assertEqual(_mode(private), 0o600, f"{private.name} was not created 0600")
+
+    def assert_reports_drained(self, launches: int = 1) -> None:
+        self.assertEqual(self.scrapers_started, launches, "the launch was not observed")
+        self.assertEqual(self.scrapers_drained, self.scrapers_started)
+        for scraper in self.scrapers:
+            self.assertFalse(scraper.is_alive(), "a stdout collector raced the reports read")
 
     def _observe(self, real_popen):
         """Pipe stdout only for the helper's own desktop spawn.
@@ -451,29 +620,32 @@ class DesktopSmokeFixture(unittest.TestCase):
             stream.close()
 
     def _collect(self, stream) -> None:
+        # Private 0600 signals of the tests' own, created 0600 at creation
+        # (``os.open`` mode is applied by the kernel, bounded by the umask),
+        # never widened by a later ``chmod`` of an already-readable file. The
+        # pid lets the test prove the group was owned without relying on the
+        # live record; the nudge is released only by a report acknowledged in
+        # ``_NUDGE_AFTER`` -- by default the plain ``launch`` line, as before.
         for line in iter(stream.readline, b""):
             head, _, rest = line.decode("utf-8", "replace").strip().partition(" ")
             self.reports.setdefault(head, rest)
             if head == "launch":
-                # Private 0600 files of their own: the nudge releases the
-                # seeded stand-in's rewrite, and the pid lets the test prove
-                # the group was owned without relying on the live record. Both
-                # are created 0600 at creation (``os.open`` mode is applied by
-                # the kernel, bounded by the umask), never widened by a later
-                # ``chmod`` of an already-readable file.
-                _private_fd = os.open(
-                    self.nudge, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-                )
-                os.close(_private_fd)
-                _private_fd = os.open(
-                    self.launched_pid, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-                )
-                try:
-                    _written = os.write(_private_fd, rest.encode("utf-8"))
-                    if _written != len(rest.encode("utf-8")):
-                        raise OSError(f"short pid write: {_written} bytes")
-                finally:
-                    os.close(_private_fd)
+                self._private_write(self.launched_pid, rest)
+            if head == self._nudge_after:
+                self._private_write(self.nudge, "")
+
+    @staticmethod
+    def _private_write(path: Path, text: str) -> None:
+        # O_EXCL: these files are signals, not state; a collector must never
+        # follow a planted link or reuse a file created some other way.
+        payload = text.encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            _written = os.write(fd, payload)
+            if _written != len(payload):
+                raise OSError(f"short write to {path.name}: {_written} bytes")
+        finally:
+            os.close(fd)
 
     def _mkdtemp(self) -> Path:
         directory = Path(tempfile.mkdtemp(prefix="ll-desktop-smoke-"))
@@ -770,80 +942,63 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
         # or the helper, and only after it has read the settings the helper
         # bound, which the helper writes after taking its ``before`` digest.
         # Ordering to the child rides on its own stdout (which the real helper
-        # redirects into a pipe) and a private nudge file: no polling sleeps.
-        # The collector starts with the spawn, so the reports are read only
-        # after it, and the child's stdout EOF, are proven -- not before.
-        seed = (
-            f"_harness_pid = {os.getpid()}\n"
-            f"_nudge = [{str(self.nudge)!r}]\n"
-            f"_vault_path = [{str(self.vault)!r}]\n"
-            f"_launch_argv = [{str(self.records[-1])!r}, *sys.argv[2:]]\n"
-            + _MUTATING_STAND_IN
+        # redirects into a pipe) and a private nudge file: no polling sleeps
+        # on the test side. The collector starts with the spawn, so the
+        # reports are read only after it, and the child's stdout EOF, are
+        # proven -- never before (see ``mutation_launch``).
+        reports, error = self.mutation_launch(
+            _MUTATING_STAND_IN, harness_pid=os.getpid()
         )
-        self.ctx.desktop_bin = self._install_stand_in(seed)
-
-        observed: queue.Queue[tuple[bool, BaseException | None]] = queue.Queue()
-
-        def launch() -> None:
-            try:
-                observed.put((bool(self.launch(seconds=2.0)), None))
-            except BaseException as exc:  # reported on the main thread
-                observed.put((False, exc))
-
-        worker = threading.Thread(target=launch, daemon=True)
-        worker.start()
-        try:
-            # Completion is ``is_alive`` going false, never ``join() is None``
-            # (which is also what a timed-out join returns); the wait is bounded.
-            _await_thread(self, worker, "desktop smoke helper")
-            if observed.empty():
-                self.fail("desktop smoke helper reported no outcome")
-            alive, error = observed.get_nowait()
-            self.assertIsInstance(error, AssertionError, f"unexpected outcome {alive!r}")
-            # One fixed error, evaluated after the owned session was reaped:
-            # the child changed the vault while the helper was still in its
-            # window, so both digests see the change and no cleanup note is
-            # attached (teardown succeeded and the group was proven reaped).
-            self.assertIsNone(getattr(error, "__notes__", None))
-            mutated = re.fullmatch(
-                re.escape(_MUTATION_ERROR.format(pre=True, post=True)), str(error)
-            )
-            self.assertIsNotNone(mutated, f"unexpected mutation error {str(error)!r}")
-            # No raw vault path and no cleanup note share the mutation error.
-            self.assertNotIn(str(self.vault), str(error))
-            self.assertNotIn(self.temp_dir.name, str(error))
-        finally:
-            # A reported failure still reaps: bounded, and only the own
-            # thread; nothing here ever signals a process group. The collector
-            # is drained here too, so a failing assertion above never reaches
-            # the cleanup with a scraper still writing ``reports``.
-            _wait_until_dead(worker, _WORKER_REAP)
-            self._wait_for_scrapers()
+        # One fixed error, evaluated after the owned session was reaped: the
+        # child changed the vault while the helper was still in its window,
+        # so both digests see the change and no cleanup note is attached.
+        self.assert_mutation_error(error, pre=True, post=True)
 
         # The child's own byte-level handshake: it announced its pid, changed
         # the vault and was still running when the helper reaped it. No static
         # substring stands in for the helper's post-window digest.
         self.assertEqual(self.vault.read_bytes(), _MUTATION)
-        self.assertEqual(self.scrapers_started, 1, "the mutation launch was not observed")
-        self.assertEqual(self.scrapers_drained, self.scrapers_started)
-        for scraper in self.scrapers:
-            self.assertFalse(scraper.is_alive(), "a stdout collector raced the reports read")
-        reports = self.drained_reports()
+        self.assert_reports_drained()
         self.assertEqual(set(reports), {"launch", "mutated", "alive"}, reports)
-        # Created 0600 by the collector itself; no chmod runs after creation.
-        for private in (self.nudge, self.launched_pid):
-            self.assertTrue(private.is_file() and not private.is_symlink())
-            self.assertEqual(_mode(private), 0o600, f"{private.name} was not created 0600")
-        pid = int(self.launched_pid.read_text(encoding="utf-8"))
-        self.assertEqual(reports["launch"], str(pid))
-        # The shim recorded the helper's session leader, which exec'd the
-        # stand-in in place: same pid, and the owned group is that pid.
-        self.assertEqual(int(self.executed.read_text(encoding="utf-8")), pid)
-        self.assertFalse(_alive(pid), "a failing smoke must still reap its owned desktop")
-        self.assertFalse(
-            harness._group_has_members(pid),
-            "a failing smoke must still reap its owned process group",
+        self.assert_private_signals()
+        self.assert_launch_owned_and_reaped(reports)
+
+    def test_mutation_written_only_from_the_sigterm_handler_fails_post(self):
+        # The owned child leaves the vault byte-identical for the whole window
+        # and writes it only from its SIGTERM handler, i.e. after the helper's
+        # ``before`` digest and its in-window digest. Neither the test parent
+        # nor the helper touches the vault: the child's own handshake must show
+        # the write happened after ``handler-ready``, so only the post-teardown
+        # digest can see it -- a real teardown-only mutation, not a pre one.
+        self._nudge_after = "handler-ready"
+        before = _sha256(self.vault)
+
+        reports, error = self.mutation_launch(
+            _TEARDOWN_MUTATING_STAND_IN, harness_pid=os.getpid()
         )
+        # A changed vault wins over every other outcome and carries exactly
+        # pre=False post=True: not the refusal, not an arbitrary error.
+        self.assertNotEqual(type(error), SystemExit, "the smoke left as a non-failure")
+        self.assert_mutation_error(error, pre=False, post=True)
+        self.assertNotIn(support.DESKTOP_SMOKE_REFUSAL, str(error))
+
+        # Reports are drained; the child's handshake is ordered, and its
+        # SIGTERM write was proven by the child's own re-read.
+        self.assert_reports_drained()
+        self.assertEqual(
+            set(reports), {"launch", "handler-ready", "vh-written", "done"}, reports
+        )
+        # The handler is reported before the nudge is released, so the write
+        # (and its proof by re-read) can only follow that report.
+        self.assertEqual(self.reports, reports, "reports changed after draining")
+        self.assertEqual(reports["vh-written"], "ok", "the child's handler write was not proven")
+        self.assert_private_signals()
+
+        # The nudge was released only after ``handler-ready``: the window
+        # mutation and the final byte check both come after that report.
+        self.assertNotEqual(before, _sha256(self.vault), "the vault did not change")
+        self.assertEqual(self.vault.read_bytes(), _MUTATION)
+        self.assert_launch_owned_and_reaped(reports, required=set(reports))
 
     def test_early_exit_is_false_not_a_liveness_pass(self):
         # A desktop that stops during the window (other than the exit-2 usage
