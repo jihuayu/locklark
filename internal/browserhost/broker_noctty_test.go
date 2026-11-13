@@ -22,6 +22,12 @@ const (
 	browserhostNoCTTYStatLimit = 64 << 10
 	browserhostNoCTTYFail      = "no-CTTY child failed the legacy contract"
 	browserhostNoCTTYStatPath  = "/proc/self/stat"
+
+	// A complete modern /proc/PID/stat has 52 fields; pid and comm are before
+	// the closing parenthesis, leaving 50 tokens for fields 3 through 52.
+	browserhostNoCTTYStatFields     = 52
+	browserhostNoCTTYStatTailFields = browserhostNoCTTYStatFields - 2
+	browserhostNoCTTYStatStates     = "RSDZTtWXxKPI"
 )
 
 // runLegacyNoCTTYTest makes Linux-only legacy-gate contracts execute in a real
@@ -64,8 +70,9 @@ func runLegacyNoCTTYTest(t *testing.T, name string, body func(*testing.T)) {
 // the production controlling-terminal resolver: that resolver also performs
 // namespace and devpts work, so an unavailable result would not prove tty_nr
 // is zero. The read is bounded, the command name is skipped at its final ')'
-// (it may itself contain spaces or parentheses), and field 7's original token
-// must be exactly "0".
+// (it may itself contain spaces or parentheses), state must be a kernel task
+// state, the line must contain the complete 52-field stat layout, and field
+// 7's original token must be exactly "0".
 func noCTTYStatField7IsZero(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -81,7 +88,10 @@ func noCTTYStatField7IsZero(path string) bool {
 		return false
 	}
 	fields := strings.Fields(string(data[end+1:]))
-	return len(fields) >= 5 && fields[4] == "0"
+	if len(fields) < browserhostNoCTTYStatTailFields || len(fields[0]) != 1 {
+		return false
+	}
+	return strings.IndexByte(browserhostNoCTTYStatStates, fields[0][0]) >= 0 && fields[4] == "0"
 }
 
 // noCTTYChildTargetPassed accepts only a verbose result for the exact test:
@@ -124,12 +134,17 @@ func TestBrowserhostNoCTTYStatField7(t *testing.T) {
 		stat string
 		want bool
 	}{
-		{"zero", "123 (worker) S 1 2 3 0 4 5\n", true},
-		{"zero without newline", "123 (worker) S 1 2 3 0 4 5", true},
-		{"comm parentheses and spaces", "123 (x) (y) S 1 2 3 0 4 5\n", true},
-		{"nonzero", "123 (worker) S 1 2 3 1 4 5\n", false},
-		{"noncanonical zero", "123 (worker) S 1 2 3 00 4 5\n", false},
-		{"negative zero", "123 (worker) S 1 2 3 -0 4 5\n", false},
+		{"complete zero", noCTTYStatFixture("worker", "S", "0", browserhostNoCTTYStatTailFields) + "\n", true},
+		{"complete zero without newline", noCTTYStatFixture("worker", "S", "0", browserhostNoCTTYStatTailFields), true},
+		{"comm parentheses and spaces", noCTTYStatFixture("x) (y", "S", "0", browserhostNoCTTYStatTailFields) + "\n", true},
+		{"legal running state", noCTTYStatFixture("worker", "R", "0", browserhostNoCTTYStatTailFields) + "\n", true},
+		{"legal tracing state", noCTTYStatFixture("worker", "t", "0", browserhostNoCTTYStatTailFields) + "\n", true},
+		{"nonzero", noCTTYStatFixture("worker", "S", "1", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"noncanonical zero", noCTTYStatFixture("worker", "S", "00", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"negative zero", noCTTYStatFixture("worker", "S", "-0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"bad state", noCTTYStatFixture("worker", "Q", "0", browserhostNoCTTYStatTailFields) + "\n", false},
+		{"truncated zero at field 7", noCTTYStatFixture("worker", "S", "0", 5) + "\n", false},
+		{"truncated zero at field 51", noCTTYStatFixture("worker", "S", "0", browserhostNoCTTYStatTailFields-1) + "\n", false},
 		{"missing close paren", "123 worker S 1 2 3 0 4 5\n", false},
 		{"missing tty field", "123 (worker) S 1 2 3\n", false},
 	} {
@@ -137,6 +152,14 @@ func TestBrowserhostNoCTTYStatField7(t *testing.T) {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+func noCTTYStatFixture(comm, state, tty string, tailFields int) string {
+	fields := []string{state, "1", "2", "3", tty}
+	for len(fields) < tailFields {
+		fields = append(fields, "0")
+	}
+	return "123 (" + comm + ") " + strings.Join(fields, " ")
 }
 
 func TestBrowserhostNoCTTYStatReadIsBounded(t *testing.T) {
