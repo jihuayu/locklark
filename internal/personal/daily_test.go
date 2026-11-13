@@ -472,23 +472,47 @@ func TestDailyOTPExpiryPrecedesStaleRevalidation(t *testing.T) {
 }
 func TestDailyOTPExpiryClearsCodeWithoutSessionOrViewPolling(t *testing.T) {
 	s, d, code := deliveryFixture()
+	cleared, retired := make(chan struct{}), make(chan struct{})
 	s.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
 	d.cap.mu.Lock()
-	d.cap.timer = time.AfterFunc(10*time.Millisecond, func() {
+	deadline := d.cap.bounds.Deadline
+	d.cap.timer = time.AfterFunc(time.Until(deadline), func() {
 		d.cap.clear()
+		close(cleared)
 		s.otpCaps.Delete(d.cap)
 		s.mu.Lock()
 		delete(s.otpDeliveries, d)
 		s.mu.Unlock()
+		close(retired)
 	})
 	d.cap.mu.Unlock()
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-cleared:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expiry did not clear code while disk/UI mutex remained held")
+	}
 	d.cap.mu.Lock()
-	cleared := bytes.Equal(code, make([]byte, len(code)))
+	zeroed := d.cap.code == nil && bytes.Equal(code, make([]byte, len(code)))
 	d.cap.mu.Unlock()
+	registered := s.otpDeliveries[d]
 	s.mu.Unlock()
-	if !cleared {
-		t.Fatal("deadline waited for disk/UI mutex to clear code")
+	locked = false
+	select {
+	case <-retired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("expiry did not retire delivery after disk/UI mutex release")
+	}
+	if !zeroed {
+		t.Fatal("expiry retained code while disk/UI mutex remained held")
+	}
+	if !registered {
+		t.Fatal("expiry removed delivery before disk/UI mutex release")
 	}
 }
 func TestDailyNewManualURLAndNativeAuditRestore(t *testing.T) {
