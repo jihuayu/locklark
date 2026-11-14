@@ -346,47 +346,8 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	return browserhost.BrokerCLIResponse{V: 1, PreparedValues: prepared, Receipt: receipt}, nil
 }
 
-func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, args ...any) (bool, error) {
-	if ctx == nil {
-		return false, errCLIRunRefused
-	}
-	// The 150 callers pass the full BrokerCLIRequest; the 151 broker passes
-	// the already validated vault path, scope, and targets. Both forms build
-	// the same immutable pending review and render summary.
-	var (
-		vaultPath string
-		scope     browserhost.CLIRunScope
-		targets   []personal.CLIBrokerTarget
-		session   *personal.Session
-		epoch     uint64
-	)
-	switch len(args) {
-	case 3:
-		req, ok := args[0].(browserhost.BrokerCLIRequest)
-		if !ok {
-			return false, errCLIRunRefused
-		}
-		session, _ = args[1].(*personal.Session)
-		epoch, _ = args[2].(uint64)
-		vaultPath = req.VaultPath
-		scope = req.Scope.Clone()
-		targets = append([]personal.CLIBrokerTarget(nil), req.Targets...)
-	case 5:
-		var ok bool
-		if vaultPath, ok = args[0].(string); !ok {
-			return false, errCLIRunRefused
-		}
-		if scope, ok = args[1].(browserhost.CLIRunScope); !ok {
-			return false, errCLIRunRefused
-		}
-		if args[2] != nil {
-			if targets, ok = args[2].([]personal.CLIBrokerTarget); !ok {
-				return false, errCLIRunRefused
-			}
-		}
-		session, _ = args[3].(*personal.Session)
-		epoch, _ = args[4].(uint64)
-	default:
+func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, vaultPath string, scope browserhost.CLIRunScope, targets []personal.CLIBrokerTarget, session *personal.Session, epoch uint64) (bool, error) {
+	if ctx == nil || session == nil {
 		return false, errCLIRunRefused
 	}
 	// One absolute cap. A shorter caller deadline wins; no prompt activity
@@ -422,7 +383,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 	p.id = hex.EncodeToString(b[:])
 	a.brokerMu.Lock()
-	if a.cliPending != nil || a.brokerSession != session || a.brokerEpoch != epoch || session == nil || !session.Unlocked() {
+	if a.cliPending != nil || a.brokerSession != session || a.brokerEpoch != epoch || !session.Unlocked() {
 		a.brokerMu.Unlock()
 		return false, errCLIRunRefused
 	}
@@ -533,35 +494,20 @@ func (a *App) cliRunDecisionHandlers(p *cliRunPending) (approve, refuse func()) 
 	return func() { a.approveCLIRun(p, true) }, func() { a.approveCLIRun(p, false) }
 }
 
-// approveCLIRun records and signals the decision once, under brokerMu. It
-// accepts either the exact pending pointer (the 151 view) or a rendered id (the
-// 150 popup/test path); an id is resolved only while it is still current. A
-// positive decision also requires the exact non-nil session and broker epoch to
-// be current and unlocked. The owned popup, if any, is retired on every
-// accepted decision; a stale target touches nothing and reports false.
-func (a *App) approveCLIRun(target any, approved bool) bool {
-	a.brokerMu.Lock()
-	var p *cliRunPending
-	switch value := target.(type) {
-	case *cliRunPending:
-		p = value
-	case string:
-		if value != "" && a.cliPending != nil && a.cliPending.id == value {
-			p = a.cliPending
-		}
-	}
+// decideCLIRunLocked records exactly one decision for p while brokerMu is
+// held. A positive decision is published only for the exact non-nil session,
+// current broker epoch, and still-unlocked session bound at request entry;
+// every other positive attempt is signalled as a refusal. It returns the popup
+// and window owned by p so the caller can retire them after unlocking, and
+// reports whether p was the current undecided pending.
+func (a *App) decideCLIRunLocked(p *cliRunPending, approved bool) (*cliApprovalPopup, *mygo.Window, bool) {
 	if p == nil || a.cliPending != p || p.decided {
-		a.brokerMu.Unlock()
-		return false
+		return nil, nil, false
 	}
 	p.decided = true
-	// A real review always has a non-nil session. The 150 popup/tests use a
-	// synthetic unbound pending to exercise window ownership; keep that path
-	// working while every session-bound decision is checked exactly.
-	if approved && p.session != nil && (a.brokerSession != p.session || a.brokerEpoch != p.epoch || !p.session.Unlocked()) {
-		approved = false
-	}
-	p.choose(approved)
+	positive := approved && p.session != nil && p.session.Unlocked() &&
+		a.brokerSession == p.session && a.brokerEpoch == p.epoch
+	p.choose(positive)
 	id := p.id
 	popup := p.popup
 	if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == id {
@@ -575,12 +521,55 @@ func (a *App) approveCLIRun(target any, approved bool) bool {
 	if popup != nil && a.approvalPopup == popup {
 		a.approvalPopup = nil
 	}
-	a.brokerMu.Unlock()
+	return popup, win, true
+}
+
+// retireDecidedCLIRun retires the exact popup and window captured for an
+// accepted decision. Retirement takes brokerMu itself, so it must run only
+// after decideCLIRunLocked has released the lock.
+func (a *App) retireDecidedCLIRun(popup *cliApprovalPopup, win *mygo.Window) {
 	if popup != nil {
 		a.retireCLIApprovalPopup(popup)
 	} else if win != nil && !win.IsDestroyed() {
 		win.Destroy()
 	}
+}
+
+// approveCLIRun records and signals the decision for the exact pending pointer
+// once, under brokerMu. A positive decision also requires the exact non-nil
+// session and current broker epoch to be current and unlocked; every refusal
+// or stale binding is signalled as a refusal. The owned popup, if any, is
+// retired on every accepted decision; a stale pointer touches nothing and
+// reports false.
+func (a *App) approveCLIRun(p *cliRunPending, approved bool) bool {
+	a.brokerMu.Lock()
+	popup, win, ok := a.decideCLIRunLocked(p, approved)
+	a.brokerMu.Unlock()
+	if !ok {
+		return false
+	}
+	a.retireDecidedCLIRun(popup, win)
+	return true
+}
+
+// approveCLIRunID is the typed wrapper for the 150-owned popup close action,
+// which is bound to a rendered id rather than the pending pointer. It resolves
+// the id to the current pending under brokerMu and then applies the same
+// pointer/session/epoch checks as approveCLIRun; an empty, unknown, or stale
+// id reports false and decides nothing.
+func (a *App) approveCLIRunID(id string, approved bool) bool {
+	a.brokerMu.Lock()
+	p := a.cliPending
+	if p == nil || id == "" || p.id != id {
+		a.brokerMu.Unlock()
+		return false
+	}
+	popup, win, ok := a.decideCLIRunLocked(p, approved)
+	a.brokerMu.Unlock()
+	if !ok {
+		return false
+	}
+	a.retireDecidedCLIRun(popup, win)
 	return true
 }
 
@@ -602,7 +591,7 @@ func (a *App) closeCLIApprovalPopup(popup *cliApprovalPopup) {
 	}
 	// approveCLIRun rejects the captured id only while it is still current.
 	// A stale p1 popup leaves p2's decision and window untouched.
-	a.approveCLIRun(popup.id, false)
+	a.approveCLIRunID(popup.id, false)
 	a.retireCLIApprovalPopup(popup)
 }
 

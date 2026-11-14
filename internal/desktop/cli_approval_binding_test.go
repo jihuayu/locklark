@@ -11,13 +11,25 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
-func cliPendingBindingFixture(id string) *cliRunPending {
+// cliPendingBindingFixture builds a pending review bound to a real owned,
+// unlocked temporary personal session and the app's current broker epoch. The
+// popup/window ownership tests must not use synthetic unbound pendings: a
+// positive decision is only meaningful for a genuine session binding.
+func cliPendingBindingFixture(t *testing.T, a *App, id string) *cliRunPending {
+	t.Helper()
+	a.notifyBrowserBrokerUnlocked()
+	a.brokerMu.Lock()
+	session, epoch := a.brokerSession, a.brokerEpoch
+	a.brokerMu.Unlock()
+	if session == nil || !session.Unlocked() {
+		t.Fatal("binding fixture has no unlocked broker session")
+	}
 	return &cliRunPending{
 		id:   id,
 		peer: browserhost.Peer{PID: 99, User: "tester", Process: "gh.exe"},
 		request: browserhost.BrokerCLIRequest{
 			V:         1,
-			VaultPath: "/fixture/personal.ll",
+			VaultPath: session.VaultPath(),
 			Targets: []personal.CLIBrokerTarget{{
 				Slot:     "GH_TOKEN",
 				ID:       "0123456789abcdef0123456789abcdef",
@@ -25,6 +37,8 @@ func cliPendingBindingFixture(id string) *cliRunPending {
 				Field:    "password",
 			}},
 		},
+		session:  session,
+		epoch:    epoch,
 		decision: make(chan bool, 1),
 	}
 }
@@ -58,9 +72,9 @@ func setCLIApprovalPopup(a *App, p *cliRunPending, popup *cliApprovalPopup) {
 // A rendered p1 must not be able to approve, refuse, or hide after p2 has
 // replaced it. These are the exact closures both approval views wire.
 func TestStaleCLIApprovalRenderCannotDecideReplacement(t *testing.T) {
-	a := New()
-	p1 := cliPendingBindingFixture("pending-1")
-	p2 := cliPendingBindingFixture("pending-2")
+	a := dailyAppFixture(t)
+	p1 := cliPendingBindingFixture(t, a, "pending-1")
+	p2 := cliPendingBindingFixture(t, a, "pending-2")
 	popup1 := &cliApprovalPopup{id: p1.id}
 	popup2 := &cliApprovalPopup{id: p2.id}
 	setCLIApprovalPopup(a, p1, popup1)
@@ -110,9 +124,9 @@ func TestStaleCLIApprovalRenderCannotDecideReplacement(t *testing.T) {
 // Cleanup and a delayed p1 window-close event must not reject, retire, or hide
 // the rendered p2 popup. A genuine p2 close refuses exactly once.
 func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
-	a := New()
-	p1 := cliPendingBindingFixture("pending-1")
-	p2 := cliPendingBindingFixture("pending-2")
+	a := dailyAppFixture(t)
+	p1 := cliPendingBindingFixture(t, a, "pending-1")
+	p2 := cliPendingBindingFixture(t, a, "pending-2")
 	popup1 := &cliApprovalPopup{id: p1.id}
 	popup2 := &cliApprovalPopup{id: p2.id}
 	setCLIApprovalPopup(a, p1, popup1)
@@ -154,7 +168,7 @@ func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
 	}
 
 	// A different retired pending's own cleanup also retires only its popup.
-	p1b := cliPendingBindingFixture("pending-1b")
+	p1b := cliPendingBindingFixture(t, a, "pending-1b")
 	popup1b := &cliApprovalPopup{id: p1b.id}
 	a.brokerMu.Lock()
 	p1b.popup = popup1b
@@ -194,9 +208,9 @@ func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
 // A captured p1 content callback must never reread the global pending and
 // build p2's body or decision controls after p2 replaces it.
 func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
-	a := New()
-	p1 := cliPendingBindingFixture("pending-1")
-	p2 := cliPendingBindingFixture("pending-2")
+	a := dailyAppFixture(t)
+	p1 := cliPendingBindingFixture(t, a, "pending-1")
+	p2 := cliPendingBindingFixture(t, a, "pending-2")
 	p2.peer.Process = "p2-process"
 	p2.request.VaultPath = "/fixture/p2-visible.ll"
 	p2.request.Targets[0].Slot = "P2_SLOT"
@@ -241,11 +255,93 @@ func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
 	}
 }
 
+// TestCLIApprovalRequiresLiveBoundSession is the focused regression for the
+// approval adapter: a missing session can never approve, a noncurrent epoch or
+// locked session is signalled as a refusal, an unknown id touches nothing, and
+// only the exact current owner approves exactly once.
+func TestCLIApprovalRequiresLiveBoundSession(t *testing.T) {
+	t.Run("nil-session-cannot-approve", func(t *testing.T) {
+		a := New()
+		p := &cliRunPending{id: "nil-session", decision: make(chan bool, 1)}
+		setCLIPending(a, p, p.id)
+		if !a.approveCLIRun(p, true) {
+			t.Fatal("current pending decision was not recorded")
+		}
+		if value, ok := cliPendingDecision(p); !ok || value {
+			t.Fatalf("nil session approval = %v, %v; want recorded refusal", value, ok)
+		}
+		if !p.decided {
+			t.Fatal("nil-session refusal did not mark the pending decided")
+		}
+	})
+
+	t.Run("epoch-mismatch-refuses", func(t *testing.T) {
+		a := dailyAppFixture(t)
+		p := cliPendingBindingFixture(t, a, "epoch-stale")
+		p.epoch++
+		setCLIPending(a, p, p.id)
+		if !a.approveCLIRun(p, true) {
+			t.Fatal("current pending decision was not recorded")
+		}
+		if value, ok := cliPendingDecision(p); !ok || value {
+			t.Fatalf("stale epoch approval = %v, %v; want recorded refusal", value, ok)
+		}
+	})
+
+	t.Run("locked-session-refuses", func(t *testing.T) {
+		a := dailyAppFixture(t)
+		p := cliPendingBindingFixture(t, a, "locked")
+		setCLIPending(a, p, p.id)
+		p.session.Lock()
+		if !a.approveCLIRun(p, true) {
+			t.Fatal("current pending decision was not recorded")
+		}
+		if value, ok := cliPendingDecision(p); !ok || value {
+			t.Fatalf("locked session approval = %v, %v; want recorded refusal", value, ok)
+		}
+	})
+
+	t.Run("unknown-and-empty-id-refuse", func(t *testing.T) {
+		a := dailyAppFixture(t)
+		p := cliPendingBindingFixture(t, a, "current")
+		setCLIPending(a, p, p.id)
+		for _, id := range []string{"", "unknown"} {
+			if a.approveCLIRunID(id, true) {
+				t.Fatalf("approveCLIRunID(%q) accepted a noncurrent id", id)
+			}
+		}
+		if p.decided {
+			t.Fatal("unknown id decided the current pending")
+		}
+		if _, ok := cliPendingDecision(p); ok {
+			t.Fatal("unknown id signalled the current pending")
+		}
+	})
+
+	t.Run("genuine-owner-approves-once", func(t *testing.T) {
+		a := dailyAppFixture(t)
+		p := cliPendingBindingFixture(t, a, "owner")
+		setCLIPending(a, p, p.id)
+		if !a.approveCLIRun(p, true) {
+			t.Fatal("genuine owner approval was not recorded")
+		}
+		if value, ok := cliPendingDecision(p); !ok || !value {
+			t.Fatalf("genuine owner approval = %v, %v; want true", value, ok)
+		}
+		if a.approveCLIRun(p, true) {
+			t.Fatal("second decision was accepted")
+		}
+		if _, ok := cliPendingDecision(p); ok {
+			t.Fatal("second decision signalled twice")
+		}
+	})
+}
+
 // Concurrent stale and current callbacks must decide the current id once.
 func TestCLIApprovalConcurrentDecisionIsOnceAndCurrentID(t *testing.T) {
-	a := New()
-	p1 := cliPendingBindingFixture("pending-1")
-	p2 := cliPendingBindingFixture("pending-2")
+	a := dailyAppFixture(t)
+	p1 := cliPendingBindingFixture(t, a, "pending-1")
+	p2 := cliPendingBindingFixture(t, a, "pending-2")
 	setCLIPending(a, p2, p2.id)
 
 	const workers = 64
@@ -261,7 +357,7 @@ func TestCLIApprovalConcurrentDecisionIsOnceAndCurrentID(t *testing.T) {
 			if i%2 == 0 {
 				id = p2.id
 			}
-			if a.approveCLIRun(id, i%4 == 0) {
+			if a.approveCLIRunID(id, i%4 == 0) {
 				accepted.Add(1)
 			}
 		}(i)

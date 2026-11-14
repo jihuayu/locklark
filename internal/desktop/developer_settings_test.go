@@ -436,7 +436,11 @@ func TestCLIRequestActivityStatusFilterChips(t *testing.T) {
 }
 
 func TestStandaloneCLIApprovalPopupView(t *testing.T) {
-	a := New()
+	a := dailyAppFixture(t)
+	a.notifyBrowserBrokerUnlocked()
+	a.brokerMu.Lock()
+	session, epoch := a.brokerSession, a.brokerEpoch
+	a.brokerMu.Unlock()
 	decision := make(chan bool, 1)
 	pending := &cliRunPending{
 		id:   "pending-1",
@@ -450,6 +454,8 @@ func TestStandaloneCLIApprovalPopupView(t *testing.T) {
 				Field:    "password",
 			}},
 		},
+		session:  session,
+		epoch:    epoch,
 		decision: decision,
 	}
 	popup := &cliApprovalPopup{id: pending.id}

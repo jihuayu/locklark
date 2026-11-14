@@ -47,13 +47,14 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 	session, epoch := a.brokerSession, a.brokerEpoch
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
+	req := cliLifetimeRequest(t, a)
 	type result struct {
 		approved bool
 		err      error
 	}
 	done := make(chan result, 1)
 	go func() {
-		approved, err := a.requestCLIRunApproval(ctx, browserhost.Peer{}, browserhost.BrokerCLIRequest{}, session, epoch)
+		approved, err := a.requestCLIRunApproval(ctx, browserhost.Peer{}, req.VaultPath, req.Scope, req.Targets, session, epoch)
 		done <- result{approved: approved, err: err}
 	}()
 
@@ -90,7 +91,7 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 	if stillPending || rendered != "" {
 		t.Fatalf("timeout left pending=%v rendered=%q", stillPending, rendered)
 	}
-	if a.approveCLIRun(pending.id, true) {
+	if a.approveCLIRunID(pending.id, true) {
 		t.Fatal("late approval accepted the retired pending id")
 	}
 	if _, ok := cliPendingDecision(pending); ok {
@@ -98,9 +99,9 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 	}
 
 	// Old timeout cleanup must not decide or hide a replacement render.
-	replacement := cliPendingBindingFixture("pending-replacement")
+	replacement := cliPendingBindingFixture(t, a, "pending-replacement")
 	setCLIPending(a, replacement, replacement.id)
-	if a.approveCLIRun(pending.id, true) || a.hideApprovalWindowFor(pending.id) {
+	if a.approveCLIRunID(pending.id, true) || a.hideApprovalWindowFor(pending.id) {
 		t.Fatal("retired callback touched the replacement pending")
 	}
 	if replacement.decided {
@@ -114,10 +115,8 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 // TestHandleCLIRunLateApprovalRefused proves a callback that returns "approved"
 // only after its bounded context expired cannot reach extraction or disclosure.
 func TestHandleCLIRunLateApprovalRefused(t *testing.T) {
-	a := dailyAppFixture(t)
+	a, req := desktopCLIRunFixture(t)
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
-	a.notifyBrowserBrokerUnlocked()
-	req := cliLifetimeRequest(t, a)
 	bounded := make(chan bool, 1)
 	a.cliApprover = func(ctx context.Context, _ browserhost.Peer, _ browserhost.BrokerCLIRequest) (bool, error) {
 		deadline, ok := ctx.Deadline()
@@ -150,10 +149,8 @@ func TestHandleCLIRunLateApprovalRefused(t *testing.T) {
 // TestHandleCLIRunLateLockRefused proves a broker lock between approval and
 // extraction fails closed before values are returned.
 func TestHandleCLIRunLateLockRefused(t *testing.T) {
-	a := dailyAppFixture(t)
+	a, req := desktopCLIRunFixture(t)
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
-	a.notifyBrowserBrokerUnlocked()
-	req := cliLifetimeRequest(t, a)
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) {
 		a.notifyBrowserBrokerLocked()
 		return true, nil
