@@ -261,13 +261,37 @@ jobs:
           & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   desktop-macos:
-    needs: [contracts]
+    needs: [contracts, extension-producer]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
+          {
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$src/unpacked/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$src/unpacked/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$src/unpacked/safari"
+          } >> "$GITHUB_ENV"
       - name: Build primary artifacts once
         run: |
           bin="$RUNNER_TEMP/locklark-bin"
@@ -278,6 +302,12 @@ jobs:
           go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
       - name: Test Safari transport policy and compile the macOS app
         timeout-minutes: 15
+        env:
+          LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
+          LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: ${{ runner.temp }}/locklark-extension-producer/prepared/v2pairs
+          LOCKLARK_BROWSER_EXTENSION_CHROMIUM: ${{ runner.temp }}/locklark-extension-producer/unpacked/chromium
+          LOCKLARK_BROWSER_EXTENSION_FIREFOX: ${{ runner.temp }}/locklark-extension-producer/unpacked/firefox
+          LOCKLARK_BROWSER_EXTENSION_SAFARI: ${{ runner.temp }}/locklark-extension-producer/unpacked/safari
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
@@ -308,11 +338,75 @@ jobs:
           test -x "$LOCKLARK_TEST_OPENSSH_BIN"
           go test ./internal/sshagent ./internal/localpath -count=1
           go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
+  extension-producer:
+    needs: [contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install pinned release verifier dependencies
+        run: python3 -m pip install -r scripts/browserrelease/requirements.txt
+      - name: Prepare Chromium once and strict smoke
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          install -d -m 0700 "$out/prepared/v2pairs"
+          export PYTHONPATH=scripts
+          python3 -m browserrelease --product chromium --output "$out/prepared/v2pairs"
+          python3 -m browserrelease.prebuilt --product chromium \
+            --prepared-dir "$out/prepared/v2pairs" --dist browser-extension/dist/chromium
+      - name: Run original release and legacy unit tests
+        timeout-minutes: 5
+        run: |
+          PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
+          python3 scripts/test_package_browser_extension.py
+          node --test scripts/test_browser_edge_install.mjs
+      - name: Prepare Firefox and Safari once with strict smoke
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          export PYTHONPATH=scripts
+          for product in firefox safari; do
+            python3 -m browserrelease --product "$product" --output "$out/prepared/v2pairs"
+            python3 -m browserrelease.prebuilt --product "$product" \
+              --prepared-dir "$out/prepared/v2pairs" --dist "browser-extension/dist/$product"
+          done
+      - name: Stage unpacked products and consume legacy pairs
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            install -d -m 0700 "$out/unpacked/$product"
+            cp -a "browser-extension/dist/$product/." "$out/unpacked/$product/"
+          done
+          install -d -m 0700 "$out/legacy/v1pairs"
+          for product in chromium firefox; do
+            python3 scripts/package_browser_extension.py --product "$product" \
+              --output "$out/legacy/v1pairs" \
+              --prepared-dir "$out/prepared/v2pairs" --dist "$out/unpacked/$product"
+          done
+      - name: Preserve single extension producer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer/
+          if-no-files-found: error
+          retention-days: 14
   web-core:
-    needs: [linux-build, contracts]
+    needs: [linux-build, contracts, extension-producer]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
+      LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -323,6 +417,30 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
+          {
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$src/unpacked/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$src/unpacked/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$src/unpacked/safari"
+          } >> "$GITHUB_ENV"
       - name: Download Linux primary binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -335,28 +453,6 @@ jobs:
       - name: Test browser extension
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
-      - name: Prepare reproducible unsigned extension packages
-        timeout-minutes: 5
-        run: |
-          python3 -m pip install -r scripts/browserrelease/requirements.txt
-          PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
-          python3 scripts/test_package_browser_extension.py
-          python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
-          node --test scripts/test_browser_edge_install.mjs
-          python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
-          for product in chromium firefox safari; do
-            PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
-            PYTHONPATH=scripts python3 -m browserrelease --verify --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
-          done
-      - name: Preserve unsigned extension preparation artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: locklark-extension-unsigned-preparation
-          path: |
-            ${{ runner.temp }}/locklark-extension-unsigned/
-            ${{ runner.temp }}/locklark-extension-verified/
-          if-no-files-found: error
-          retention-days: 14
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -471,10 +567,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   web-browsers:
-    needs: [linux-build, contracts]
+    needs: [linux-build, contracts, extension-producer]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
+      LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -489,6 +586,24 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
       - name: Download Linux primary binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -610,17 +725,18 @@ jobs:
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
   web:
     name: web
-    needs: [web-core, web-browsers]
+    needs: [extension-producer, web-core, web-browsers]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require every Web check to succeed
         env:
+          EXTENSION_PRODUCER_RESULT: ${{ needs.extension-producer.result }}
           WEB_CORE_RESULT: ${{ needs.web-core.result }}
           WEB_BROWSERS_RESULT: ${{ needs.web-browsers.result }}
         run: |
-          if [ "$WEB_CORE_RESULT" != success ] || [ "$WEB_BROWSERS_RESULT" != success ]; then
-            echo "web-core=$WEB_CORE_RESULT web-browsers=$WEB_BROWSERS_RESULT"
+          if [ "$EXTENSION_PRODUCER_RESULT" != success ] || [ "$WEB_CORE_RESULT" != success ] || [ "$WEB_BROWSERS_RESULT" != success ]; then
+            echo "extension-producer=$EXTENSION_PRODUCER_RESULT web-core=$WEB_CORE_RESULT web-browsers=$WEB_BROWSERS_RESULT"
             exit 1
           fi
   # Required check: a skipped, cancelled, or failed job is never a pass.
@@ -713,7 +829,7 @@ jobs:
   # command enforces it.
   ci-required:
     name: ci-required
-    needs: [linux-build, contracts, go, desktop-macos, web-core, web-browsers, web, android, ios]
+    needs: [linux-build, contracts, extension-producer, go, desktop-macos, web-core, web-browsers, web, android, ios]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -722,6 +838,7 @@ jobs:
         env:
           LINUX_BUILD_RESULT: ${{ needs.linux-build.result }}
           CONTRACTS_RESULT: ${{ needs.contracts.result }}
+          EXTENSION_PRODUCER_RESULT: ${{ needs.extension-producer.result }}
           GO_RESULT: ${{ needs.go.result }}
           DESKTOP_MACOS_RESULT: ${{ needs.desktop-macos.result }}
           WEB_CORE_RESULT: ${{ needs.web-core.result }}
@@ -730,7 +847,7 @@ jobs:
           ANDROID_RESULT: ${{ needs.android.result }}
           IOS_RESULT: ${{ needs.ios.result }}
         run: |
-          required='linux-build contracts go desktop-macos web-core web-browsers web android ios'
+          required='linux-build contracts extension-producer go desktop-macos web-core web-browsers web android ios'
           failed=0
           summary=''
           for job in $required; do
