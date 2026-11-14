@@ -139,3 +139,19 @@ installs cannot self-update and report that instead of attempting a write.
 The first published release has no deltas. Later releases get up to three
 delta updates from the currently published version and the earlier versions
 listed in its manifest.
+
+## Preparatory release-trust validator
+
+`scripts/authorize_desktop_release.py` is a read-only, source-only preparatory
+checkpoint; it is **not** wired into the release workflow and does not change
+the process above. It independently binds a `workflow_run` to the exact real
+tag commit, proves that commit is an ancestor of the protected default branch,
+and requires external metadata for tag immutability, environment branch
+restriction, and environment-scoped production credentials.
+
+The validator is fail-closed. Generic illustrative fixtures that omit `main`
+protection, active immutable `v*` tag rules, a default-branch-only production
+environment policy, or environment-only production credential scope are
+refused. This checkpoint makes no statement about the current external settings
+of any repository and does not claim that external policy has been fixed. See
+[release-trust.md](release-trust.md) for the prerequisites and test caveats.
