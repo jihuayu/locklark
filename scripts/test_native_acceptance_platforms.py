@@ -1677,6 +1677,8 @@ class StatusAxApi(FakeMacApi):
     # them the AttributeError would be caught by status and every case would
     # read all-false instead of exercising the real reader.
     _ax_value_read = macos.QuartzApi._ax_value_read
+    _owned_generation_ok = macos.QuartzApi._owned_generation_ok
+    _check_owned_generation = macos.QuartzApi._check_owned_generation
     _status_walk = macos.QuartzApi._status_walk
     status = macos.QuartzApi.status
 
