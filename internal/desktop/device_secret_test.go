@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -239,6 +240,29 @@ func TestForgetDeviceSystemUnlockDeleteFailureKeepsDeviceKeyAndBinding(t *testin
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
 		t.Fatalf("quick-unlock failure altered the .ll vault file: %v", err)
+	}
+}
+
+func TestForgetDeviceAbsentQuickUnlockStillCompletes(t *testing.T) {
+	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	system.deleteErr = osunlock.ErrNotFound
+	a.forgetPassword = password
+	a.forgetDeviceWithPassword()
+
+	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+		t.Fatalf("already-absent quick unlock blocked logout: %q", a.status)
+	}
+	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
+		t.Fatalf("already-absent quick unlock skipped cleanup: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+	}
+	if got := a.settingsSnapshot().VaultPath; got != "" {
+		t.Fatalf("already-absent quick unlock retained VaultPath binding: %q", got)
+	}
+	if !a.onboarding {
+		t.Fatal("already-absent quick unlock did not return to onboarding")
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("already-absent quick unlock altered the .ll vault file: %v", err)
 	}
 }
 
