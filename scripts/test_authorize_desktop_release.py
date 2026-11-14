@@ -4,6 +4,9 @@ The git smoke tests build a real, temporary, test-owned repository and pin
 real commits/tag objects. The API metadata contracts use an injected fake
 transport. Fake GitHub metadata is not evidence that any external GitHub
 policy has been configured or accepted.
+
+Future CI hook for the C2b workflow contracts (not added to check.yml yet):
+    python3 -m unittest scripts/test_desktop_release_workflow.py
 """
 
 from __future__ import annotations

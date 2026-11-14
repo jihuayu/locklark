@@ -29,7 +29,7 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
 ## What a successful checkpoint verifies
 
 1. The `workflow_run` event and canonical API run have the same repository
-   id/name, run id, workflow id, exact `.github/workflows/release.yml` path,
+   id/name, run id, workflow id, the historical test workflow path,
    `push` event, completed `success` conclusion, and head SHA.
 2. The canonical run API `actor.id` and `triggering_actor.id` are positive
    integers and each exactly equals the `owner.id` from the same canonical
@@ -153,9 +153,13 @@ GitHub policy acceptance.
 
 ## Usage and tests
 
-The CLI is deliberately not wired into `.github/workflows/release.yml` yet.
-A future integration would need to provide a trusted event path and a git
-repository containing the tag and default-branch objects, for example:
+The historical `workflow_run` CLI is deliberately not wired into the active
+release workflow. The C2b workflow uses
+`scripts/desktop_release_routing.py` for default-branch `repository_dispatch`
+routing, as described in [release-routing.md](release-routing.md). The
+historical CLI remains an unwired contract and would require a trusted event
+path and a git repository containing the tag and default-branch objects, for
+example:
 
 ```sh
 python3 scripts/authorize_desktop_release.py \

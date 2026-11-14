@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Source-only C2a routing for a default-branch repository_dispatch release.
+"""Source-only routing for a default-branch repository_dispatch release.
 
-This module is not wired into a workflow. It binds a ``repository_dispatch``
-event with action ``desktop-release`` to the canonical current run, then reuses
-the C1 release-trust policy gates before resolving the exact candidate tag and
-its default-branch ancestry.
+This module is wired by ``.github/workflows/desktop-release.yml`` in the C2b
+checkpoint. It binds a ``repository_dispatch`` event with action
+``desktop-release`` to the canonical current run, then reuses the C1
+release-trust policy gates before resolving the exact candidate tag and its
+default-branch ancestry. Wiring does not make the source contract an actual
+external policy acceptance.
 
 The event supplies only the release tag through ``client_payload``. Run id,
 attempt, server SHA, workflow SHA, repository, and git path are supplied by the

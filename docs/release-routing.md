@@ -1,10 +1,11 @@
-# Desktop release routing: source-only C2a checkpoint
+# Desktop release routing
 
-This document describes a **source-only** default-branch routing checkpoint.
-It is not wired into any workflow and it does not dispatch a release, apply a
+This document describes the **source-only** routing contract used by the C2b
+default-branch release workflow. The workflow is triggered only by a
+`repository_dispatch` event; it does not dispatch a release itself, apply a
 policy, request a review, read a credential value, or prove that external
-repository policy is currently configured. C2b wiring and external policy
-acceptance are separate pending work.
+repository policy is currently configured. External policy acceptance remains
+separate pending work.
 
 ## Dispatch binding
 
@@ -45,3 +46,34 @@ names, and raw transport errors are not printed.
 A successful local check is source-level evidence only. It is not an actual
 external policy acceptance, an independent security review, or proof that a
 real repository has the required settings.
+
+## C2b workflow and cutover prerequisites
+
+The active workflow is `.github/workflows/desktop-release.yml`. The `authorize`
+job checks out `github.workflow_sha` with full history and tags, uses only
+`contents: read` and `actions: read`, and runs this routing entry before any
+candidate code, write token, or production secret is used. Draft, Windows, and
+macOS jobs depend on authorization and successful predecessor jobs. The final
+verifier checks out `github.workflow_sha` and runs the trusted verifier/helper/
+config, not scripts from the candidate commit.
+
+Before any real release tag is dispatched, the owner must verify externally
+that production credentials are isolated to the `production` environment,
+`main` protection and required immutable-tag/review gates are enforced, and
+every legacy tag-triggered workflow or script in historical tag trees is
+disabled or made inert. Committing the new workflow cannot retroactively stop
+workflows embedded in old tags.
+
+The builtin token may lack administrative or secret-metadata scopes needed to
+prove some policy inputs. The helper then refuses with a fixed enum. Do not
+widen the token, grant extra permissions, or weaken the gate to force a pass.
+
+## Future CI hook
+
+This checkpoint does not add a CI job or edit the monolithic `check.yml`. When
+the separate shared-CI alignment is ready, the exact cheap workflow contract
+command to add is:
+
+```sh
+python3 -m unittest scripts/test_desktop_release_workflow.py
+```

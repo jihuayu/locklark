@@ -1,21 +1,28 @@
 # Desktop release
 
-Pushing a semantic release tag such as `v0.1.0` or `v0.2.0-beta.1`
-starts [the Release workflow](../.github/workflows/release.yml). It:
+Desktop releases are requested by the repository owner with a
+`repository_dispatch` event of type `desktop-release` and payload
+`{"tag":"v0.2.0"}`. The tag must already exist. The
+[Desktop Release workflow](../.github/workflows/desktop-release.yml) is
+triggered only by that dispatch; pushing a tag does not start it. It:
 
-1. checks the release secrets and the matching `CHANGELOG.md` section;
-2. creates or refreshes a draft GitHub release with notes from that section;
-3. builds the Windows x64 package on `windows-latest`;
-4. builds a Developer ID-signed and notarized macOS universal app on
+1. authorizes the default-branch dispatch, current run, repository owner, and
+   exact real tag candidate before any write or production credential is used;
+2. checks the production environment secrets and the matching `CHANGELOG.md`
+   section;
+3. creates or refreshes a draft GitHub release with notes from that section;
+4. builds the Windows x64 package on `windows-latest`;
+5. builds a Developer ID-signed and notarized macOS universal app on
    `macos-latest`;
-5. downloads the draft assets, verifies every signed update manifest and
-   archive, and rebuilds a complete `SHA256SUMS`.
+6. downloads the draft assets, verifies every signed update manifest and
+   archive from the trusted workflow commit, and rebuilds a complete
+   `SHA256SUMS`.
 
 The release remains a draft for review. Installed applications cannot see it
 through GitHub's `releases/latest/download` endpoint until the draft is
 published.
 
-## Required secrets
+## Required production environment secrets
 
 ### Update signing key
 
@@ -36,7 +43,7 @@ printing it (PowerShell on Windows):
 
 ```powershell
 Get-Content -Raw "$env:APPDATA\mygo\update-keys\mygo-update.key" |
-  gh secret set MYGO_UPDATER_PRIVATE_KEY --repo jihuayu/locklark
+  gh secret set MYGO_UPDATER_PRIVATE_KEY --env production --repo jihuayu/locklark
 ```
 
 Keep an offline backup in a password manager. Losing the key prevents every
@@ -46,8 +53,8 @@ key without an explicit migration plan.
 
 ### macOS production signing and notarization
 
-All of these repository secrets are required. The workflow fails before
-creating the draft when one is missing:
+All of these production environment secrets are required. The workflow fails
+before creating the draft when one is missing:
 
 - `MACOS_CERTIFICATE`: base64-encoded Developer ID Application `.p12`;
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
@@ -64,8 +71,8 @@ fallback.
 
 ### Windows Authenticode signing
 
-These optional secrets sign the executable, installer, uninstaller, and
-unsigned executables shipped as resources:
+These optional production environment secrets sign the executable,
+installer, uninstaller, and unsigned executables shipped as resources:
 
 - `WINDOWS_CERTIFICATE`: base64-encoded `.pfx` code-signing certificate;
 - `WINDOWS_CERTIFICATE_PASSWORD`: its password.
@@ -75,20 +82,37 @@ Windows SmartScreen will warn users. A fully production-signed Windows
 release requires both secrets and a certificate trusted by the target
 machines.
 
+## Cutover prerequisites
+
+Before dispatching any real release tag, verify externally that production
+credentials are isolated to the `production` environment, `main` protection
+and the required reviews/immutable-tag rules are enforced, and every legacy
+tag-triggered workflow or script in historical tag trees is disabled or made
+inert. Committing the new workflow cannot retroactively stop workflows embedded
+in old tags.
+
+The builtin workflow token may lack the administrative or secret-metadata
+scopes needed to prove some policy inputs. The authorizer then refuses with a
+fixed enum. Do not widen the token or weaken the policy gate to make it pass.
+
 ## Creating a release
 
 1. Add a `## <version>` or `## [<version>] - <date>` section to
    `CHANGELOG.md`. MyGo puts its text into every signed update manifest and
    the workflow uses it as the draft release notes.
 2. Commit and merge the change after the normal checks pass.
-3. Create and push the tag:
+3. Create and push the tag, then ask the repository owner to dispatch the
+   release workflow:
 
    ```sh
    git tag -s v0.2.0 -m "Locklark v0.2.0"
    git push origin v0.2.0
+   gh api --method POST "/repos/jihuayu/locklark/dispatches" \
+     -f event_type=desktop-release \
+     -f 'client_payload[tag]=v0.2.0'
    ```
 
-4. Wait for Windows, macOS, and `verify-release` to pass.
+4. Wait for `authorize`, Windows, macOS, and `verify-release` to pass.
 5. Review every asset and the platform signatures, then publish the draft.
 
 The tag and `CHANGELOG.md` heading must use the same version. Re-running a
@@ -140,18 +164,21 @@ The first published release has no deltas. Later releases get up to three
 delta updates from the currently published version and the earlier versions
 listed in its manifest.
 
-## Preparatory release-trust validator
+## Release authorization
 
-`scripts/authorize_desktop_release.py` is a read-only, source-only preparatory
-checkpoint; it is **not** wired into the release workflow and does not change
-the process above. It independently binds a `workflow_run` to the exact real
-tag commit, proves that commit is an ancestor of the protected default branch,
-and requires external metadata for tag immutability, environment branch
-restriction, and environment-scoped production credentials.
+The active workflow uses the read-only
+`scripts/desktop_release_routing.py` entry. It binds the default-branch
+`repository_dispatch` to the canonical current run and exact real tag
+candidate, then reuses the C1 policy gates for main protection, reviews,
+immutable tags, environment branch restriction, and environment-only
+credentials. The historical `scripts/authorize_desktop_release.py`
+`workflow_run` CLI remains unwired.
 
 The validator is fail-closed. Generic illustrative fixtures that omit `main`
 protection, active immutable `v*` tag rules, a default-branch-only production
 environment policy, or environment-only production credential scope are
 refused. This checkpoint makes no statement about the current external settings
 of any repository and does not claim that external policy has been fixed. See
-[release-trust.md](release-trust.md) for the prerequisites and test caveats.
+[release-trust.md](release-trust.md) and
+[release-routing.md](release-routing.md) for the prerequisites and test
+caveats.

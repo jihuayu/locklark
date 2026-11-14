@@ -379,7 +379,7 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。已在 macOS 27 arm64 实测：未签名的开发构建在钥匙串 ACL 路径返回 `-34018`，UI 会明确提示需要签名 `.app`，不再误报“金库已锁定”；Developer ID 签名后的 Touch ID 验收仍需 Apple Developer 身份。macOS 的 `kSecAccessControlUserPresence` 接受 Touch ID **或 Mac 登录密码**，不是纯生物识别，取舍见 [macOS 文档](macos/README.md)。Windows Hello/TPM、Linux Secret Service 的真实硬件行为仍需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
 
-推送 `v*` 标签时，[Release 工作流](.github/workflows/release.yml)用固定版本 MyGo 构建 Windows x64 生产版和 macOS universal 生产包，上传更新包与 manifest，并在收尾任务中重新核验所有 Ed25519 签名和完整 `SHA256SUMS`。安装版通过 GitHub Releases 自动检查更新；只有发布草稿后才进入更新源。macOS 签名、公证或 provisioning profile 缺失时发布会直接失败；Windows Authenticode 凭据可选，但未配置时 SmartScreen 会警告。密钥、证书和发布步骤见[桌面发布](docs/release.md)。
+仓库所有者通过 `desktop-release` 类型的 `repository_dispatch` 请求发布后，[Desktop Release 工作流](.github/workflows/desktop-release.yml)先授权默认分支与精确标签提交，再用固定版本 MyGo 构建 Windows x64 生产版和 macOS universal 生产包，上传更新包与 manifest，并在收尾任务中从可信工作流提交重新核验所有 Ed25519 签名和完整 `SHA256SUMS`。安装版通过 GitHub Releases 自动检查更新；只有发布草稿后才进入更新源。macOS 签名、公证或 provisioning profile 缺失时发布会直接失败；Windows Authenticode 凭据可选，但未配置时 SmartScreen 会警告。密钥、证书和发布步骤见[桌面发布](docs/release.md)。
 
 ### 浏览器登录（开发版）
 

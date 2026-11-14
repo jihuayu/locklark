@@ -1,27 +1,82 @@
-name: Release
+name: Desktop Release
 
-on:
-  push:
-    tags: ["v*"]
+# Cutover prerequisite: before dispatching this workflow for a real tag,
+# verify external credential isolation and main protection, and disable or
+# make inert every legacy tag-triggered workflow/script in historical tag
+# trees. Committing this file cannot retroactively stop workflows embedded in
+# old tags. The builtin token may lack admin/secret metadata scopes; the
+# authorizer refuses with fixed enums rather than widening permissions.
+
+"on":
+  repository_dispatch:
+    types: [desktop-release]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: desktop-release-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
   MYGO_VERSION: v0.7.4
 
 jobs:
-  draft-release:
+  authorize:
+    name: Authorize trusted release dispatch
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.authorize.outputs.tag }}
+      commit: ${{ steps.authorize.outputs.commit }}
+      version: ${{ steps.authorize.outputs.version }}
+      prerelease: ${{ steps.authorize.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Check required release secrets
+      - name: Check out the trusted default-branch workflow
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Authorize the default-branch dispatch
+        id: authorize
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/desktop_release_routing.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --repository "$GITHUB_REPOSITORY" \
+            --git-repo . \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sha "$GITHUB_SHA" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  draft-release:
+    name: Create or refresh draft release
+    needs: authorize
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PRERELEASE: ${{ needs.authorize.outputs.prerelease }}
+    steps:
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - name: Check required production release secrets
         shell: bash
         env:
           MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
@@ -47,28 +102,19 @@ jobs:
             exit 1
           fi
       - name: Validate release tag and notes
-        id: meta
         shell: bash
         run: |
           set -euo pipefail
-          version_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
-          if [[ ! "$GITHUB_REF_NAME" =~ $version_re ]]; then
-            echo "Release tags must be semantic versions such as v1.2.3 or v1.2.3-beta.1" >&2
-            exit 1
-          fi
-          version="${GITHUB_REF_NAME#v}"
-          if [[ "$version" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-          python3 - "$version" <<'PY'
+          python3 - "$RELEASE_TAG" "$LOCKLARK_VERSION" <<'PY'
           from pathlib import Path
           import os
           import re
           import sys
 
-          version = sys.argv[1]
+          tag = sys.argv[1]
+          version = sys.argv[2]
+          if tag != "v" + version:
+              raise SystemExit("validated tag and version outputs disagree")
           changelog = Path("CHANGELOG.md")
           try:
               text = changelog.read_text(encoding="utf-8")
@@ -89,42 +135,47 @@ jobs:
               notes + "\n", encoding="utf-8"
           )
           PY
-          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Create or refresh the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
-          create_args=(--draft --verify-tag --title "Locklark $GITHUB_REF_NAME" --notes-file "$notes")
-          if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
+          create_args=(--draft --verify-tag --title "Locklark $RELEASE_TAG" --notes-file "$notes")
+          if [[ "$PRERELEASE" == "true" ]]; then
             create_args+=(--prerelease)
           fi
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            if [[ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
-              echo "Release $GITHUB_REF_NAME is already published; refusing to replace it" >&2
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace it" >&2
               exit 1
             fi
-            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
-            if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
-              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+            if [[ "$PRERELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease
             fi
           else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
               "${create_args[@]}"
           fi
 
   windows:
-    needs: draft-release
+    name: Build Windows release
+    needs: [authorize, draft-release]
     runs-on: windows-latest
+    permissions:
+      contents: write
+    environment: production
     env:
       GH_TOKEN: ${{ github.token }}
-      LOCKLARK_VERSION: ${{ needs.draft-release.outputs.version }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
       MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
       MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
@@ -135,7 +186,7 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:MYGO_UPDATER_PRIVATE_KEY)) {
-            throw "Set the MYGO_UPDATER_PRIVATE_KEY repository secret before releasing."
+            throw "Set the production updater key before releasing."
           }
       - name: Prepare optional Authenticode signing
         shell: pwsh
@@ -190,14 +241,22 @@ jobs:
           Get-ChildItem -Path out\windows-* -File | Select-Object FullName, Length
 
   macos:
-    needs: draft-release
+    name: Build macOS release
+    needs: [authorize, draft-release]
     runs-on: macos-latest
+    permissions:
+      contents: write
+    environment: production
     env:
       GH_TOKEN: ${{ github.token }}
-      LOCKLARK_VERSION: ${{ needs.draft-release.outputs.version }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
       MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
@@ -299,13 +358,21 @@ jobs:
           find out -maxdepth 3 -type f -print
 
   verify-release:
-    needs: [draft-release, windows, macos]
+    name: Verify and checksum draft assets
+    needs: [authorize, draft-release, windows, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      LOCKLARK_VERSION: ${{ needs.draft-release.outputs.version }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out the trusted default-branch verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
@@ -317,7 +384,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release-assets"
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --dir "$RUNNER_TEMP/release-assets"
       - name: Verify signed manifests and rebuild checksums
         shell: bash
@@ -332,6 +399,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$RELEASE_TAG" \
             "$RUNNER_TEMP/release-assets/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" --clobber

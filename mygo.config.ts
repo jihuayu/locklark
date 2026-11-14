@@ -4,7 +4,7 @@
 // Development builds stay ad hoc signed (`-`) and must not carry restricted
 // keychain entitlements: an ad-hoc process with such entitlements is killed by
 // the OS. Release builds set the environment variables below and use
-// scripts/macos_release.sh and .github/workflows/release.yml. See
+// scripts/macos_release.sh and .github/workflows/desktop-release.yml. See
 // macos/README.md and docs/release.md.
 //
 // defineConfig is a local identity helper so evaluating this file needs only
