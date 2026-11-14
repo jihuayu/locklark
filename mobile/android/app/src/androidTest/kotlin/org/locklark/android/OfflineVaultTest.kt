@@ -363,12 +363,20 @@ class OfflineVaultTest {
                 controlPhase = "scroll"
                 return@waitUntil false
             }
+            // The stalled flag is raised only after the one allowed bounded
+            // request and alignment both made no progress, or after an
+            // oversized/partially visible target exhausted its range. It is
+            // terminal on the test thread, not thrown from scenario.onActivity.
+            // A missing tag is not stalled: it keeps the normal asynchronous
+            // observation until the existing deadline.
+            if (stalled) {
+                rememberGeometry(liveGeometry)
+                controlPhase = "clipped"
+                failWait("Native control not visible")
+            }
             // An enabled control outside the app viewport is pending real
-            // scrolling, not a product failure; report its own phase. A
-            // partially visible control that a pending bounded request left
-            // unmoved (its range is exhausted) can never reach the viewport:
-            // fail at once instead of re-requesting or waiting for the deadline.
-            controlPhase = if (inViewport) "visibility" else if (stalled) "clipped" else "offscreen"
+            // scrolling, not a product failure; report its own phase.
+            controlPhase = if (inViewport) "visibility" else "offscreen"
             // Only a stable full-rect observation inside the settled app viewport
             // is a click target.
             val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport &&
