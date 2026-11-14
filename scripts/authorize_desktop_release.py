@@ -186,6 +186,7 @@ class Refusal(str, Enum):
     WORKFLOW_RUN_PATH_UNTRUSTED = "workflow_run_path_untrusted"
     WORKFLOW_RUN_REPOSITORY_MISMATCH = "workflow_run_repository_mismatch"
     WORKFLOW_RUN_HEAD_SHA_INVALID = "workflow_run_head_sha_invalid"
+    WORKFLOW_OBJECT_MISSING = "workflow_object_missing"
     RELEASE_INITIATOR_UNTRUSTED = "release_initiator_untrusted"
 
     DEFAULT_BRANCH_UNTRUSTED = "default_branch_untrusted"
@@ -868,6 +869,20 @@ def _repository_info(payload: object, requested: str) -> RepositoryInfo:
         owner_type=owner_type,
         owner_id=owner_id,
     )
+
+
+def _load_repository_info(
+    transport: ReadOnlyTransport, repository: str
+) -> RepositoryInfo:
+    repository_payload = _api_call(
+        transport,
+        repository_api(repository),
+        list_response=False,
+        absent=Refusal.REPOSITORY_ABSENT,
+        unreadable=Refusal.REPOSITORY_UNREADABLE,
+        unknown=Refusal.REPOSITORY_UNKNOWN,
+    )
+    return _repository_info(repository_payload, repository)
 
 
 def _bind_run(
@@ -1908,6 +1923,23 @@ def _check_secrets(
             )
 
 
+def _check_policy_metadata(
+    transport: ReadOnlyTransport,
+    repository: str,
+    repository_info: RepositoryInfo,
+    git: GitReader,
+) -> str:
+    """Run the shared C1 policy gates and return the protected main tip."""
+
+    default_branch_sha = _check_branch(transport, repository)
+    _check_protection(transport, repository, repository_info.full_name)
+    _check_tag_rules(transport, repository)
+    _check_environment(transport, repository)
+    _check_secrets(transport, repository, repository_info)
+    git.ensure_commit(default_branch_sha, Refusal.DEFAULT_BRANCH_OBJECT_MISSING)
+    return default_branch_sha
+
+
 def _run_authorization(
     *,
     event: object,
@@ -1932,15 +1964,7 @@ def _run_authorization(
             "workflow_run event belongs to a different repository",
         )
 
-    repository_payload = _api_call(
-        transport,
-        repository_api(repository),
-        list_response=False,
-        absent=Refusal.REPOSITORY_ABSENT,
-        unreadable=Refusal.REPOSITORY_UNREADABLE,
-        unknown=Refusal.REPOSITORY_UNKNOWN,
-    )
-    repository_info = _repository_info(repository_payload, repository)
+    repository_info = _load_repository_info(transport, repository)
     if (
         binding.repository_id != repository_info.repository_id
         or binding.run_repository_id != repository_info.repository_id
@@ -1971,14 +1995,8 @@ def _run_authorization(
             "workflow_run head SHA does not equal the exact real tag commit",
         )
 
-    default_branch_sha = _check_branch(transport, repository)
-    _check_protection(transport, repository, repository_info.full_name)
-    _check_tag_rules(transport, repository)
-    _check_environment(transport, repository)
-    _check_secrets(transport, repository, repository_info)
-
-    git.ensure_commit(
-        default_branch_sha, Refusal.DEFAULT_BRANCH_OBJECT_MISSING
+    default_branch_sha = _check_policy_metadata(
+        transport, repository, repository_info, git
     )
     if not git.is_ancestor(tag_info.commit, default_branch_sha):
         _refuse(

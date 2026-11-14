@@ -24,6 +24,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import authorize_desktop_release as trust  # noqa: E402
+import desktop_release_routing as routing  # noqa: E402
 
 
 REPOSITORY = "acme/widget"
@@ -537,6 +538,694 @@ class AuthorizationTests(unittest.TestCase):
         with mock.patch.object(trust.subprocess, "run", side_effect=run):
             decision = self.authorize(transport=trust.GhApiTransport())
         return decision, commands
+
+    def dispatch_event(
+        self,
+        *,
+        action: str = "desktop-release",
+        tag: str = TAG,
+        payload: object | None = None,
+        repository_id: int = REPOSITORY_ID,
+        full_name: str = REPOSITORY,
+        sender_id: int = OWNER_ID,
+        sender_type: str = "User",
+        branch: object = "main",
+    ) -> dict[str, object]:
+        event: dict[str, object] = {
+            "action": action,
+            "client_payload": {"tag": tag} if payload is None else payload,
+            "repository": {"id": repository_id, "full_name": full_name},
+            "sender": {"id": sender_id, "login": OWNER, "type": sender_type},
+        }
+        if branch is not None:
+            event["branch"] = branch
+        return event
+
+    def dispatch_run_payload(
+        self,
+        *,
+        run_id: int = RUN_ID,
+        run_attempt: int = 1,
+        event: str = "repository_dispatch",
+        status: str = "in_progress",
+        conclusion: object = None,
+        head_branch: str = "main",
+        head_sha: str | None = None,
+        path: str = routing.DESKTOP_RELEASE_WORKFLOW_PATH,
+        repository_id: int = REPOSITORY_ID,
+        full_name: str = REPOSITORY,
+        head_repository_id: int = REPOSITORY_ID,
+        head_full_name: str = REPOSITORY,
+        actor_id: int = OWNER_ID,
+        actor_type: str = "User",
+        triggering_actor_id: int = OWNER_ID,
+        triggering_actor_type: str = "User",
+    ) -> dict[str, object]:
+        if head_sha is None:
+            head_sha = self.git.tip
+        return {
+            "id": run_id,
+            "run_attempt": run_attempt,
+            "event": event,
+            "status": status,
+            "conclusion": conclusion,
+            "head_branch": head_branch,
+            "head_sha": head_sha,
+            "path": path,
+            "repository": {"id": repository_id, "full_name": full_name},
+            "head_repository": {
+                "id": head_repository_id,
+                "full_name": head_full_name,
+            },
+            "actor": {"id": actor_id, "type": actor_type},
+            "triggering_actor": {
+                "id": triggering_actor_id,
+                "type": triggering_actor_type,
+            },
+        }
+
+    def dispatch_binding(self, **overrides: object) -> dict[str, object]:
+        binding: dict[str, object] = {
+            "run_id": str(RUN_ID),
+            "run_attempt": "1",
+            "sha": self.git.tip,
+            "workflow_sha": self.git.tip,
+        }
+        binding.update(overrides)
+        return binding
+
+    def dispatch_decision(
+        self,
+        *,
+        event: object | None = None,
+        run: object | None = None,
+        binding: dict[str, object] | None = None,
+        transport: FakeTransport | None = None,
+    ) -> trust.Decision:
+        if event is None:
+            event = self.dispatch_event()
+        if run is None:
+            run = self.dispatch_run_payload()
+        if binding is None:
+            binding = self.dispatch_binding()
+        if transport is None:
+            transport = self.valid_transport()
+        transport.responses[
+            trust.workflow_run_api(REPOSITORY, int(binding["run_id"]))
+        ] = run
+        return routing.authorize_desktop_release_dispatch(
+            event=event,
+            repository=REPOSITORY,
+            git_repo=self.git.root,
+            run_id=binding["run_id"],
+            run_attempt=binding["run_attempt"],
+            sha=binding["sha"],
+            workflow_sha=binding["workflow_sha"],
+            transport=transport,
+        )
+
+    def authorize_dispatch_via_gh(
+        self,
+        stdout: dict[str, str],
+        *,
+        event: object | None = None,
+        binding: dict[str, object] | None = None,
+    ) -> tuple[trust.Decision, list[list[str]]]:
+        if event is None:
+            event = self.dispatch_event()
+        if binding is None:
+            binding = self.dispatch_binding()
+        real_run = subprocess.run
+        commands: list[list[str]] = []
+
+        def run(command, *args, **kwargs):
+            if not command or command[0] != "gh":
+                return real_run(command, *args, **kwargs)
+            commands.append(list(command))
+            path = command[-1]
+            if path not in stdout:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=1,
+                    stdout="",
+                    stderr="gh: Not Found (HTTP 404)",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout=stdout[path],
+                stderr="",
+            )
+
+        with mock.patch.object(trust.subprocess, "run", side_effect=run):
+            decision = routing.authorize_desktop_release_dispatch(
+                event=event,
+                repository=REPOSITORY,
+                git_repo=self.git.root,
+                run_id=binding["run_id"],
+                run_attempt=binding["run_attempt"],
+                sha=binding["sha"],
+                workflow_sha=binding["workflow_sha"],
+                transport=trust.GhApiTransport(),
+            )
+        return decision, commands
+
+    # repository_dispatch routing ------------------------------------------
+
+    def test_dispatch_real_git_gh_transport_smoke(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        run_path = trust.workflow_run_api(REPOSITORY, RUN_ID)
+        stdout = self.gh_fixture_stdout()
+        stdout[run_path] = json.dumps(
+            self.dispatch_run_payload(
+                path=routing.DESKTOP_RELEASE_WORKFLOW_PATH + "@refs/heads/main"
+            )
+        )
+        decision, commands = self.authorize_dispatch_via_gh(stdout)
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(decision.reason, trust.Refusal.AUTHORIZED)
+        self.assertIn(run_path, {command[-1] for command in commands})
+        for command in commands:
+            self.assertEqual(command[:4], ["gh", "api", "--method", "GET"])
+            for write_verb in ("POST", "PUT", "PATCH", "DELETE"):
+                self.assertNotIn(write_verb, command)
+
+        bad = dict(stdout)
+        bad[run_path] = json.dumps(
+            self.dispatch_run_payload(
+                path=routing.DESKTOP_RELEASE_WORKFLOW_PATH + "@v1.2.3"
+            )
+        )
+        decision, _ = self.authorize_dispatch_via_gh(bad)
+        self.assert_refused(
+            decision, trust.Refusal.WORKFLOW_RUN_PATH_UNTRUSTED
+        )
+
+    def test_dispatch_accepts_allowed_workflow_path_suffixes(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        for suffix in ("", "@main", "@refs/heads/main"):
+            with self.subTest(suffix=suffix):
+                run = self.dispatch_run_payload(
+                    path=routing.DESKTOP_RELEASE_WORKFLOW_PATH + suffix
+                )
+                decision = self.dispatch_decision(run=run)
+                self.assertTrue(decision.authorized, decision.detail)
+
+    def test_dispatch_rejects_event_run_and_identity_mismatches(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        cases: list[
+            tuple[
+                str,
+                object,
+                object,
+                dict[str, object],
+                trust.Refusal,
+            ]
+        ] = []
+
+        def add(
+            label: str,
+            expected: trust.Refusal,
+            *,
+            event: object | None = None,
+            run: object | None = None,
+            binding: dict[str, object] | None = None,
+        ) -> None:
+            cases.append(
+                (
+                    label,
+                    event if event is not None else self.dispatch_event(),
+                    run if run is not None else self.dispatch_run_payload(),
+                    binding if binding is not None else self.dispatch_binding(),
+                    expected,
+                )
+            )
+
+        event = self.dispatch_event()
+        event["action"] = "other"
+        add("wrong action", trust.Refusal.EVENT_INVALID, event=event)
+
+        event = self.dispatch_event()
+        event["client_payload"] = {"tag": TAG, "extra": "override"}
+        add("extra payload key", trust.Refusal.EVENT_INVALID, event=event)
+
+        event = self.dispatch_event()
+        event["client_payload"] = {}
+        add("missing payload tag", trust.Refusal.EVENT_INVALID, event=event)
+
+        event = self.dispatch_event()
+        event["client_payload"] = None
+        add("malformed payload", trust.Refusal.EVENT_INVALID, event=event)
+
+        event = self.dispatch_event()
+        event["client_payload"] = {"tag": 123}
+        add("non-string tag", trust.Refusal.TAG_INVALID, event=event)
+
+        event = self.dispatch_event(branch="develop")
+        add(
+            "non-default event branch",
+            trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
+            event=event,
+        )
+
+        event = self.dispatch_event(repository_id=REPOSITORY_ID + 1)
+        add(
+            "event repository id",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            event=event,
+        )
+
+        event = self.dispatch_event(full_name="other/repository")
+        add(
+            "event repository name",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            event=event,
+        )
+
+        event = self.dispatch_event(sender_type="Organization")
+        add(
+            "organization sender",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            event=event,
+        )
+
+        event = self.dispatch_event(sender_id=OWNER_ID + 1)
+        add(
+            "wrong sender id",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            event=event,
+        )
+
+        event = self.dispatch_event(sender_id=True)
+        add(
+            "boolean sender id",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            event=event,
+        )
+
+        run = self.dispatch_run_payload(run_id=RUN_ID + 1)
+        add("wrong canonical run id", trust.Refusal.WORKFLOW_RUN_MISMATCH, run=run)
+
+        run = self.dispatch_run_payload(run_id=True)
+        add(
+            "boolean canonical run id",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(run_attempt=2)
+        add(
+            "wrong canonical attempt",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(run_attempt=True)
+        add(
+            "boolean canonical attempt",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(event="push")
+        add(
+            "wrong canonical event",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(status="completed")
+        add(
+            "wrong canonical status",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(conclusion="success")
+        add(
+            "non-null conclusion",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(head_branch="develop")
+        add(
+            "wrong head branch",
+            trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
+            run=run,
+        )
+
+        for path in (
+            routing.DESKTOP_RELEASE_WORKFLOW_PATH + "@v1.2.3",
+            routing.DESKTOP_RELEASE_WORKFLOW_PATH + "@refs/tags/v1.2.3",
+            routing.DESKTOP_RELEASE_WORKFLOW_PATH + "@feature",
+            ".github/workflows/release.yml",
+        ):
+            run = self.dispatch_run_payload(path=path)
+            add(
+                "wrong workflow path",
+                trust.Refusal.WORKFLOW_RUN_PATH_UNTRUSTED,
+                run=run,
+            )
+
+        run = self.dispatch_run_payload(head_sha=self.git.unreviewed)
+        add(
+            "wrong source SHA",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(head_sha="ABC")
+        add(
+            "malformed source SHA",
+            trust.Refusal.WORKFLOW_RUN_HEAD_SHA_INVALID,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(repository_id=REPOSITORY_ID + 1)
+        add(
+            "run repository id",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(full_name="other/repository")
+        add(
+            "run repository name",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(head_repository_id=REPOSITORY_ID + 1)
+        add(
+            "fork head repository id",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(head_full_name="fork/repository")
+        add(
+            "fork head repository name",
+            trust.Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(actor_id=OWNER_ID + 1)
+        add(
+            "wrong actor id",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(actor_id=True)
+        add(
+            "boolean actor id",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(actor_type="Bot")
+        add(
+            "non-user actor",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(triggering_actor_id=OWNER_ID + 1)
+        add(
+            "wrong triggering actor id",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            run=run,
+        )
+
+        run = self.dispatch_run_payload(triggering_actor_type="Bot")
+        add(
+            "non-user triggering actor",
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            run=run,
+        )
+
+        binding = self.dispatch_binding(sha=self.git.unreviewed)
+        add(
+            "trusted server SHA mismatch",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            binding=binding,
+        )
+
+        binding = self.dispatch_binding(workflow_sha=self.git.unreviewed)
+        add(
+            "trusted workflow SHA mismatch",
+            trust.Refusal.WORKFLOW_RUN_MISMATCH,
+            binding=binding,
+        )
+
+        for label, event, run, binding, expected in cases:
+            with self.subTest(case=label):
+                decision = self.dispatch_decision(
+                    event=event, run=run, binding=binding
+                )
+                self.assert_refused(decision, expected)
+
+        invalid_bindings: list[tuple[str, dict[str, object]]] = [
+            ("zero run id", self.dispatch_binding(run_id="0")),
+            ("boolean attempt", self.dispatch_binding(run_attempt="true")),
+            ("short server SHA", self.dispatch_binding(sha="abc")),
+            (
+                "uppercase workflow SHA",
+                self.dispatch_binding(workflow_sha="A" * 40),
+            ),
+        ]
+        for label, binding in invalid_bindings:
+            with self.subTest(case=label):
+                decision = routing.authorize_desktop_release_dispatch(
+                    event=self.dispatch_event(),
+                    repository=REPOSITORY,
+                    git_repo=self.git.root,
+                    run_id=binding["run_id"],
+                    run_attempt=binding["run_attempt"],
+                    sha=binding["sha"],
+                    workflow_sha=binding["workflow_sha"],
+                    transport=self.valid_transport(),
+                )
+                self.assert_refused(decision, trust.Refusal.ARGUMENT_INVALID)
+
+    def test_dispatch_rejects_tag_ancestry_and_policy_failures(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        self.git.delete_tag(TAG)
+        self.assert_refused(self.dispatch_decision(), trust.Refusal.TAG_MISSING)
+
+        self.git.lightweight_tag(TAG, self.git.unreviewed)
+        self.assert_refused(
+            self.dispatch_decision(), trust.Refusal.CANDIDATE_NOT_ANCESTOR
+        )
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+
+        binding = self.dispatch_binding(
+            sha=self.git.unreviewed, workflow_sha=self.git.unreviewed
+        )
+        run = self.dispatch_run_payload(head_sha=self.git.unreviewed)
+        self.assert_refused(
+            self.dispatch_decision(run=run, binding=binding),
+            trust.Refusal.CANDIDATE_NOT_ANCESTOR,
+        )
+
+        missing_sha = "f" * 40
+        binding = self.dispatch_binding(sha=missing_sha, workflow_sha=missing_sha)
+        run = self.dispatch_run_payload(head_sha=missing_sha)
+        self.assert_refused(
+            self.dispatch_decision(run=run, binding=binding),
+            trust.Refusal.WORKFLOW_OBJECT_MISSING,
+        )
+
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+            trust.ApiResponse(500, None)
+        )
+        self.assert_refused(
+            self.dispatch_decision(transport=transport),
+            trust.Refusal.BRANCH_PROTECTION_UNKNOWN,
+        )
+
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+            trust.ApiResponse(403, None)
+        )
+        self.assert_refused(
+            self.dispatch_decision(transport=transport),
+            trust.Refusal.BRANCH_PROTECTION_UNREADABLE,
+        )
+
+        transport = self.valid_transport()
+        transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+            trust.ApiResponse(403, None)
+        )
+        binding = self.dispatch_binding()
+        decision = routing.authorize_desktop_release_dispatch(
+            event=self.dispatch_event(),
+            repository=REPOSITORY,
+            git_repo=self.git.root,
+            run_id=binding["run_id"],
+            run_attempt=binding["run_attempt"],
+            sha=binding["sha"],
+            workflow_sha=binding["workflow_sha"],
+            transport=transport,
+        )
+        self.assert_refused(decision, trust.Refusal.WORKFLOW_RUN_UNREADABLE)
+
+    def test_dispatch_outputs_and_refusal_do_not_write(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        decision = self.dispatch_decision()
+        self.assertTrue(decision.authorized, decision.detail)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            routing.write_github_output(output, decision.facts)
+            self.assertEqual(
+                output.read_text(encoding="utf-8").splitlines(),
+                [
+                    f"tag={TAG}",
+                    f"commit={self.git.reviewed}",
+                    "version=1.2.3",
+                    "prerelease=false",
+                ],
+            )
+
+            refusal_output = root / "refusal-output"
+            refusal_output.write_text("sentinel\n", encoding="utf-8")
+            event_path = root / "refusal-event.json"
+            event_path.write_text(
+                json.dumps(self.dispatch_event(action="other")),
+                encoding="utf-8",
+            )
+            code = routing.main(
+                [
+                    "--event",
+                    str(event_path),
+                    "--repository",
+                    REPOSITORY,
+                    "--git-repo",
+                    str(self.git.root),
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    "1",
+                    "--sha",
+                    self.git.tip,
+                    "--workflow-sha",
+                    self.git.tip,
+                    "--github-output",
+                    str(refusal_output),
+                ],
+                transport=self.valid_transport(),
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(
+                refusal_output.read_text(encoding="utf-8"), "sentinel\n"
+            )
+
+            accepted_output = root / "accepted-output"
+            accepted_event = root / "accepted-event.json"
+            accepted_event.write_text(
+                json.dumps(self.dispatch_event()), encoding="utf-8"
+            )
+            transport = self.valid_transport()
+            transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+                self.dispatch_run_payload()
+            )
+            code = routing.main(
+                [
+                    "--event",
+                    str(accepted_event),
+                    "--repository",
+                    REPOSITORY,
+                    "--git-repo",
+                    str(self.git.root),
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    "1",
+                    "--sha",
+                    self.git.tip,
+                    "--workflow-sha",
+                    self.git.tip,
+                    "--github-output",
+                    str(accepted_output),
+                ],
+                transport=transport,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(
+                accepted_output.read_text(encoding="utf-8").splitlines(),
+                [
+                    f"tag={TAG}",
+                    f"commit={self.git.reviewed}",
+                    "version=1.2.3",
+                    "prerelease=false",
+                ],
+            )
+
+            for index, (release_tag, expected_version, expected_prerelease) in enumerate(
+                (
+                    ("v1.2.3+build-1", "1.2.3+build-1", "false"),
+                    ("v1.2.3-rc.1", "1.2.3-rc.1", "true"),
+                )
+            ):
+                with self.subTest(release_tag=release_tag):
+                    self.git.lightweight_tag(release_tag, self.git.reviewed)
+                    variant = self.dispatch_decision(
+                        event=self.dispatch_event(tag=release_tag)
+                    )
+                    self.assertTrue(variant.authorized, variant.detail)
+                    variant_output = root / f"variant-{index}"
+                    routing.write_github_output(variant_output, variant.facts)
+                    self.assertEqual(
+                        variant_output.read_text(
+                            encoding="utf-8"
+                        ).splitlines(),
+                        [
+                            f"tag={release_tag}",
+                            f"commit={self.git.reviewed}",
+                            f"version={expected_version}",
+                            f"prerelease={expected_prerelease}",
+                        ],
+                    )
+
+    def test_dispatch_output_injection_and_diagnostics_are_safe(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        injected = TAG + "\nleak=true"
+        decision = self.dispatch_decision(
+            event=self.dispatch_event(tag=injected)
+        )
+        self.assert_refused(decision, trust.Refusal.TAG_INVALID)
+        for value in (TAG, REPOSITORY, OWNER):
+            self.assertNotIn(value, decision.detail)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "output"
+            output.write_text("sentinel\n", encoding="utf-8")
+            with self.assertRaises(trust.ReleaseRefusal):
+                routing.write_github_output(
+                    output,
+                    {
+                        "tag": injected,
+                        "tag_commit": self.git.reviewed,
+                        "version": "1.2.3",
+                        "prerelease": False,
+                    },
+                )
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
+
+        transport = self.valid_transport()
+        secret_name = next(iter(trust.PRODUCTION_SECRETS))
+        transport.responses[trust.repository_secrets_api(REPOSITORY)] = {
+            "total_count": 1,
+            "secrets": [{"name": secret_name}],
+        }
+        decision = self.dispatch_decision(transport=transport)
+        self.assert_refused(decision, trust.Refusal.SECRETS_REPOSITORY_LEAK)
+        for value in (TAG, REPOSITORY, OWNER, secret_name):
+            self.assertNotIn(value, decision.detail)
 
     # Real git smoke tests -------------------------------------------------
 
