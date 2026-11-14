@@ -2716,7 +2716,7 @@ test("post-repair QuickFill=false refusal refreshes the source, rejects the rout
   );
   // The exact synthetic row is clicked physically, then one unique route tab
   // is discovered and attached before any native UI wait.
-  const rowClick = at("await popup.click(target);");
+  const rowClick = at("await popup.click(target, { expectedRouteClose: true });");
   const unique = at('throw Error("Route page must be unique");');
   const attach = at("route = await attachPopup(opened);");
   const native = at("const reviewShowing = async () => {");
