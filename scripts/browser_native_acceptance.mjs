@@ -19,6 +19,11 @@ import {
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
 
+import {
+  sanitizeFailureReport,
+  sanitizeNativeSnapshot,
+} from "./browser_native_diagnostics.mjs";
+
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
@@ -840,21 +845,17 @@ try {
     "Changed checkout document did not finish",
     "Changed checkout document received a value",
   ];
-  const report = {
+  const rawReport = {
     reason: safeReasons.includes(error?.message)
       ? error.message
       : "unclassified acceptance failure",
-    frames:
-      typeof error?.stack === "string"
-        ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
-        : [],
     stage,
     popup: { available: false },
     native: { available: false },
   };
   if (lastPopup) {
     try {
-      report.popup = {
+      rawReport.popup = {
         available: true,
         status: popupStatusKind(await lastPopup.text("#status")),
         refreshDisabled: await lastPopup.disabled("#refresh"),
@@ -871,13 +872,17 @@ try {
   } catch {}
   if (nativeInput) {
     try {
-      report.native = { available: true, ...nativeInput([], true, true) };
+      const nativeSnapshot = nativeInput([], true, true);
+      rawReport.native = sanitizeNativeSnapshot({
+        ...nativeSnapshot,
+        available: true,
+      });
       if (browserScreenshotsAllowed(stage)) {
         execFileSync(
           "import",
           [
             "-window",
-            String(report.native.window),
+            String(nativeSnapshot.window),
             join(diagnostics, "failure-native.png"),
           ],
           { env, stdio: "ignore" },
@@ -885,13 +890,14 @@ try {
       }
     } catch {}
   }
+  const report = sanitizeFailureReport(rawReport, safeReasons);
   writeFileSync(
     join(diagnostics, "failure.json"),
     JSON.stringify(report, null, 2) + "\n",
     { mode: 0o600 },
   );
   console.error("Native browser diagnostic: " + JSON.stringify(report));
-  console.error("Synthetic diagnostic directory: " + diagnostics);
+  console.error("Synthetic diagnostic directory retained locally");
   throw Error("Native browser acceptance failed at " + stage);
 } finally {
   if (browser) await browser.close();

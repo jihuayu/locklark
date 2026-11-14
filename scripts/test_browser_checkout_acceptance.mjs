@@ -17,6 +17,10 @@ import {
   assertPrivateText,
   privacyDiagnostic,
 } from "./browser_save_acceptance.mjs";
+import {
+  sanitizeFailureReport,
+  sanitizeNativeSnapshot,
+} from "./browser_native_diagnostics.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
 const CARD_ORIGIN = "https://checkout.locklark.test:8443";
@@ -369,4 +373,85 @@ test("artifact privacy failure reports class/source after primary", () => {
   } finally {
     rmSync(state, { recursive: true, force: true });
   }
+});
+
+
+test("dual failure public output has no raw native data or path", () => {
+  const rawNative = {
+    available: true,
+    window: 424242,
+    x: 17,
+    y: 19,
+    clicks: [{ x: 1, y: 2, actor: "synthetic-actor" }],
+    controls: {
+      "批准本次填充": [
+        { enabled: true, showing: true, x: 3, y: 4, width: 5, height: 6 },
+      ],
+    },
+  };
+  const safeNative = sanitizeNativeSnapshot(rawNative);
+  assert.deepEqual(safeNative, {
+    available: true,
+    clicks: 1,
+    controls: 1,
+    enabled: 1,
+    showing: 1,
+  });
+  const rawReport = {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-stale:old-approval",
+    frames: ["/tmp/locklark-private/scripts/browser_native_acceptance.mjs:1:1"],
+    diagnostics: "/tmp/locklark-private",
+    popup: {
+      available: true,
+      status: "native-pending",
+      refreshDisabled: false,
+      candidates: 2,
+      path: "/tmp/locklark-private/failure-popup.png",
+    },
+    native: rawNative,
+  };
+  const report = sanitizeFailureReport(rawReport, [
+    "Synthetic checkout failure",
+  ]);
+  assert.deepEqual(report, {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-stale:old-approval",
+    popup: {
+      available: true,
+      status: "native-pending",
+      refreshDisabled: false,
+      candidates: 2,
+    },
+    native: {
+      available: true,
+      clicks: 1,
+      controls: 1,
+      enabled: 1,
+      showing: 1,
+    },
+  });
+  assert.deepEqual(
+    sanitizeFailureReport({ ...rawReport, native: safeNative }, [
+      "Synthetic checkout failure",
+    ]),
+    report,
+  );
+  const failure = privacyFailure(() =>
+    assertPrivateText('{"timestamp":731,"mystery":731}', PRIVACY_FIXTURE, {
+      scan_source: "artifact",
+      artifact_class: "json",
+    }),
+  );
+  const privacy = privacyDiagnostic(failure, true, {
+    scan_source: "artifact",
+  });
+  assert.equal(privacy.primary_error_seen, true);
+  assert.equal(privacy.context_class, "unknown");
+  const output = JSON.stringify({ report, privacy });
+  assert.match(output, /Synthetic checkout failure/);
+  assert.doesNotMatch(
+    output,
+    /\/tmp|locklark-private|424242|"window"|"x"|"y"|actor|\.png|731|4826|654321|synthetic-private-password/,
+  );
 });
