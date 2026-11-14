@@ -151,9 +151,25 @@ func (a *App) notifyBrowserBrokerLocked() {
 	}
 }
 
+// brokerCurrent reports whether the exact session and epoch captured at
+// request entry are still the broker's current unlocked binding.
+func (a *App) brokerCurrent(s *personal.Session, epoch uint64) bool {
+	a.brokerMu.Lock()
+	defer a.brokerMu.Unlock()
+	return s != nil && s.Unlocked() && a.brokerSession == s && a.brokerEpoch == epoch
+}
+
 // handleCLIRun verifies the desktop vault, requests native approval, then
 // extracts pinned targets in one authenticated view.
 func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
+	if ctx == nil {
+		_ = a.recordCLIActivity("failed", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
+	// The absolute lifetime starts here and is never renewed. An earlier
+	// caller deadline remains authoritative through WithTimeout.
+	ctx, cancel := context.WithTimeout(ctx, browserhost.CLIRunApprovalMaxLifetime)
+	defer cancel()
 	a.brokerMu.Lock()
 	s := a.brokerSession
 	epoch := a.brokerEpoch
@@ -186,21 +202,42 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 		_ = a.recordCLIActivity("refused", peer, req)
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
+	// Approval is not disclosure. A deadline that elapsed while the prompt was
+	// open, or a lock/epoch change, must fail closed before extraction.
+	if ctx.Err() != nil || !a.brokerCurrent(s, epoch) {
+		_ = a.recordCLIActivity("failed", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
 	values, e := s.ExtractCLIBrokerTargets(req.Targets)
 	if e != nil {
 		_ = a.recordCLIActivity("failed", peer, req)
 		return browserhost.BrokerCLIResponse{}, e
 	}
+	// Recheck immediately before the audited return so a lock or deadline
+	// racing extraction cannot disclose values.
+	if ctx.Err() != nil || !a.brokerCurrent(s, epoch) {
+		clear(values)
+		_ = a.recordCLIActivity("failed", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
 	if e := a.recordCLIActivity("approved", peer, req); e != nil {
-		for key := range values {
-			delete(values, key)
-		}
+		clear(values)
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
 	return browserhost.BrokerCLIResponse{V: 1, Values: values}, nil
 }
 
 func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest, session *personal.Session, epoch uint64) (bool, error) {
+	if ctx == nil {
+		return false, errCLIRunRefused
+	}
+	// One absolute cap. A shorter caller deadline wins; no prompt activity
+	// extends the deadline.
+	ctx, cancel := context.WithTimeout(ctx, browserhost.CLIRunApprovalMaxLifetime)
+	defer cancel()
+	if ctx.Err() != nil {
+		return false, errCLIRunRefused
+	}
 	p := &cliRunPending{peer: peer, request: req, decision: make(chan bool, 1)}
 	var b [16]byte
 	if _, e := rand.Read(b[:]); e != nil {
@@ -239,6 +276,11 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 				a.win.Invalidate()
 			}
 		})
+		// A decision delivered at or after the deadline is stale. The exact
+		// session/epoch binding must still be current as well.
+		if ctx.Err() != nil || !a.brokerCurrent(session, epoch) {
+			return false, errCLIRunRefused
+		}
 		return approved, nil
 	case <-ctx.Done():
 		a.brokerMu.Lock()

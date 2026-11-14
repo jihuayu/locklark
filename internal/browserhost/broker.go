@@ -17,6 +17,11 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
+// CLIRunApprovalMaxLifetime bounds one legacy CLI approval from the request
+// frame through the response. It is absolute: activity never extends it, and a
+// caller deadline earlier than this cap remains authoritative.
+const CLIRunApprovalMaxLifetime = 60 * time.Second
+
 // Peer identifies the authenticated local OS peer of a broker connection.
 type Peer struct {
 	User    string
@@ -315,24 +320,63 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: "refused"})
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), CLIRunApprovalMaxLifetime)
+	defer cancel()
+
+	// The legacy CLI wire contract sends one request and then waits. Any read
+	// after that frame -- EOF, a fully closed connection, or an unexpected byte
+	// -- means the client is gone or violated the contract. Cancel the native
+	// approval immediately so its exact pending review is retired instead of
+	// lingering until the absolute lifetime expires.
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		var extra [1]byte
+		_, _ = conn.Read(extra[:])
+		cancel()
+	}()
+
 	resp := CLIRunBrokerResponse{V: 1}
+	var callbackValues map[string]string
 	if b.callbacks.HandleCLIRun != nil {
-		out, err := b.callbacks.HandleCLIRun(context.Background(), peer, req)
-		if err != nil {
+		out, err := b.callbacks.HandleCLIRun(ctx, peer, req)
+		callbackValues = out.Values
+		switch {
+		case ctx.Err() != nil:
+			// A disconnect, unexpected input, or the absolute deadline wins
+			// over a late callback result. Values are cleared below and never
+			// reach the wire.
+			resp.Error = "refused"
+		case err != nil:
 			if errors.Is(err, ErrBrokerUnavailable) {
 				resp.Error = "unavailable"
 			} else {
 				resp.Error = "refused"
 			}
-		} else {
+		default:
 			resp.Values = out.Values
 		}
 	} else {
 		resp.Error = "unavailable"
 	}
+	// Recheck after approval and immediately before encoding/disclosure. This
+	// is the same absolute deadline; no activity renews it.
+	if ctx.Err() != nil {
+		resp.Values = nil
+		resp.Error = "refused"
+	}
 	writeCLIResponse(conn, resp)
-	for k := range resp.Values {
-		resp.Values[k] = ""
+	clearCLIResponseValues(callbackValues)
+	clearCLIResponseValues(resp.Values)
+	// Closing the connection unblocks the watcher; waiting for it proves no
+	// read goroutine outlives the request.
+	_ = conn.Close()
+	<-watchDone
+}
+
+func clearCLIResponseValues(values map[string]string) {
+	for key := range values {
+		values[key] = ""
 	}
 }
 
@@ -455,6 +499,11 @@ func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerRe
 	if ctx == nil || req.V != 1 || len(req.VaultPath) == 0 || len(req.Targets) < 1 || len(req.Targets) > 16 {
 		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
 	}
+	// The cap is absolute. A shorter caller deadline is preserved by
+	// WithTimeout and closes the connection below, which also cancels the
+	// desktop-side approval promptly.
+	ctx, cancel := context.WithTimeout(ctx, CLIRunApprovalMaxLifetime)
+	defer cancel()
 	endpoint, e := DefaultBrokerEndpoint()
 	if e != nil {
 		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
@@ -464,6 +513,11 @@ func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerRe
 		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
 	}
 	defer conn.Close()
+	// Context expiry interrupts a blocked frame read; without this the client
+	// would wait for the server's absolute lifetime even after its own caller
+	// deadline passed.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
 	if e = writeFrame(conn, hello); e != nil {
 		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
@@ -493,6 +547,12 @@ func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerRe
 			return CLIRunBrokerResponse{}, ErrBrokerUnavailable
 		}
 		return CLIRunBrokerResponse{}, errors.New(resp.Error)
+	}
+	if ctx.Err() != nil {
+		for key := range resp.Values {
+			resp.Values[key] = ""
+		}
+		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
 	}
 	return resp, nil
 }
