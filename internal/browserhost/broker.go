@@ -525,6 +525,7 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	stop := make(chan struct{})
 	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, callbackReq)
+	canceled := ctx.Err() != nil
 	// Everything the callback returned that is not transferred is cleared on
 	// every exit. Only a successful callback hands its prepared bytes over to
 	// resp; an error, a legacy-only or otherwise unaudited reply, and a reply
@@ -555,7 +556,12 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	// Only the exact transport/service-unavailable sentinel may select the
 	// explicit unavailable token; a wrapped copy of it (errors.Is), a refusal,
 	// a cancellation, a deadline, or any other callback error is a refusal.
+	// Cancellation observed before classification wins over a late success:
+	// the callback's valid prepared bytes and receipt must not cross after the
+	// client half-closed or the absolute deadline expired.
 	switch {
+	case canceled:
+		resp.Error = cliRunErrorRefused
 	case err == nil:
 		// Only the audited pair crosses: prepared bytes plus the canonical
 		// receipt, and only when the slots are exactly the requested ones as
@@ -576,6 +582,26 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		resp.Error = cliRunErrorUnavailable
 	default:
 		resp.Error = cliRunErrorRefused
+	}
+	// Recheck immediately before any secret frame can be written. A
+	// cancellation or expiry observed after classification also wins over a
+	// prepared success or an unavailable classification: clear the prepared
+	// buffers, the unused bound encoding, and the receipt, then send only the
+	// fixed refusal. No retry and no renewed deadline.
+	if ctx.Err() != nil {
+		if transferred {
+			clearCLIRunValueMap(resp.PreparedValues)
+		}
+		*resp = CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused}
+		clear(bound)
+		bound = nil
+		transferred = false
+		bindErr = errCLIRunResponse
+	}
+	// Bound the write by the original absolute deadline when one exists. It is
+	// never shorter than the caller's deadline and never renewed.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetWriteDeadline(deadline)
 	}
 	// writeCLIResponse neither modifies nor takes ownership of resp: it
 	// re-checks the response pair first, so values with an error, values
