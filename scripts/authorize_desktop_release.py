@@ -200,6 +200,11 @@ class Refusal(str, Enum):
     BRANCH_PROTECTION_UNKNOWN = "branch_protection_unknown"
     BRANCH_PROTECTION_INSUFFICIENT = "branch_protection_insufficient"
 
+    BRANCH_RULES_ABSENT = "branch_rules_absent"
+    BRANCH_RULES_UNREADABLE = "branch_rules_unreadable"
+    BRANCH_RULES_UNKNOWN = "branch_rules_unknown"
+    BRANCH_RULES_INSUFFICIENT = "branch_rules_insufficient"
+
     TAG_RULES_ABSENT = "tag_rules_absent"
     TAG_RULES_UNREADABLE = "tag_rules_unreadable"
     TAG_RULES_UNKNOWN = "tag_rules_unknown"
@@ -330,6 +335,18 @@ def branch_protection_api(repository: str, branch: str = DEFAULT_BRANCH) -> str:
 def rulesets_api(repository: str) -> str:
     return _paged(
         f"/repos/{repository}/rulesets?includes_parents=true&targets=tag"
+    )
+
+
+def branch_rulesets_api(repository: str) -> str:
+    """List branch-targeted rulesets, including parent-scope entries.
+
+    Parent-scoped details are read but never accepted as canonical repository
+    proof; the detail source must be this exact repository.
+    """
+
+    return _paged(
+        f"/repos/{repository}/rulesets?includes_parents=true&targets=branch"
     )
 
 
@@ -1314,7 +1331,7 @@ def _check_required_status_checks(protection: Mapping[str, object]) -> None:
         )
 
 
-def _check_pull_request_reviews(protection: Mapping[str, object]) -> None:
+def _check_pull_request_reviews(protection: Mapping[str, object]) -> int | None:
     reviews = protection.get("required_pull_request_reviews")
     if not isinstance(reviews, dict):
         _refuse(
@@ -1333,11 +1350,17 @@ def _check_pull_request_reviews(protection: Mapping[str, object]) -> None:
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
                 f"main review setting {field} is not enabled",
             )
+    # Official branch-protection GET examples may omit this field entirely.
+    # Absence is not evidence of an empty allowlist: it requires an independent
+    # canonical ruleset proof. A present value is still validated here, and a
+    # malformed or non-empty present value is refused without rescue.
+    if "bypass_pull_request_allowances" not in reviews:
+        return count
     bypass = reviews.get("bypass_pull_request_allowances")
     if not isinstance(bypass, dict):
         _refuse(
             Refusal.BRANCH_PROTECTION_INSUFFICIENT,
-            "main review bypass metadata is absent or malformed",
+            "main review bypass metadata is present but malformed",
         )
     expected = {"users", "teams", "apps"}
     if set(bypass) != expected:
@@ -1352,9 +1375,156 @@ def _check_pull_request_reviews(protection: Mapping[str, object]) -> None:
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
                 f"main review bypass allowance {key} is not empty",
             )
+    return None
 
 
-def _check_protection(transport: ReadOnlyTransport, repository: str) -> None:
+def _branch_ref_conditions_match(detail: Mapping[str, object]) -> bool:
+    conditions = detail.get("conditions")
+    if not isinstance(conditions, dict):
+        return False
+    ref_name = conditions.get("ref_name")
+    if not isinstance(ref_name, dict):
+        return False
+    return (
+        ref_name.get("include") == [f"refs/heads/{DEFAULT_BRANCH}"]
+        and ref_name.get("exclude") == []
+    )
+
+
+def _branch_pull_request_rule_matches(
+    detail: Mapping[str, object], required_review_count: int
+) -> bool:
+    rules = detail.get("rules")
+    if not isinstance(rules, list):
+        return False
+    pull_request_rules: list[Mapping[str, object]] = []
+    for rule in rules:
+        if not isinstance(rule, dict) or not isinstance(rule.get("type"), str):
+            return False
+        if rule["type"] == "pull_request":
+            pull_request_rules.append(rule)
+    if len(pull_request_rules) != 1:
+        return False
+    parameters = pull_request_rules[0].get("parameters")
+    if not isinstance(parameters, dict):
+        return False
+    count = parameters.get("required_approving_review_count")
+    if (
+        isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < required_review_count
+    ):
+        return False
+    return (
+        parameters.get("dismiss_stale_reviews_on_push") is True
+        and parameters.get("require_last_push_approval") is True
+    )
+
+
+def _check_classic_bypass_ruleset_proof(
+    transport: ReadOnlyTransport,
+    repository: str,
+    canonical_repository: str,
+    required_review_count: int,
+) -> None:
+    """Prove an absent classic bypass field with one canonical branch ruleset.
+
+    The list summaries are used only for positive ids. Target, enforcement,
+    source, conditions, rules, and bypass metadata are read from the detail and
+    must all be satisfied by one single repository-level ruleset.
+    """
+
+    payload = _api_call(
+        transport,
+        branch_rulesets_api(repository),
+        list_response=True,
+        absent=Refusal.BRANCH_RULES_ABSENT,
+        unreadable=Refusal.BRANCH_RULES_UNREADABLE,
+        unknown=Refusal.BRANCH_RULES_UNKNOWN,
+    )
+    summaries = _list_items(
+        payload,
+        key="rulesets",
+        reason=Refusal.BRANCH_RULES_UNKNOWN,
+        detail="branch ruleset list metadata is malformed",
+    )
+    if not summaries:
+        _refuse(Refusal.BRANCH_RULES_ABSENT, "repository has no branch rulesets")
+    ruleset_ids: list[int] = []
+    seen_ids: set[int] = set()
+    for raw_summary in summaries:
+        summary = _mapping(
+            raw_summary,
+            Refusal.BRANCH_RULES_UNKNOWN,
+            "branch ruleset summary is malformed",
+        )
+        ruleset_id = _positive_int(
+            summary.get("id"),
+            Refusal.BRANCH_RULES_UNKNOWN,
+            "branch ruleset id is malformed",
+        )
+        if ruleset_id in seen_ids:
+            _refuse(
+                Refusal.BRANCH_RULES_UNKNOWN,
+                "branch ruleset list contains duplicate ids",
+            )
+        seen_ids.add(ruleset_id)
+        ruleset_ids.append(ruleset_id)
+
+    for ruleset_id in ruleset_ids:
+        detail_payload = _api_call(
+            transport,
+            ruleset_api(repository, ruleset_id),
+            list_response=False,
+            absent=Refusal.BRANCH_RULES_UNKNOWN,
+            unreadable=Refusal.BRANCH_RULES_UNREADABLE,
+            unknown=Refusal.BRANCH_RULES_UNKNOWN,
+        )
+        detail = _mapping(
+            detail_payload,
+            Refusal.BRANCH_RULES_UNKNOWN,
+            "branch ruleset detail is malformed",
+        )
+        if (
+            _positive_int(
+                detail.get("id"),
+                Refusal.BRANCH_RULES_UNKNOWN,
+                "branch ruleset detail id is malformed",
+            )
+            != ruleset_id
+        ):
+            _refuse(
+                Refusal.BRANCH_RULES_UNKNOWN,
+                "branch ruleset detail id differs from the list entry",
+            )
+        # Parent-scoped and non-repository rulesets are never accepted as the
+        # canonical repository proof. They are read, then skipped.
+        if (
+            detail.get("source_type") != "Repository"
+            or detail.get("source") != canonical_repository
+        ):
+            continue
+        if detail.get("target") != "branch" or detail.get("enforcement") != "active":
+            continue
+        if not _branch_ref_conditions_match(detail):
+            continue
+        if not _branch_pull_request_rule_matches(detail, required_review_count):
+            continue
+        # The field must be explicitly present as an empty list. A missing or
+        # hidden field is not inferred to mean no bypass.
+        if detail.get("bypass_actors") != []:
+            continue
+        return
+
+    _refuse(
+        Refusal.BRANCH_RULES_INSUFFICIENT,
+        "no single canonical repository branch ruleset proves empty bypass",
+    )
+
+
+def _check_protection(
+    transport: ReadOnlyTransport, repository: str, canonical_repository: str
+) -> None:
     payload = _api_call(
         transport,
         branch_protection_api(repository),
@@ -1369,7 +1539,7 @@ def _check_protection(transport: ReadOnlyTransport, repository: str) -> None:
         "branch protection metadata is not an object",
     )
     _check_required_status_checks(protection)
-    _check_pull_request_reviews(protection)
+    required_review_count = _check_pull_request_reviews(protection)
     for field, expected in (
         ("enforce_admins", True),
         ("allow_force_pushes", False),
@@ -1388,6 +1558,13 @@ def _check_protection(transport: ReadOnlyTransport, repository: str) -> None:
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
                 f"main protection setting {field} is not fail-closed",
             )
+    if required_review_count is not None:
+        _check_classic_bypass_ruleset_proof(
+            transport,
+            repository,
+            canonical_repository,
+            required_review_count,
+        )
 
 
 def _covers_all_v_tags(detail: Mapping[str, object]) -> bool | None:
@@ -1795,7 +1972,7 @@ def _run_authorization(
         )
 
     default_branch_sha = _check_branch(transport, repository)
-    _check_protection(transport, repository)
+    _check_protection(transport, repository, repository_info.full_name)
     _check_tag_rules(transport, repository)
     _check_environment(transport, repository)
     _check_secrets(transport, repository, repository_info)

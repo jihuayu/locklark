@@ -45,8 +45,13 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
 4. The tag commit is an ancestor of the current protected default branch tip
    returned by the read-only branch API. The ancestry check uses the real
    local git object for the API tip with `git merge-base --is-ancestor`.
-5. `main` is protected with required status checks, admin enforcement, force
-   pushes disabled, and deletions disabled.
+5. `main` is protected with required status checks, required pull-request
+   reviews, admin enforcement, force pushes disabled, and deletions disabled.
+   A present classic `bypass_pull_request_allowances` field must be explicitly
+   empty. If the classic response omits that field, one single active canonical
+   repository branch ruleset must independently prove an explicitly empty
+   `bypass_actors` list and a `pull_request` rule at least as strict as the
+   classic review count.
 6. An active tag ruleset includes exactly `refs/tags/v*` and contains
    `deletion`, `update`, and `non_fast_forward` rules. Bare `v*`, broader
    patterns, extra include patterns, and exclusions are refused. Bypass
@@ -63,6 +68,18 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
    (including the optional `WINDOWS_CERTIFICATE` and
    `WINDOWS_CERTIFICATE_PASSWORD` pair if present) must not exist at
    repository or organization scope.
+
+### Scope limitation: ruleset bypass metadata may be invisible
+
+The classic branch-protection GET examples may omit
+`bypass_pull_request_allowances`. The validator does not infer an empty value
+from that omission; it requires an independent canonical branch-ruleset proof.
+GitHub may also omit or hide a ruleset's `bypass_actors` when the caller lacks
+write access to that ruleset. The validator requires an explicitly present,
+empty list. An invisible or missing field is refused, never treated as empty,
+and the read-only credential is never widened to obtain write access. This
+checkpoint proves only what the source metadata explicitly exposes; it makes no
+claim that an unseen bypass policy does not exist.
 
 ### Scope limitation: `v*` tag-name squatting is not prevented
 

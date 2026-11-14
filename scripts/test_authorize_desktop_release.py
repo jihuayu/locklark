@@ -326,6 +326,64 @@ class AuthorizationTests(unittest.TestCase):
             "allow_deletions": {"enabled": False},
         }
 
+    def classic_protection_without_bypass(self) -> dict[str, object]:
+        protection = self.valid_protection()
+        reviews = dict(protection["required_pull_request_reviews"])  # type: ignore[arg-type]
+        reviews.pop("bypass_pull_request_allowances", None)
+        protection["required_pull_request_reviews"] = reviews
+        return protection
+
+    def valid_branch_ruleset(
+        self,
+        *,
+        ruleset_id: int = 11,
+        review_count: int = 1,
+        source: str = REPOSITORY,
+        source_type: str = "Repository",
+        target: str = "branch",
+        enforcement: str = "active",
+    ) -> dict[str, object]:
+        return {
+            "id": ruleset_id,
+            "source_type": source_type,
+            "source": source,
+            "target": target,
+            "enforcement": enforcement,
+            "conditions": {
+                "ref_name": {
+                    "include": [f"refs/heads/{trust.DEFAULT_BRANCH}"],
+                    "exclude": [],
+                }
+            },
+            "bypass_actors": [],
+            "rules": [
+                {
+                    "type": "pull_request",
+                    "parameters": {
+                        "required_approving_review_count": review_count,
+                        "dismiss_stale_reviews_on_push": True,
+                        "require_last_push_approval": True,
+                    },
+                }
+            ],
+        }
+
+    def install_branch_rulesets(
+        self,
+        transport: FakeTransport,
+        details: list[dict[str, object]],
+        *,
+        summaries: list[dict[str, object]] | None = None,
+        detail_ids: list[int] | None = None,
+    ) -> None:
+        if summaries is None:
+            summaries = [{"id": detail["id"]} for detail in details]
+        if detail_ids is None:
+            detail_ids = [int(detail["id"]) for detail in details]
+        transport.responses[trust.branch_rulesets_api(REPOSITORY)] = summaries
+        for detail_id, detail in zip(detail_ids, details):
+            transport.responses[trust.ruleset_api(REPOSITORY, detail_id)] = detail
+
     def valid_transport(
         self,
         *,
@@ -430,6 +488,7 @@ class AuthorizationTests(unittest.TestCase):
         responses = self.valid_transport(owner_type=owner_type).responses
         paginated = {
             trust.rulesets_api(REPOSITORY),
+            trust.branch_rulesets_api(REPOSITORY),
             trust.environment_branch_policies_api(REPOSITORY),
             trust.environment_secrets_api(REPOSITORY),
             trust.repository_secrets_api(REPOSITORY),
@@ -1148,13 +1207,12 @@ class AuthorizationTests(unittest.TestCase):
                 },
             ),
             (
-                "missing bypass metadata",
+                "null bypass metadata",
                 {
                     **base,
                     "required_pull_request_reviews": {
-                        key: value
-                        for key, value in valid_reviews.items()
-                        if key != "bypass_pull_request_allowances"
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": None,
                     },
                 },
             ),
@@ -1240,6 +1298,341 @@ class AuthorizationTests(unittest.TestCase):
         transport.responses[trust.branch_protection_api(REPOSITORY)] = payload
         decision = self.authorize(transport=transport)
         self.assertTrue(decision.authorized, decision.detail)
+
+    def test_classic_bypass_absent_composed_ruleset_proof(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        classic = self.classic_protection_without_bypass()
+        detail = self.valid_branch_ruleset()
+        # Summaries contribute only positive ids. Target/enforcement here are
+        # deliberately misleading and must not affect the decision.
+        summary = {"id": 11, "target": "tag", "enforcement": "disabled"}
+
+        stdout = self.gh_fixture_stdout()
+        stdout[trust.branch_protection_api(REPOSITORY)] = json.dumps(classic)
+        stdout[trust.branch_rulesets_api(REPOSITORY)] = json.dumps([[summary]])
+        stdout[trust.ruleset_api(REPOSITORY, 11)] = json.dumps(detail)
+        decision, commands = self.authorize_via_gh(stdout)
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(decision.reason, trust.Refusal.AUTHORIZED)
+        branch_path = trust.branch_rulesets_api(REPOSITORY)
+        self.assertIn("targets=branch", branch_path)
+        branch_commands = [
+            command for command in commands if command[-1] == branch_path
+        ]
+        self.assertEqual(len(branch_commands), 1)
+        self.assertIn("--paginate", branch_commands[0])
+        self.assertIn("--slurp", branch_commands[0])
+
+        # Explicit present-empty classic bypass still needs no ruleset proof.
+        decision, _ = self.authorize_via_gh(self.gh_fixture_stdout())
+        self.assertTrue(decision.authorized, decision.detail)
+
+        # The same absent classic field without a branch ruleset is refused.
+        no_proof = self.gh_fixture_stdout()
+        no_proof[trust.branch_protection_api(REPOSITORY)] = json.dumps(classic)
+        decision, _ = self.authorize_via_gh(no_proof)
+        self.assert_refused(decision, trust.Refusal.BRANCH_RULES_ABSENT)
+
+    def test_present_classic_bypass_is_not_rescued_by_ruleset_proof(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        cases: list[tuple[str, object]] = [
+            ("null", None),
+            ("unknown allowances", {}),
+            (
+                "users bypass",
+                {"users": [{"login": "untrusted"}], "teams": [], "apps": []},
+            ),
+            (
+                "malformed users",
+                {"users": "nobody", "teams": [], "apps": []},
+            ),
+        ]
+        for label, bypass in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                protection = self.valid_protection()
+                reviews = dict(protection["required_pull_request_reviews"])  # type: ignore[arg-type]
+                reviews["bypass_pull_request_allowances"] = bypass
+                protection["required_pull_request_reviews"] = reviews
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    protection
+                )
+                self.install_branch_rulesets(
+                    transport, [self.valid_branch_ruleset()]
+                )
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                )
+                branch_path = trust.branch_rulesets_api(REPOSITORY)
+                self.assertFalse(
+                    any(path == branch_path for _, path in transport.calls)
+                )
+
+    def test_branch_ruleset_proof_rejects_unsafe_or_incomplete_details(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        classic = self.classic_protection_without_bypass()
+        cases: list[
+            tuple[
+                str,
+                dict[str, object],
+                list[dict[str, object]],
+                list[dict[str, object]] | None,
+                list[int] | None,
+                trust.Refusal,
+            ]
+        ] = []
+
+        def base_detail(**kwargs: object) -> dict[str, object]:
+            return copy.deepcopy(self.valid_branch_ruleset(**kwargs))  # type: ignore[arg-type]
+
+        def add(
+            label: str,
+            detail: dict[str, object],
+            expected: trust.Refusal = trust.Refusal.BRANCH_RULES_INSUFFICIENT,
+            *,
+            summaries: list[dict[str, object]] | None = None,
+            detail_ids: list[int] | None = None,
+            protection: dict[str, object] | None = None,
+        ) -> None:
+            cases.append(
+                (
+                    label,
+                    protection or classic,
+                    [detail],
+                    summaries,
+                    detail_ids,
+                    expected,
+                )
+            )
+
+        detail = base_detail()
+        detail.pop("bypass_actors")
+        add("missing bypass actors", detail)
+
+        detail = base_detail()
+        detail["bypass_actors"] = None
+        add("hidden bypass actors", detail)
+
+        detail = base_detail()
+        detail["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
+        add("nonempty bypass actors", detail)
+
+        detail = base_detail()
+        detail["source_type"] = "Organization"
+        detail["source"] = OWNER
+        add("parent source", detail)
+
+        detail = base_detail()
+        detail["source"] = "other/repo"
+        add("different repository source", detail)
+
+        detail = base_detail(ruleset_id=12)
+        add(
+            "detail id mismatch",
+            detail,
+            trust.Refusal.BRANCH_RULES_UNKNOWN,
+            summaries=[{"id": 11}],
+            detail_ids=[11],
+        )
+
+        detail = base_detail()
+        detail["conditions"] = {
+            "ref_name": {"include": ["refs/heads/release"], "exclude": []}
+        }
+        add("wrong branch include", detail)
+
+        detail = base_detail()
+        detail["conditions"] = {
+            "ref_name": {
+                "include": [f"refs/heads/{trust.DEFAULT_BRANCH}"],
+                "exclude": ["refs/heads/main"],
+            }
+        }
+        add("branch exclusion", detail)
+
+        detail = base_detail()
+        detail["target"] = "tag"
+        add("tag target detail", detail)
+
+        detail = base_detail()
+        detail["enforcement"] = "disabled"
+        add("disabled ruleset", detail)
+
+        detail = base_detail()
+        detail["enforcement"] = "evaluate"
+        add("evaluate ruleset", detail)
+
+        classic_two = copy.deepcopy(classic)
+        reviews_two = dict(classic_two["required_pull_request_reviews"])  # type: ignore[arg-type]
+        reviews_two["required_approving_review_count"] = 2
+        classic_two["required_pull_request_reviews"] = reviews_two
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = 1
+        add("proof count below classic", detail, protection=classic_two)
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = True
+        add("boolean proof count", detail)
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = 0
+        add("zero proof count", detail)
+
+        detail = base_detail()
+        detail["rules"] = []
+        add("missing pull request rule", detail)
+
+        detail = base_detail()
+        detail["rules"][0].pop("parameters")
+        add("missing rule parameters", detail)
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "dismiss_stale_reviews_on_push"
+        ] = False
+        add("dismiss stale disabled", detail)
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "require_last_push_approval"
+        ] = False
+        add("last push approval disabled", detail)
+
+        detail = base_detail()
+        detail["rules"][0]["parameters"].pop(  # type: ignore[index]
+            "require_last_push_approval"
+        )
+        add("missing last push approval", detail)
+
+        detail = base_detail()
+        detail["rules"].append(copy.deepcopy(detail["rules"][0]))
+        add("multiple pull request rules", detail)
+
+        first = base_detail(ruleset_id=11)
+        first["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
+        second = base_detail(ruleset_id=12)
+        second["rules"] = []
+        cases.append(
+            (
+                "split proof across rulesets",
+                classic,
+                [first, second],
+                None,
+                None,
+                trust.Refusal.BRANCH_RULES_INSUFFICIENT,
+            )
+        )
+
+        detail = base_detail()
+        cases.append(
+            (
+                "duplicate summary ids",
+                classic,
+                [detail],
+                [{"id": 11}, {"id": 11}],
+                [11],
+                trust.Refusal.BRANCH_RULES_UNKNOWN,
+            )
+        )
+
+        for (
+            label,
+            protection,
+            details,
+            summaries,
+            detail_ids,
+            expected,
+        ) in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    copy.deepcopy(protection)
+                )
+                self.install_branch_rulesets(
+                    transport,
+                    details,
+                    summaries=summaries,
+                    detail_ids=detail_ids,
+                )
+                self.assert_refused(
+                    self.authorize(transport=transport), expected
+                )
+
+    def test_branch_ruleset_proof_transport_errors_are_fixed_enums(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        classic = self.classic_protection_without_bypass()
+        cases: list[tuple[str, str, object, trust.Refusal]] = [
+            (
+                "list absent",
+                "list",
+                trust.ApiResponse(404, None),
+                trust.Refusal.BRANCH_RULES_ABSENT,
+            ),
+            (
+                "list empty",
+                "list",
+                [],
+                trust.Refusal.BRANCH_RULES_ABSENT,
+            ),
+            (
+                "list forbidden",
+                "list",
+                trust.ApiResponse(403, None),
+                trust.Refusal.BRANCH_RULES_UNREADABLE,
+            ),
+            (
+                "list unknown",
+                "list",
+                trust.ApiResponse(500, None),
+                trust.Refusal.BRANCH_RULES_UNKNOWN,
+            ),
+            (
+                "detail absent",
+                "detail",
+                trust.ApiResponse(404, None),
+                trust.Refusal.BRANCH_RULES_UNKNOWN,
+            ),
+            (
+                "detail forbidden",
+                "detail",
+                trust.ApiResponse(403, None),
+                trust.Refusal.BRANCH_RULES_UNREADABLE,
+            ),
+            (
+                "detail unknown",
+                "detail",
+                trust.ApiResponse(500, None),
+                trust.Refusal.BRANCH_RULES_UNKNOWN,
+            ),
+        ]
+        for label, endpoint, response, expected in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    copy.deepcopy(classic)
+                )
+                if endpoint == "list":
+                    transport.responses[trust.branch_rulesets_api(REPOSITORY)] = (
+                        response
+                    )
+                else:
+                    transport.responses[trust.branch_rulesets_api(REPOSITORY)] = [
+                        {"id": 11}
+                    ]
+                    transport.responses[trust.ruleset_api(REPOSITORY, 11)] = (
+                        response
+                    )
+                self.assert_refused(
+                    self.authorize(transport=transport), expected
+                )
 
     def test_unprotected_branch_metadata_is_refused(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
@@ -1713,6 +2106,7 @@ class AuthorizationTests(unittest.TestCase):
             trust.branch_api(REPOSITORY),
             trust.branch_protection_api(REPOSITORY),
             trust.rulesets_api(REPOSITORY),
+            trust.branch_rulesets_api(REPOSITORY),
             trust.ruleset_api(REPOSITORY, 7),
             trust.environment_api(REPOSITORY),
             trust.environment_branch_policies_api(REPOSITORY),
