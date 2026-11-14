@@ -24,6 +24,10 @@ import {
   sanitizeNativeSnapshot,
 } from "./browser_native_diagnostics.mjs";
 import { runNativeMain } from "./browser_native_error_boundary.mjs";
+import {
+  cleanupOwnedState,
+  listenLoopback,
+} from "./browser_native_setup.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
@@ -36,6 +40,10 @@ import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteC
 import { requirePrebuiltChromium } from "./browser_extension_prebuilt.mjs";
 
 async function main() {
+let ownedState = null;
+let ownedServer = null;
+let setupComplete = false;
+try {
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 
 const scanController = captureControllerOutput();
@@ -62,6 +70,7 @@ assert(
   "Unsupported acceptance failure stage",
 );
 const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
+ownedState = state;
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 let prebuilt;
 try {
@@ -173,8 +182,10 @@ const server = createServer(
     );
   },
 );
-await new Promise((r) => server.listen(0, "127.0.0.1", r));
+ownedServer = server;
+await listenLoopback(server);
 const origin = "https://login.locklark.test:" + server.address().port;
+setupComplete = true;
 let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -934,6 +945,17 @@ console.log(
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );
 console.log("Private synthetic artifacts: " + state);
+} catch (error) {
+  if (!setupComplete) {
+    try {
+      if (ownedServer && ownedServer.listening) {
+        await new Promise((resolve) => ownedServer.close(() => resolve()));
+      }
+    } catch {}
+    cleanupOwnedState(ownedState);
+  }
+  throw error;
+}
 }
 
 await runNativeMain(main);

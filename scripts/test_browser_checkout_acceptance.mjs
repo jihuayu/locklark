@@ -3,7 +3,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -617,4 +618,69 @@ test("normal main boundary hides a synthetic dual failure", () => {
     result.stdout + result.stderr,
     /731|\/tmp\/locklark-private|actor|Error:|\bat /,
   );
+});
+
+
+test("normal main catches local listen failure and cleans owned setup", async () => {
+  const blocker = createNetServer();
+  await new Promise((resolve, reject) => {
+    blocker.once("error", reject);
+    blocker.listen(0, "127.0.0.1", resolve);
+  });
+  const port = blocker.address().port;
+  const state = mkdtempSync("/tmp/locklark-browser-acceptance-listen-");
+  writeFileSync(join(state, "diagnostics-private.log"), "synthetic");
+  const boundary = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const setup = new URL("./browser_native_setup.mjs", import.meta.url).href;
+  const child = [
+    'import { createServer } from "node:net";',
+    `import { runNativeMain } from ${JSON.stringify(boundary)};`,
+    `import { cleanupOwnedState, listenLoopback } from ${JSON.stringify(setup)};`,
+    "await runNativeMain(async () => {",
+    "  const state = process.env.LOCKLARK_TEST_OWNED_STATE;",
+    "  const server = createServer();",
+    "  let rejected = false;",
+    "  try {",
+    "    await listenLoopback(server, Number(process.env.LOCKLARK_TEST_LISTEN_PORT));",
+    "  } catch {",
+    "    rejected = true;",
+    "  }",
+    '  if (rejected) console.log("listen: rejected");',
+    "  if (server.listening) {",
+    "    await new Promise((resolve) => server.close(() => resolve()));",
+    "  }",
+    "  cleanupOwnedState(state);",
+    '  throw new Error("raw canary 731 /tmp/locklark-browser-acceptance-listen actor stack");',
+    "});",
+  ].join("\n");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", child],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LOCKLARK_TEST_LISTEN_PORT: String(port),
+          LOCKLARK_TEST_OWNED_STATE: state,
+        },
+      },
+    );
+    assert.equal(result.status, 1);
+    assert.equal(result.signal, null);
+    assert.match(result.stdout, /listen: rejected/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+    assert.equal(result.stderr, "Native browser acceptance failed\n");
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /731|\/tmp\/locklark-browser-acceptance-listen|actor|Error:|\bat /,
+    );
+    assert.equal(existsSync(state), false);
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+    rmSync(state, { recursive: true, force: true });
+  }
 });
