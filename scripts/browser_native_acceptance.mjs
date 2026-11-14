@@ -1,11 +1,11 @@
 // External end-to-end acceptance: actual extension action, native messaging,
 // MyGo UI input, and a controlled HTTPS document. No product test bypasses.
 import { createRequire } from "node:module";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import {
@@ -248,7 +248,56 @@ assert(
     ),
   "Unsupported acceptance failure stage",
 );
-const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
+function privateStateParent() {
+  const value = process.env.LOCKLARK_TEST_PRIVATE_STATE_PARENT;
+  if (value === undefined) return null;
+  try {
+    if (
+      !isAbsolute(value) ||
+      resolve(value) !== value ||
+      realpathSync(value) !== value ||
+      typeof process.geteuid !== "function"
+    ) {
+      throw Error();
+    }
+    const info = lstatSync(value);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      info.uid !== process.geteuid() ||
+      (info.mode & 0o777) !== 0o700
+    ) {
+      throw Error();
+    }
+    return value;
+  } catch {
+    throw Error("Private state parent invalid");
+  }
+}
+
+function createPrivateState() {
+  const parent = privateStateParent();
+  if (parent === null) {
+    return mkdtempSync("/tmp/locklark-browser-acceptance-");
+  }
+  try {
+    const created = mkdtempSync(join(parent, "locklark-browser-acceptance-"));
+    const info = lstatSync(created);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      info.uid !== process.geteuid() ||
+      (info.mode & 0o777) !== 0o700
+    ) {
+      throw Error();
+    }
+    return created;
+  } catch {
+    throw Error("Private state parent invalid");
+  }
+}
+
+const state = createPrivateState();
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.

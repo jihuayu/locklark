@@ -4,12 +4,71 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 from browser_otp_hmac import codes
+
+
+def _owned_private_directory(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def require_private_parent(path):
+    """Accept only one canonical, owned, 0700 real directory."""
+    path = Path(path)
+    try:
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            raise ValueError
+    except (OSError, RuntimeError):
+        raise ValueError("privacy-state") from None
+    if not _owned_private_directory(path):
+        raise ValueError("privacy-state")
+    return path
+
+
+def find_private_child_state(parent):
+    """Find the one child state under the wrapper-owned parent, no global scan."""
+    parent = require_private_parent(parent)
+    try:
+        children = [
+            child
+            for child in parent.iterdir()
+            if child.name.startswith("locklark-browser-acceptance-")
+        ]
+    except OSError:
+        raise ValueError("privacy-state") from None
+    if len(children) != 1:
+        raise ValueError("privacy-state")
+    child = require_private_parent(children[0])
+    vault = child / "vault"
+    if not _owned_private_directory(vault):
+        raise ValueError("privacy-state")
+    fixture = vault / "fixture.json"
+    try:
+        info = fixture.lstat()
+    except OSError:
+        raise ValueError("privacy-state") from None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise ValueError("privacy-state")
+    return child
 
 
 def check_output(raw, fixture, first, last):
@@ -38,7 +97,12 @@ def main():
     script = "browser_native_acceptance.mjs" if args.engine == "chromium" else "browser_firefox_native_acceptance.mjs"
     state = Path(tempfile.mkdtemp(prefix="locklark-browser-otp-privacy-"))
     os.chmod(state, 0o700)
-    environment = dict(os.environ, LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments")
+    require_private_parent(state)
+    environment = dict(
+        os.environ,
+        LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments",
+        LOCKLARK_TEST_PRIVATE_STATE_PARENT=str(state),
+    )
     first = time.time()
     with (state / "controller.log").open("xb") as log:
         os.chmod(log.name, 0o600)
@@ -61,18 +125,9 @@ def main():
         raise ValueError("privacy-failure-stage")
     if args.engine == "chromium":
         # The public failure console intentionally no longer prints the private
-        # diagnostics path. This test owns the just-started process, so it can
-        # locate the unique state directory it created without reading values.
-        candidates = []
-        for candidate in Path("/tmp").glob("locklark-browser-acceptance-*"):
-            try:
-                if (candidate / "vault/fixture.json").is_file() and candidate.stat().st_mtime >= first - 1:
-                    candidates.append(candidate)
-            except OSError:
-                continue
-        if len(candidates) != 1:
-            raise ValueError("privacy-state")
-        private = candidates[0]
+        # diagnostics path. The wrapper-owned state directory is this run's
+        # exclusive parent, so only that parent is inspected and validated.
+        private = find_private_child_state(state)
     else:
         marker = r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)"
         match = re.search(marker, text)
@@ -89,7 +144,7 @@ def main():
         if manifest.exists() or manifest.is_symlink():
             raise ValueError("privacy-manifest")
     print("PASS: real " + args.engine + " OTP argument failure exits 1; full controller canary scan, no OTP screenshots")
-    print("Private fault artifacts: " + str(state))
+    print("Private fault artifacts: [private]")
 
 
 if __name__ == "__main__":
