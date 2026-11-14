@@ -8,13 +8,18 @@ export const PREBUILT_ERROR = "prebuilt browser extension input rejected";
 export const PREPARED_DIR_ENV = "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR";
 export const CHROMIUM_ENV = "LOCKLARK_BROWSER_EXTENSION_CHROMIUM";
 export const FIREFOX_ENV = "LOCKLARK_BROWSER_EXTENSION_FIREFOX";
+export const SAFARI_ENV = "LOCKLARK_BROWSER_EXTENSION_SAFARI";
+export const FLAG_ENV = "LOCKLARK_BROWSER_REQUIRE_PREBUILT";
+const PREBUILT_KEYS = [FLAG_ENV, PREPARED_DIR_ENV, CHROMIUM_ENV, FIREFOX_ENV, SAFARI_ENV];
 
 function fail() {
   throw new Error(PREBUILT_ERROR);
 }
 
 export function requirePrebuiltExtension(root, product, env = process.env) {
-  if (env.LOCKLARK_BROWSER_REQUIRE_PREBUILT !== "1") return null;
+  const configured = PREBUILT_KEYS.some((key) => Object.hasOwn(env, key));
+  if (!configured) return null;
+  if (env[FLAG_ENV] !== "1") fail();
   const prepared = env[PREPARED_DIR_ENV] || "";
   const chromium = env[CHROMIUM_ENV] || "";
   const firefox = env[FIREFOX_ENV] || "";
@@ -23,21 +28,27 @@ export function requirePrebuiltExtension(root, product, env = process.env) {
   const dist = product === "chromium" ? chromium : product === "firefox" ? firefox : "";
   if (!dist) fail();
   const selected = resolve(root, dist);
+  const safari = env[SAFARI_ENV];
+  if (Object.hasOwn(env, SAFARI_ENV) && (!safari || !isAbsolute(safari))) fail();
+  const checks = [[product, selected]];
+  if (Object.hasOwn(env, SAFARI_ENV)) checks.push(["safari", resolve(root, safari)]);
   try {
-    execFileSync(env.PYTHON || "python3", [
-      "-m", "browserrelease.prebuilt",
-      "--product", product,
-      "--prepared-dir", prepared,
-      "--dist", selected,
-    ], {
-      cwd: root,
-      env: {
-        ...env,
-        PYTHONPATH: join(root, "scripts"),
-        PYTHONDONTWRITEBYTECODE: "1",
-      },
-      stdio: ["ignore", "ignore", "ignore"],
-    });
+    for (const [checkedProduct, checkedDist] of checks) {
+      execFileSync("python3", [
+        "-m", "browserrelease.prebuilt",
+        "--product", checkedProduct,
+        "--prepared-dir", prepared,
+        "--dist", checkedDist,
+      ], {
+        cwd: root,
+        env: {
+          ...env,
+          PYTHONPATH: join(root, "scripts"),
+          PYTHONDONTWRITEBYTECODE: "1",
+        },
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    }
   } catch {
     fail();
   }

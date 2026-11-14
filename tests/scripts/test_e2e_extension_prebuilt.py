@@ -50,10 +50,13 @@ class PrebuiltHarnessTests(unittest.TestCase):
             ],
         )
 
-    def test_missing_partial_and_failure_are_fixed(self):
+    def test_missing_partial_malformed_and_failure_are_fixed(self):
         for overrides in (
             {"LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": ""},
             {"LOCKLARK_BROWSER_EXTENSION_FIREFOX": ""},
+            {"LOCKLARK_BROWSER_REQUIRE_PREBUILT": "0"},
+            {"LOCKLARK_BROWSER_REQUIRE_PREBUILT": "true"},
+            {"LOCKLARK_BROWSER_EXTENSION_SAFARI": ""},
         ):
             with self.subTest(overrides=overrides), mock.patch.dict(
                 os.environ, self.env(**overrides), clear=True
@@ -61,6 +64,18 @@ class PrebuiltHarnessTests(unittest.TestCase):
                 with self.assertRaises(AssertionError) as raised:
                     self.ctx._prebuilt_extension_paths()
                 self.assertEqual(str(raised.exception), PREBUILT_EXTENSION_ERROR)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(self.ctx._prebuilt_extension_paths())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": str(self.tmp / "prepared"),
+                "LOCKLARK_BROWSER_EXTENSION_CHROMIUM": str(self.tmp / "chromium"),
+            },
+            clear=True,
+        ):
+            with self.assertRaises(AssertionError):
+                self.ctx._prebuilt_extension_paths()
         with mock.patch.dict(os.environ, self.env(), clear=True), mock.patch(
             "browserrelease.prebuilt.verify_prebuilt",
             side_effect=ReleaseError("private"),

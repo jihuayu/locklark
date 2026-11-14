@@ -1610,12 +1610,12 @@ async function acceptEdgePairDisconnect(driver) {
   );
   mark("edge-pair-complete");
 }
-const prebuiltChromium = edgeManagerInstall
-  ? null
-  : requirePrebuiltExtension(root, "chromium");
 if (edgeManagerInstall) phase("fixture");
 startupMarkup(4);
 try {
+  const prebuiltChromium = edgeManagerInstall
+    ? null
+    : requirePrebuiltExtension(root, "chromium");
   // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
   const fixtureExecutable = browserFixtureExecutable({ go, root, env, state });

@@ -107,12 +107,22 @@ test("missing and partial env, and consumer mismatch, fail without build", async
   const helper = await import(pathToFileURL(join(root, "scripts/browser_extension_prebuilt.mjs")));
 
   assert.equal(helper.requirePrebuiltExtension(root, "chromium", {}), null);
+  const allPaths = {
+    LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: join(base, "prepared"),
+    LOCKLARK_BROWSER_EXTENSION_CHROMIUM: join(base, "chromium"),
+    LOCKLARK_BROWSER_EXTENSION_FIREFOX: join(base, "firefox"),
+  };
   for (const env of [
     { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1" },
-    {
-      LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
-      LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: join(base, "missing"),
-      LOCKLARK_BROWSER_EXTENSION_CHROMIUM: join(base, "chromium"),
+    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "0", ...allPaths },
+    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "true", ...allPaths },
+    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "" },
+    allPaths,
+    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1", ...allPaths,
+      LOCKLARK_BROWSER_EXTENSION_SAFARI: "" },
+    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
+      LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: allPaths.LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR,
+      LOCKLARK_BROWSER_EXTENSION_CHROMIUM: allPaths.LOCKLARK_BROWSER_EXTENSION_CHROMIUM,
     },
   ]) {
     assert.throws(
@@ -122,20 +132,27 @@ test("missing and partial env, and consumer mismatch, fail without build", async
   }
   assert.equal(existsSync(marker), false);
 
-  const fakePython = join(base, "fake-python");
-  writeFileSync(fakePython, "#!/bin/sh\nexit 1\n");
-  execFileSync("chmod", ["0755", fakePython]);
+  const fakeBin = join(base, "bin");
+  mkdirSync(fakeBin);
+  const called = join(base, "python3-called");
+  const wrong = join(base, "wrong-python-called");
+  writeFileSync(join(fakeBin, "python3"), `#!/bin/sh\nprintf called > ${JSON.stringify(called)}\nexit 1\n`);
+  execFileSync("chmod", ["0755", join(fakeBin, "python3")]);
+  const wrongPython = join(base, "wrong-python");
+  writeFileSync(wrongPython, `#!/bin/sh\nprintf wrong > ${JSON.stringify(wrong)}\nexit 0\n`);
+  execFileSync("chmod", ["0755", wrongPython]);
   const all = {
     LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
-    LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: join(base, "prepared"),
-    LOCKLARK_BROWSER_EXTENSION_CHROMIUM: join(base, "chromium"),
-    LOCKLARK_BROWSER_EXTENSION_FIREFOX: join(base, "firefox"),
-    PYTHON: fakePython,
+    ...allPaths,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    PYTHON: wrongPython,
   };
   assert.throws(
     () => helper.requirePrebuiltExtension(root, "chromium", all),
     { message: helper.PREBUILT_ERROR },
   );
+  assert.equal(existsSync(called), true);
+  assert.equal(existsSync(wrong), false);
   assert.equal(existsSync(marker), false);
 });
 
@@ -145,13 +162,14 @@ test("local default and native/Edge/T2 wiring remain explicit", () => {
   const harness = readFileSync(HARNESS, "utf8");
   const support = readFileSync(SUPPORT, "utf8");
   assert.match(native, /edgeManagerInstall\s*\?\s*null\s*:\s*requirePrebuiltExtension/);
+  assert.ok(native.indexOf("try {") < native.indexOf("const prebuiltChromium"));
   assert.ok(native.indexOf("const prebuiltChromium") < native.lastIndexOf("browserFixtureExecutable"));
   assert.ok(firefox.indexOf("requirePrebuiltExtension(root, \"firefox\")") < firefox.indexOf("create private synthetic fixture"));
   assert.match(harness, /LOCKLARK_BROWSER_REQUIRE_PREBUILT/);
   assert.match(harness, /env = dict\(os\.environ\)/);
   assert.match(
     support,
-    /if os\.environ\.get\("LOCKLARK_BROWSER_REQUIRE_PREBUILT"\) == "1":\s+ctx\.ensure_extension_built\(\)/,
+    /if prebuilt_env_configured\(\):\s+ctx\.ensure_extension_built\(\)/,
   );
   assert.match(support, /env = dict\(os\.environ\)/);
 });

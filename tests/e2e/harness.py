@@ -55,6 +55,17 @@ ISSUED_TOKEN_RE = re.compile(
 _MAX_NATIVE_FRAME = 256 << 10
 _E2E_BIN_NAME = "e2e-bin"
 PREBUILT_EXTENSION_ERROR = "prebuilt browser extension input rejected"
+PREBUILT_ENV_KEYS = (
+    "LOCKLARK_BROWSER_REQUIRE_PREBUILT",
+    "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR",
+    "LOCKLARK_BROWSER_EXTENSION_CHROMIUM",
+    "LOCKLARK_BROWSER_EXTENSION_FIREFOX",
+    "LOCKLARK_BROWSER_EXTENSION_SAFARI",
+)
+
+
+def prebuilt_env_configured() -> bool:
+    return any(name in os.environ for name in PREBUILT_ENV_KEYS)
 
 
 class FeatureNotImplementedError(Exception):
@@ -1192,16 +1203,26 @@ class E2EContext:
         )
 
     def _prebuilt_extension_paths(self) -> tuple[Path, Path] | None:
-        if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") != "1":
+        if not prebuilt_env_configured():
             return None
+        if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") != "1":
+            raise AssertionError(PREBUILT_EXTENSION_ERROR)
         prepared = os.environ.get("LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR", "")
         chromium = os.environ.get("LOCKLARK_BROWSER_EXTENSION_CHROMIUM", "")
         firefox = os.environ.get("LOCKLARK_BROWSER_EXTENSION_FIREFOX", "")
         if not prepared or not chromium or not firefox:
             raise AssertionError(PREBUILT_EXTENSION_ERROR)
+        if not all(Path(value).is_absolute() for value in (prepared, chromium, firefox)):
+            raise AssertionError(PREBUILT_EXTENSION_ERROR)
+        checks = [("chromium", chromium), ("firefox", firefox)]
+        if "LOCKLARK_BROWSER_EXTENSION_SAFARI" in os.environ:
+            safari = os.environ.get("LOCKLARK_BROWSER_EXTENSION_SAFARI", "")
+            if not safari or not Path(safari).is_absolute():
+                raise AssertionError(PREBUILT_EXTENSION_ERROR)
+            checks.append(("safari", safari))
         try:
             from browserrelease import prebuilt
-            for product, dist in (("chromium", chromium), ("firefox", firefox)):
+            for product, dist in checks:
                 prebuilt.verify_prebuilt(
                     product, Path(prepared), Path(dist), self.repo_root
                 )

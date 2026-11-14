@@ -32,6 +32,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .harness import (
     CLIResult,
     E2EContext,
+    prebuilt_env_configured,
     FeatureNotImplementedError,
     PTYResult,
     owned_gui_command,
@@ -3653,7 +3654,7 @@ def _checkout_run(
         raise _checkout_pending(
             "native checkout prerequisites are absent: node runtime"
         )
-    if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") == "1":
+    if prebuilt_env_configured():
         ctx.ensure_extension_built()
     private = Path(tempfile.mkdtemp(prefix="lk-", dir="/tmp"))
     try:
