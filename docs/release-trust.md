@@ -64,6 +64,16 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
    `WINDOWS_CERTIFICATE_PASSWORD` pair if present) must not exist at
    repository or organization scope.
 
+### Scope limitation: `v*` tag-name squatting is not prevented
+
+The canonical actor check refuses outsider publication, but it does **not**
+prevent collaborators from creating or occupying unused `v*` tag names
+(tag-name squatting or denial of service). The required `deletion`, `update`,
+and `non_fast_forward` rules constrain movement of existing tags; they do not
+constrain tag creation. This checkpoint makes no namespace anti-squatting
+claim. Controlling who may create `v*` tags would require separate explicit
+external policy and trust design and is not added here.
+
 ## Immutable external prerequisites
 
 These prerequisites cannot be created by this checkpoint and are not fixed by
