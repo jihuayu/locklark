@@ -21,6 +21,14 @@ function fixedFailure(message) {
   throw Error(message);
 }
 
+async function waitFixed(page, predicate, category) {
+  try {
+    await page.waitForFunction(predicate, null, { timeout: 5000 });
+  } catch {
+    fixedFailure("OTP storage smoke: " + category);
+  }
+}
+
 module.exports = async function run() {
   if (!fs.existsSync(path.join(distExtension, "manifest.json")))
     fixedFailure("OTP storage smoke: built dist/chromium is required");
@@ -84,48 +92,78 @@ module.exports = async function run() {
       }),
     );
     await page.goto("https://otp-storage.fixture.test/settings/2fa");
-    await page.waitForFunction(
-      () => Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 1,
-      null,
-      { timeout: 5000 },
+    await waitFixed(
+      page,
+      () =>
+        Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 1 &&
+        document.documentElement.dataset.locklarkOtpFixtureTarget === "identified",
+      "OTP observer target not uniquely identified",
     );
     const initial = await page.evaluate(() => ({
       decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
-      observed: Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0),
+      active: Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0),
+      target: document.documentElement.dataset.locklarkOtpFixtureTarget,
     }));
     assert.equal(initial.decode, 0);
+    assert.equal(initial.active, 1);
+    assert.equal(initial.target, "identified");
 
     await worker.evaluate(
       async () => chrome.storage.local.set({ otpCapture: false }),
     );
-    await page.waitForFunction(
-      () => Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0) >= 1,
-      null,
-      { timeout: 5000 },
+    await waitFixed(
+      page,
+      () =>
+        Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0) >= 1 &&
+        Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 0,
+      "OTP observer did not disconnect",
     );
     const afterDisable = await page.evaluate(() => ({
       decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
       disconnected: Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0),
     }));
     assert.equal(afterDisable.decode, 0);
+    assert.ok(afterDisable.disconnected >= 1);
 
     await worker.evaluate(
       async () => chrome.storage.local.set({ otpCapture: true }),
     );
-    await page.waitForFunction(
-      () => Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 2,
-      null,
-      { timeout: 5000 },
+    await waitFixed(
+      page,
+      () =>
+        Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 2 &&
+        Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 1 &&
+        document.documentElement.dataset.locklarkOtpFixtureTarget === "identified",
+      "OTP observer did not rearm uniquely",
     );
     const afterEnable = await page.evaluate(() => ({
       decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
       observed: Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0),
+      active: Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0),
+      target: document.documentElement.dataset.locklarkOtpFixtureTarget,
     }));
     assert.equal(afterEnable.decode, 0);
     assert.ok(afterEnable.observed >= 2);
+    assert.equal(afterEnable.active, 1);
+    assert.equal(afterEnable.target, "identified");
     console.log("OTP storage smoke: decode=0 initial_observed=true disconnected=true rearmed=true");
   } finally {
     if (context) await context.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
 };
+
+const runSmoke = module.exports;
+module.exports = async function runFixed() {
+  try {
+    return await runSmoke();
+  } catch {
+    throw Error("OTP storage smoke failed");
+  }
+};
+if (require.main === module) {
+  module.exports().catch(() => {
+    console.error("OTP storage smoke failed");
+    process.exitCode = 1;
+  });
+}
