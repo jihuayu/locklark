@@ -1361,7 +1361,10 @@ def _covers_all_v_tags(detail: Mapping[str, object]) -> bool | None:
     # An exclusion can carve a release tag out of otherwise immutable v* refs.
     if excludes:
         return False
-    return any(item in (TAG_REF_PATTERN, "v*") for item in includes)
+    # Only the exact full-ref pattern is accepted. A bare ``v*`` is not a
+    # valid ref-name condition, and broader or additional patterns can cover
+    # non-release refs or leave part of the release namespace untested.
+    return includes == [TAG_REF_PATTERN]
 
 
 def _check_tag_rules(transport: ReadOnlyTransport, repository: str) -> None:

@@ -1130,6 +1130,47 @@ class AuthorizationTests(unittest.TestCase):
                 )
                 self.assert_refused(self.authorize(transport=transport), expected)
 
+    def test_tag_coverage_requires_exact_refs_tags_vstar(self) -> None:
+        def detail(includes: object, excludes: object = []) -> dict[str, object]:
+            return {
+                "conditions": {
+                    "ref_name": {"include": includes, "exclude": excludes}
+                }
+            }
+
+        self.assertIs(trust._covers_all_v_tags(detail(["refs/tags/v*"])), True)
+        for label, include, excludes in (
+            ("bare v*", ["v*"], []),
+            ("all tags", ["refs/tags/*"], []),
+            ("all refs", ["refs/*"], []),
+            ("everything", ["*"], []),
+            ("exact plus bare", ["refs/tags/v*", "v*"], []),
+            ("exact plus broader", ["refs/tags/v*", "refs/tags/*"], []),
+            ("duplicate exact", ["refs/tags/v*", "refs/tags/v*"], []),
+            ("empty", [], []),
+            ("excluded release tag", ["refs/tags/v*"], ["refs/tags/v1.2.3"]),
+            ("excluded broad ref", ["refs/tags/v*"], ["refs/tags/*"]),
+        ):
+            with self.subTest(case=label):
+                self.assertIs(
+                    trust._covers_all_v_tags(detail(include, excludes)), False
+                )
+        for label, includes, excludes in (
+            ("malformed include", "refs/tags/v*", []),
+            ("malformed include item", ["refs/tags/v*", 7], []),
+            ("malformed exclude", ["refs/tags/v*"], "refs/tags/v1.2.3"),
+        ):
+            with self.subTest(case=label):
+                self.assertIs(trust._covers_all_v_tags(detail(includes, excludes)), None)
+        for label, payload in (
+            ("missing conditions", {}),
+            ("conditions not an object", {"conditions": []}),
+            ("missing ref_name", {"conditions": {}}),
+            ("ref_name not an object", {"conditions": {"ref_name": "v*"}}),
+        ):
+            with self.subTest(case=label):
+                self.assertIs(trust._covers_all_v_tags(payload), None)
+
     def test_trusted_organization_admin_bypass_remains_authorized(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
         transport = self.valid_transport()
