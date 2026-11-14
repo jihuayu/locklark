@@ -2,8 +2,10 @@ package desktop
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -11,11 +13,22 @@ import (
 )
 
 type fakeDeviceSecretStore struct {
-	values map[string][]byte
+	values             map[string][]byte
+	setCalls, getCalls int
+	deleteCalls        int
+}
+
+type fakeSystemUnlockStore struct {
+	values      map[string][]byte
+	deleteCalls int
 }
 
 func newFakeDeviceSecretStore() *fakeDeviceSecretStore {
 	return &fakeDeviceSecretStore{values: map[string][]byte{}}
+}
+
+func newFakeSystemUnlockStore() *fakeSystemUnlockStore {
+	return &fakeSystemUnlockStore{values: map[string][]byte{}}
 }
 
 func TestDeviceSecretKeyIsCompactAndDoesNotExposeVaultPath(t *testing.T) {
@@ -34,11 +47,13 @@ func TestDeviceSecretKeyIsCompactAndDoesNotExposeVaultPath(t *testing.T) {
 }
 
 func (s *fakeDeviceSecretStore) Set(key string, value []byte) error {
+	s.setCalls++
 	s.values[key] = append([]byte(nil), value...)
 	return nil
 }
 
 func (s *fakeDeviceSecretStore) Get(key string) ([]byte, error) {
+	s.getCalls++
 	value, ok := s.values[key]
 	if !ok {
 		return nil, errors.New("not found")
@@ -47,6 +62,26 @@ func (s *fakeDeviceSecretStore) Get(key string) ([]byte, error) {
 }
 
 func (s *fakeDeviceSecretStore) Delete(key string) error {
+	s.deleteCalls++
+	delete(s.values, key)
+	return nil
+}
+
+func (s *fakeSystemUnlockStore) Store(key string, value []byte) error {
+	s.values[key] = append([]byte(nil), value...)
+	return nil
+}
+
+func (s *fakeSystemUnlockStore) Load(key string) ([]byte, error) {
+	value, ok := s.values[key]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return append([]byte(nil), value...), nil
+}
+
+func (s *fakeSystemUnlockStore) Delete(key string) error {
+	s.deleteCalls++
 	delete(s.values, key)
 	return nil
 }
@@ -103,6 +138,151 @@ func TestUnlockWithoutSavedSecretRevealsEmergencyFallback(t *testing.T) {
 	if !a.showSecretFallback {
 		t.Fatal("missing device Secret Key did not reveal the emergency fallback")
 	}
+}
+
+func TestForgetDeviceStatFailureAbortsBeforeDestructiveCalls(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"permission", &os.PathError{Op: "stat", Path: "vault.ll", Err: os.ErrPermission}},
+		{"io", &os.PathError{Op: "stat", Path: "vault.ll", Err: syscall.EIO}},
+		{"not-a-directory", &os.PathError{Op: "stat", Path: "vault.ll", Err: syscall.ENOTDIR}},
+		{"unknown", errors.New("unexpected stat failure")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if errors.Is(tc.err, os.ErrNotExist) {
+				t.Skip("this platform classifies the stat error as not-exist")
+			}
+			a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+			previousStat := statVaultFile
+			statVaultFile = func(string) (os.FileInfo, error) { return nil, tc.err }
+			t.Cleanup(func() { statVaultFile = previousStat })
+
+			a.confirmForgetDevice = true
+			a.showSecretFallback = true
+			a.forgetPassword = password
+			a.forgetDeviceWithPassword()
+
+			if a.status != forgetDeviceStatError {
+				t.Fatalf("status = %q, want fixed stat error", a.status)
+			}
+			if secrets.deleteCalls != 0 || system.deleteCalls != 0 {
+				t.Fatalf("stat error deleted credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+			}
+			if secrets.getCalls != 0 {
+				t.Fatalf("stat error read the device Secret Key %d time(s)", secrets.getCalls)
+			}
+			if got := a.settingsSnapshot().VaultPath; got != vaultPath {
+				t.Fatalf("stat error changed VaultPath binding: %q", got)
+			}
+			if a.path != vaultPath {
+				t.Fatalf("stat error changed active vault path: %q", a.path)
+			}
+			if _, ok := secrets.values[deviceSecretKey(vaultPath)]; !ok {
+				t.Fatal("stat error removed the device Secret Key")
+			}
+			if !a.confirmForgetDevice || !a.showSecretFallback || a.onboarding || a.busy {
+				t.Fatalf("stat error changed UI state: confirm=%v fallback=%v onboarding=%v busy=%v", a.confirmForgetDevice, a.showSecretFallback, a.onboarding, a.busy)
+			}
+			if !a.forgetDeviceNeedsSecret() {
+				t.Fatal("stat error was treated as an absent vault")
+			}
+			if secrets.getCalls != 0 {
+				t.Fatal("forgetDeviceNeedsSecret read credentials after a stat error")
+			}
+		})
+	}
+}
+
+func TestForgetDeviceExplicitMissingVaultTakesAbsentPath(t *testing.T) {
+	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	if err := os.Remove(vaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if a.forgetDeviceNeedsSecret() {
+		t.Fatal("explicitly missing vault still required a Secret Key")
+	}
+	a.forgetPassword = ""
+	a.forgetDeviceWithPassword()
+
+	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+		t.Fatalf("unexpected missing-vault status: %q", a.status)
+	}
+	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
+		t.Fatalf("missing vault did not take the absent path: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+	}
+	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; ok {
+		t.Fatal("missing-vault path retained the device Secret Key")
+	}
+	if got := a.settingsSnapshot().VaultPath; got != "" {
+		t.Fatalf("missing-vault path retained VaultPath binding: %q", got)
+	}
+	if !a.onboarding {
+		t.Fatal("missing-vault path did not return to onboarding")
+	}
+	if _, err := os.Stat(vaultPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-vault path created or retained a vault file: %v", err)
+	}
+}
+
+func TestForgetDeviceVerifiedPasswordDeletesCredentialsAndBinding(t *testing.T) {
+	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+
+	a.forgetPassword = "wrong-password"
+	a.forgetDeviceWithPassword()
+	if secrets.deleteCalls != 0 || system.deleteCalls != 0 {
+		t.Fatalf("wrong password deleted credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+	}
+	if got := a.settingsSnapshot().VaultPath; got != vaultPath {
+		t.Fatalf("wrong password changed VaultPath binding: %q", got)
+	}
+	if a.onboarding {
+		t.Fatal("wrong password returned to onboarding")
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("wrong password altered the vault file: %v", err)
+	}
+
+	a.forgetPassword = password
+	a.forgetDeviceWithPassword()
+	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+		t.Fatalf("verified password did not finish forget-device: %q", a.status)
+	}
+	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
+		t.Fatalf("verified password did not delete credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+	}
+	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; ok {
+		t.Fatal("verified password retained the device Secret Key")
+	}
+	if got := a.settingsSnapshot().VaultPath; got != "" {
+		t.Fatalf("verified password retained VaultPath binding: %q", got)
+	}
+	if !a.onboarding {
+		t.Fatal("verified password did not return to onboarding")
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("verified password deleted the .ll vault file: %v", err)
+	}
+}
+
+func prepareForgetDeviceTest(t *testing.T) (*App, string, string, *fakeDeviceSecretStore, *fakeSystemUnlockStore) {
+	t.Helper()
+	a, password, secret := createDeviceSecretTestVault(t)
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	secrets := newFakeDeviceSecretStore()
+	a.deviceSecrets = secrets
+	if err := a.storeDeviceSecret(a.path, secret); err != nil {
+		t.Fatal(err)
+	}
+	system := newFakeSystemUnlockStore()
+	a.systemStore = system
+	vaultPath := a.path
+	if err := a.SetVaultPath(vaultPath); err != nil {
+		t.Fatal(err)
+	}
+	return a, password, vaultPath, secrets, system
 }
 
 func createDeviceSecretTestVault(t *testing.T) (*App, string, string) {

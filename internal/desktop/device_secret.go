@@ -14,7 +14,29 @@ import (
 	oneui "github.com/oneo-me/onevra/source/components"
 )
 
-const deviceSecretService = "app.locklark.device-secret-key.v1"
+const (
+	deviceSecretService   = "app.locklark.device-secret-key.v1"
+	forgetDeviceStatError = "无法确认金库文件状态；已取消退出当前设备，未删除任何凭据。"
+)
+
+// statVaultFile is a test seam for filesystem status failures. Only an
+// explicit os.ErrNotExist may be treated as an absent vault.
+var (
+	statVaultFile     = os.Stat
+	errVaultFileState = errors.New("desktop: vault file state unavailable")
+)
+
+func vaultFileExists(path string) (bool, error) {
+	_, err := statVaultFile(path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return false, nil
+	default:
+		return false, errVaultFileState
+	}
+}
 
 // deviceSecretStore is the small part of the OS credential store used by the
 // desktop unlock flow. Tests use an in-memory implementation; production uses
@@ -98,10 +120,17 @@ func (a *App) forgetDeviceNeedsSecret() bool {
 	if path == "" {
 		return false
 	}
-	if _, err := os.Stat(path); err != nil {
+	exists, err := vaultFileExists(path)
+	if err != nil {
+		// A stat error is not evidence that the vault is absent. Keep the
+		// emergency Secret Key field available; submission will abort before
+		// any credential or binding change.
+		return true
+	}
+	if !exists {
 		return false
 	}
-	_, err := a.loadDeviceSecret(path)
+	_, err = a.loadDeviceSecret(path)
 	return err != nil
 }
 
@@ -117,8 +146,12 @@ func (a *App) forgetDeviceWithPassword() {
 		a.status = "当前没有绑定的金库文件"
 		return
 	}
-	_, statErr := os.Stat(path)
-	vaultExists := statErr == nil
+	vaultExists, statErr := vaultFileExists(path)
+	if statErr != nil {
+		a.forgetPassword = ""
+		a.status = forgetDeviceStatError
+		return
+	}
 	if vaultExists && a.forgetPassword == "" {
 		a.status = "请输入当前金库主密码以确认退出当前设备"
 		return
