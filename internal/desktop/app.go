@@ -1540,9 +1540,6 @@ func (a *App) transferView(c *ui.Context) {
 
 // Run starts the desktop application with the per-user default settings file.
 func Run() error {
-	// Draw MyGo's updater window in native UI as well: Locklark ships no
-	// WebView runtime, and development builds keep the updater disabled.
-	mygo.Use(updatenative.Plugin)
 	return runDesktop()
 }
 
@@ -1560,9 +1557,28 @@ func RunWithSettingsPath(path string) error {
 	return runDesktop(clean)
 }
 
+// registerNativeUpdater registers MyGo's updater plugin before App.Run. The
+// tray always includes updater.MenuItem, which panics when no updater plugin
+// is active, so every desktop entry point must reach this exactly once.
+// mygo.Use panics on a duplicate or failed registration; do not recover it.
+func registerNativeUpdater() {
+	// Draw MyGo's updater window in native UI as well: Locklark ships no
+	// WebView runtime, and development builds keep the updater disabled.
+	mygo.Use(updatenative.Plugin)
+}
+
+// desktopStartupBoundary runs after updater registration and before any App
+// or GUI state. Tests replace it to stop at the startup boundary without
+// opening native UI; production leaves it as a no-op.
+var desktopStartupBoundary = func() error { return nil }
+
 // runDesktop runs the native application. Optional settings paths were
 // already validated by RunWithSettingsPath.
 func runDesktop(settingsPaths ...string) error {
+	registerNativeUpdater()
+	if err := desktopStartupBoundary(); err != nil {
+		return err
+	}
 	a := New()
 	if len(settingsPaths) == 1 {
 		a.settingsPath = settingsPaths[0]
