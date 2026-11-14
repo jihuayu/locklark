@@ -60,6 +60,11 @@ type CLIRunBrokerRequest struct {
 	VaultPath string                     `json:"vault_path"`
 	Scope     CLIRunScope                `json:"scope"`
 	Targets   []personal.CLIBrokerTarget `json:"targets"`
+	// DeliveryControl is an explicit opt-in for the post-response control
+	// socket. It is an intent only: proof, nonce, scope, and approval still
+	// decide every authorization question.
+	DeliveryControl bool `json:"delivery_control,omitempty"`
+	cttyProof       *clirunCTTYProof
 }
 
 // CLIRunBrokerResponse is the audited one-shot reply of the desktop broker.
@@ -108,14 +113,46 @@ type BrokerCallbacks struct {
 }
 
 // Broker is the desktop-hosted local IPC endpoint.
+// cliRunControlMaxLifetime bounds the transport control socket. It is not a
+// session authority cap; a future lease activation must additionally take the
+// minimum with the real Session.AuthorityDeadline.
+const cliRunControlMaxLifetime = 2 * time.Minute
+
+type cliRunControlReadOutcome uint8
+
+const (
+	cliRunControlReadError cliRunControlReadOutcome = iota
+	cliRunControlReadEOF
+	cliRunControlReadFrame
+)
+
+type cliRunControlReadObservation struct {
+	Outcome cliRunControlReadOutcome
+	Length  int
+	// Accepted reports the one-time inactive pending-to-accepted transition.
+	// It carries no lease, secret, or approval result.
+	Accepted bool
+}
+
 type Broker struct {
 	callbacks BrokerCallbacks
 	listener  net.Listener
-	mu        sync.Mutex
-	conns     map[*Connection]bool
-	never     map[string]bool
-	closed    bool
-	done      chan struct{}
+	// cliRunControlLifetime can only shorten the fixed two-minute control
+	// lifetime; it is a per-broker test seam, never a production extension.
+	cliRunControlLifetime time.Duration
+	// cliRunControlObserve is a nil-by-default, per-broker test observation of
+	// the unique post-ready reader's fixed outcome, frame length, and inactive
+	// transition flag. It never receives raw bytes, a connection, proof
+	// material, or authority.
+	cliRunControlObserve func(cliRunControlReadObservation)
+	// cliRunControlChallenge is a nil-by-default per-broker entropy seam for
+	// tests; production uses crypto/rand. It cannot grant authority.
+	cliRunControlChallenge func() (string, error)
+	mu                     sync.Mutex
+	conns                  map[*Connection]bool
+	never                  map[string]bool
+	closed                 bool
+	done                   chan struct{}
 }
 
 func NewBroker(callbacks BrokerCallbacks) *Broker {
@@ -397,11 +434,11 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 	}
 }
 
-func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
+func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) error {
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	raw, e := readFrame(conn, MaxInput)
 	if e != nil {
-		return
+		return e
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	// The decoded scope is the only copy kept: it stays alive through native
@@ -410,8 +447,7 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	req, ok := decodeCLIRunBrokerRequest(raw)
 	if !ok {
 		clear(raw)
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
 	defer func() {
 		clear(raw)
@@ -425,33 +461,52 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	//     every later outcome: refused, cancelled, timed out, or never
 	//     delivered. A replay or a full cache is refused before approval, and
 	//     before the terminal check, so neither can be used to probe it.
-	//  2. The declared terminal must be the OS peer-attested controlling
-	//     terminal of this authenticated process. No declared string is
-	//     authority. Every attestation failure is a fixed refusal, including
-	//     errCLIRunUnavailable / unsupported: a platform without peer
-	//     attestation (Linux), a peer without a controlling terminal, and a
-	//     declared name that does not match the attested terminal all write
-	//     "refused". After a valid request only the exact
-	//     ErrBrokerUnavailable callback sentinel or a missing callback may
-	//     select "unavailable" (handleCLIRunConn), so no TTY outcome can be
+	//  2. The terminal must be authenticated from this connection, never from
+	//     a declared string. Linux uses the sealed live CTTY association built
+	//     from the authenticated Unix socket; Darwin/Windows retain the legacy
+	//     gate. A Linux connection with no self CTTY/no Unix socket uses the
+	//     legacy gate as its only decider; production Linux still refuses there.
+	//     Every proof/gate failure, including unsupported, stale, mismatched,
+	//     or missing proof, is a fixed refusal. After a valid proof only the
+	//     exact ErrBrokerUnavailable callback sentinel or a missing callback
+	//     may select "unavailable" (handleCLIRunConn), so no TTY outcome can be
 	//     fallback-eligible.
 	//
-	// Only after both checks pass is a missing HandleCLIRun classified as the
+	// Only after a valid proof/gate is a missing HandleCLIRun classified as the
 	// explicit unavailable: it must not short-circuit a refused nonce or an
 	// unattested, unsupported, or mismatching terminal, so those always stay a
 	// fixed refusal whatever the callback state.
 	if consumeCLIRunNonce(peer, req.Scope.Nonce) != nil {
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
-	if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
-		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
-		return
+	if cliRunCTTYProofRequired() {
+		proof, boundPeer, proofErr := newCLIRunCTTYProof(conn, peer, req.Scope)
+		switch {
+		case proofErr == errCLIRunCTTYUnsupported:
+			// No self CTTY or no Unix connection: the legacy gate remains the
+			// only decider. On Linux production it always refuses.
+			if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
+				return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			}
+		case proofErr != nil:
+			return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+		default:
+			defer proof.Close()
+			req.cttyProof = proof
+			peer = boundPeer
+			if !req.VerifyCLIRunCTTY(peer) {
+				return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			}
+		}
+	} else if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
+		return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
 	}
 	if b.callbacks.HandleCLIRun == nil {
+		if req.cttyProof != nil && !req.VerifyCLIRunCTTY(peer) {
+			return writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+		}
 		resp.Error = cliRunErrorUnavailable
-		writeCLIResponse(conn, resp)
-		return
+		return writeCLIResponse(conn, resp)
 	}
 	// The request frame is fully read, validated, terminal-attested, and its
 	// nonce consumed; the callback still runs with an OS-authenticated peer.
@@ -459,17 +514,20 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	// or sends an unexpected extra byte, cancels the callback instead of
 	// leaving a native approval prompt pending after the CLI exited. Context
 	// values stay nil; only cancellation is propagated.
-	b.handleCLIRunConn(conn, peer, req, &resp)
-	// The wire encoding already went out; every byte slice of the broker's own
-	// copy is zeroed in place here.
+	writeErr := b.handleCLIRunConn(conn, peer, req, &resp)
+	// Whether the frame was written fully or failed, the broker's own prepared
+	// copy is cleared here. A successful write is only transport completion,
+	// never proof that the client adopted a value or granted a lease.
 	clearCLIRunResponse(&resp)
+	return writeErr
 }
 
-// cliRunTTYGate is the peer terminal check serveCLIRun runs after the nonce is
-// consumed and before the callback. Its verdict has exactly two outcomes
-// here: nil proceeds, anything else is the fixed refusal. Production always
-// uses verifyCLIRunTTY; the tests replace it to prove that an unsupported or
-// no-proof peer terminal (errCLIRunUnavailable) is refused, not unavailable.
+// cliRunTTYGate is the legacy/self-CTTY-missing gate. On Linux, a self CTTY
+// uses newCLIRunCTTYProof instead; when no self CTTY or Unix connection exists,
+// this gate remains the only decider and production Linux still refuses. Its
+// verdict has two outcomes here: nil proceeds, anything else is the fixed
+// refusal. Tests replace it only for unit coverage; that seam never authorizes
+// a Linux connection that has a live qualified proof.
 var cliRunTTYGate = verifyCLIRunTTY
 
 // handleCLIRunConn runs HandleCLIRun with a cancelable context, writes the
@@ -489,7 +547,8 @@ var cliRunTTYGate = verifyCLIRunTTY
 // mutates, reorders, or clears anything in its copy therefore changes neither
 // the broker's parsed request nor the slots the returned PreparedValues are
 // bound to.
-func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) {
+func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) error {
+	controlStarted := time.Now()
 	// The snapshot is captured from req and never handed out. Its slot names
 	// are owned string copies, so nothing the callback (or the broker clearing
 	// req later) does to another slice reaches it. The callback request is a
@@ -506,17 +565,42 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		}
 	}
 	callbackReq := CLIRunBrokerRequest{
-		V:         req.V,
-		VaultPath: string([]byte(req.VaultPath)),
-		Scope:     req.Scope.Clone(),
-		Targets:   make([]personal.CLIBrokerTarget, len(expectedTargets)),
+		V:               req.V,
+		VaultPath:       string([]byte(req.VaultPath)),
+		Scope:           req.Scope.Clone(),
+		Targets:         make([]personal.CLIBrokerTarget, len(expectedTargets)),
+		DeliveryControl: req.DeliveryControl,
+		cttyProof:       req.cttyProof,
 	}
 	copy(callbackReq.Targets, expectedTargets)
 	defer clearCLIRunTargets(expectedTargets)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var controlTimer *time.Timer
+	var controlDeadline time.Time
+	if req.DeliveryControl {
+		lifetime := cliRunControlMaxLifetime
+		if b.cliRunControlLifetime > 0 && b.cliRunControlLifetime < lifetime {
+			lifetime = b.cliRunControlLifetime
+		}
+		controlDeadline = controlStarted.Add(lifetime)
+		remaining := time.Until(controlDeadline)
+		if remaining <= 0 {
+			cancel()
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		controlTimer = time.AfterFunc(remaining, func() {
+			cancel()
+			_ = conn.Close()
+		})
+		defer controlTimer.Stop()
+	}
 	stop := make(chan struct{})
-	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
+	watchExit := make(chan bool, 1)
+	go func() {
+		watchExit <- watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
+	}()
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, callbackReq)
 	// Everything the callback returned that is not transferred is cleared on
 	// every exit. Only a successful callback hands its prepared bytes over to
@@ -545,10 +629,15 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		clearCLIRunTargets(callbackReq.Targets)
 		callbackReq.Targets = nil
 	}()
+	// A stale proof never turns a callback success or unavailable sentinel into
+	// disclosure: recheck the exact peer/scope binding before any transfer.
+	staleProof := req.cttyProof != nil && !req.VerifyCLIRunCTTY(peer)
 	// Only the exact transport/service-unavailable sentinel may select the
 	// explicit unavailable token; a wrapped copy of it (errors.Is), a refusal,
 	// a cancellation, a deadline, or any other callback error is a refusal.
 	switch {
+	case staleProof:
+		resp.Error = cliRunErrorRefused
 	case err == nil:
 		// Only the audited pair crosses: prepared bytes plus the canonical
 		// receipt, and only when the slots are exactly the requested ones as
@@ -570,6 +659,27 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	default:
 		resp.Error = cliRunErrorRefused
 	}
+	// Generate the delivery-control challenge before writing any successful
+	// prepared reply. An entropy failure writes only the fixed refusal and
+	// never leaks the prepared values.
+	var controlChallenge string
+	if req.DeliveryControl && transferred && bindErr == nil {
+		generate := b.cliRunControlChallenge
+		if generate == nil {
+			generate = newCLIRunControlChallenge
+		}
+		challenge, challengeErr := generate()
+		if challengeErr != nil || !validCLIRunControlChallenge(challenge) {
+			writeErr := writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: cliRunErrorRefused})
+			close(stop)
+			_ = conn.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			return errCLIRunControl
+		}
+		controlChallenge = challenge
+	}
 	// writeCLIResponse neither modifies nor takes ownership of resp: it
 	// re-checks the response pair first, so values with an error, values
 	// without a canonical receipt, and the legacy map can never reach the
@@ -578,43 +688,177 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	// written from the already slot-bound encoding, so the bytes that were
 	// checked against the expected target snapshot are exactly the bytes that
 	// go out.
+	var writeErr error
 	if transferred && bindErr == nil {
-		writeCLIRunRaw(conn, bound)
+		writeErr = writeCLIRunRaw(conn, bound)
 	} else {
-		writeCLIResponse(conn, *resp)
+		writeErr = writeCLIResponse(conn, *resp)
+	}
+	// A control-ready reply is sent only after a complete audited success was
+	// written and only when the request explicitly opted in. The monitor stays
+	// alive to detect the client's Close, EOF, or cancellation; this handler
+	// then closes the retained socket. No lease is activated here.
+	if req.DeliveryControl && transferred && bindErr == nil && writeErr == nil {
+		// Stop the pre-ready monitor before writing the ready frame. The
+		// deadline wake bounds this; a byte it already read is a refusal. Only
+		// after its Read has exited does the single new reader touch the conn.
+		if !stopCLIRunMonitor(conn, stop, watchExit) {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		// Bind the inactive state to the exact challenge this connection is
+		// about to receive. No callback, approval, secret, or lease is
+		// reachable after this point.
+		pending, pendingErr := newCLIRunControlPending(controlChallenge, controlDeadline)
+		if pendingErr != nil {
+			_ = conn.Close()
+			return pendingErr
+		}
+		defer pending.clear()
+		if e := conn.SetWriteDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		if e := writeCLIRunControlReady(conn, controlChallenge); e != nil {
+			_ = conn.Close()
+			return e
+		}
+		if e := conn.SetReadDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		raw, readErr := readFrame(conn, MaxOutput)
+		observation := cliRunControlReadObservation{Outcome: cliRunControlReadError}
+		switch {
+		case readErr == nil:
+			observation.Outcome = cliRunControlReadFrame
+			observation.Length = len(raw)
+		case errors.Is(readErr, io.EOF):
+			observation.Outcome = cliRunControlReadEOF
+		}
+		observe := func() {
+			if b.cliRunControlObserve != nil {
+				b.cliRunControlObserve(observation)
+			}
+		}
+		if readErr != nil {
+			observe()
+			clear(raw)
+			_ = conn.Close()
+			return nil
+		}
+		phase, decodeErr := DecodeControlClientPhase(raw)
+		clear(raw)
+		if decodeErr != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		// A parseable commit is not a transition. The exact operation,
+		// challenge, connection state, and original absolute deadline must all
+		// match before the strict single-frame EOF proof is even attempted.
+		if !pending.matches(phase, time.Now()) {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		if e := requireCLIRunControlEOF(conn, controlDeadline); e != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		// Only the one-time pending-to-accepted transition may produce the
+		// acknowledgement. The accepted state remains inactive.
+		ack, acceptErr := pending.accept(phase, time.Now())
+		if acceptErr != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		observation.Accepted = true
+		observe()
+		ackRaw, marshalErr := MarshalControlServerAck(ack)
+		if marshalErr != nil {
+			_ = conn.Close()
+			return marshalErr
+		}
+		defer clear(ackRaw)
+		if e := conn.SetWriteDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		if e := writeFrame(conn, ackRaw); e != nil {
+			_ = conn.Close()
+			return e
+		}
+		_ = conn.Close()
+		return nil
 	}
 	// Closing unblocks the monitor if it is still reading; the close of stop
 	// tells it a lost monitor is expected rather than a client cancellation.
 	close(stop)
 	_ = conn.Close()
+	return writeErr
 }
 
 // watchCLIRunConn watches an idle CLI-run connection for the whole time the
 // callback is pending and calls cancel on EOF, on any unexpected inbound byte,
 // or on any non-timeout read failure. An idle read timeout is not a
 // cancellation: it only bounds each read (so the monitor wakes to observe
-// stop), after which the monitor keeps reading. Once stop is closed the
-// handler has completed and closes the connection itself, so the monitor may
-// exit without cancelling. The watcher never writes.
-func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}, idle time.Duration) {
+// stop), after which the monitor keeps reading. Closing stop is used for the
+// control handoff: the monitor exits without consuming or cancelling, and the
+// handler does not write control-ready until that Read has exited. The watcher
+// never writes.
+func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}, idle time.Duration) bool {
 	var in [1]byte
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(idle))
 		n, e := conn.Read(in[:])
 		if n > 0 {
-			break // unexpected input, even alongside a timeout error
+			cancel() // unexpected input, even alongside a timeout error
+			return true
 		}
 		if !cliRunMonitorTimeout(e) {
 			cancel()
-			return
+			return true
 		}
 		select {
 		case <-stop:
-			return
+			return false
 		default:
 		}
 	}
-	cancel()
+}
+
+const cliRunControlHandoffLimit = 2 * time.Second
+
+// stopCLIRunMonitor wakes the sole pre-ready reader with a deadline, confirms
+// its Read has exited, and resets the deadline before the new owner reads.
+// It returns false on a pre-ready byte/disconnect or if the bounded handoff
+// does not complete.
+func stopCLIRunMonitor(conn net.Conn, stop chan struct{}, exit <-chan bool) bool {
+	close(stop)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	limit := time.NewTimer(cliRunControlHandoffLimit)
+	defer limit.Stop()
+	deadline := time.Now()
+	for {
+		_ = conn.SetReadDeadline(deadline)
+		select {
+		case canceled := <-exit:
+			if canceled {
+				return false
+			}
+			if conn.SetReadDeadline(time.Time{}) != nil {
+				return false
+			}
+			return true
+		case <-ticker.C:
+		case <-limit.C:
+			return false
+		}
+	}
 }
 
 // cliRunMonitorTimeout reports whether a read error is an idle deadline, not a
@@ -653,7 +897,7 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 	if !parsed {
 		return CLIRunBrokerRequest{}, false
 	}
-	keysAllowed := map[string]struct{}{"v": {}, "vault_path": {}, "scope": {}, "targets": {}}
+	keysAllowed := map[string]struct{}{"v": {}, "vault_path": {}, "scope": {}, "targets": {}, "delivery_control": {}}
 	for key, value := range values {
 		if _, allowed := keysAllowed[key]; !allowed {
 			return CLIRunBrokerRequest{}, false
@@ -683,6 +927,10 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 	if json.Unmarshal(values["v"], &v) != nil || v != 1 {
 		return CLIRunBrokerRequest{}, false
 	}
+	var deliveryControl bool
+	if raw, present := values["delivery_control"]; present && json.Unmarshal(raw, &deliveryControl) != nil {
+		return CLIRunBrokerRequest{}, false
+	}
 	if json.Unmarshal(values["vault_path"], &vaultPath) != nil {
 		return CLIRunBrokerRequest{}, false
 	}
@@ -698,7 +946,7 @@ func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
 		return CLIRunBrokerRequest{}, false
 	}
 	valid = true
-	return CLIRunBrokerRequest{V: 1, VaultPath: vaultPath, Scope: scope, Targets: targets}, true
+	return CLIRunBrokerRequest{V: 1, VaultPath: vaultPath, Scope: scope, Targets: targets, DeliveryControl: deliveryControl}, true
 }
 
 // CanonicalCLIRunTargets converts the wire targets to the exact RunBundle
@@ -846,34 +1094,32 @@ func clearCLIRunSpec(spec *cliprofile.Spec) {
 // values with an error, or values without a canonical receipt, never reaches
 // the wire: it is replaced by the explicit refusal. An oversized reply is also
 // replaced by the refusal; a marshal failure writes nothing.
-func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
+func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) error {
 	raw, e := marshalCLIRunResponse(resp)
 	if e != nil {
-		writeCLIRunRefusal(conn)
-		return
+		return writeCLIRunRefusal(conn)
 	}
-	writeCLIRunRaw(conn, raw)
+	return writeCLIRunRaw(conn, raw)
 }
 
 // writeCLIRunRaw writes one already-encoded reply, replacing it with the fixed
 // refusal when it is oversized, and zeroes the encoding afterwards.
-func writeCLIRunRaw(conn net.Conn, raw []byte) {
+func writeCLIRunRaw(conn net.Conn, raw []byte) error {
 	defer clear(raw)
 	if len(raw) == 0 || len(raw) > MaxOutput {
-		writeCLIRunRefusal(conn)
-		return
+		return writeCLIRunRefusal(conn)
 	}
-	_ = writeFrame(conn, raw)
+	return writeFrame(conn, raw)
 }
 
 // writeCLIRunRefusal writes the fixed refusal reply.
-func writeCLIRunRefusal(conn net.Conn) {
+func writeCLIRunRefusal(conn net.Conn) error {
 	raw, e := marshalCLIRunResponse(CLIRunBrokerResponse{Error: cliRunErrorRefused})
 	if e != nil {
-		return
+		return e
 	}
 	defer clear(raw)
-	_ = writeFrame(conn, raw)
+	return writeFrame(conn, raw)
 }
 
 func readFrame(r io.Reader, max int) ([]byte, error) {
@@ -1087,6 +1333,9 @@ var (
 // occurred. Cancellation and deadlines are always preserved in every phase.
 // Errors never echo broker payloads, endpoint paths, or request secrets.
 func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, error) {
+	// The one-shot API never opts into delivery control, even if a caller set
+	// the internal intent field. RequestCLIRunControl is the only opt-in path.
+	req.DeliveryControl = false
 	if ctx == nil {
 		return CLIRunBrokerResponse{}, errCLIRunInvalid
 	}

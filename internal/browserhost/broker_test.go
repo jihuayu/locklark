@@ -244,6 +244,10 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 }
 
 func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
+	runLegacyNoCTTYTest(t, "TestBrokerCLIRunApprovalAndFallback", testBrokerCLIRunApprovalAndFallbackBody)
+}
+
+func testBrokerCLIRunApprovalAndFallbackBody(t *testing.T) {
 	// The unit terminal gate substitutes only the kernel peer attestation; the
 	// broker still runs it before the callback and each exchange below is a
 	// real RequestCLIRun over the broker socket.
@@ -360,6 +364,10 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 }
 
 func TestBrokerCLIRunClientCancelCancelsApproval(t *testing.T) {
+	runLegacyNoCTTYTest(t, "TestBrokerCLIRunClientCancelCancelsApproval", testBrokerCLIRunClientCancelCancelsApprovalBody)
+}
+
+func testBrokerCLIRunClientCancelCancelsApprovalBody(t *testing.T) {
 	// The unit terminal gate only substitutes the kernel peer attestation, so
 	// this exchange reaches the callback that is pending native approval.
 	installCLIRunPassingGate(t)

@@ -41,7 +41,7 @@ func TestCLIRunHandlerLockStartAfterCaptureRefuses(t *testing.T) {
 
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+		resp, e := a.handleCLIRunUnit(context.Background(), desktopPeerFixture(), req)
 		result <- cliRunApprovalResult{approved: desktopHasCLIPrepared(resp), err: e}
 	}()
 	p := waitCLIRunApprovalPending(t, a)

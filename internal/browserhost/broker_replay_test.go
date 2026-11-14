@@ -12,6 +12,12 @@ import (
 	"unsafe"
 )
 
+// The cache and key tests in this file use synthetic Peer values. They do not
+// authenticate Unix credentials, attest a kernel CTTY, or drive native
+// approval. The Unix-socket test in broker_replay_unix_test.go covers only
+// transport-level peer identity for one real process; it is not a cross-PID
+// smoke and does not claim a native GUI or lease result.
+
 // replayClock is a test seam for time.Now. Its readings derive from a real
 // time.Now(), so they carry a monotonic component, and only the test moves
 // time, deterministically, by advance.
@@ -162,7 +168,7 @@ func TestCLIRunNonceCacheConcurrentDuplicateRecordsOnce(t *testing.T) {
 	}
 }
 
-func TestCLIRunNonceCachePeerSeparationAndCaseFolding(t *testing.T) {
+func TestCLIRunNonceCacheSameUserRejectsNewPIDAndProcess(t *testing.T) {
 	clock := newReplayClock()
 	c := replayCache(4, time.Minute, clock)
 	peer := replayPeer()
@@ -175,14 +181,29 @@ func TestCLIRunNonceCachePeerSeparationAndCaseFolding(t *testing.T) {
 	if !c.reserve(lower) || c.reserve(upper) {
 		t.Fatal("case-variant nonce was not treated as a replay")
 	}
+	if live := replayLive(t, c); live != 1 {
+		t.Fatalf("case-variant replay created %d records, want 1", live)
+	}
 	for _, other := range []Peer{
 		{User: peer.User, PID: peer.PID + 1, Process: peer.Process},
-		{User: "UID 999", PID: peer.PID, Process: peer.Process},
 		{User: peer.User, PID: peer.PID, Process: peer.Process + "x"},
 	} {
-		if !c.reserve(cliRunNonceDigest(cliRunNonceKey(other, nonce))) {
-			t.Fatalf("peer %+v was blocked by another peer's nonce", other)
+		if c.reserve(cliRunNonceDigest(cliRunNonceKey(other, nonce))) {
+			t.Fatalf("same-user peer %+v replayed another process's nonce", other)
 		}
+	}
+	if live := replayLive(t, c); live != 1 {
+		t.Fatalf("same-user replay changed occupancy to %d", live)
+	}
+	otherUser := Peer{User: "UID 999", PID: peer.PID, Process: peer.Process}
+	if !c.reserve(cliRunNonceDigest(cliRunNonceKey(otherUser, nonce))) {
+		t.Fatal("another authenticated user's nonce was blocked")
+	}
+	if !c.reserve(cliRunNonceDigest(cliRunNonceKey(peer, strings.Repeat("cd", 16)))) {
+		t.Fatal("a fresh nonce from the same user was blocked")
+	}
+	if live := replayLive(t, c); live != 3 {
+		t.Fatalf("final occupancy %d, want 3", live)
 	}
 	// The raw nonce is not stored: only a keyed digest reaches the cache.
 	if lower == sha256.Sum256([]byte(nonce)) || lower == sha256.Sum256([]byte(peer.User+nonce)) {
@@ -223,7 +244,7 @@ func TestCLIRunNonceMalformedRejectedBeforeCapacity(t *testing.T) {
 
 func TestCLIRunNonceConsumeRecordsBeforeApproval(t *testing.T) {
 	saved := brokerCLIRunNonces
-	brokerCLIRunNonces = replayCache(2, time.Minute, newReplayClock())
+	brokerCLIRunNonces = replayCache(3, time.Minute, newReplayClock())
 	t.Cleanup(func() { brokerCLIRunNonces = saved })
 	peer, nonce := replayPeer(), strings.Repeat("cd", 16)
 
@@ -233,13 +254,27 @@ func TestCLIRunNonceConsumeRecordsBeforeApproval(t *testing.T) {
 	if e := consumeCLIRunNonce(peer, strings.ToUpper(nonce)); !errors.Is(e, errCLIRunInvalid) {
 		t.Fatalf("case-variant replay returned %v, want errCLIRunInvalid", e)
 	}
-	other := peer
-	other.PID++
-	if e := consumeCLIRunNonce(other, nonce); e != nil {
-		t.Fatalf("another peer was blocked: %v", e)
+	for _, other := range []Peer{
+		{User: peer.User, PID: peer.PID + 1, Process: peer.Process},
+		{User: peer.User, PID: peer.PID, Process: peer.Process + "x"},
+	} {
+		if e := consumeCLIRunNonce(other, nonce); !errors.Is(e, errCLIRunInvalid) {
+			t.Fatalf("same-user peer %+v replay returned %v, want errCLIRunInvalid", other, e)
+		}
 	}
-	if e := consumeCLIRunNonce(peer, strings.Repeat("ef", 16)); !errors.Is(e, errCLIRunInvalid) {
+	otherUser := peer
+	otherUser.User = "UID 999"
+	if e := consumeCLIRunNonce(otherUser, nonce); e != nil {
+		t.Fatalf("another user's nonce was blocked: %v", e)
+	}
+	if e := consumeCLIRunNonce(peer, strings.Repeat("ef", 16)); e != nil {
+		t.Fatalf("fresh nonce for the same user was blocked: %v", e)
+	}
+	if e := consumeCLIRunNonce(peer, strings.Repeat("12", 16)); !errors.Is(e, errCLIRunInvalid) {
 		t.Fatalf("full cache returned %v, want errCLIRunInvalid", e)
+	}
+	if e := consumeCLIRunNonce(Peer{PID: peer.PID, Process: peer.Process}, strings.Repeat("34", 16)); !errors.Is(e, errCLIRunInvalid) {
+		t.Fatalf("unauthenticated user returned %v, want errCLIRunInvalid", e)
 	}
 }
 
@@ -268,9 +303,8 @@ func TestCLIRunNonceClockFailureFailsClosed(t *testing.T) {
 	// nonce may now be released, but a record made after the outage still holds.
 	c.now = clock.Read
 	clock.setErr(nil)
-	peer2 := peer
-	peer2.PID++
-	key2 := cliRunNonceDigest(cliRunNonceKey(peer2, nonce))
+	otherNonce := strings.Repeat("ef", 16)
+	key2 := cliRunNonceDigest(cliRunNonceKey(peer, otherNonce))
 	if !c.reserve(key2) || c.reserve(key2) {
 		t.Fatal("fresh record was not held for a full TTL after recovery")
 	}

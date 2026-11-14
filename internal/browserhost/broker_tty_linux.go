@@ -54,12 +54,11 @@ func handleTTYIdentity(attestedDev, handleDev uint64, charDevice bool) (uint32, 
 // controlling terminal. Every CLI-run is unavailable when it cannot.
 func cliRunTTYAttestedPlatform() bool { return true }
 
-// peerTTYAttestationAvailable reports whether this build can prove, from the
-// kernel, that a peer's controlling terminal is the terminal object this
-// broker inspects. Linux cannot: tty_nr names only a devpts major/minor, and
-// nothing available to the broker distinguishes two terminal instances that
-// reuse it. AttestCLIRunTTY returns unavailable without reading tty_nr, so no
-// brokered CLI-run on Linux is ever treated as authenticated.
+// peerTTYAttestationAvailable is false for this legacy AttestCLIRunTTY path.
+// Linux tty_nr alone names only a devpts major/minor, and nothing here
+// distinguishes two terminal instances that reuse it. A separate same-session
+// CLI-run proof path can qualify a connection; this constant is not a global
+// gate and never authorizes that path by itself.
 const peerTTYAttestationAvailable = false
 
 // peerControllingTerminal returns the kernel-reported controlling terminal of
@@ -76,10 +75,9 @@ const peerTTYAttestationAvailable = false
 // reading stat, so a peer that changes mount namespace or mounts while it is
 // looked up is rejected rather than resolved against either view.
 //
-// This lookup supports only the client's self-description
-// (CurrentTTYIdentity). It is not a peer-CTTY association and is never used
-// as authority: the broker's peer attestation is unavailable on Linux
-// (peerTTYAttestationAvailable).
+// This lookup supports the client's self-description (CurrentTTYIdentity). The
+// separate same-session association also uses it as one parser, but tty_nr
+// alone is not a peer-CTTY association and is never sufficient authority.
 func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok bool) {
 	if pid <= 0 {
 		return "", 0, 0, false
