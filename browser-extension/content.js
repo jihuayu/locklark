@@ -191,7 +191,9 @@
     if (Date.now() - siteLink.at > SITE_LINK_TTL) return null;
     return siteLink.linked;
   }
+  let otpSettingsRevision = 0;
   const settingsReady = (async () => {
+    const revision = otpSettingsRevision;
     try {
       const value = await api.storage?.local?.get?.([
         "showInlineMenu",
@@ -204,7 +206,10 @@
         siteSettings.showInlineMenu = value.showInlineMenu !== false;
         siteSettings.showInlineGenerator = value.showInlineGenerator !== false;
         siteSettings.pasteProtection = value.pasteProtection !== false;
-        siteSettings.otpCapture = value.otpCapture !== false;
+        // A storage change that arrived while this initial read was pending
+        // wins; the late initial value must not resurrect a disabled generation.
+        if (revision === otpSettingsRevision)
+          siteSettings.otpCapture = value.otpCapture !== false;
         siteSettings.disabledInlineMenuOrigins = Array.isArray(
           value.disabledInlineMenuOrigins,
         )
@@ -247,6 +252,19 @@
     },
     observer = null,
     scanTimer = null;
+  try {
+    api.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "local" || !changes || typeof changes !== "object") return;
+      const change = changes.otpCapture;
+      if (!change || typeof change !== "object" || !("newValue" in change)) return;
+      otpSettingsRevision++;
+      const enabled = change.newValue !== false;
+      siteSettings.otpCapture = enabled;
+      if (!enabled) stopOTPCapture(true);
+      else if (otpDetector) startOTPObserver(), scheduleOTPScan(1200);
+      else void installOTPCapture();
+    });
+  } catch {}
   function element(tag, textValue, className) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -1641,7 +1659,9 @@
     otpScanTimer = null,
     otpObserver = null,
     otpScans = 0,
-    otpGeneration = 0;
+    otpGeneration = 0,
+    otpInstalling = false,
+    otpVisibilityListener = false;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
   function otpHash(text) {
@@ -1895,33 +1915,45 @@
       void otpScan();
     }, delay);
   }
-  async function installOTPCapture() {
-    if (typeof BarcodeDetector !== "function") return;
+  function startOTPObserver() {
+    if (otpObserver || typeof MutationObserver !== "function") return;
     try {
-      const formats = await BarcodeDetector.getSupportedFormats?.();
-      if (Array.isArray(formats) && !formats.includes("qr_code")) return;
-      otpDetector = new BarcodeDetector({ formats: ["qr_code"] });
+      otpObserver = new MutationObserver(() => scheduleOTPScan());
+      otpObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
     } catch {
-      otpDetector = null;
-      return;
+      otpObserver = null;
     }
-    await settingsReady;
-    if (siteSettings.otpCapture === false) return;
-    scheduleOTPScan(2000);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") scheduleOTPScan(1200);
-      else stopOTPCapture(true);
-    });
-    if (typeof MutationObserver === "function") {
+  }
+  async function installOTPCapture() {
+    if (otpInstalling || typeof BarcodeDetector !== "function") return;
+    otpInstalling = true;
+    try {
       try {
-        otpObserver = new MutationObserver(() => scheduleOTPScan());
-        otpObserver.observe(document.documentElement, {
-          childList: true,
-          subtree: true,
-        });
+        const formats = await BarcodeDetector.getSupportedFormats?.();
+        if (Array.isArray(formats) && !formats.includes("qr_code")) return;
+        otpDetector = new BarcodeDetector({ formats: ["qr_code"] });
       } catch {
-        otpObserver = null;
+        otpDetector = null;
+        return;
       }
+      await settingsReady;
+      if (!otpVisibilityListener) {
+        otpVisibilityListener = true;
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            startOTPObserver();
+            scheduleOTPScan(1200);
+          } else stopOTPCapture(true);
+        });
+      }
+      if (siteSettings.otpCapture === false) return;
+      scheduleOTPScan(2000);
+      startOTPObserver();
+    } finally {
+      otpInstalling = false;
     }
   }
   void installOTPCapture();

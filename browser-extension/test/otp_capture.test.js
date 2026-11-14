@@ -217,6 +217,8 @@ function makeHarness(options = {}) {
   const pendingDetections = [];
   const pendingCaptures = [];
   const pendingSaves = [];
+  const storageListeners = [];
+  const pendingStorage = [];
   let timerSerial = 0;
 
   const body = new Element("body");
@@ -338,8 +340,17 @@ function makeHarness(options = {}) {
       },
     },
     storage: {
+      onChanged: {
+        addListener(listener) {
+          storageListeners.push(listener);
+        },
+      },
       local: {
-        get: async () => options.storage || {},
+        get: async () => {
+          if (options.deferStorage)
+            return await new Promise((resolve) => pendingStorage.push(resolve));
+          return options.storage || {};
+        },
       },
     },
   };
@@ -464,6 +475,20 @@ function makeHarness(options = {}) {
     hide() {
       document.visibilityState = "hidden";
       document.dispatchEvent({ type: "visibilitychange" });
+    },
+    show() {
+      document.visibilityState = "visible";
+      document.dispatchEvent({ type: "visibilitychange" });
+    },
+    changeOtpSetting(value) {
+      for (const listener of storageListeners)
+        listener({ otpCapture: { newValue: value } }, "local");
+    },
+    resolveStorage(value) {
+      const resolve = pendingStorage.shift();
+      if (!resolve) return false;
+      resolve(value || {});
+      return true;
     },
     resolveDetection(index = 0) {
       const pending = pendingDetections.splice(index, 1)[0];
@@ -959,6 +984,97 @@ test("a late save response cannot close or update a hidden panel", async () => {
   assert.ok(h.panel(), "the late save response must not close the panel");
   assert.match(h.panelText(), /正在保存/);
   assert.doesNotMatch(h.panelText(), /已保存/);
+});
+
+test("runtime disable cancels a pending decode", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("runtime disable cancels a pending capture", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("runtime disable cancels a pending save response", async () => {
+  const h = makeHarness({ deferSave: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel());
+  await h.click("保存到 Example login");
+  assert.equal(h.pendingSaves(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveSave(), true);
+  await h.flush();
+  await h.flush();
+  assert.ok(h.panel(), "the late save response must not close the panel");
+  assert.match(h.panelText(), /正在保存/);
+  assert.doesNotMatch(h.panelText(), /已保存/);
+});
+
+test("disable then enable rejects an old pending response", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("hidden then visible rejects an old pending generation", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.hide();
+  h.show();
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("a late initial settings read cannot overwrite a runtime disable", async () => {
+  const h = makeHarness({ deferStorage: true });
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveStorage({ otpCapture: true }), true);
+  await h.flush();
+  await h.flush();
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
 });
 
 test("a stop while decode is pending never offers the late result", async () => {
