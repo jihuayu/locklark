@@ -16,6 +16,7 @@ for tool in gomobile gobind; do
   # go.mod tool directive: builds the exact golang.org/x/mobile require version.
   "$go_bin" install "golang.org/x/mobile/cmd/$tool"
 done
+python3 "$repo_dir/mobile/core/scripts/verify_mobile_tools.py" --go "$go_bin" "$GOBIN/gomobile" "$GOBIN/gobind"
 gomobile init
 gomobile bind -target=ios,iossimulator -iosversion=17.0 -prefix Mobilecore -trimpath -o "$ios_dir/Build/Mobilecore.xcframework" ./mobile/core
 test -f "$ios_dir/Build/Mobilecore.xcframework/Info.plist"
