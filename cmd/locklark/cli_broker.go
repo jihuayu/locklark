@@ -128,7 +128,7 @@ func (c cliRunBrokerCall) scope(root string, request personal.RunBundleRequest, 
 		TTYPlatform: browserhost.CLIRunTTYPlatform(),
 		Nonce:       nonce,
 		Program:     request.Program,
-		ProgramSH:   c.Binding.ProgramSHA256,
+		ProgramSH:   request.ProgramSHA256,
 		CWD:         request.Directory,
 		TempRoot:    root,
 		Args:        append([]string(nil), request.Args...),
@@ -159,7 +159,8 @@ func (c cliRunBrokerCall) scope(root string, request personal.RunBundleRequest, 
 // profile spec runCLIRun, this scope, and the desktop all resolve by name.
 func cliRunBrokerRequestDiffers(canonical, committed personal.RunBundleRequest) error {
 	if !sameStrings(canonical.Args, committed.Args) || !sameStrings(canonical.HelperPath, committed.HelperPath) ||
-		canonical.Program != committed.Program || canonical.Directory != committed.Directory ||
+		canonical.Program != committed.Program || canonical.ProgramSHA256 != committed.ProgramSHA256 ||
+		canonical.Directory != committed.Directory ||
 		canonical.TimeoutSeconds != committed.TimeoutSeconds || canonical.TokenEnvName != committed.TokenEnvName ||
 		canonical.Spec.ID != committed.Spec.ID || len(canonical.Passthrough) != len(committed.Passthrough) {
 		return browserhost.ErrCLIRunRefused

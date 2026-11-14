@@ -126,6 +126,7 @@ func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	targets := []personal.BundleTarget{{Slot: "token", ID: cliTestID, Revision: cliTestRevision, Field: "password"}}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
+		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           []string{"-test.run=^$"},
 		Directory:      filepath.Join(dir, "work"),
 		TimeoutSeconds: binding.TimeoutSeconds,
@@ -316,6 +317,7 @@ func dispatchCLIRunBrokerShim(t *testing.T, code int) (sent browserhost.CLIRunSc
 		t.Fatal("child program digest unavailable")
 	}
 	f.binding.Program, f.binding.ProgramSHA256 = program, sum
+	f.request.ProgramSHA256 = sum
 	if e = f.binding.Validate(); e != nil {
 		t.Fatal("child binding fixture invalid:", e)
 	}
@@ -386,6 +388,7 @@ func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 		t.Fatal("child program digest unavailable")
 	}
 	f.binding.Program, f.binding.ProgramSHA256 = program, sum
+	f.request.ProgramSHA256 = sum
 	if err = f.binding.Validate(); err != nil {
 		t.Fatal("child binding fixture invalid:", err)
 	}
@@ -451,6 +454,7 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 				t.Fatal("child program digest unavailable")
 			}
 			f.binding.Program, f.binding.ProgramSHA256 = program, sum
+			f.request.ProgramSHA256 = sum
 			if err = f.binding.Validate(); err != nil {
 				t.Fatal("child binding fixture invalid:", err)
 			}
@@ -529,6 +533,7 @@ func TestCLIRunBrokerRequestClearedAfterReturn(t *testing.T) {
 				t.Fatal("child program digest unavailable")
 			}
 			f.binding.Program, f.binding.ProgramSHA256 = program, sum
+			f.request.ProgramSHA256 = sum
 			if err = f.binding.Validate(); err != nil {
 				t.Fatal("child binding fixture invalid:", err)
 			}
@@ -958,5 +963,29 @@ func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 	})
 	if err := dispatchCLIRunWithBroker(f); err != errRunCLIConsole || requests != 0 || opens != 1 || subscriptions != 0 {
 		t.Fatalf("non-Darwin path changed: err=%v requests=%d opens=%d subscriptions=%d", err, requests, opens, subscriptions)
+	}
+}
+
+// TestCLIRunBrokerRequestDiffIncludesProgramPin proves the CLI's canonical
+// request-diff equality treats the optional executable pin as part of the
+// committed execution scope.
+func TestCLIRunBrokerRequestDiffIncludesProgramPin(t *testing.T) {
+	f := newCLIBrokerFixture(t)
+	committed := f.request
+	if err := cliRunBrokerRequestDiffers(committed, committed); err != nil {
+		t.Fatalf("identical pinned request differed: %v", err)
+	}
+	changed := committed
+	changed.ProgramSHA256 = strings.Repeat("0", 64)
+	if changed.ProgramSHA256 == committed.ProgramSHA256 {
+		t.Fatal("fixture pin canary is not distinct")
+	}
+	if err := cliRunBrokerRequestDiffers(changed, committed); !errors.Is(err, browserhost.ErrCLIRunRefused) {
+		t.Fatalf("pin mismatch in request diff = %v", err)
+	}
+	unpinned := committed
+	unpinned.ProgramSHA256 = ""
+	if err := cliRunBrokerRequestDiffers(unpinned, committed); !errors.Is(err, browserhost.ErrCLIRunRefused) {
+		t.Fatalf("removed pin in request diff = %v", err)
 	}
 }

@@ -410,3 +410,26 @@ func TestCLIRunScope_DecodeRoundTrip(t *testing.T) {
 		t.Fatal("decoded scope aliases the marshaled source")
 	}
 }
+
+// TestCanonicalCLIRunRequestPreservesProgramPin proves the canonical broker
+// conversion carries the optional executable pin from the approved scope into
+// the exact RunBundleRequest the desktop prepares and the CLI signs.
+func TestCanonicalCLIRunRequestPreservesProgramPin(t *testing.T) {
+	scope := cliRunFixtureScope()
+	request, err := CanonicalCLIRunRequest(scope, scope.TempRoot)
+	if err != nil {
+		t.Fatal("unpinned canonical request failed:", err)
+	}
+	if request.ProgramSHA256 != "" {
+		t.Fatalf("unpinned scope became pinned: %q", request.ProgramSHA256)
+	}
+	pin := strings.Repeat("0123456789abcdef", 4)
+	scope.ProgramSH = pin
+	request, err = CanonicalCLIRunRequest(scope, scope.TempRoot)
+	if err != nil {
+		t.Fatal("pinned canonical request failed:", err)
+	}
+	if request.ProgramSHA256 != pin {
+		t.Fatalf("canonical request pin = %q, want %q", request.ProgramSHA256, pin)
+	}
+}

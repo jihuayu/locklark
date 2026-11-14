@@ -167,7 +167,12 @@ jobs:
           & $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
-          go test -count=1 ./...
+          if ($IsWindows) {
+            python scripts/personal_test_partition.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            go test -count=1 ./...
+          }
       - if: runner.os == 'Linux'
         env:
           LOCKLARK_CLI: ${{ runner.temp }}/locklark-bin/locklark

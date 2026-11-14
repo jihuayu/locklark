@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jihuayu/locklark/internal/clibinding"
 	"github.com/jihuayu/locklark/internal/cliprofile"
 	"github.com/jihuayu/locklark/internal/vault"
 )
@@ -36,6 +37,7 @@ type BundleTarget struct {
 // sandbox or a reusable machine grant.
 type RunBundleRequest struct {
 	Program        string
+	ProgramSHA256  string
 	Args           []string
 	Directory      string
 	TimeoutSeconds int
@@ -62,6 +64,9 @@ func (r RunBundleRequest) Validate(targets []BundleTarget) error {
 		return ErrRunTarget
 	}
 	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(r.Program), ".exe") {
+		return ErrRunTarget
+	}
+	if r.ProgramSHA256 != "" && !digestOK(r.ProgramSHA256) {
 		return ErrRunTarget
 	}
 	if len(r.Args) > 64 {
@@ -247,6 +252,7 @@ func (s *runBundleStoreRequest) binding(secret []byte) (string, error) {
 		Args                                                 []string
 		Directory                                            string
 		TimeoutSeconds                                       int
+		ProgramSHA256                                        string `json:",omitempty"`
 	}{
 		Profile:        "bundle-inherited-stdio-v1",
 		Platform:       runtime.GOOS,
@@ -262,6 +268,7 @@ func (s *runBundleStoreRequest) binding(secret []byte) (string, error) {
 		Args:           s.request.Args,
 		Directory:      s.request.Directory,
 		TimeoutSeconds: s.request.TimeoutSeconds,
+		ProgramSHA256:  s.request.ProgramSHA256,
 	})
 	if e != nil {
 		return "", invalid
@@ -632,6 +639,15 @@ func executeRunBundle(ctx context.Context, req RunBundleRequest, root string, re
 	}
 	if ctx.Err() != nil {
 		return 0, ErrRunCancelled
+	}
+	// Recheck a nonempty pin immediately before writing any rendered credential
+	// file or starting the child. This closes the approval-delay replacement
+	// window; it is not an atomic exec-byte or TOCTOU guarantee.
+	if req.ProgramSHA256 != "" {
+		sum, e := clibinding.ComputeProgramSHA256(req.Program)
+		if e != nil || sum != req.ProgramSHA256 {
+			return 0, ErrRunCredential
+		}
 	}
 	if err := writeRunBundleFiles(root, rendered.Files); err != nil {
 		return 0, ErrRunTemporary

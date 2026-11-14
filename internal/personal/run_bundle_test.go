@@ -720,6 +720,7 @@ func testBundleValidationAndBinding(t *testing.T) {
 		func(s *runBundleStoreRequest) {
 			s.request.Program = filepath.Join(filepath.Dir(s.request.Program), "other"+filepath.Ext(s.request.Program))
 		},
+		func(s *runBundleStoreRequest) { s.request.ProgramSHA256 = strings.Repeat("a", 64) },
 		func(s *runBundleStoreRequest) { s.request.Directory += "-other" },
 	}
 	for i, change := range variations {
@@ -1551,6 +1552,7 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 	f := newBundleTestFixture(t)
 	targets := bundleTestTargets(f)
 	request := bundleTestRequest(t, f)
+	request.ProgramSHA256 = strings.Repeat("a", 64)
 	wantRequest := cloneBundleRequest(request)
 	wantTargets := append([]BundleTarget(nil), targets...)
 	wantReceipt := brokeredTestReceipt()
@@ -1595,6 +1597,7 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 			gotRequest.Args[i] = "mutated"
 		}
 		gotRequest.Program = "/mutated/program"
+		gotRequest.ProgramSHA256 = strings.Repeat("b", 64)
 		gotRequest.Directory = "/mutated/directory"
 		for i := range gotTargets {
 			gotTargets[i] = BundleTarget{Slot: "mutated", ID: "mutated", Revision: "mutated", Field: "mutated"}
