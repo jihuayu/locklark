@@ -21,7 +21,8 @@ const FIXED_CASES = new Set([
 const FIXED_STAGES = new Set([
   "init", "open", "observation", "disable", "enable", "decode",
   "limit-7", "limit-15", "limit-23", "limit-24", "limit-rearm",
-  "pending-decode", "pending-rearm",
+  "pending-decode", "pending-disable", "pending-append", "pending-enable",
+  "pending-busy", "pending-release",
 ]);
 function setStage(caseName, stageName) {
   currentCase = caseName;
@@ -296,11 +297,32 @@ module.exports = async function run() {
     await waitDecode(pending, 1, "pending decode did not start");
     current = await state(pending);
     assert.equal(current.pending, 1);
-    setStage("pending", "pending-rearm");
+    setStage("pending", "pending-disable");
     await setOtpCapture(worker, false);
-    await setOtpCapture(worker, true);
-    await pending.waitForTimeout(1500);
+    await waitFixed(
+      pending,
+      () =>
+        Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 0 &&
+        Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0) >= 1,
+      null,
+      "pending disable did not acknowledge observer",
+    );
+    setStage("pending", "pending-append");
     await addCandidates(pending, 1);
+    setStage("pending", "pending-enable");
+    await setOtpCapture(worker, true);
+    await waitFixed(
+      pending,
+      () => Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 1,
+      null,
+      "pending enable did not rearm observer",
+    );
+    setStage("pending", "pending-busy");
+    await pending.waitForTimeout(1500);
+    current = await state(pending);
+    assert.equal(current.active, 1);
+    assert.equal(current.pending, 1);
+    setStage("pending", "pending-release");
     await pending.evaluate(() =>
       document.dispatchEvent(new Event("locklark-otp-fixture-release")),
     );
@@ -316,6 +338,7 @@ module.exports = async function run() {
     assert.equal(current.pending, 0);
     assert.equal(current.active, 1);
     assert.equal(current.target, "identified");
+    assert.equal(current.observed, 2);
     await pending.close();
 
     console.log(
