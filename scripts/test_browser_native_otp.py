@@ -7,7 +7,7 @@ import subprocess
 import time
 import unittest
 from browser_otp_hmac import codes
-from browser_otp_privacy_acceptance import check_output, read_handoff, validate_handoff
+from browser_otp_privacy_acceptance import check_child_result, check_output, read_handoff, validate_handoff
 
 
 class BrowserOTPOracle(unittest.TestCase):
@@ -118,3 +118,45 @@ class BrowserOTPPrivacyHandoff(unittest.TestCase):
         os.chmod(state, 0o755)
         with self.assertRaises(ValueError):
             validate_handoff(payload)
+
+
+class BrowserOTPPrivacyResult(unittest.TestCase):
+    def run_child(self, body):
+        return subprocess.run(
+            ["node", "--input-type=module", "-e", body],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+
+    def test_real_child_expected_primary_plus_artifact_privacy_rejected(self):
+        result = self.run_child(
+            'console.log("otp-6:positive:driver-arguments-failure");'
+            'console.error("Native browser privacy diagnostic: {\"scan_source\":\"artifact\"}");'
+            "process.exit(1);"
+        )
+        self.assertEqual(result.returncode, 1)
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(result.stdout.encode(), result.returncode)
+        self.assertEqual(raised.exception.args, ("privacy-scan",))
+
+    def test_real_child_expected_primary_plus_controller_privacy_rejected(self):
+        result = self.run_child(
+            'console.log("otp-6:positive:driver-arguments-failure");'
+            'console.error("Native browser privacy diagnostic: {\"scan_source\":\"controller\"}");'
+            "process.exit(1);"
+        )
+        self.assertEqual(result.returncode, 1)
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(result.stdout.encode(), result.returncode)
+        self.assertEqual(raised.exception.args, ("privacy-scan",))
+
+    def test_real_child_clean_expected_primary_continues(self):
+        result = self.run_child(
+            'console.log("otp-6:positive:driver-arguments-failure");'
+            "process.exit(1);"
+        )
+        self.assertEqual(result.returncode, 1)
+        check_child_result(result.stdout.encode(), result.returncode)

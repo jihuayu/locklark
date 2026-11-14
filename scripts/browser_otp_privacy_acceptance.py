@@ -66,6 +66,14 @@ def validate_handoff(raw, expected_uid=None):
     return path
 
 
+def check_child_result(raw, returncode, reject_privacy_marker=True):
+    text = raw.decode("utf-8", errors="replace")
+    if returncode != 1 or "otp-6:positive:driver-arguments-failure" not in text:
+        raise ValueError("privacy-failure-stage")
+    if reject_privacy_marker and "Native browser privacy diagnostic:" in text:
+        raise ValueError("privacy-scan")
+
+
 def check_output(raw, fixture, first, last):
     if last < first or last - first > 600:
         raise ValueError("privacy-clock")
@@ -126,8 +134,7 @@ def main():
         last = time.time()
         raw = (state / "controller.log").read_bytes()
         text = raw.decode("utf-8", errors="replace")
-        if process.returncode != 1 or "otp-6:positive:driver-arguments-failure" not in text:
-            raise ValueError("privacy-failure-stage")
+        check_child_result(raw, process.returncode, args.engine == "chromium")
         if args.engine == "chromium":
             if handoff_read is None:
                 raise ValueError("privacy-state")
@@ -160,7 +167,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        allowed = {"privacy-clock", "privacy-factor", "privacy-code", "privacy-failure-stage", "privacy-state", "privacy-otp-screenshot", "privacy-manifest", "privacy-timeout"}
+        allowed = {"privacy-clock", "privacy-factor", "privacy-code", "privacy-failure-stage", "privacy-state", "privacy-otp-screenshot", "privacy-manifest", "privacy-scan", "privacy-timeout"}
         reason = error.args[0] if type(error) is ValueError and len(error.args) == 1 and error.args[0] in allowed else "privacy-unexpected"
         print("FAIL: browser OTP privacy acceptance (" + reason + ")", file=sys.stderr)
         sys.exit(1)
