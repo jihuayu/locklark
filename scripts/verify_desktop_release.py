@@ -4,15 +4,19 @@
 The release workflow runs this after the Windows and macOS jobs upload to
 the same draft. It checks that each MyGo update manifest names the exact
 archive for its platform and version, verifies the manifest's Ed25519
-signature, rejects unexpected assets, and writes a complete SHA256SUMS.
+signature, inspects the signed archive's Windows PE and macOS universal
+Mach-O metadata, rejects unexpected assets, and writes a complete SHA256SUMS.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +34,9 @@ APP_SLUG = "locklark"
 PLATFORMS = ("windows-amd64", "darwin-universal")
 CHECKSUMS = "SHA256SUMS"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+IDENTITY_HELPER_DIR = REPO_ROOT / "scripts" / "desktop_release_identity"
+_IDENTITY_HELPER: Path | None = None
 
 
 def fail(message: str) -> None:
@@ -76,6 +83,75 @@ def asset_name(url: object, label: str) -> str:
     if not name or "/" in name or "\\" in name or "\x00" in name:
         fail(f"{label} has an invalid asset URL: {url}")
     return name
+
+
+def identity_helper() -> Path:
+    """Build the stdlib-only archive identity helper once per invocation."""
+    global _IDENTITY_HELPER
+    if _IDENTITY_HELPER is not None:
+        return _IDENTITY_HELPER
+    directory = Path(tempfile.mkdtemp(prefix="locklark-release-identity-"))
+    try:
+        os.chmod(directory, 0o700)
+        helper = directory / "desktop_release_identity"
+        environment = os.environ.copy()
+        environment["GOWORK"] = "off"
+        environment["GOENV"] = "off"
+        environment["GOTOOLCHAIN"] = "local"
+        try:
+            result = subprocess.run(
+                [
+                    "go",
+                    "build",
+                    "-mod=readonly",
+                    "-trimpath",
+                    "-o",
+                    str(helper),
+                    ".",
+                ],
+                cwd=IDENTITY_HELPER_DIR,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            fail("go is required to verify archive content identity")
+        if result.returncode != 0 or not helper.is_file():
+            detail = (result.stderr or result.stdout).strip()
+            fail(f"cannot build the archive identity helper: {detail}")
+        os.chmod(helper, 0o700)
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    _IDENTITY_HELPER = helper
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    return helper
+
+
+def verify_archive_identity(
+    path: Path, platform: str, version: str, label: str
+) -> None:
+    helper = identity_helper()
+    try:
+        result = subprocess.run(
+            [
+                str(helper),
+                "--platform",
+                platform,
+                "--version",
+                version,
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        fail(f"cannot run the archive identity helper: {exc}")
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        fail(f"{label} content identity does not verify: {detail}")
+    if result.stdout.strip() != "archive identity ok":
+        fail(f"{label} content identity helper returned an unexpected result")
 
 
 def sha256(path: Path) -> bytes:
@@ -191,17 +267,19 @@ def main() -> None:
             )
         if not isinstance(manifest.get("notes"), str) or not manifest["notes"].strip():
             fail(f"{manifest_name} has no release notes")
-        signed_assets.add(
-            validate_signed_asset(
-                assets,
-                public_key,
-                label=f"{platform} archive",
-                url=manifest.get("url"),
-                size=manifest.get("size"),
-                signature=manifest.get("signature"),
-                expected_name=expected_archive_name(args.version, platform),
-            )
+        archive = validate_signed_asset(
+            assets,
+            public_key,
+            label=f"{platform} archive",
+            url=manifest.get("url"),
+            size=manifest.get("size"),
+            signature=manifest.get("signature"),
+            expected_name=expected_archive_name(args.version, platform),
         )
+        verify_archive_identity(
+            assets / archive, platform, args.version, f"{platform} archive"
+        )
+        signed_assets.add(archive)
         deltas = manifest.get("deltas", [])
         if not isinstance(deltas, list):
             fail(f"{manifest_name} has an invalid deltas list")
