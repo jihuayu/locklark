@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "check.yml"
@@ -54,16 +56,29 @@ def stage_shell(name: str) -> str:
     return "\n".join(shell)
 
 
-def step_commands(job_name: str, step_name: str) -> list[str]:
+def step_text(job_name: str, step_name: str) -> str:
     source = block(job_name)
     marker = f"      - name: {step_name}\n"
     if source.count(marker) != 1:
         raise AssertionError("workflow step is not unique")
-    start = source.index(marker)
+    lines = source.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line == marker)
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^ {6}- ", lines[index]):
+            end = index
+            break
+    return "".join(lines[start:end])
+
+
+def step_commands(job_name: str, step_name: str) -> list[str]:
+    step = step_text(job_name, step_name)
     run_marker = "        run: |\n"
-    run_at = source.index(run_marker, start)
+    if step.count(run_marker) != 1:
+        raise AssertionError("workflow step must declare exactly one run: |")
+    run_at = step.index(run_marker) + len(run_marker)
     commands = []
-    for line in source[run_at + len(run_marker):].splitlines():
+    for line in step[run_at:].splitlines():
         if line.startswith("          "):
             commands.append(line[10:])
         elif line.strip():
@@ -175,6 +190,24 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
                         product,
                     )
 
+    def test_step_commands_does_not_read_a_later_step_run(self):
+        source = """  extension-producer:
+    needs: [contracts]
+    steps:
+      - name: Run original release and legacy unit tests
+        uses: actions/checkout@v4
+      - name: Later step
+        run: |
+          node --test scripts/test_browser_edge_install.mjs
+"""
+        self.assertEqual(
+            source.count("node --test scripts/test_browser_edge_install.mjs"),
+            1,
+        )
+        with mock.patch("scripts.test_ci_extension_producer.text", return_value=source):
+            with self.assertRaisesRegex(AssertionError, "run: \\|"):
+                step_commands("extension-producer", "Run original release and legacy unit tests")
+
     def test_edge_install_contract_runs_once_after_official_chromium(self):
         prepare = "Prepare Chromium once and strict smoke"
         units = "Run original release and legacy unit tests"
@@ -198,8 +231,9 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
         self.assertEqual(
             [line for line in unit_commands if line == edge], [edge]
         )
-        early = step_commands("web-core", "Test browser extension")
-        self.assertFalse(any(edge in line for line in early))
+        early = step_text("web-core", "Test browser extension")
+        self.assertIn("node --test ", early)
+        self.assertNotIn(edge, early)
         self.assertEqual(text().count(edge), 1)
 
     def test_actual_ci_required_shell_rejects_non_success(self):
