@@ -559,6 +559,55 @@ export const CHECKOUT_PICKER_STATUSES = Object.freeze([
   "other",
 ]);
 
+// Fixed, read-only activation/focus/target probe. It returns only booleans or
+// the fixed unavailable enum; it does not read DOM values, keys, IDs, text or
+// storage, and it never dispatches an event, brings a page to front, retries,
+// approves, or invokes a callback.
+const PICKER_ACTIVATION_PROBE = `(() => {
+  const activation = navigator.userActivation;
+  return {
+    focus: document.hasFocus() === true,
+    visible: document.visibilityState === "visible",
+    active: activation && typeof activation.isActive === "boolean"
+      ? activation.isActive : "unavailable",
+    hasBeenActive: activation && typeof activation.hasBeenActive === "boolean"
+      ? activation.hasBeenActive : "unavailable",
+  };
+})()`;
+
+function unavailablePickerActivation() {
+  return {
+    focus: "unavailable",
+    visible: "unavailable",
+    active: "unavailable",
+    hasBeenActive: "unavailable",
+    targetLive: "unavailable",
+  };
+}
+
+async function pickerActivationProbe(popup) {
+  if (!popup || typeof popup.evaluate !== "function") {
+    return unavailablePickerActivation();
+  }
+  try {
+    const value = await popup.evaluate(PICKER_ACTIVATION_PROBE);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return unavailablePickerActivation();
+    }
+    const fixed = (entry) =>
+      typeof entry === "boolean" ? entry : "unavailable";
+    return {
+      focus: fixed(value.focus),
+      visible: fixed(value.visible),
+      active: fixed(value.active),
+      hasBeenActive: fixed(value.hasBeenActive),
+      targetLive: true,
+    };
+  } catch {
+    return unavailablePickerActivation();
+  }
+}
+
 // Requests the metadata frame picker with one explicit trusted pointer click
 // on the real "#detail-fill" control. The popup only enumerates frames from a
 // trusted gesture with an active user activation, so this control must not be
@@ -567,8 +616,10 @@ export const CHECKOUT_PICKER_STATUSES = Object.freeze([
 // failure. When no picker appears, the classified public status is attached
 // to the same "Checkout origin picker missing" reason as the fixed
 // `pickerStatus` enum, so the stage stays diagnosable.
-export async function openCheckoutPicker(popup, eventually) {
+export async function openCheckoutPicker(popup, eventually, diagnose = false) {
+  const before = diagnose ? await pickerActivationProbe(popup) : null;
   await popup.click("#detail-fill");
+  const after = diagnose ? await pickerActivationProbe(popup) : null;
   let shown = false;
   const pickerMissing = "Checkout origin picker missing";
   try {
@@ -592,6 +643,7 @@ export async function openCheckoutPicker(popup, eventually) {
       ? "unavailable"
       : known || "other";
     assert(!shown, pickerMissing);
+    const failure = diagnose ? await pickerActivationProbe(popup) : null;
     throw Object.assign(
       Error(status
         ? pickerMissing + ": popup status " +
@@ -600,6 +652,7 @@ export async function openCheckoutPicker(popup, eventually) {
             : "other (unrecognised public status)")
         : pickerMissing + ": popup status unavailable"),
       { pickerStatus },
+      diagnose ? { pickerDiagnostics: { before, after, failure } } : {},
     );
   }
 }
@@ -684,10 +737,12 @@ export async function chooseChildOrigin(
     "Checkout choice options must be an object",
   );
   for (const key of Object.keys(options))
-    assert(key === "cancel", "Unsupported checkout choice option");
+    assert(key === "cancel" || key === "diagnose", "Unsupported checkout choice option");
   const cancel = options.cancel === undefined ? false : options.cancel;
+  const diagnose = options.diagnose === undefined ? false : options.diagnose;
   assert(typeof cancel === "boolean", "Checkout cancel must be boolean");
-  await openCheckoutPicker(popup, eventually);
+  assert(typeof diagnose === "boolean", "Checkout diagnose must be boolean");
+  await openCheckoutPicker(popup, eventually, diagnose);
   assert(
     (await popup.text("#checkout-current-page")) ===
       "当前页面来源：" + topOrigin,
@@ -1296,7 +1351,7 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     topOrigin,
     frameOrigin,
     eventually,
-    { cancel: true },
+    { cancel: true, diagnose: true },
   );
   assert(choice.selected === false, "Picker cancel must not select a frame");
   await eventually(
