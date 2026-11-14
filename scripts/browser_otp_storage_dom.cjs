@@ -13,6 +13,27 @@ const sourceExtension = path.join(sourceRoot, "browser-extension");
 const distExtension = path.join(sourceExtension, "dist/chromium");
 const bootstrap = path.join(__dirname, "browser_otp_fixture_bootstrap.js");
 
+let currentCase = "init";
+let currentStage = "init";
+const FIXED_CASES = new Set([
+  "init", "empty", "body-only", "title", "heading", "limit", "pending",
+]);
+const FIXED_STAGES = new Set([
+  "init", "open", "observation", "disable", "enable", "decode",
+  "limit-7", "limit-15", "limit-23", "limit-24", "limit-rearm",
+  "pending-decode", "pending-rearm",
+]);
+function setStage(caseName, stageName) {
+  currentCase = caseName;
+  currentStage = stageName;
+}
+function fixedCase() {
+  return FIXED_CASES.has(currentCase) ? currentCase : "unknown";
+}
+function fixedStage() {
+  return FIXED_STAGES.has(currentStage) ? currentStage : "unknown";
+}
+
 function sha256(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
@@ -160,14 +181,17 @@ module.exports = async function run() {
     );
     assert.equal(JSON.stringify(permissions), originalPermissions);
 
+    setStage("empty", "open");
     const empty = await openCase(context, {
       path: "/ordinary/empty",
       body: "<p>No candidate</p>",
     });
+    setStage("empty", "observation");
     await empty.waitForTimeout(2300);
     let current = await state(empty);
     assert.equal(current.decode, 0);
     assert.equal(current.bodyRead, 0);
+    setStage("empty", "disable");
     await setOtpCapture(worker, false);
     await waitFixed(
       empty,
@@ -175,6 +199,7 @@ module.exports = async function run() {
       null,
       "empty case did not disconnect",
     );
+    setStage("empty", "enable");
     await setOtpCapture(worker, true);
     await waitFixed(
       empty,
@@ -187,22 +212,26 @@ module.exports = async function run() {
     assert.equal(current.bodyRead, 0);
     await empty.close();
 
+    setStage("body-only", "open");
     const bodyOnly = await openCase(context, {
       path: "/ordinary/body-only",
       body:
         "<p>Scan this QR code with your authenticator app</p>" +
         '<canvas width="128" height="128" style="display:block;width:128px;height:128px"></canvas>',
     });
+    setStage("body-only", "observation");
     await bodyOnly.waitForTimeout(2300);
     current = await state(bodyOnly);
     assert.equal(current.decode, 0);
     assert.equal(current.bodyRead, 0);
     await bodyOnly.close();
 
+    setStage("title", "open");
     const title = await openCase(context, {
       path: "/ordinary/title",
       title: "Scan this QR code with your authenticator app",
     });
+    setStage("title", "decode");
     await addCandidates(title, 1);
     await waitDecode(title, 1, "title case did not decode");
     current = await state(title);
@@ -210,10 +239,12 @@ module.exports = async function run() {
     assert.equal(current.bodyRead, 0);
     await title.close();
 
+    setStage("heading", "open");
     const heading = await openCase(context, {
       path: "/ordinary/heading",
       heading: "Scan this QR code with your authenticator app",
     });
+    setStage("heading", "decode");
     await addCandidates(heading, 1);
     await waitDecode(heading, 1, "heading case did not decode");
     current = await state(heading);
@@ -221,22 +252,28 @@ module.exports = async function run() {
     assert.equal(current.bodyRead, 0);
     await heading.close();
 
+    setStage("limit", "open");
     const limit = await openCase(context, {
       path: "/ordinary/limit",
       title: "Scan this QR code with your authenticator app",
     });
+    setStage("limit", "limit-7");
     await addCandidates(limit, 7);
     await waitDecode(limit, 7, "limit batch 7");
+    setStage("limit", "limit-15");
     await addCandidates(limit, 8);
     await waitDecode(limit, 15, "limit batch 15");
+    setStage("limit", "limit-23");
     await addCandidates(limit, 8);
     await waitDecode(limit, 23, "limit batch 23");
+    setStage("limit", "limit-24");
     await addCandidates(limit, 3);
     await waitDecode(limit, 24, "limit batch 24");
     current = await state(limit);
     assert.equal(current.decode, 24);
     assert.equal(current.active, 0);
     assert.ok(current.disconnected >= 1);
+    setStage("limit", "limit-rearm");
     await addCandidates(limit, 1);
     await setOtpCapture(worker, false);
     await setOtpCapture(worker, true);
@@ -246,6 +283,7 @@ module.exports = async function run() {
     assert.equal(current.active, 0);
     await limit.close();
 
+    setStage("pending", "open");
     const pending = await openCase(context, {
       path: "/ordinary/pending",
       title: "Scan this QR code with your authenticator app",
@@ -253,13 +291,16 @@ module.exports = async function run() {
     await pending.evaluate(() => {
       document.documentElement.dataset.locklarkOtpFixtureDefer = "1";
     });
+    setStage("pending", "pending-decode");
     await addCandidates(pending, 1);
     await waitDecode(pending, 1, "pending decode did not start");
     current = await state(pending);
     assert.equal(current.pending, 1);
+    setStage("pending", "pending-rearm");
     await setOtpCapture(worker, false);
     await setOtpCapture(worker, true);
     await pending.waitForTimeout(1500);
+    await addCandidates(pending, 1);
     await pending.evaluate(() =>
       document.dispatchEvent(new Event("locklark-otp-fixture-release")),
     );
@@ -291,12 +332,14 @@ module.exports = async function runFixed() {
   try {
     return await runSmoke();
   } catch {
-    throw Error("OTP storage smoke failed");
+    throw Error(
+      "OTP storage smoke failed case=" + fixedCase() + " stage=" + fixedStage(),
+    );
   }
 };
 if (require.main === module) {
-  module.exports().catch(() => {
-    console.error("OTP storage smoke failed");
+  module.exports().catch((error) => {
+    console.error(error.message);
     process.exitCode = 1;
   });
 }
