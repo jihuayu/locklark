@@ -82,6 +82,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
           python3 -m unittest scripts.test_ci_extension_producer
+          python3 -m unittest discover -s scripts -p test_cli_broker_acceptance.py
           # Discover every mobile contract so the emulator gate/category
           # regressions run with the other cheap checks, not after a build.
           python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
