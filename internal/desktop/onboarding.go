@@ -77,7 +77,7 @@ func nextEmergencyKitPath(vaultPath string) string {
 }
 
 // autoSaveEmergencyKit creates the parent folder if needed and writes a collision-free
-// unencrypted Emergency Kit next to the newly created vault.
+// unencrypted Emergency Kit next to the vault being created.
 func autoSaveEmergencyKit(vaultPath, key string) (string, error) {
 	if strings.TrimSpace(vaultPath) == "" || key == "" {
 		return "", errors.New("missing vault path or key")
@@ -97,6 +97,15 @@ func autoSaveEmergencyKit(vaultPath, key string) (string, error) {
 		}
 	}
 	return "", os.ErrExist
+}
+
+// saveNewVaultKit uses the production Emergency Kit writer unless a test
+// injects a failed backup.
+func (a *App) saveNewVaultKit(vaultPath, key string) (string, error) {
+	if a.autoSaveKit != nil {
+		return a.autoSaveKit(vaultPath, key)
+	}
+	return autoSaveEmergencyKit(vaultPath, key)
 }
 
 // syncInitialVaultState binds the persisted vault path or enters the 4-step first-launch guide

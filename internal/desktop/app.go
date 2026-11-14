@@ -37,6 +37,11 @@ type outcome struct {
 	apply, drop func()
 	err         error
 }
+
+// errEmergencyKitRequired aborts a generated-key vault creation before any
+// .ll is published when no durable Emergency Kit could be written.
+var errEmergencyKitRequired = errors.New("emergency kit backup is required before vault creation")
+
 type App struct {
 	sshHost                                                *sshNativeHost
 	sshService                                             *sshagent.Service
@@ -133,9 +138,12 @@ type App struct {
 	forgetPassword        string
 	reexportPassword      string
 	kitSavedPath          string
-	auditFilter           string
-	winHidden             bool
-	approvalWin           *mygo.Window
+	// autoSaveKit is a test seam for injected backup failures. Production
+	// leaves it nil and uses autoSaveEmergencyKit.
+	autoSaveKit func(vaultPath, key string) (string, error)
+	auditFilter string
+	winHidden   bool
+	approvalWin *mygo.Window
 }
 
 func New() *App {
@@ -194,6 +202,8 @@ func (a *App) runContext(work func(context.Context) outcome) {
 }
 func message(e error) string {
 	switch {
+	case errors.Is(e, errEmergencyKitRequired):
+		return "应急文件保存失败，未创建金库；请检查保存位置和权限后重试"
 	case errors.Is(e, personal.ErrSSHKey):
 		return "SSH 密钥不可用；仅支持有效的未加密 OpenSSH Ed25519 私钥"
 	case errors.Is(e, personal.ErrSSHSign):
@@ -530,15 +540,29 @@ func (a *App) createVaultFile() {
 		return
 	}
 	a.password = ""
-	a.secret = ""
 	a.confirmation = ""
-	a.issued = ""
 	a.run(func() outcome {
 		defer clear(pw)
 		defer clear(key)
+		var kitPath string
 		if !classic {
 			if dirErr := os.MkdirAll(filepath.Dir(path), 0700); dirErr != nil {
-				return outcome{err: dirErr}
+				return outcome{err: errEmergencyKitRequired}
+			}
+			// Refuse an existing vault before writing a kit or touching the
+			// device binding. personal.Create still publishes exclusively.
+			if _, statErr := os.Lstat(path); statErr == nil {
+				return outcome{err: os.ErrExist}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return outcome{err: statErr}
+			}
+			// A generated key is only safe to commit with a durable kit on
+			// disk. If this fails, no .ll is created and the wizard key stays
+			// available for retry.
+			var kitErr error
+			kitPath, kitErr = a.saveNewVaultKit(path, secret)
+			if kitErr != nil || strings.TrimSpace(kitPath) == "" {
+				return outcome{err: errEmergencyKitRequired}
 			}
 		}
 		if e := personal.Create(path, string(pw), key); e != nil {
@@ -548,13 +572,13 @@ func (a *App) createVaultFile() {
 		if e != nil {
 			return outcome{err: e}
 		}
-		var kitPath string
-		var kitErr error
-		if !classic {
-			kitPath, kitErr = autoSaveEmergencyKit(path, secret)
-		}
+		// The device store is optional once the kit above is durable, and it
+		// is only attempted after the exclusive .ll publish succeeded.
 		rememberErr := a.storeDeviceSecret(path, secret)
 		return outcome{drop: s.Lock, apply: func() {
+			a.issued = ""
+			a.secret = ""
+			a.confirmation = ""
 			a.session = s
 			a.armIdleTimer()
 			a.rows = nil
@@ -571,8 +595,6 @@ func (a *App) createVaultFile() {
 			a.loadV2Metadata()
 			if kitPath != "" {
 				a.status = "金库已创建，应急文件已自动保存至 " + filepath.Base(kitPath)
-			} else if kitErr != nil {
-				a.status = "金库已创建，但应急文件自动保存失败，请立即在设置中手动导出"
 			} else {
 				a.status = "金库已创建，Secret Key 请继续离线保管"
 			}
