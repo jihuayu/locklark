@@ -2,6 +2,9 @@
 // These run without a browser, native host or private vault fixture.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
@@ -9,6 +12,11 @@ import {
   checkoutRouteCase,
   chooseChildOrigin,
 } from "./browser_checkout_acceptance.mjs";
+import {
+  assertPrivateArtifacts,
+  assertPrivateText,
+  privacyDiagnostic,
+} from "./browser_save_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
 const CARD_ORIGIN = "https://checkout.locklark.test:8443";
@@ -190,4 +198,149 @@ test("missing or duplicate public origins are never guessed or forced", async ()
     /Expected exactly one explicit checkout child origin/,
   );
   assert.deepEqual(duplicate.clicked, ["#detail-fill"]);
+});
+
+const PRIVACY_FIXTURE = {
+  Password: "synthetic-private-password",
+  CardVerification: "731",
+  CardPIN: "4826",
+  OTPCodes: ["654321"],
+};
+
+function privacyFailure(run) {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  assert.fail("privacy matcher did not fail");
+}
+
+function expectPrivacyFields(error, primaryErrorSeen, expected) {
+  const diagnostic = privacyDiagnostic(error, primaryErrorSeen);
+  assert.deepEqual(diagnostic, {
+    primary_error_seen: primaryErrorSeen,
+    ...expected,
+  });
+  return diagnostic;
+}
+
+test("privacy diagnostics keep only fixed fields and preserve primary", () => {
+  const failure = privacyFailure(() =>
+    assertPrivateText('{"cvv":"731"}', PRIVACY_FIXTURE, {
+      scan_source: "artifact",
+      artifact_class: "json",
+    }),
+  );
+  const diagnostic = expectPrivacyFields(failure, true, {
+    artifact_class: "json",
+    match_kind: "short_numeric",
+    canary_class: "CVV",
+    context_class: "credential_field",
+    scan_source: "artifact",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(diagnostic),
+    /731|4826|654321|synthetic-private-password/,
+  );
+});
+
+test("privacy context is strict and unknown still fails", () => {
+  const cases = [
+    {
+      text: '{"pin":"4826"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "PIN",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"otp":"654321"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "otp",
+        canary_class: "OTP",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"password":"synthetic-private-password"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "exact",
+        canary_class: "exact",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"timestamp":731}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "known_time_process_metadata",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"notes":"token 731"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "free_text",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"mystery":"731"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "unknown",
+        scan_source: "controller",
+      },
+    },
+  ];
+  for (const item of cases) {
+    const failure = privacyFailure(() =>
+      assertPrivateText(item.text, PRIVACY_FIXTURE, {
+        scan_source: "controller",
+        artifact_class: "json",
+      }),
+    );
+    expectPrivacyFields(failure, false, item.expected);
+  }
+});
+
+test("artifact privacy failure reports class/source after primary", () => {
+  const state = mkdtempSync(join(tmpdir(), "locklark-privacy-"));
+  try {
+    writeFileSync(
+      join(state, "profile.log"),
+      '{"timestamp":731}\n',
+    );
+    const failure = privacyFailure(() =>
+      assertPrivateArtifacts(state, PRIVACY_FIXTURE),
+    );
+    const diagnostic = expectPrivacyFields(failure, true, {
+      artifact_class: "log",
+      match_kind: "short_numeric",
+      canary_class: "CVV",
+      context_class: "known_time_process_metadata",
+      scan_source: "artifact",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(diagnostic),
+      /locklark-privacy|731|4826|654321|synthetic-private-password/,
+    );
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
 });

@@ -14,6 +14,7 @@ import {
   browserScreenshotsAllowed,
   assertPrivateText,
   assertPrivateArtifacts,
+  privacyDiagnostic,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
@@ -178,6 +179,16 @@ async function eventually(check, message, limit = 10000) {
   }
   throw Error(message);
 }
+let primaryErrorSeen = false;
+const recordPrivacyFailure = (error, source) => {
+  const diagnostic = privacyDiagnostic(error, primaryErrorSeen, {
+    scan_source: source,
+  });
+  console.error(
+    "Native browser privacy diagnostic: " + JSON.stringify(diagnostic),
+  );
+  throw Error("Native browser privacy acceptance failed");
+};
 try {
   execFileSync(
     go,
@@ -774,6 +785,7 @@ try {
   }
   }
 } catch (error) {
+  primaryErrorSeen = true;
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
@@ -885,8 +897,16 @@ try {
   if (browser) await browser.close();
   await new Promise((r) => server.close(r));
   if (observedFixture) {
-    assertPrivateArtifacts(state, observedFixture);
-    scanController(observedFixture);
+    try {
+      assertPrivateArtifacts(state, observedFixture);
+    } catch (error) {
+      recordPrivacyFailure(error, "artifact");
+    }
+    try {
+      scanController(observedFixture);
+    } catch (error) {
+      recordPrivacyFailure(error, "controller");
+    }
   }
 }
 console.log(
@@ -900,4 +920,10 @@ console.log(
 );
 console.log("Private synthetic artifacts: " + state);
 
-if (observedFixture) scanController(observedFixture);
+if (observedFixture) {
+  try {
+    scanController(observedFixture);
+  } catch (error) {
+    recordPrivacyFailure(error, "controller");
+  }
+}
