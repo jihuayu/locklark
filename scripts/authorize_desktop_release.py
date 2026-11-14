@@ -118,6 +118,40 @@ _API_ENDPOINT_PATTERNS = tuple(
     )
 )
 
+# ``gh api --paginate --slurp`` emits one entry per page. Repository rulesets
+# use an array page, while deployment branch policies and secret listings use a
+# ``{total_count, <key>: [...]}`` wrapper. A ``None`` key means array pages.
+_LIST_ENDPOINT_KEYS: tuple[tuple[re.Pattern[str], str | None], ...] = tuple(
+    (re.compile(pattern), key)
+    for pattern, key in (
+        (
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rulesets"
+            r"(?:\?[A-Za-z0-9_=&.-]+)?$",
+            None,
+        ),
+        (
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+            r"deployment-branch-policies(?:\?[A-Za-z0-9_=&.-]+)?$",
+            "branch_policies",
+        ),
+        (
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+            r"secrets(?:\?[A-Za-z0-9_=&.-]+)?$",
+            "secrets",
+        ),
+        (
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/secrets"
+            r"(?:\?[A-Za-z0-9_=&.-]+)?$",
+            "secrets",
+        ),
+        (
+            r"^/orgs/[A-Za-z0-9_.-]+/actions/secrets"
+            r"(?:\?[A-Za-z0-9_=&.-]+)?$",
+            "secrets",
+        ),
+    )
+)
+
 
 class Refusal(str, Enum):
     """Fixed refusal vocabulary. No free-form reason is returned."""
@@ -324,6 +358,60 @@ def organization_secrets_api(organization: str) -> str:
     return _paged(f"/orgs/{organization}/actions/secrets")
 
 
+def _paginated_list_key(path: str) -> str | None:
+    """Return the expected page list key, or ``None`` for array pages."""
+
+    for pattern, key in _LIST_ENDPOINT_KEYS:
+        if pattern.fullmatch(path):
+            return key
+    raise UnsafeEndpoint("API endpoint does not support paginated list reads")
+
+
+def _merge_slurped_pages(payload: object, key: str | None) -> list[object]:
+    """Flatten real slurped pages after validating their endpoint schema."""
+
+    if not isinstance(payload, list):
+        raise ApiTransportError(None, "trusted gh api pagination shape is invalid")
+    merged: list[object] = []
+    if key is None:
+        for page in payload:
+            if not isinstance(page, list):
+                raise ApiTransportError(
+                    None, "trusted gh api pagination page is invalid"
+                )
+            merged.extend(page)
+        return merged
+
+    reported_total: int | None = None
+    for index, page in enumerate(payload):
+        if not isinstance(page, dict) or set(page) != {"total_count", key}:
+            raise ApiTransportError(None, "trusted gh api pagination page is invalid")
+        total = page.get("total_count")
+        items = page.get(key)
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, int)
+            or total < 0
+            or not isinstance(items, list)
+            or total < len(items)
+        ):
+            raise ApiTransportError(None, "trusted gh api pagination page is invalid")
+        if reported_total is None:
+            reported_total = total
+        elif total != reported_total:
+            raise ApiTransportError(
+                None, "trusted gh api pagination totals disagree"
+            )
+        if index > 0 and len(merged) >= reported_total:
+            raise ApiTransportError(
+                None, "trusted gh api pagination contains an extra page"
+            )
+        merged.extend(items)
+    if reported_total is None or len(merged) != reported_total:
+        raise ApiTransportError(None, "trusted gh api pagination count is incomplete")
+    return merged
+
+
 class GhApiTransport:
     """Production transport: ``gh api --method GET`` only, fixed allowlist."""
 
@@ -339,6 +427,7 @@ class GhApiTransport:
 
     def _run(self, path: str, *, paginate: bool) -> ApiResponse:
         validate_readonly_endpoint(path)
+        list_key = _paginated_list_key(path) if paginate else None
         command = [self.executable, "api", "--method", "GET"]
         if paginate:
             command.extend(["--paginate", "--slurp"])
@@ -380,19 +469,7 @@ class GhApiTransport:
         except (TypeError, json.JSONDecodeError) as exc:
             raise ApiTransportError(None, "trusted gh api returned invalid JSON") from exc
         if paginate:
-            if not isinstance(payload, list):
-                raise ApiTransportError(None, "trusted gh api pagination shape is invalid")
-            merged: list[object] = []
-            for page in payload:
-                if isinstance(page, list):
-                    merged.extend(page)
-                elif isinstance(page, dict):
-                    merged.append(page)
-                else:
-                    raise ApiTransportError(
-                        None, "trusted gh api pagination page is invalid"
-                    )
-            payload = merged
+            payload = _merge_slurped_pages(payload, list_key)
         return ApiResponse(200, payload)
 
 

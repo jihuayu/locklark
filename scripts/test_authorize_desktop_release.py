@@ -409,6 +409,61 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(decision.reason, reason, decision.detail)
         self.assertFalse(decision.authorized)
 
+    def gh_fixture_stdout(self, *, owner_type: str = "User") -> dict[str, str]:
+        """Render the fake metadata as real ``gh --paginate --slurp`` JSON."""
+
+        responses = self.valid_transport(owner_type=owner_type).responses
+        paginated = {
+            trust.rulesets_api(REPOSITORY),
+            trust.environment_branch_policies_api(REPOSITORY),
+            trust.environment_secrets_api(REPOSITORY),
+            trust.repository_secrets_api(REPOSITORY),
+            trust.organization_secrets_api(OWNER),
+        }
+        stdout: dict[str, str] = {}
+        for path, value in responses.items():
+            if isinstance(value, trust.ApiResponse):
+                if value.status != 200:
+                    raise AssertionError("fixture uses a non-200 API response")
+                payload = value.payload
+            else:
+                payload = value
+            if path in paginated:
+                payload = [payload]
+            stdout[path] = json.dumps(payload)
+        return stdout
+
+    def authorize_via_gh(
+        self, stdout: dict[str, str]
+    ) -> tuple[trust.Decision, list[list[str]]]:
+        """Run the full validator with the real transport and fake subprocess."""
+
+        real_run = subprocess.run
+        commands: list[list[str]] = []
+
+        def run(command, *args, **kwargs):
+            if not command or command[0] != "gh":
+                return real_run(command, *args, **kwargs)
+            commands.append(list(command))
+            path = command[-1]
+            if path not in stdout:
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=1,
+                    stdout="",
+                    stderr="gh: Not Found (HTTP 404)",
+                )
+            return subprocess.CompletedProcess(
+                args=list(command),
+                returncode=0,
+                stdout=stdout[path],
+                stderr="",
+            )
+
+        with mock.patch.object(trust.subprocess, "run", side_effect=run):
+            decision = self.authorize(transport=trust.GhApiTransport())
+        return decision, commands
+
     # Real git smoke tests -------------------------------------------------
 
     def test_real_lightweight_ancestor_authorizes(self) -> None:
@@ -1323,6 +1378,219 @@ class AuthorizationTests(unittest.TestCase):
                 r"/secrets/[^/?#]+",
                 "transport must never request a secret value endpoint",
             )
+
+    # Production transport pagination composition -------------------------
+
+    def test_gh_pagination_composed_smoke_is_read_only(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        stdout = self.gh_fixture_stdout(owner_type="Organization")
+        secret_value = "must-never-be-read"
+        environment_path = trust.environment_secrets_api(REPOSITORY)
+        environment_pages = json.loads(stdout[environment_path])
+        environment_pages[0]["secrets"][0]["value"] = secret_value
+        stdout[environment_path] = json.dumps(environment_pages)
+
+        decision, commands = self.authorize_via_gh(stdout)
+
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(decision.reason, trust.Refusal.AUTHORIZED)
+        paginated = {
+            trust.rulesets_api(REPOSITORY),
+            trust.environment_branch_policies_api(REPOSITORY),
+            trust.environment_secrets_api(REPOSITORY),
+            trust.repository_secrets_api(REPOSITORY),
+            trust.organization_secrets_api(OWNER),
+        }
+        called = {command[-1] for command in commands}
+        self.assertTrue(paginated <= called)
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertEqual(command[:4], ["gh", "api", "--method", "GET"])
+            for write_verb in ("POST", "PUT", "PATCH", "DELETE"):
+                self.assertNotIn(write_verb, command)
+            path = command[-1]
+            self.assertTrue(path.startswith("/"))
+            self.assertNotRegex(path, r"/secrets/[^/?#]+")
+            self.assertNotIn(secret_value, command)
+            if path in paginated:
+                self.assertIn("--paginate", command)
+                self.assertIn("--slurp", command)
+            else:
+                self.assertNotIn("--paginate", command)
+        self.assertNotIn(secret_value, json.dumps(decision.as_json()))
+
+    def test_gh_pagination_accepts_zero_item_wrapper_pages(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        stdout = self.gh_fixture_stdout()
+        stdout[trust.repository_secrets_api(REPOSITORY)] = json.dumps(
+            [{"total_count": 0, "secrets": []}]
+        )
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assertTrue(decision.authorized, decision.detail)
+
+        stdout = self.gh_fixture_stdout()
+        stdout[trust.environment_branch_policies_api(REPOSITORY)] = json.dumps(
+            [{"total_count": 0, "branch_policies": []}]
+        )
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(
+            decision, trust.Refusal.BRANCH_POLICIES_INSUFFICIENT
+        )
+
+    def test_gh_pagination_flattens_multi_page_secret_listing(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        names = [f"OTHER_SECRET_{index:03d}" for index in range(101)]
+        items = [{"name": name} for name in names]
+        pages = [
+            {"total_count": len(items), "secrets": items[:100]},
+            {"total_count": len(items), "secrets": items[100:]},
+        ]
+        stdout = self.gh_fixture_stdout()
+        repository_path = trust.repository_secrets_api(REPOSITORY)
+        stdout[repository_path] = json.dumps(pages)
+
+        decision, commands = self.authorize_via_gh(stdout)
+
+        self.assertTrue(decision.authorized, decision.detail)
+        repository_commands = [
+            command for command in commands if command[-1] == repository_path
+        ]
+        self.assertEqual(len(repository_commands), 1)
+        self.assertIn("--paginate", repository_commands[0])
+        self.assertIn("--slurp", repository_commands[0])
+
+    def test_gh_pagination_incomplete_changed_and_extra_pages_refuse(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        items = [{"name": f"OTHER_SECRET_{index:03d}"} for index in range(101)]
+        repository_path = trust.repository_secrets_api(REPOSITORY)
+        cases = [
+            (
+                "missing later page",
+                [{"total_count": len(items), "secrets": items[:100]}],
+            ),
+            (
+                "changed total",
+                [
+                    {"total_count": len(items), "secrets": items[:100]},
+                    {"total_count": len(items) + 1, "secrets": items[100:]},
+                ],
+            ),
+            (
+                "extra page",
+                [
+                    {
+                        "total_count": 1,
+                        "secrets": [{"name": "OTHER_SECRET_ONLY"}],
+                    },
+                    {"total_count": 1, "secrets": []},
+                ],
+            ),
+        ]
+        for label, pages in cases:
+            with self.subTest(case=label):
+                stdout = self.gh_fixture_stdout()
+                stdout[repository_path] = json.dumps(pages)
+                decision, _ = self.authorize_via_gh(stdout)
+                self.assert_refused(
+                    decision, trust.Refusal.SECRETS_REPOSITORY_UNKNOWN
+                )
+
+    def test_gh_pagination_malformed_wrapper_pages_refuse(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        branch_path = trust.environment_branch_policies_api(REPOSITORY)
+        repository_path = trust.repository_secrets_api(REPOSITORY)
+        cases = [
+            (
+                "branch wrapper missing key",
+                branch_path,
+                [{"total_count": 1}],
+                trust.Refusal.BRANCH_POLICIES_UNKNOWN,
+            ),
+            (
+                "branch wrapper wrong key",
+                branch_path,
+                [
+                    {
+                        "total_count": 1,
+                        "secrets": [{"name": "main"}],
+                    }
+                ],
+                trust.Refusal.BRANCH_POLICIES_UNKNOWN,
+            ),
+            (
+                "secret wrapper extra key",
+                repository_path,
+                [{"total_count": 0, "secrets": [], "extra": []}],
+                trust.Refusal.SECRETS_REPOSITORY_UNKNOWN,
+            ),
+            (
+                "secret wrapper array page",
+                repository_path,
+                [[]],
+                trust.Refusal.SECRETS_REPOSITORY_UNKNOWN,
+            ),
+            (
+                "secret wrapper boolean total",
+                repository_path,
+                [{"total_count": True, "secrets": []}],
+                trust.Refusal.SECRETS_REPOSITORY_UNKNOWN,
+            ),
+            (
+                "secret wrapper total below item count",
+                repository_path,
+                [
+                    {
+                        "total_count": 0,
+                        "secrets": [{"name": "OTHER_SECRET_ONLY"}],
+                    }
+                ],
+                trust.Refusal.SECRETS_REPOSITORY_UNKNOWN,
+            ),
+        ]
+        for label, path, pages, expected in cases:
+            with self.subTest(case=label):
+                stdout = self.gh_fixture_stdout()
+                stdout[path] = json.dumps(pages)
+                decision, _ = self.authorize_via_gh(stdout)
+                self.assert_refused(decision, expected)
+
+    def test_gh_pagination_preserves_array_ruleset_pages(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        rulesets_path = trust.rulesets_api(REPOSITORY)
+        stdout = self.gh_fixture_stdout()
+        stdout[rulesets_path] = json.dumps(
+            [
+                [{"id": 7, "target": "tag", "enforcement": "active"}],
+                [{"id": 8, "target": "branch", "enforcement": "active"}],
+            ]
+        )
+        stdout[trust.ruleset_api(REPOSITORY, 8)] = json.dumps(
+            {"id": 8, "target": "branch", "enforcement": "active"}
+        )
+
+        decision, commands = self.authorize_via_gh(stdout)
+
+        self.assertTrue(decision.authorized, decision.detail)
+        ruleset_commands = [
+            command for command in commands if command[-1] == rulesets_path
+        ]
+        self.assertEqual(len(ruleset_commands), 1)
+        self.assertIn("--paginate", ruleset_commands[0])
+        self.assertIn("--slurp", ruleset_commands[0])
+
+        stdout = self.gh_fixture_stdout()
+        stdout[rulesets_path] = json.dumps(
+            [
+                {
+                    "total_count": 1,
+                    "rulesets": [
+                        {"id": 7, "target": "tag", "enforcement": "active"}
+                    ],
+                }
+            ]
+        )
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(decision, trust.Refusal.TAG_RULES_UNKNOWN)
 
     def test_production_transport_issues_only_allowlisted_get_commands(self) -> None:
         completed = subprocess.CompletedProcess(
