@@ -23,6 +23,7 @@ import {
   sanitizeFailureReport,
   sanitizeNativeSnapshot,
 } from "./browser_native_diagnostics.mjs";
+import { runNativeMain } from "./browser_native_error_boundary.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
@@ -34,6 +35,7 @@ import {
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
 import { requirePrebuiltChromium } from "./browser_extension_prebuilt.mjs";
 
+async function main() {
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 
 const scanController = captureControllerOutput();
@@ -915,6 +917,13 @@ try {
     }
   }
 }
+if (observedFixture) {
+  try {
+    scanController(observedFixture);
+  } catch (error) {
+    recordPrivacyFailure(error, "controller");
+  }
+}
 console.log(
   process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
@@ -925,11 +934,6 @@ console.log(
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );
 console.log("Private synthetic artifacts: " + state);
-
-if (observedFixture) {
-  try {
-    scanController(observedFixture);
-  } catch (error) {
-    recordPrivacyFailure(error, "controller");
-  }
 }
+
+await runNativeMain(main);

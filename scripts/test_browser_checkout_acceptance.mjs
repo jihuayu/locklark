@@ -2,6 +2,7 @@
 // These run without a browser, native host or private vault fixture.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -585,4 +586,35 @@ test("artifact privacy keeps homogeneous contexts and still fails", () => {
   );
   assert.equal(credential.context_class, "credential_field");
   assert.equal(credential.scan_source, "artifact");
+});
+
+
+test("normal main boundary hides a synthetic dual failure", () => {
+  const helper = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const child = [
+    `import { runNativeMain } from ${JSON.stringify(helper)};`,
+    "await runNativeMain(async () => {",
+    '  console.log("primary: " + JSON.stringify({ reason: "Synthetic checkout failure" }));',
+    '  console.log("privacy: " + JSON.stringify({ primary_error_seen: true, artifact_class: "json", match_kind: "short_numeric", canary_class: "CVV", context_class: "unknown", scan_source: "artifact" }));',
+    '  throw new Error("raw canary 731 /tmp/locklark-private actor stack");',
+    "});",
+  ].join("\n");
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", child],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /primary: .*Synthetic checkout failure/);
+  assert.match(result.stdout, /privacy: .*"primary_error_seen":true/);
+  assert.doesNotMatch(result.stdout, /PASS/);
+  assert.equal(result.stderr, "Native browser acceptance failed\n");
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /731|\/tmp\/locklark-private|actor|Error:|\bat /,
+  );
 });
