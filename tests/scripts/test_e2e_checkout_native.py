@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -1526,6 +1527,25 @@ RUNNER_GLUE_SOURCES = (
 )
 
 
+def _local_python_closure(entry: Path) -> set[Path]:
+    """Resolve the package-local import closure of one Python entry module."""
+
+    base = ROOT / "scripts" / "browserrelease"
+    seen: set[Path] = {entry.resolve(), (base / "__init__.py").resolve()}
+    pending = [entry.resolve()]
+    while pending:
+        module = pending.pop()
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.level or not node.module:
+                continue
+            target = (base / (node.module.replace(".", "/") + ".py")).resolve()
+            if target not in seen:
+                seen.add(target)
+                pending.append(target)
+    return seen
+
+
 def _local_module_graph(entry: Path) -> set[str]:
     """Relative-to-ROOT local module specifiers reachable from ``entry``."""
 
@@ -1572,6 +1592,23 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
                 "browser-extension/build.js",
             ),
         )
+
+    def test_prebuilt_python_runtime_closure_is_bound(self):
+        closure = _local_python_closure(
+            ROOT / "scripts" / "browserrelease" / "prebuilt.py"
+        )
+        relatives = {str(path.relative_to(ROOT)) for path in closure}
+        self.assertIn("scripts/browserrelease/__init__.py", relatives)
+        self.assertIn("scripts/browserrelease/prebuilt.py", relatives)
+        for relative in relatives:
+            with self.subTest(source=relative):
+                self.assertIn(relative, support.CHECKOUT_SOURCE_FILES)
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n# dirty runtime closure\n")
+                self.assertNotEqual(self._identity(), self._baseline)
+                path.write_bytes(original)
+                self.assertEqual(self._identity(), self._baseline)
 
     def test_changing_each_runner_glue_source_changes_identity(self):
         baseline = self._identity()
