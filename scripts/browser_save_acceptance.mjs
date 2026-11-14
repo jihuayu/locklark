@@ -334,61 +334,64 @@ export function captureControllerOutput() {
   return (fixture) => assertPrivateText(lines.join("\n"), fixture);
 }
 
-export function assertPrivateText(text, fixture, options = {}) {
+function collectPrivateTextMatches(text, fixture, options = {}) {
   const scanSource =
     options.scan_source === "artifact" ? "artifact" : "controller";
   const artifactClass = options.artifact_class || "unknown";
   const persisted = scanSource === "artifact";
   const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
+  const matches = [];
   for (const canary of exact) {
     const spans = findExactSpans(text, canary.value);
     if (spans.length === 0) continue;
-    privacyFailure(
-      persisted
+    matches.push({
+      message: persisted
         ? "Synthetic factor or field value persisted in diagnostics"
         : "Synthetic factor or field leaked in output",
-      {
-        artifact_class: artifactClass,
-        match_kind: "exact",
-        canary_class: canary.canaryClass,
-        context_class: classifyPrivacyContextAt(text, spans),
-        scan_source: scanSource,
-      },
-    );
+      artifact_class: artifactClass,
+      match_kind: "exact",
+      canary_class: canary.canaryClass,
+      context_class: classifyPrivacyContextAt(text, spans),
+      scan_source: scanSource,
+    });
   }
   for (const canary of shortNumeric) {
     const spans = findShortNumericSpans(text, canary.value);
     if (spans.length === 0) continue;
-    privacyFailure(
-      persisted
+    matches.push({
+      message: persisted
         ? "Synthetic card verification or PIN token persisted in diagnostics"
         : "Synthetic card verification or PIN token leaked in output",
-      {
-        artifact_class: artifactClass,
-        match_kind: "short_numeric",
-        canary_class: canary.canaryClass,
-        context_class: classifyPrivacyContextAt(text, spans),
-        scan_source: scanSource,
-      },
-    );
+      artifact_class: artifactClass,
+      match_kind: "short_numeric",
+      canary_class: canary.canaryClass,
+      context_class: classifyPrivacyContextAt(text, spans),
+      scan_source: scanSource,
+    });
   }
   for (const code of fixture.OTPCodes || []) {
     assert(/^(?:[0-9]{6}|[0-9]{8})$/.test(code), "Invalid private OTP canary");
     const spans = findOTPSpans(text, code);
     if (spans.length === 0) continue;
-    privacyFailure(
-      persisted
+    matches.push({
+      message: persisted
         ? "Synthetic OTP token persisted in diagnostics"
         : "Synthetic OTP token leaked in output",
-      {
-        artifact_class: artifactClass,
-        match_kind: "otp",
-        canary_class: "OTP",
-        context_class: classifyPrivacyContextAt(text, spans),
-        scan_source: scanSource,
-      },
-    );
+      artifact_class: artifactClass,
+      match_kind: "otp",
+      canary_class: "OTP",
+      context_class: classifyPrivacyContextAt(text, spans),
+      scan_source: scanSource,
+    });
   }
+  return matches;
+}
+
+export function assertPrivateText(text, fixture, options = {}) {
+  const matches = collectPrivateTextMatches(text, fixture, options);
+  if (matches.length === 0) return;
+  const first = matches[0];
+  privacyFailure(first.message, first);
 }
 
 export function assertPrivateArtifacts(state, fixture) {
@@ -424,6 +427,7 @@ export function assertPrivateArtifacts(state, fixture) {
   });
   const fixturePath = join(state, "vault", "fixture.json");
   let scanned = 0;
+  const matches = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
@@ -453,40 +457,56 @@ export function assertPrivateArtifacts(state, fixture) {
         const spans = matchedPatterns.flatMap((pattern) =>
           findExactSpans(text, pattern.toString("utf8")),
         );
-        privacyFailure(
-          "Synthetic factor or field value persisted in diagnostics",
-          {
-            artifact_class: artifactClass,
-            match_kind: "exact",
-            canary_class: canary.canaryClass,
-            context_class: classifyPrivacyContextAt(text, spans),
-            scan_source: "artifact",
-          },
-        );
+        matches.push({
+          message: "Synthetic factor or field value persisted in diagnostics",
+          artifact_class: artifactClass,
+          match_kind: "exact",
+          canary_class: canary.canaryClass,
+          context_class: classifyPrivacyContextAt(text, spans),
+          scan_source: "artifact",
+        });
       }
       for (const canary of shortNumeric) {
         if (!containsShortNumericBytes(bytes, canary.value)) continue;
         const spans = findShortNumericSpans(text, canary.value);
-        privacyFailure(
-          "Synthetic card verification or PIN token persisted in diagnostics",
-          {
-            artifact_class: artifactClass,
-            match_kind: "short_numeric",
-            canary_class: canary.canaryClass,
-            context_class: classifyPrivacyContextAt(text, spans),
-            scan_source: "artifact",
-          },
-        );
+        matches.push({
+          message:
+            "Synthetic card verification or PIN token persisted in diagnostics",
+          artifact_class: artifactClass,
+          match_kind: "short_numeric",
+          canary_class: canary.canaryClass,
+          context_class: classifyPrivacyContextAt(text, spans),
+          scan_source: "artifact",
+        });
       }
-      assertPrivateText(text, fixture, {
-        scan_source: "artifact",
-        artifact_class: artifactClass,
-      });
+      matches.push(
+        ...collectPrivateTextMatches(text, fixture, {
+          scan_source: "artifact",
+          artifact_class: artifactClass,
+        }),
+      );
       scanned++;
     }
   };
   walk(state);
   assert(scanned > 0, "No persistent diagnostics were checked");
+  if (matches.length === 0) return scanned;
+  const kinds = new Set(matches.map((match) => match.match_kind));
+  const message =
+    kinds.size === 1
+      ? matches[0].message
+      : "Synthetic factor or field value persisted in diagnostics";
+  const aggregate = (name) => {
+    const values = new Set(matches.map((match) => match[name]));
+    return values.size === 1 ? [...values][0] : "unknown";
+  };
+  privacyFailure(message, {
+    artifact_class: aggregate("artifact_class"),
+    match_kind: aggregate("match_kind"),
+    canary_class: aggregate("canary_class"),
+    context_class: aggregate("context_class"),
+    scan_source: "artifact",
+  });
   return scanned;
 }
 

@@ -455,3 +455,86 @@ test("dual failure public output has no raw native data or path", () => {
     /\/tmp|locklark-private|424242|"window"|"x"|"y"|actor|\.png|731|4826|654321|synthetic-private-password/,
   );
 });
+
+function artifactFailure(files) {
+  const state = mkdtempSync(join(tmpdir(), "locklark-privacy-"));
+  try {
+    for (const [name, text] of files) {
+      writeFileSync(join(state, name), text);
+    }
+    return privacyFailure(() => assertPrivateArtifacts(state, PRIVACY_FIXTURE));
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+}
+
+test("artifact privacy aggregates the full scan across files", () => {
+  const cases = [
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-credential.log", '{"cvv":"731"}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-credential.log", '{"cvv":"731"}\n'],
+        ["b-metadata.log", '{"timestamp":731}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-unknown.log", '{"mystery":"731"}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-unknown.log", '{"mystery":"731"}\n'],
+        ["b-metadata.log", '{"timestamp":731}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-credential.json", '{"cvv":"731"}\n'],
+      ],
+      artifact_class: "unknown",
+    },
+  ];
+  for (const item of cases) {
+    const failure = artifactFailure(item.files);
+    const diagnostic = privacyDiagnostic(failure, false);
+    assert.equal(diagnostic.artifact_class, item.artifact_class);
+    assert.equal(diagnostic.match_kind, "short_numeric");
+    assert.equal(diagnostic.canary_class, "CVV");
+    assert.equal(diagnostic.context_class, "unknown");
+    assert.equal(diagnostic.scan_source, "artifact");
+    assert.equal(diagnostic.primary_error_seen, false);
+  }
+});
+
+test("artifact privacy keeps homogeneous contexts and still fails", () => {
+  const metadata = privacyDiagnostic(
+    artifactFailure([
+      ["a-metadata.log", '{"timestamp":731}\n'],
+      ["b-metadata.log", '{"pid":731}\n'],
+    ]),
+    false,
+  );
+  assert.equal(metadata.context_class, "known_time_process_metadata");
+  assert.equal(metadata.scan_source, "artifact");
+  const credential = privacyDiagnostic(
+    artifactFailure([
+      ["a-credential.log", '{"cvv":"731"}\n'],
+      ["b-credential.log", '{"pin":"731"}\n'],
+    ]),
+    false,
+  );
+  assert.equal(credential.context_class, "credential_field");
+  assert.equal(credential.scan_source, "artifact");
+});
