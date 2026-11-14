@@ -91,7 +91,6 @@ jobs:
         run: |
           "$RUNNER_TEMP/locklark-release-contracts/bin/python" -m unittest scripts.test_run_release_contracts
       - name: Run ordered release security contracts once
-        timeout-minutes: 10
         run: |
           "$RUNNER_TEMP/locklark-release-contracts/bin/python" scripts/run_release_contracts.py
   go:

@@ -201,6 +201,8 @@ def load_plan(groups: tuple[Group, ...] | list[Group]) -> list[PlannedTest]:
 
 
 def run_plan(plan: list[PlannedTest]) -> RunOutcome:
+    if not plan:
+        raise ContractError("ordered plan is empty")
     suite = unittest.TestSuite(item.test for item in plan)
     result = FailFastResult()
     started = time.monotonic()

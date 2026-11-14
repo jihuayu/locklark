@@ -1,9 +1,10 @@
 """Owned small-fixture contracts for scripts/run_release_contracts.py.
 
 These tests use disposable modules outside the checkout. They exercise the
-runner's ordering, full-coverage, minimum, duplicate, skip, expected-failure,
-error, and class-fixture-once invariants; they do not mirror the runner's
-implementation or run the real release suites.
+runner's ordering, full-coverage, minimum, duplicate, skip, ordinary failure,
+expected-failure, unexpected-success, error, empty-plan, and
+class-fixture-once invariants; they do not mirror the runner's implementation
+or run the real release suites.
 """
 
 from __future__ import annotations
@@ -164,6 +165,81 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(outcome.result.testsRun, 1)
         self.assertEqual(len(outcome.result.errors), 1)
         self.assertEqual(getattr(self.modules.load(module), "Fixture").later, [])
+
+    def test_ordinary_assertion_failure_fails_closed(self) -> None:
+        module = self.modules.write(
+            """
+            import unittest
+
+            class Fixture(unittest.TestCase):
+                later = []
+
+                def test_z_fail(self):
+                    self.fail("ordinary assertion failure")
+
+                def test_a_later(self):
+                    type(self).later.append("expanded")
+            """
+        )
+        plan = runner.load_plan(
+            [self.group(module, ("test_z_fail",), "test_z_fail")]
+        )
+        outcome = runner.run_plan(plan)
+        self.assertFalse(outcome.ok())
+        self.assertEqual(outcome.result.testsRun, 1)
+        self.assertEqual(len(outcome.result.failures), 1)
+        self.assertEqual(getattr(self.modules.load(module), "Fixture").later, [])
+
+    def test_unexpected_success_fails_closed(self) -> None:
+        module = self.modules.write(
+            """
+            import unittest
+
+            class Fixture(unittest.TestCase):
+                later = []
+
+                @unittest.expectedFailure
+                def test_z_unexpected(self):
+                    pass
+
+                def test_a_later(self):
+                    type(self).later.append("expanded")
+            """
+        )
+        plan = runner.load_plan(
+            [self.group(module, ("test_z_unexpected",), "test_z_unexpected")]
+        )
+        outcome = runner.run_plan(plan)
+        self.assertFalse(outcome.ok())
+        self.assertEqual(outcome.result.testsRun, 1)
+        self.assertEqual(len(outcome.result.unexpectedSuccesses), 1)
+        self.assertEqual(getattr(self.modules.load(module), "Fixture").later, [])
+
+    def test_empty_group_set_fails_before_running(self) -> None:
+        with self.assertRaisesRegex(runner.ContractError, "no test groups"):
+            runner.load_plan([])
+
+    def test_empty_minimum_fails_before_importing_fixture(self) -> None:
+        marker = self.modules.root / "fixture-imported"
+        module = self.modules.write(
+            f"""
+            from pathlib import Path
+            Path({str(marker)!r}).write_text("imported", encoding="utf-8")
+
+            import unittest
+
+            class Fixture(unittest.TestCase):
+                def test_one(self):
+                    pass
+            """
+        )
+        with self.assertRaisesRegex(runner.ContractError, "minimum test set is empty"):
+            runner.load_plan([self.group(module, (), None)])
+        self.assertFalse(marker.exists())
+
+    def test_empty_plan_rejected_at_public_run_boundary(self) -> None:
+        with self.assertRaisesRegex(runner.ContractError, "ordered plan is empty"):
+            runner.run_plan([])
 
     def test_duplicate_id_fails_before_running(self) -> None:
         module = self.modules.write(
