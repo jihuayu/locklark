@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -9,7 +10,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from browserrelease import allowlist, package, prebuilt, receipt as receipt_module
+from browserrelease import (
+    allowlist,
+    bundle,
+    package,
+    prebuilt,
+    receipt as receipt_module,
+    zipbuild,
+)
 from browserrelease.errors import ReleaseError
 from browserrelease.tests import support
 
@@ -124,6 +132,62 @@ class PrebuiltTests(unittest.TestCase):
         data[-1] ^= 0xFF
         path.write_bytes(data)
         self.assert_refused(prepared=prepared, dist=dist)
+
+
+    def test_self_consistent_pair_cannot_mask_static_source_drift(self):
+        targets = {
+            "chromium": "core.js",
+            "firefox": "popup.js",
+            "safari": "safari-native-port.js",
+        }
+        for product in allowlist.PRODUCTS:
+            with self.subTest(product=product):
+                root = support.make_root(self.base / f"drift-{product}")
+                out = self.base / f"drift-out-{product}"
+                package.prepare(product, str(out), root=root)
+                prepared = self.base / f"drift-pair-{product}"
+                prepared.mkdir()
+                for artifact in receipt_module.artifact_names(product):
+                    shutil.copyfile(out / artifact, prepared / artifact)
+                dist = self.base / f"drift-dist-{product}"
+                shutil.copytree(
+                    root / "browser-extension" / "dist" / product, dist
+                )
+
+                name = targets[product]
+                static = dist / name
+                static.write_bytes(static.read_bytes() + b"\n// artifact drift\n")
+
+                version = "0.1.0"
+                files = bundle.read_bundle(dist, product, version)
+                zip_bytes = zipbuild.build_zip(
+                    allowlist.entries_for(product), files
+                )
+                zip_name, receipt_name = receipt_module.artifact_names(product)
+                (prepared / zip_name).write_bytes(zip_bytes)
+                document = json.loads(
+                    (prepared / receipt_name).read_text(encoding="utf-8")
+                )
+                for entry in document["entries"]:
+                    if entry["name"] == name:
+                        entry["size"] = len(files[name])
+                        entry["sha256"] = hashlib.sha256(files[name]).hexdigest()
+                document["artifact"]["size"] = len(zip_bytes)
+                document["artifact"]["sha256"] = hashlib.sha256(zip_bytes).hexdigest()
+                (prepared / receipt_name).write_bytes(
+                    receipt_module.receipt_bytes(document)
+                )
+
+                # The tampered pair is self-consistent; only the source bytes
+                # distinguish it, so the fixed consumer must reject it.
+                self.assertEqual(
+                    package.verify(product, str(prepared), root=root)["product"],
+                    product,
+                )
+                with self.assertRaises(ReleaseError) as raised:
+                    prebuilt.verify_prebuilt(product, prepared, dist, root)
+                self.assertEqual(str(raised.exception), prebuilt.ERROR)
+                self.assertNotIn(str(self.base), str(raised.exception))
 
     def test_cli_uses_fixed_refusal(self):
         self.assertEqual(

@@ -59,6 +59,16 @@ def _verify(product: str, prepared_dir: Path, dist_dir: Path, root: Path) -> dic
         _fail()
     if zipbuild.build_zip(allowlist.entries_for(product), rebuilt) != zip_bytes:
         _fail()
+    # The receipt and ZIP can agree while the committed build inputs drifted.
+    # Compare every copied static source byte, including Safari's helper.
+    for name in allowlist.entries_for(product):
+        if name == allowlist.MANIFEST_FILE:
+            continue
+        source_bytes = bundle.read_regular_file(
+            root / "browser-extension" / name, "extension source"
+        )
+        if source_bytes != rebuilt[name]:
+            _fail()
     return {
         "product": product,
         "version": version,
