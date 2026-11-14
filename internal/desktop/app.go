@@ -80,8 +80,12 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
-	cliActivity    cliActivityState
-	cliSettings    cliIntegrationState
+	// approvalWinPending is the pending id the approval window currently
+	// renders. Close and cleanup paths compare it under brokerMu so an action
+	// queued for an old request cannot decide or hide a replacement.
+	approvalWinPending string
+	cliActivity        cliActivityState
+	cliSettings        cliIntegrationState
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string

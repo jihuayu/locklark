@@ -118,11 +118,16 @@ func (a *App) cancelPendingCLIRun() {
 	a.brokerMu.Lock()
 	p := a.cliPending
 	a.cliPending = nil
+	if p != nil {
+		p.decided = true
+	}
+	renderedID := a.approvalWinPending
 	a.brokerMu.Unlock()
 	if p != nil {
 		p.choose(false)
+		renderedID = p.id
 	}
-	a.hideApprovalWindow()
+	a.hideApprovalWindowFor(renderedID)
 }
 
 func (a *App) notifyBrowserBrokerUnlocked() {
@@ -211,7 +216,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	a.brokerMu.Unlock()
 	a.dispatch(func() {
 		if a.onevra.shellActive && a.win != nil && (a.winHidden || !a.win.IsVisible()) {
-			a.showApprovalWindow()
+			a.showApprovalWindow(p.id)
 			return
 		}
 		if a.win != nil {
@@ -229,7 +234,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 		}
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
-			a.hideApprovalWindow()
+			a.hideApprovalWindowFor(p.id)
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -242,7 +247,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 		}
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
-			a.hideApprovalWindow()
+			a.hideApprovalWindowFor(p.id)
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -251,28 +256,86 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 }
 
-// ApproveCLIRun is called from the native approval view exactly once.
-func (a *App) approveCLIRun(approved bool) {
+// cliRunDecisionHandlers binds the approve and refuse callbacks to the exact
+// pending snapshot a view rendered. The views snapshot p under brokerMu and
+// use these closures, so a callback queued from an older render still names
+// the old id and approveCLIRun can ignore it once the pending request changes.
+func (a *App) cliRunDecisionHandlers(p *cliRunPending) (approve, refuse func()) {
+	return func() { a.approveCLIRun(p.id, true) }, func() { a.approveCLIRun(p.id, false) }
+}
+
+// approveCLIRun records and signals the decision for exactly the rendered
+// pending id, once, under brokerMu. Any other id, including a stale view or a
+// request already replaced by a newer one, is ignored without touching the
+// current pending request or its window.
+func (a *App) approveCLIRun(id string, approved bool) bool {
 	a.brokerMu.Lock()
 	p := a.cliPending
-	a.brokerMu.Unlock()
-	if p == nil || p.decided {
-		a.hideApprovalWindow()
-		return
+	if p == nil || id == "" || p.id != id || p.decided {
+		a.brokerMu.Unlock()
+		return false
 	}
 	p.decided = true
 	p.choose(approved)
-	a.hideApprovalWindow()
+	a.brokerMu.Unlock()
+	a.hideApprovalWindowFor(id)
+	return true
 }
 
-func (a *App) hideApprovalWindow() {
-	if a.approvalWin != nil && !a.approvalWin.IsDestroyed() {
-		a.approvalWin.Hide()
+// hideApprovalWindowFor hides the approval window only while it still renders
+// id. A cleanup queued for an old request therefore cannot hide the window of
+// a replacement request.
+func (a *App) hideApprovalWindowFor(id string) bool {
+	a.brokerMu.Lock()
+	if id == "" || a.approvalWinPending != id {
+		a.brokerMu.Unlock()
+		return false
+	}
+	a.approvalWinPending = ""
+	win := a.approvalWin
+	a.brokerMu.Unlock()
+	if win != nil && !win.IsDestroyed() {
+		win.Hide()
+	}
+	return true
+}
+
+// rejectRenderedCLIRun is the window-close action. It refuses only the id the
+// approval window currently renders, so a close callback cannot reject a
+// different pending request.
+func (a *App) rejectRenderedCLIRun() {
+	a.brokerMu.Lock()
+	id := a.approvalWinPending
+	a.brokerMu.Unlock()
+	if id == "" {
+		a.hideApprovalWindow()
+		return
+	}
+	if !a.approveCLIRun(id, false) {
+		a.hideApprovalWindowFor(id)
 	}
 }
 
-func (a *App) showApprovalWindow() {
-	if a.approvalWin == nil || a.approvalWin.IsDestroyed() {
+func (a *App) hideApprovalWindow() {
+	a.brokerMu.Lock()
+	a.approvalWinPending = ""
+	win := a.approvalWin
+	a.brokerMu.Unlock()
+	if win != nil && !win.IsDestroyed() {
+		win.Hide()
+	}
+}
+
+func (a *App) showApprovalWindow(id string) {
+	a.brokerMu.Lock()
+	if a.cliPending == nil || a.cliPending.id != id {
+		a.brokerMu.Unlock()
+		return
+	}
+	a.approvalWinPending = id
+	win := a.approvalWin
+	a.brokerMu.Unlock()
+	if win == nil || win.IsDestroyed() {
 		shell := plain.NewShell(plain.ShellOptions{
 			Title:     "Locklark · CLI 凭据请求审批",
 			Width:     560,
@@ -283,22 +346,31 @@ func (a *App) showApprovalWindow() {
 			Theme:     a.onevraTheme,
 			Content:   a.cliApprovalPopupView,
 		})
-		win := shell.Window()
+		win = shell.Window()
 		win.SetAlwaysOnTop(true)
 		win.SetResizable(false)
 		win.SetMinimizable(false)
 		win.SetMaximizable(false)
 		win.OnClose(func(e *mygo.CloseEvent) {
 			e.PreventDefault()
-			a.approveCLIRun(false)
-			win.Hide()
+			a.rejectRenderedCLIRun()
 		})
+		a.brokerMu.Lock()
 		a.approvalWin = win
+		a.brokerMu.Unlock()
 	}
-	a.approvalWin.Center()
-	a.approvalWin.Show()
-	a.approvalWin.Focus()
-	a.approvalWin.Invalidate()
+	// A decision or cleanup may have retired this id while the window was
+	// being created. Never show a prompt whose exact binding was cleared.
+	a.brokerMu.Lock()
+	current := a.cliPending != nil && a.cliPending.id == id && a.approvalWinPending == id
+	a.brokerMu.Unlock()
+	if !current {
+		return
+	}
+	win.Center()
+	win.Show()
+	win.Focus()
+	win.Invalidate()
 }
 
 func (a *App) cliApprovalPopupView(c *ui.Context) {
@@ -341,7 +413,7 @@ func (a *App) cliApprovalPopupView(c *ui.Context) {
 		ui.Spacer(c)
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "打开主窗口", oneui.ButtonGhost).OnClick(func() {
-				a.hideApprovalWindow()
+				a.hideApprovalWindowFor(p.id)
 				if a.win != nil {
 					a.winHidden = false
 					a.win.Show()
@@ -350,8 +422,9 @@ func (a *App) cliApprovalPopupView(c *ui.Context) {
 				}
 			})
 			ui.Row(c).Gap(t.Space(1.5)).Children(func() {
-				oneui.Button(c, "拒绝本次请求", oneui.ButtonOutline).OnClick(func() { a.approveCLIRun(false) })
-				oneui.Button(c, "仅批准本次 CLI 请求", oneui.ButtonPrimary).OnClick(func() { a.approveCLIRun(true) })
+				approve, refuse := a.cliRunDecisionHandlers(p)
+				oneui.Button(c, "拒绝本次请求", oneui.ButtonOutline).OnClick(refuse)
+				oneui.Button(c, "仅批准本次 CLI 请求", oneui.ButtonPrimary).OnClick(approve)
 			})
 		})
 	})
@@ -382,8 +455,9 @@ func (a *App) cliApprovalView(c *ui.Context) {
 		}
 		ui.Text(c, "批准后，以上固定字段将一次性交给本机 CLI 进程。每次请求都需要明确确认。").FontSize(13).Bold().TextColor(t.Warning)
 		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, "仅批准本次 CLI 请求").OnClick(func() { a.approveCLIRun(true) })
-			ui.Button(c, "拒绝本次请求").OnClick(func() { a.approveCLIRun(false) })
+			approve, refuse := a.cliRunDecisionHandlers(p)
+			ui.PrimaryButton(c, "仅批准本次 CLI 请求").OnClick(approve)
+			ui.Button(c, "拒绝本次请求").OnClick(refuse)
 		})
 	})
 }
