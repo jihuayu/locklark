@@ -16,12 +16,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTENSION = ROOT / "browser-extension"
 DIST = EXTENSION / "dist"
+REAL_DIST = DIST
 SAFARI = ROOT / "safari"
 
 EXPECTED_FILES = {
@@ -96,8 +98,10 @@ def assert_safe_resource_name(name: str) -> None:
         raise AssertionError(f"unsafe/resource traversal name: {name!r}")
 
 
-def verify_safari_dist() -> None:
-    safari_dir = DIST / "safari"
+def verify_safari_dist(dist: Path | None = None) -> None:
+    if dist is None:
+        dist = DIST
+    safari_dir = dist / "safari"
     if not safari_dir.is_dir():
         raise AssertionError("dist/safari missing; run node build.js safari")
     names = {entry.name for entry in safari_dir.iterdir() if entry.is_file()}
@@ -164,7 +168,7 @@ def verify_safari_dist() -> None:
         if not (safari_dir / reference).is_file():
             raise AssertionError(f"manifest references missing resource: {reference}")
 
-    baseline = DIST / "chromium" / "manifest.json"
+    baseline = dist / "chromium" / "manifest.json"
     if not baseline.is_file():
         raise AssertionError(
             "dist/chromium/manifest.json missing; build the default baseline "
@@ -194,11 +198,43 @@ class SafariPackagingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         if not shutil.which("node"):
             raise unittest.SkipTest("node unavailable")
-        shutil.rmtree(DIST, ignore_errors=True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-safari-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        fixture_root = Path(cls.temporary.name)
+        os.chmod(fixture_root, 0o700)
+        fixture_extension = fixture_root / "browser-extension"
+        fixture_extension.mkdir(mode=0o700)
+        real_extension = EXTENSION
+        for name in (
+            "build.js",
+            "release-version.json",
+            "core.js",
+            "content.js",
+            "webauthn.js",
+            "background.js",
+            "safari-native-port.js",
+            "popup.html",
+            "popup.css",
+            "popup.js",
+            "options.html",
+            "options.css",
+            "options.js",
+        ):
+            shutil.copyfile(real_extension / name, fixture_extension / name)
+        cls.original_extension = EXTENSION
+        cls.original_dist = DIST
+        globals()["EXTENSION"] = fixture_extension
+        globals()["DIST"] = fixture_extension / "dist"
+        cls.addClassCleanup(cls._restore_globals)
         run([])
         if (DIST / "safari").exists():
             raise AssertionError("Safari must not be part of the default build")
         run(["safari"])
+
+    @classmethod
+    def _restore_globals(cls) -> None:
+        globals()["EXTENSION"] = cls.original_extension
+        globals()["DIST"] = cls.original_dist
 
     def test_safari_resource_whitelist_and_manifest(self) -> None:
         verify_safari_dist()
@@ -416,7 +452,7 @@ class SafariPackagingTests(unittest.TestCase):
 def main() -> int:
     if "--verify-dist" in sys.argv:
         try:
-            verify_safari_dist()
+            verify_safari_dist(REAL_DIST)
         except AssertionError as error:
             print(f"Safari dist verification failed: {error}", file=sys.stderr)
             return 1

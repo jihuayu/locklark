@@ -27,11 +27,28 @@ class PreparationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-package-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)
+        os.chmod(cls.root, 0o700)
+        real_extension = HERE.parent / "browser-extension"
+        cls.fixture_root = cls.root / "fixture"
+        cls.fixture_root.mkdir(mode=0o700)
+        cls.extension = cls.fixture_root / "browser-extension"
+        cls.extension.mkdir(mode=0o700)
+        for name in ("build.js", "release-version.json", *packaging.PRODUCT_FILES):
+            shutil.copyfile(real_extension / name, cls.extension / name)
+        for attribute, value in (
+            ("ROOT", cls.fixture_root),
+            ("EXTENSION_DIR", cls.extension),
+            ("BUILD_SCRIPT", cls.extension / "build.js"),
+        ):
+            patcher = mock.patch.object(packaging, attribute, value)
+            patcher.start()
+            cls.addClassCleanup(patcher.stop)
         cls.chromium_out = cls.root / "chromium-out"
         cls.firefox_out = cls.root / "firefox-out"
-        cls.chromium_out.mkdir()
-        cls.firefox_out.mkdir()
+        cls.chromium_out.mkdir(mode=0o700)
+        cls.firefox_out.mkdir(mode=0o700)
         for product, output in (
             ("chromium", cls.chromium_out),
             ("firefox", cls.firefox_out),
@@ -39,10 +56,6 @@ class PreparationTests(unittest.TestCase):
             code = cls._run_main(product, output)
             if code != 0:
                 raise AssertionError(f"initial {product} preparation failed")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temporary.cleanup()
 
     @staticmethod
     def _run_main(product, output):
