@@ -238,6 +238,8 @@ func message(e error) string {
 		return "系统快捷解锁不可用；需要系统密钥服务与正确权限，请使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSessionLocked):
 		return "金库已锁定，请重新解锁"
+	case errors.Is(e, errForgetDeviceCleanup):
+		return forgetDeviceCleanupError
 	default:
 		return "操作未完成。请检查输入、文件权限和当前版本后重试。"
 	}

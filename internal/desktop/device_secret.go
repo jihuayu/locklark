@@ -10,20 +10,23 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 )
 
 const (
-	deviceSecretService   = "app.locklark.device-secret-key.v1"
-	forgetDeviceStatError = "无法确认金库文件状态；已取消退出当前设备，未删除任何凭据。"
+	deviceSecretService      = "app.locklark.device-secret-key.v1"
+	forgetDeviceStatError    = "无法确认金库文件状态；已取消退出当前设备，未删除任何凭据。"
+	forgetDeviceCleanupError = "退出当前设备未完成；本地凭据可能已部分移除，金库绑定仍保留，请检查权限后重试。磁盘上的 .ll 金库文件未被删除。"
 )
 
 // statVaultFile is a test seam for filesystem status failures. Only an
 // explicit os.ErrNotExist may be treated as an absent vault.
 var (
-	statVaultFile     = os.Stat
-	errVaultFileState = errors.New("desktop: vault file state unavailable")
+	statVaultFile          = os.Stat
+	errVaultFileState      = errors.New("desktop: vault file state unavailable")
+	errForgetDeviceCleanup = errors.New("desktop: forget-device cleanup incomplete")
 )
 
 func vaultFileExists(path string) (bool, error) {
@@ -183,14 +186,35 @@ func (a *App) forgetDeviceWithPassword() {
 			s.Lock()
 		}
 
-		if err := a.deleteDeviceSecret(path); err != nil {
-			return outcome{err: err}
-		}
+		// Cleanup is ordered and intentionally not transactional. Remove quick
+		// unlock first, then the device Secret Key, then the persisted binding.
+		// This keeps the UI bound on every failure and preserves the local
+		// Secret Key when quick-unlock removal fails. A later failure can leave
+		// earlier cleanup applied: after a device-key failure quick unlock is
+		// gone but the Secret Key and binding remain; after a binding-save
+		// failure both credentials may be gone while the UI restores the old
+		// in-memory binding and reports incomplete cleanup rather than success.
+		// A late settings-file error can already have replaced the file, so a
+		// retry or relaunch may still be required. The .ll file is never touched.
 		if sysStore != nil {
-			_ = personal.DisableSystemUnlock(path, sysStore)
+			// An already-absent quick-unlock item is a successful removal.
+			if err := personal.DisableSystemUnlock(path, sysStore); err != nil && !errors.Is(err, osunlock.ErrNotFound) {
+				return outcome{err: errForgetDeviceCleanup}
+			}
+		}
+		if err := a.deleteDeviceSecret(path); err != nil {
+			return outcome{err: errForgetDeviceCleanup}
 		}
 		return outcome{apply: func() {
-			_ = a.SetVaultPath("")
+			// SetVaultPath changes in-memory settings before persisting. Restore
+			// the old binding if the owned settings file cannot be saved so the
+			// UI remains truthfully bound and the operation can be retried.
+			previousSettings := a.settings
+			if err := a.SetVaultPath(""); err != nil {
+				a.settings = previousSettings
+				a.status = forgetDeviceCleanupError
+				return
+			}
 			a.Lock()
 			a.path = DefaultVaultPath()
 			a.confirmForgetDevice = false

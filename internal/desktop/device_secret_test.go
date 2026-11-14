@@ -21,6 +21,7 @@ type fakeDeviceSecretStore struct {
 type fakeSystemUnlockStore struct {
 	values      map[string][]byte
 	deleteCalls int
+	deleteErr   error
 }
 
 func newFakeDeviceSecretStore() *fakeDeviceSecretStore {
@@ -82,6 +83,9 @@ func (s *fakeSystemUnlockStore) Load(key string) ([]byte, error) {
 
 func (s *fakeSystemUnlockStore) Delete(key string) error {
 	s.deleteCalls++
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	delete(s.values, key)
 	return nil
 }
@@ -196,6 +200,87 @@ func TestForgetDeviceStatFailureAbortsBeforeDestructiveCalls(t *testing.T) {
 	}
 }
 
+func TestForgetDeviceSystemUnlockDeleteFailureKeepsDeviceKeyAndBinding(t *testing.T) {
+	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	a.password = password
+	a.secret = ""
+	a.showSecretFallback = false
+	a.unlock()
+	if a.session == nil {
+		t.Fatalf("setup unlock failed: %s", a.status)
+	}
+	defer a.Lock()
+
+	system.deleteErr = errors.New("system store delete denied")
+	a.confirmForgetDevice = true
+	a.forgetPassword = password
+	a.forgetDeviceWithPassword()
+
+	if a.status != forgetDeviceCleanupError {
+		t.Fatalf("status = %q, want fixed cleanup failure", a.status)
+	}
+	if system.deleteCalls != 1 {
+		t.Fatalf("system delete calls = %d, want 1", system.deleteCalls)
+	}
+	if secrets.deleteCalls != 0 {
+		t.Fatalf("device Secret Key was deleted after quick-unlock removal failed: %d", secrets.deleteCalls)
+	}
+	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; !ok {
+		t.Fatal("quick-unlock failure removed the last local recovery material")
+	}
+	if got := a.settingsSnapshot().VaultPath; got != vaultPath {
+		t.Fatalf("quick-unlock failure changed VaultPath binding: %q", got)
+	}
+	if a.path != vaultPath || a.onboarding || !a.confirmForgetDevice {
+		t.Fatalf("quick-unlock failure changed bound UI: path=%q onboarding=%v confirm=%v", a.path, a.onboarding, a.confirmForgetDevice)
+	}
+	if a.session == nil || !a.session.Unlocked() {
+		t.Fatal("quick-unlock failure lost the existing unlocked session")
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("quick-unlock failure altered the .ll vault file: %v", err)
+	}
+}
+
+func TestForgetDeviceSettingsSaveFailureKeepsBoundUI(t *testing.T) {
+	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	boundSettings := a.settingsPath
+	blocker := filepath.Join(t.TempDir(), "settings-parent-is-a-file")
+	if err := os.WriteFile(blocker, []byte("owned test blocker"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.settingsPath = filepath.Join(blocker, "settings.json")
+	a.confirmForgetDevice = true
+	a.forgetPassword = password
+	a.forgetDeviceWithPassword()
+
+	if a.status != forgetDeviceCleanupError {
+		t.Fatalf("status = %q, want fixed cleanup failure", a.status)
+	}
+	if system.deleteCalls != 1 || secrets.deleteCalls != 1 {
+		t.Fatalf("cleanup did not reach the binding step: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+	}
+	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; ok {
+		t.Fatal("settings failure restored the already-deleted device Secret Key")
+	}
+	if got := a.settingsSnapshot().VaultPath; got != vaultPath {
+		t.Fatalf("settings failure lost in-memory VaultPath binding: %q", got)
+	}
+	if a.path != vaultPath || a.onboarding || !a.confirmForgetDevice {
+		t.Fatalf("settings failure changed bound UI: path=%q onboarding=%v confirm=%v", a.path, a.onboarding, a.confirmForgetDevice)
+	}
+	persisted, err := LoadSettings(boundSettings)
+	if err != nil {
+		t.Fatalf("load original settings: %v", err)
+	}
+	if persisted.VaultPath != vaultPath {
+		t.Fatalf("settings failure lost persisted VaultPath binding: %q", persisted.VaultPath)
+	}
+	if _, err := os.Stat(vaultPath); err != nil {
+		t.Fatalf("settings failure altered the .ll vault file: %v", err)
+	}
+}
+
 func TestForgetDeviceExplicitMissingVaultTakesAbsentPath(t *testing.T) {
 	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 	if err := os.Remove(vaultPath); err != nil {
@@ -258,6 +343,13 @@ func TestForgetDeviceVerifiedPasswordDeletesCredentialsAndBinding(t *testing.T) 
 	}
 	if got := a.settingsSnapshot().VaultPath; got != "" {
 		t.Fatalf("verified password retained VaultPath binding: %q", got)
+	}
+	persisted, err := LoadSettings(a.settingsPath)
+	if err != nil {
+		t.Fatalf("load settings after verified forget: %v", err)
+	}
+	if persisted.VaultPath != "" {
+		t.Fatalf("verified password retained persisted VaultPath binding: %q", persisted.VaultPath)
 	}
 	if !a.onboarding {
 		t.Fatal("verified password did not return to onboarding")
