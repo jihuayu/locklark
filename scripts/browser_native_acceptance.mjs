@@ -27,6 +27,7 @@ import { runNativeMain } from "./browser_native_error_boundary.mjs";
 import {
   cleanupOwnedState,
   listenLoopback,
+  writeDiagnosticHandoff,
 } from "./browser_native_setup.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
@@ -904,6 +905,7 @@ try {
   );
   console.error("Native browser diagnostic: " + JSON.stringify(report));
   console.error("Synthetic diagnostic directory retained locally");
+  writeDiagnosticHandoff(state);
   throw Error("Native browser acceptance failed at " + stage);
 } finally {
   if (browser) await browser.close();
