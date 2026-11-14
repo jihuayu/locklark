@@ -31,22 +31,31 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
 1. The `workflow_run` event and canonical API run have the same repository
    id/name, run id, workflow id, exact `.github/workflows/release.yml` path,
    `push` event, completed `success` conclusion, and head SHA.
-2. The exact local `refs/tags/<tag>` exists and resolves to the same commit.
+2. The canonical run API `actor.id` and `triggering_actor.id` are positive
+   integers and each exactly equals the `owner.id` from the same canonical
+   repository API response. `owner.id` is also a positive integer, and
+   `owner.type` is `User`. Event actor hints and login strings are not
+   trusted. This personal-repository policy refuses bots, collaborators, and
+   organization-owned repositories; it does not define a shared or
+   organization publishing model.
+3. The exact local `refs/tags/<tag>` exists and resolves to the same commit.
    Lightweight tags and one-level annotated tags are supported. A missing
    tag, a retagged ref, a nested tag, or a tag object with ambiguous binding
    fields is refused.
-3. The tag commit is an ancestor of the current protected default branch tip
+4. The tag commit is an ancestor of the current protected default branch tip
    returned by the read-only branch API. The ancestry check uses the real
    local git object for the API tip with `git merge-base --is-ancestor`.
-4. `main` is protected with required status checks, admin enforcement, force
+5. `main` is protected with required status checks, admin enforcement, force
    pushes disabled, and deletions disabled.
-5. An active tag ruleset covers `refs/tags/v*` and contains `deletion`,
-   `update`, and `non_fast_forward` rules. Bypass actors are empty or
-   `OrganizationAdmin`; every other bypass type is refused.
-6. The `production` environment has a custom deployment branch policy that
+6. An active tag ruleset includes exactly `refs/tags/v*` and contains
+   `deletion`, `update`, and `non_fast_forward` rules. Bare `v*`, broader
+   patterns, extra include patterns, and exclusions are refused. Bypass
+   actors are empty or `OrganizationAdmin`; every other bypass type is
+   refused.
+7. The `production` environment has a custom deployment branch policy that
    names exactly `main` and does not permit wildcards, extra branches, or tag
    deployments.
-7. The required updater and macOS signing/notarization secret names exist in
+8. The required updater and macOS signing/notarization secret names exist in
    the `production` environment: `MYGO_UPDATER_PRIVATE_KEY`,
    `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD`,
    `MACOS_SIGNING_IDENTITY`, `MACOS_PROVISIONING_PROFILE`, `APPLE_ID`,
@@ -63,6 +72,9 @@ future release workflow is allowed to use this validator:
 
 - the repository and owner ids, release workflow id/path, and tag are already
   fixed and cannot be rewritten by an untrusted actor;
+- the repository is owned by the personal user whose positive `owner.id` both
+  canonical run actor ids equal. Organization-owned repositories and bot
+  initiators require a separate explicit trust design;
 - `main` is protected and its protection settings are enforced for
   administrators;
 - an active tag ruleset prevents deletion, updates, and non-fast-forward
@@ -93,9 +105,13 @@ credential.
 
 - the default branch is unprotected, lacks required checks, permits force
   pushes or deletions, or does not enforce protection for administrators;
-- no active tag ruleset covers `v*` tags, the active ruleset omits deletion,
-  update, or non-fast-forward protection, or it allows a non-organization-admin
-  bypass;
+- the canonical run actor or triggering actor is missing, malformed, a bot,
+  a collaborator, or has a different id than the repository owner id, even if
+  an event actor hint or login string appears to match; the repository owner
+  is not a personal `User`;
+- the active tag ruleset does not include exactly `refs/tags/v*`, the active
+  ruleset omits deletion, update, or non-fast-forward protection, or it allows
+  a non-organization-admin bypass;
 - the production environment is absent, has no deployment branch policy,
   permits a branch other than the default branch, or permits wildcards or tag
   deployments;

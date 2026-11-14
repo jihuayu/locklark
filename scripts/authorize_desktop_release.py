@@ -13,6 +13,11 @@ The validator:
   object, requiring the same repository id/name, run id, workflow id, exact
   workflow path, ``push`` event, completed successful conclusion, and head
   SHA;
+* binds the run initiator to the canonical repository owner: the canonical
+  run API ``actor.id`` and ``triggering_actor.id`` must both be positive
+  integers and exactly equal the positive ``owner.id`` from the same
+  repository response, whose ``owner.type`` must be ``User``. Event actor
+  hints and login strings are never trusted;
 * resolves only the exact local ``refs/tags/<tag>`` ref, accepting a
   lightweight or one-level annotated tag, and peels it by reading the real tag
   object—not by checking out the tag or executing any file in it;
@@ -170,6 +175,7 @@ class Refusal(str, Enum):
     REPOSITORY_UNREADABLE = "repository_unreadable"
     REPOSITORY_UNKNOWN = "repository_unknown"
     REPOSITORY_MISMATCH = "repository_mismatch"
+    REPOSITORY_OWNER_UNTRUSTED = "repository_owner_untrusted"
 
     WORKFLOW_RUN_ABSENT = "workflow_run_absent"
     WORKFLOW_RUN_UNREADABLE = "workflow_run_unreadable"
@@ -180,6 +186,7 @@ class Refusal(str, Enum):
     WORKFLOW_RUN_PATH_UNTRUSTED = "workflow_run_path_untrusted"
     WORKFLOW_RUN_REPOSITORY_MISMATCH = "workflow_run_repository_mismatch"
     WORKFLOW_RUN_HEAD_SHA_INVALID = "workflow_run_head_sha_invalid"
+    RELEASE_INITIATOR_UNTRUSTED = "release_initiator_untrusted"
 
     DEFAULT_BRANCH_UNTRUSTED = "default_branch_untrusted"
     DEFAULT_BRANCH_ABSENT = "default_branch_absent"
@@ -779,6 +786,7 @@ class RepositoryInfo:
     default_branch: str
     owner_login: str
     owner_type: str
+    owner_id: int
 
 
 def _repository_info(payload: object, requested: str) -> RepositoryInfo:
@@ -810,27 +818,38 @@ def _repository_info(payload: object, requested: str) -> RepositoryInfo:
         )
     owner = _mapping(
         data.get("owner"),
-        Refusal.REPOSITORY_UNKNOWN,
-        "repository owner is invalid",
+        Refusal.REPOSITORY_OWNER_UNTRUSTED,
+        "repository owner metadata is invalid",
+    )
+    owner_id = _positive_int(
+        owner.get("id"),
+        Refusal.REPOSITORY_OWNER_UNTRUSTED,
+        "repository owner id is missing or invalid",
     )
     owner_login = _text(
         owner.get("login"),
-        Refusal.REPOSITORY_UNKNOWN,
+        Refusal.REPOSITORY_OWNER_UNTRUSTED,
         "repository owner login is invalid",
     )
     owner_type = _text(
         owner.get("type"),
-        Refusal.REPOSITORY_UNKNOWN,
+        Refusal.REPOSITORY_OWNER_UNTRUSTED,
         "repository owner type is invalid",
     )
-    if owner_type not in ("User", "Organization"):
-        _refuse(Refusal.REPOSITORY_UNKNOWN, "repository owner type is unknown")
+    # This personal-repository checkpoint trusts only the actual personal
+    # owner. Organizations and bots need a separate explicit trust design.
+    if owner_type != "User":
+        _refuse(
+            Refusal.REPOSITORY_OWNER_UNTRUSTED,
+            "repository owner is not a personal user",
+        )
     return RepositoryInfo(
         repository_id=repository_id,
         full_name=full_name,
         default_branch=default_branch,
         owner_login=owner_login,
         owner_type=owner_type,
+        owner_id=owner_id,
     )
 
 
@@ -970,6 +989,38 @@ def _bind_run(
         _refuse(
             Refusal.WORKFLOW_RUN_REPOSITORY_MISMATCH,
             "workflow_run repository names do not match the canonical repository",
+        )
+
+    actor = _mapping(
+        run.get("actor"),
+        Refusal.RELEASE_INITIATOR_UNTRUSTED,
+        "workflow run actor metadata is missing or malformed",
+    )
+    actor_id = _positive_int(
+        actor.get("id"),
+        Refusal.RELEASE_INITIATOR_UNTRUSTED,
+        "workflow run actor id is missing or invalid",
+    )
+    triggering_actor = _mapping(
+        run.get("triggering_actor"),
+        Refusal.RELEASE_INITIATOR_UNTRUSTED,
+        "workflow run triggering actor metadata is missing or malformed",
+    )
+    triggering_actor_id = _positive_int(
+        triggering_actor.get("id"),
+        Refusal.RELEASE_INITIATOR_UNTRUSTED,
+        "workflow run triggering actor id is missing or invalid",
+    )
+    # Only the canonical run API actor ids are trusted. Event actor/login
+    # hints and API login strings are deliberately not compared: identity is
+    # the immutable owner id from the same canonical repository response.
+    if (
+        actor_id != repository.owner_id
+        or triggering_actor_id != repository.owner_id
+    ):
+        _refuse(
+            Refusal.RELEASE_INITIATOR_UNTRUSTED,
+            "workflow run actor and triggering actor must both be the repository owner",
         )
     return run
 
@@ -1767,6 +1818,7 @@ def _run_authorization(
         "tag_annotated": tag_info.annotated,
         "workflow_run_id": binding.run_id,
         "workflow_id": binding.workflow_id,
+        "release_initiator": "repository_owner",
         "head_branch_hint": binding.head_branch_hint,
         "default_branch": DEFAULT_BRANCH,
         "default_branch_commit": default_branch_sha,

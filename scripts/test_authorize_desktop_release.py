@@ -31,6 +31,7 @@ TAG = "v1.2.3"
 RUN_ID = 123
 WORKFLOW_ID = 456
 REPOSITORY_ID = 100
+OWNER_ID = 200
 OWNER = "acme"
 
 
@@ -253,6 +254,10 @@ class AuthorizationTests(unittest.TestCase):
         status: str = "completed",
         conclusion: str = "success",
         run_attempt: int = 1,
+        actor_id: object = OWNER_ID,
+        triggering_actor_id: object = OWNER_ID,
+        actor_login: object = OWNER,
+        actor_type: object = "User",
     ) -> dict[str, object]:
         return {
             "id": run_id,
@@ -266,6 +271,16 @@ class AuthorizationTests(unittest.TestCase):
             "run_attempt": run_attempt,
             "repository": {"id": repository_id, "full_name": full_name},
             "head_repository": {"id": repository_id, "full_name": full_name},
+            "actor": {
+                "id": actor_id,
+                "login": actor_login,
+                "type": actor_type,
+            },
+            "triggering_actor": {
+                "id": triggering_actor_id,
+                "login": actor_login,
+                "type": actor_type,
+            },
         }
 
     def repository_payload(
@@ -275,7 +290,7 @@ class AuthorizationTests(unittest.TestCase):
             "id": REPOSITORY_ID,
             "full_name": REPOSITORY,
             "default_branch": default_branch,
-            "owner": {"login": OWNER, "type": owner_type},
+            "owner": {"id": OWNER_ID, "login": OWNER, "type": owner_type},
         }
 
     def valid_status_checks(self) -> dict[str, object]:
@@ -606,6 +621,245 @@ class AuthorizationTests(unittest.TestCase):
         transport = self.valid_transport(head_commit=self.git.tip)
         decision = self.authorize(transport=transport, event=event)
         self.assert_refused(decision, trust.Refusal.TAG_COMMIT_MISMATCH)
+
+    # Release initiator policy ---------------------------------------------
+
+    def test_composed_personal_owner_tag_signal_and_owner_rerun_authorize(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        decision = self.authorize()
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(decision.facts["release_initiator"], "repository_owner")
+
+        event = self.event(self.git.reviewed, run_attempt=2)
+        transport = self.valid_transport()
+        transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+            self.run_payload(self.git.reviewed, run_attempt=2)
+        )
+        decision = self.authorize(transport=transport, event=event)
+        self.assertTrue(decision.authorized, decision.detail)
+
+    def test_forged_event_actor_and_login_hints_are_not_trusted(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        event = self.event(self.git.reviewed)
+        for container in (event, event["workflow_run"]):
+            container["actor"] = {
+                "id": OWNER_ID,
+                "login": OWNER,
+                "type": "User",
+            }
+            container["triggering_actor"] = {
+                "id": OWNER_ID,
+                "login": OWNER,
+                "type": "User",
+            }
+
+        transport = self.valid_transport()
+        transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+            self.run_payload(
+                self.git.reviewed,
+                actor_id=OWNER_ID + 1,
+                triggering_actor_id=OWNER_ID + 1,
+                actor_login=OWNER,
+            )
+        )
+        self.assert_refused(
+            self.authorize(transport=transport, event=event),
+            trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+        )
+
+        forged = self.event(self.git.reviewed)
+        for container in (forged, forged["workflow_run"]):
+            container["actor"] = {
+                "id": OWNER_ID + 1,
+                "login": "outsider",
+                "type": "User",
+            }
+            container["triggering_actor"] = {
+                "id": OWNER_ID + 1,
+                "login": "outsider",
+                "type": "User",
+            }
+        decision = self.authorize(transport=self.valid_transport(), event=forged)
+        self.assertTrue(decision.authorized, decision.detail)
+
+    def test_canonical_initiator_ids_must_match_the_personal_owner(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        cases: list[tuple[str, int, dict[str, object]]] = [
+            (
+                "collaborator",
+                1,
+                {
+                    "actor_id": OWNER_ID + 1,
+                    "triggering_actor_id": OWNER_ID + 1,
+                    "actor_login": "collaborator",
+                },
+            ),
+            (
+                "bot",
+                1,
+                {
+                    "actor_id": OWNER_ID + 1,
+                    "triggering_actor_id": OWNER_ID + 1,
+                    "actor_login": f"{OWNER}[bot]",
+                    "actor_type": "Bot",
+                },
+            ),
+            (
+                "same login wrong id",
+                1,
+                {
+                    "actor_id": OWNER_ID + 1,
+                    "triggering_actor_id": OWNER_ID + 1,
+                    "actor_login": OWNER,
+                },
+            ),
+            (
+                "actor owner but triggering outsider",
+                1,
+                {"triggering_actor_id": OWNER_ID + 1},
+            ),
+            (
+                "actor outsider but triggering owner",
+                1,
+                {"actor_id": OWNER_ID + 1},
+            ),
+            (
+                "outsider rerun",
+                2,
+                {
+                    "actor_id": OWNER_ID + 1,
+                    "triggering_actor_id": OWNER_ID + 1,
+                },
+            ),
+            (
+                "mixed owner and outsider rerun",
+                2,
+                {"triggering_actor_id": OWNER_ID + 1},
+            ),
+        ]
+        for label, run_attempt, options in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+                    self.run_payload(
+                        self.git.reviewed,
+                        run_attempt=run_attempt,
+                        **options,
+                    )
+                )
+                event = self.event(self.git.reviewed, run_attempt=run_attempt)
+                self.assert_refused(
+                    self.authorize(transport=transport, event=event),
+                    trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+                )
+
+    def test_missing_or_malformed_initiator_metadata_fails_closed(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+
+        def remove_actor(run: dict[str, object]) -> None:
+            del run["actor"]
+
+        def remove_triggering_actor(run: dict[str, object]) -> None:
+            del run["triggering_actor"]
+
+        def actor(value: object) -> object:
+            return lambda run: run.__setitem__("actor", value)
+
+        def triggering_actor(value: object) -> object:
+            return lambda run: run.__setitem__("triggering_actor", value)
+
+        bad_ids: tuple[object, ...] = (None, True, False, 0, -1, "200", 200.0)
+        cases: list[tuple[str, object]] = [
+            ("missing actor", remove_actor),
+            ("null actor", actor(None)),
+            ("actor not an object", actor("actor")),
+            ("actor id missing", actor({"login": OWNER, "type": "User"})),
+            ("missing triggering actor", remove_triggering_actor),
+            ("null triggering actor", triggering_actor(None)),
+            (
+                "triggering actor not an object",
+                triggering_actor(["not", "an", "actor"]),
+            ),
+            (
+                "triggering actor id missing",
+                triggering_actor({"login": OWNER, "type": "User"}),
+            ),
+        ]
+        for value in bad_ids:
+            cases.append(
+                (
+                    f"actor id {value!r}",
+                    actor({"id": value, "login": OWNER, "type": "User"}),
+                )
+            )
+            cases.append(
+                (
+                    f"triggering actor id {value!r}",
+                    triggering_actor(
+                        {"id": value, "login": OWNER, "type": "User"}
+                    ),
+                )
+            )
+        for label, mutate in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                run = transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)]
+                mutate(run)  # type: ignore[operator]
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.RELEASE_INITIATOR_UNTRUSTED,
+                )
+
+    def test_owner_metadata_requires_a_positive_personal_user_id(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+
+        def owner_without_id(payload: dict[str, object]) -> None:
+            del payload["owner"]["id"]  # type: ignore[index]
+
+        def owner_without_type(payload: dict[str, object]) -> None:
+            del payload["owner"]["type"]  # type: ignore[index]
+
+        def owner_id(value: object) -> object:
+            return lambda payload: payload["owner"].__setitem__("id", value)
+
+        def owner_type(value: object) -> object:
+            return lambda payload: payload["owner"].__setitem__("type", value)
+
+        cases: list[tuple[str, object]] = [
+            ("owner missing", lambda payload: payload.pop("owner")),
+            ("owner null", lambda payload: payload.__setitem__("owner", None)),
+            ("owner id missing", owner_without_id),
+            ("owner id null", owner_id(None)),
+            ("owner id true", owner_id(True)),
+            ("owner id false", owner_id(False)),
+            ("owner id zero", owner_id(0)),
+            ("owner id negative", owner_id(-1)),
+            ("owner id string", owner_id(str(OWNER_ID))),
+            ("owner id float", owner_id(float(OWNER_ID))),
+            ("owner type missing", owner_without_type),
+            ("organization owner", owner_type("Organization")),
+            ("bot owner", owner_type("Bot")),
+            ("owner type null", owner_type(None)),
+        ]
+        for label, mutate in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                payload = transport.responses[trust.repository_api(REPOSITORY)]
+                mutate(payload)  # type: ignore[operator]
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.REPOSITORY_OWNER_UNTRUSTED,
+                )
+
+    def test_unsupported_organization_refuses_before_org_secret_scope(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        transport = self.valid_transport(owner_type="Organization")
+        decision = self.authorize(transport=transport)
+        self.assert_refused(decision, trust.Refusal.REPOSITORY_OWNER_UNTRUSTED)
+        self.assertNotIn(
+            ("get_list", trust.organization_secrets_api(OWNER)),
+            transport.calls,
+        )
 
     # Metadata absence/unreadability --------------------------------------
 
@@ -1324,7 +1578,7 @@ class AuthorizationTests(unittest.TestCase):
 
     def test_production_credentials_are_environment_only(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
-        cases: list[tuple[str, str, object, bool, trust.Refusal]] = [
+        cases: list[tuple[str, str, object, trust.Refusal]] = [
             (
                 "missing environment updater",
                 trust.environment_secrets_api(REPOSITORY),
@@ -1335,7 +1589,6 @@ class AuthorizationTests(unittest.TestCase):
                         if name != "MYGO_UPDATER_PRIVATE_KEY"
                     ]
                 },
-                False,
                 trust.Refusal.SECRETS_ENVIRONMENT_MISSING,
             ),
             (
@@ -1346,29 +1599,13 @@ class AuthorizationTests(unittest.TestCase):
                         {"name": "MYGO_UPDATER_PRIVATE_KEY"},
                     ]
                 },
-                False,
                 trust.Refusal.SECRETS_REPOSITORY_LEAK,
             ),
             (
                 "repository scoped optional windows certificate",
                 trust.repository_secrets_api(REPOSITORY),
                 {"secrets": [{"name": "WINDOWS_CERTIFICATE"}]},
-                False,
                 trust.Refusal.SECRETS_REPOSITORY_LEAK,
-            ),
-            (
-                "organization scoped signing credential",
-                trust.organization_secrets_api(OWNER),
-                {"secrets": [{"name": "MACOS_CERTIFICATE"}]},
-                True,
-                trust.Refusal.SECRETS_ORGANIZATION_LEAK,
-            ),
-            (
-                "organization secret listing absent",
-                trust.organization_secrets_api(OWNER),
-                trust.ApiResponse(404, None),
-                True,
-                trust.Refusal.SECRETS_ORGANIZATION_ABSENT,
             ),
             (
                 "truncated environment secret list",
@@ -1380,7 +1617,6 @@ class AuthorizationTests(unittest.TestCase):
                         for name in sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)
                     ],
                 },
-                False,
                 trust.Refusal.SECRETS_ENVIRONMENT_UNKNOWN,
             ),
             (
@@ -1394,17 +1630,59 @@ class AuthorizationTests(unittest.TestCase):
                     ]
                     + [{"name": sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)[0]}],
                 },
-                False,
                 trust.Refusal.SECRETS_ENVIRONMENT_UNKNOWN,
             ),
         ]
-        for label, path, payload, organization, expected in cases:
+        for label, path, payload, expected in cases:
             with self.subTest(case=label):
-                transport = self.valid_transport(
-                    owner_type="Organization" if organization else "User"
-                )
+                transport = self.valid_transport()
                 transport.responses[path] = payload
                 self.assert_refused(self.authorize(transport=transport), expected)
+
+    def test_organization_secret_scope_is_isolated_from_owner_gate(self) -> None:
+        # A composed flow must refuse an organization-owned repository before
+        # any organization secret metadata is treated as a policy answer.
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        self.assert_refused(
+            self.authorize(transport=self.valid_transport(owner_type="Organization")),
+            trust.Refusal.REPOSITORY_OWNER_UNTRUSTED,
+        )
+
+        # The scope check is exercised directly, with an explicit organization
+        # RepositoryInfo, so these tests cannot accidentally bypass the
+        # personal-owner gate in the composed validator.
+        repository_info = trust.RepositoryInfo(
+            repository_id=REPOSITORY_ID,
+            full_name=REPOSITORY,
+            default_branch="main",
+            owner_login=OWNER,
+            owner_type="Organization",
+            owner_id=OWNER_ID,
+        )
+        cases: list[tuple[str, object, trust.Refusal]] = [
+            (
+                "organization scoped signing credential",
+                {"secrets": [{"name": "MACOS_CERTIFICATE"}]},
+                trust.Refusal.SECRETS_ORGANIZATION_LEAK,
+            ),
+            (
+                "organization scoped optional certificate",
+                {"secrets": [{"name": "WINDOWS_CERTIFICATE"}]},
+                trust.Refusal.SECRETS_ORGANIZATION_LEAK,
+            ),
+            (
+                "organization secret listing absent",
+                trust.ApiResponse(404, None),
+                trust.Refusal.SECRETS_ORGANIZATION_ABSENT,
+            ),
+        ]
+        for label, payload, expected in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport(owner_type="Organization")
+                transport.responses[trust.organization_secrets_api(OWNER)] = payload
+                with self.assertRaises(trust.ReleaseRefusal) as caught:
+                    trust._check_secrets(transport, REPOSITORY, repository_info)
+                self.assertEqual(caught.exception.reason, expected)
 
     # Generic unsafe-policy fixture and read-only API surface ---------------
 
@@ -1477,7 +1755,7 @@ class AuthorizationTests(unittest.TestCase):
 
     def test_gh_pagination_composed_smoke_is_read_only(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
-        stdout = self.gh_fixture_stdout(owner_type="Organization")
+        stdout = self.gh_fixture_stdout()
         secret_value = "must-never-be-read"
         environment_path = trust.environment_secrets_api(REPOSITORY)
         environment_pages = json.loads(stdout[environment_path])
@@ -1493,10 +1771,10 @@ class AuthorizationTests(unittest.TestCase):
             trust.environment_branch_policies_api(REPOSITORY),
             trust.environment_secrets_api(REPOSITORY),
             trust.repository_secrets_api(REPOSITORY),
-            trust.organization_secrets_api(OWNER),
         }
         called = {command[-1] for command in commands}
         self.assertTrue(paginated <= called)
+        self.assertNotIn(trust.organization_secrets_api(OWNER), called)
         self.assertTrue(commands)
         for command in commands:
             self.assertEqual(command[:4], ["gh", "api", "--method", "GET"])
