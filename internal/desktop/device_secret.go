@@ -106,18 +106,6 @@ func (a *App) deleteDeviceSecret(path string) error {
 	return a.deviceSecrets.Delete(deviceSecretKey(path))
 }
 
-func (a *App) forgetDeviceSecret() {
-	path := a.path
-	a.run(func() outcome {
-		err := a.deleteDeviceSecret(path)
-		return outcome{err: err, apply: func() {
-			a.showSecretFallback = true
-			a.confirmForgetDevice = false
-			a.status = "已从此设备移除 Secret Key；金库文件未被删除"
-		}}
-	})
-}
-
 func (a *App) forgetDeviceNeedsSecret() bool {
 	path := strings.TrimSpace(a.path)
 	if path == "" {

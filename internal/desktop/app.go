@@ -1002,21 +1002,12 @@ func (a *App) lockFormView(c *ui.Context) {
 		}
 		ui.Button(c, "退出当前设备…").Disabled(a.busy || a.path == "").OnClick(func() {
 			a.confirmForgetDevice = true
-			a.status = "确认后只会移除此设备的 Secret Key，不会删除金库文件"
+			a.forgetPassword = ""
+			a.status = "确认退出前需验证当前金库主密码；不会删除金库文件"
 		})
 	})
 	if a.confirmForgetDevice {
-		ui.Column(c).FillWidth().Border(1, t.Danger).Radius(t.Radius).Background(t.Danger.Alpha(.06)).Padding(t.Space(2.5)).Gap(8).Children(func() {
-			ui.Text(c, "退出当前设备？").Bold().TextColor(t.Danger)
-			ui.Text(c, "这会移除此设备保存的 Secret Key，金库文件不会删除。下次使用应急文件重新授权此设备。").FontSize(12).TextColor(t.TextMuted).Wrap()
-			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.Button(c, "确认退出当前设备").Disabled(a.busy).OnClick(a.forgetDeviceSecret)
-				ui.Button(c, "取消退出").Disabled(a.busy).OnClick(func() {
-					a.confirmForgetDevice = false
-					a.status = ""
-				})
-			})
-		})
+		a.forgetDeviceConfirmView(c)
 	}
 	ui.Text(c, "Secret Key 不写入普通设置文件；系统凭据存储不可用时，应用会要求使用一次应急资料。").FontSize(12).TextColor(t.TextMuted).Wrap()
 }
