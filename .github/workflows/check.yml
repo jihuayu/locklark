@@ -65,6 +65,7 @@ jobs:
         timeout-minutes: 10
         run: |
           python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
+          python3 -m unittest scripts.test_ci_extension_producer
           # Discover every mobile contract so the emulator gate/category
           # regressions run with the other cheap checks, not after a build.
           python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
@@ -287,10 +288,11 @@ jobs:
             cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
           done
           {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
             echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
-            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$src/unpacked/chromium"
-            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$src/unpacked/firefox"
-            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$src/unpacked/safari"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
           } >> "$GITHUB_ENV"
       - name: Build primary artifacts once
         run: |
@@ -302,12 +304,6 @@ jobs:
           go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
       - name: Test Safari transport policy and compile the macOS app
         timeout-minutes: 15
-        env:
-          LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
-          LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: ${{ runner.temp }}/locklark-extension-producer/prepared/v2pairs
-          LOCKLARK_BROWSER_EXTENSION_CHROMIUM: ${{ runner.temp }}/locklark-extension-producer/unpacked/chromium
-          LOCKLARK_BROWSER_EXTENSION_FIREFOX: ${{ runner.temp }}/locklark-extension-producer/unpacked/firefox
-          LOCKLARK_BROWSER_EXTENSION_SAFARI: ${{ runner.temp }}/locklark-extension-producer/unpacked/safari
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
@@ -366,6 +362,8 @@ jobs:
           PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
           python3 scripts/test_package_browser_extension.py
           node --test scripts/test_browser_edge_install.mjs
+          node --test scripts/test_browser_extension_prebuilt.mjs
+          python3 -m unittest scripts.test_safari_prebuilt_builder
       - name: Prepare Firefox and Safari once with strict smoke
         timeout-minutes: 10
         run: |
@@ -436,10 +434,11 @@ jobs:
             cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
           done
           {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
             echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
-            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$src/unpacked/chromium"
-            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$src/unpacked/firefox"
-            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$src/unpacked/safari"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
           } >> "$GITHUB_ENV"
       - name: Download Linux primary binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -604,6 +603,13 @@ jobs:
             mkdir -p "browser-extension/dist/$product"
             cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
           done
+          {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
+          } >> "$GITHUB_ENV"
       - name: Download Linux primary binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:

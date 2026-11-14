@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -36,6 +37,21 @@ def block(name: str) -> str:
             end = start + source[start + 1 :].index(line)
             break
     return source[start:end]
+
+
+def stage_shell(name: str) -> str:
+    source = block(name)
+    marker = "      - name: Verify and stage extension producer\n        run: |\n"
+    start = source.index(marker) + len(marker)
+    shell = []
+    for line in source[start:].splitlines():
+        if line.startswith("          "):
+            shell.append(line[10:])
+        elif not line.strip() and shell:
+            shell.append("")
+        elif shell:
+            break
+    return "\n".join(shell)
 
 
 def ci_required_shell() -> str:
@@ -79,12 +95,68 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
         desktop = block("desktop-macos")
         self.assertIn("LOCKLARK_BROWSER_EXTENSION_SAFARI", desktop)
         self.assertIn("safari/scripts/build_safari.sh", desktop)
+        self.assertNotIn("/unpacked/chromium\n", desktop.split("Test Safari")[1])
         web = block("web")
         self.assertIn("needs: [extension-producer, web-core, web-browsers]", web)
         self.assertIn("EXTENSION_PRODUCER_RESULT", web)
         required = block("ci-required")
         self.assertIn("extension-producer", required.splitlines()[2])
         self.assertIn("EXTENSION_PRODUCER_RESULT", required)
+
+    def test_actual_stage_shell_exports_canonical_paths_and_copies(self):
+        for job in ("web-core", "web-browsers", "desktop-macos"):
+            with self.subTest(job=job), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                runner = root / "runner"
+                workspace = root / "workspace"
+                artifact = runner / "locklark-extension-producer"
+                workspace.mkdir()
+                env_file = root / "github-env"
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                fake_python = fake_bin / "python3"
+                fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                fake_python.chmod(0o755)
+                for product in ("chromium", "firefox", "safari"):
+                    (artifact / "unpacked" / product).mkdir(parents=True)
+                    (artifact / "unpacked" / product / "manifest.json").write_text(
+                        product, encoding="utf-8"
+                    )
+                (artifact / "prepared" / "v2pairs").mkdir(parents=True)
+                (artifact / "prepared" / "v2pairs" / "pair").write_text(
+                    "pair", encoding="utf-8"
+                )
+                result = subprocess.run(
+                    ["bash", "-c", stage_shell(job)],
+                    env={
+                        **os.environ,
+                        "RUNNER_TEMP": str(runner),
+                        "GITHUB_WORKSPACE": str(workspace),
+                        "GITHUB_ENV": str(env_file),
+                        "PATH": str(fake_bin) + ":" + os.environ.get("PATH", ""),
+                    },
+                    text=True, capture_output=True, check=False, cwd=workspace,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = {}
+                for line in env_file.read_text(encoding="utf-8").splitlines():
+                    key, _, value = line.partition("=")
+                    values[key] = value
+                self.assertEqual(values["LOCKLARK_BROWSER_REQUIRE_PREBUILT"], "1")
+                self.assertEqual(
+                    values["LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR"],
+                    str(artifact / "prepared" / "v2pairs"),
+                )
+                for product in ("chromium", "firefox", "safari"):
+                    target = workspace / "browser-extension" / "dist" / product
+                    self.assertEqual(
+                        values["LOCKLARK_BROWSER_EXTENSION_" + product.upper()],
+                        str(target),
+                    )
+                    self.assertEqual(
+                        (target / "manifest.json").read_text(encoding="utf-8"),
+                        product,
+                    )
 
     def test_actual_ci_required_shell_rejects_non_success(self):
         shell = ci_required_shell()
