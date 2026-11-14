@@ -51,6 +51,27 @@ function recordNativeFailure(writeFile, report, diagnostics) {
   return json;
 }
 
+const PICKER_DIAGNOSTIC_FRAMES = ["before", "after", "failure"];
+const PICKER_DIAGNOSTIC_FIELDS = [
+  "focus", "visible", "active", "hasBeenActive", "targetLive",
+];
+function sanitizePickerDiagnostics(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const out = {};
+  for (const frame of PICKER_DIAGNOSTIC_FRAMES) {
+    const probe = value[frame];
+    if (!probe || typeof probe !== "object" || Array.isArray(probe)) return null;
+    const fixed = {};
+    for (const field of PICKER_DIAGNOSTIC_FIELDS) {
+      const entry = probe[field];
+      if (entry !== true && entry !== false && entry !== "unavailable") return null;
+      fixed[field] = entry;
+    }
+    out[frame] = fixed;
+  }
+  return out;
+}
+
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
 // prefix and one fixed phase, printed only at its real launch boundary.
@@ -2992,7 +3013,7 @@ try {
     phase("post-repair:route-click");
     // The physical row click starts the actual normal QuickFill=false route
     // path: one persistent route tab, never a popup item-get.
-    await popup.click(target);
+    await popup.click(target, { expectedRouteClose: true });
     let opened;
     await eventually(async () => {
       const candidates = (await routeTargets()).filter(
@@ -3496,6 +3517,10 @@ try {
       "Edge pair status not disconnected",
       "Edge pair refresh remained enabled after disconnect",
     ];
+    const pickerDiagnostics =
+      stage === "checkout-picker-cancel:picker"
+        ? sanitizePickerDiagnostics(error?.pickerDiagnostics)
+        : null;
     const report = {
       reason: safeReasons.includes(error?.message)
         ? error.message
@@ -3515,6 +3540,7 @@ try {
       !edgePairDisconnect
         ? { pickerStatus: error.pickerStatus }
         : {}),
+      ...(pickerDiagnostics ? { pickerDiagnostics } : {}),
       // Only the last helper call's fixed contract fields, never raw stderr.
       ...(nativeHelperError ? { nativeError: nativeHelperError } : {}),
       // Latest fixed-enum route-page observation from the bounded native-label

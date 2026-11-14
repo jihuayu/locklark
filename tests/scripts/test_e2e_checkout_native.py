@@ -912,6 +912,30 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "failureRecordState": "rejected", "wrapperFamily": "unknown"},
         )
 
+    def test_picker_diagnostics_requires_exact_bool_types(self):
+        value = {
+            "before": {
+                "focus": True, "visible": False, "active": "unavailable",
+                "hasBeenActive": True, "targetLive": False,
+            },
+            "after": {
+                "focus": False, "visible": True, "active": False,
+                "hasBeenActive": "unavailable", "targetLive": True,
+            },
+            "failure": {
+                "focus": "unavailable", "visible": "unavailable",
+                "active": "unavailable", "hasBeenActive": "unavailable",
+                "targetLive": "unavailable",
+            },
+        }
+        self.assertEqual(support._checkout_picker_diagnostics(value), value)
+        # Python's bool equality would otherwise accept numeric lookalikes.
+        for bad in (1, 0, 1.0, 0.0, "True", "False", None, [], {}):
+            with self.subTest(bad=bad):
+                broken = json.loads(json.dumps(value))
+                broken["before"]["focus"] = bad
+                self.assertIsNone(support._checkout_picker_diagnostics(broken))
+
     def test_picker_status_never_coexists_with_a_native_error(self):
         # The sender writes pickerStatus only when no native helper error is
         # the original failure, so both together reject the whole record even

@@ -70,6 +70,12 @@ jobs:
           python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
           python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
           python3 -m unittest discover -s scripts -p 'test_*native*.py'
+      - name: Test pure-Node browser contracts
+        timeout-minutes: 5
+        run: |
+          # The checkout contract imports the route-idle suite, so this exact
+          # Node invocation runs both once at the cheap layer.
+          node --test scripts/test_browser_checkout_acceptance.mjs
   go:
     needs: [linux-build, contracts]
     # Keep failure reporting, but never start this expensive layer when the
@@ -334,7 +340,7 @@ jobs:
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
       - name: Prepare reproducible unsigned extension packages
         timeout-minutes: 5
         run: |
