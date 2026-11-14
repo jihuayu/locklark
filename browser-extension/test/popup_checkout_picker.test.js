@@ -219,6 +219,7 @@ function harness() {
     context,
   );
   const h = {
+    context,
     requests,
     clipboardWrites,
     el: (selector) => document.querySelector(selector),
@@ -564,4 +565,121 @@ test("a card only offers frame choice when the host reports support", async () =
   await flush();
   assert.equal(h.sent("checkout-frames").length, 0);
   h.take("fill");
+});
+
+
+function detailFillDiagnosticLog(h) {
+  return h.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__;
+}
+
+function assertDiagnosticShape(records, expectedPhases) {
+  const plain = Array.from(records, (record) => ({ ...record }));
+  assert.deepEqual(
+    plain.map((record) => record.phase),
+    expectedPhases,
+  );
+  for (const [index, record] of plain.entries()) {
+    assert.deepEqual(
+      Object.keys(record).sort(),
+      index === 0
+        ? ["isTrusted", "phase", "userActivation"]
+        : ["phase"],
+    );
+    if (index === 0) {
+      assert.equal(typeof record.isTrusted, "boolean");
+      assert.equal(typeof record.userActivation, "boolean");
+    }
+  }
+}
+
+test("detail-fill diagnostics are disabled by default and do not branch", async () => {
+  const h = harness();
+  await openCard(h);
+  assert.equal(detailFillDiagnosticLog(h), undefined);
+  h.click("#detail-fill");
+  assert.equal(detailFillDiagnosticLog(h), undefined);
+  assert.equal(h.pending("checkout-frames").length, 1);
+  h.take("checkout-frames").resolve(null);
+  await flush();
+});
+
+test("detail-fill diagnostics record entry, early guard and refused gesture", async () => {
+  const early = harness();
+  early.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  early.click("#detail-fill");
+  assertDiagnosticShape(detailFillDiagnosticLog(early), [
+    "handler-entry",
+    "early-guard",
+  ]);
+
+  const refused = harness();
+  await openCard(refused);
+  refused.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  refused.click("#detail-fill", { isTrusted: false });
+  const records = detailFillDiagnosticLog(refused);
+  assertDiagnosticShape(records, ["handler-entry", "gesture-refused"]);
+  assert.equal(records[0].isTrusted, false);
+  assert.equal(records[0].userActivation, false);
+  assert.equal(refused.pending("checkout-frames").length, 0);
+});
+
+test("detail-fill diagnostics record reply and adopt phases", async () => {
+  const nullReply = harness();
+  await openCard(nullReply);
+  nullReply.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  nullReply.click("#detail-fill");
+  assertDiagnosticShape(detailFillDiagnosticLog(nullReply), [
+    "handler-entry",
+    "request-sent",
+  ]);
+  nullReply.take("checkout-frames").resolve(null);
+  await flush();
+  assertDiagnosticShape(detailFillDiagnosticLog(nullReply), [
+    "handler-entry",
+    "request-sent",
+    "reply-null",
+    "adopt-refused",
+  ]);
+
+  const refusedAdopt = harness();
+  await openCard(refusedAdopt);
+  refusedAdopt.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  refusedAdopt.click("#detail-fill");
+  refusedAdopt
+    .take("checkout-frames")
+    .resolve(connectedState({ checkoutPicker: pickerView({ candidates: [] }) }));
+  await flush();
+  assertDiagnosticShape(detailFillDiagnosticLog(refusedAdopt), [
+    "handler-entry",
+    "request-sent",
+    "reply-present",
+    "adopt-refused",
+  ]);
+
+  const adopted = harness();
+  await openCard(adopted);
+  adopted.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  adopted.click("#detail-fill");
+  adopted
+    .take("checkout-frames")
+    .resolve(connectedState({ checkoutPicker: pickerView() }));
+  await flush();
+  const records = detailFillDiagnosticLog(adopted);
+  assertDiagnosticShape(records, [
+    "handler-entry",
+    "request-sent",
+    "reply-present",
+    "adopted",
+  ]);
+  assert.equal(records[0].isTrusted, true);
+  assert.equal(records[0].userActivation, false);
+  assert.deepEqual(
+    Array.from(records, (record) => Object.keys(record).sort()),
+    [
+      ["isTrusted", "phase", "userActivation"],
+      ["phase"],
+      ["phase"],
+      ["phase"],
+    ],
+  );
 });

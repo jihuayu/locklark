@@ -18,6 +18,8 @@ import {
   chooseChildOrigin,
   openCheckoutPicker,
   CHECKOUT_PICKER_STATUSES,
+  DETAIL_FILL_DIAGNOSTIC_PHASES,
+  sanitizeDetailFillDiagnostic,
   assertProgrammaticClickRefused,
   acceptCheckoutFrames,
   runLockDuringReviewJourney,
@@ -222,7 +224,15 @@ function pickerPopup(labels, options = {}) {
         : 0;
   return {
     clicked: [],
+    evaluated: [],
     canceled: 0,
+    async evaluate(expression) {
+      this.evaluated.push(expression);
+      if (expression.includes("__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__")) {
+        return options.diagnosticLog ?? null;
+      }
+      return true;
+    },
     async click(selector) {
       this.clicked.push(selector);
       if (selector === "#checkout-cancel") {
@@ -384,7 +394,7 @@ test("a picker that never appears is never reported as cancelled", async () => {
   // its fixed enum, so the red stage stays diagnosable while an unrecognised
   // status is never echoed. An empty line is the picker's absent status.
   for (const [line, shown] of [
-    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture (不会自动选择)"],
+    ["请选择要填充的结账表单来源；不会自动选择", "other (unrecognised public status)"],
     ["当前原生宿主或浏览器不支持选择结账表单", "unsupported (不支持选择结账表单)"],
     ["无法列出当前页面的结账表单", "list-failed (无法列出当前页面的结账表单)"],
     ["本次请求被拒绝", "other (unrecognised public status)"],
@@ -428,7 +438,7 @@ test("a picker that never appears is never reported as cancelled", async () => {
 
 test("a missing picker carries only the fixed status enum", async () => {
   const cases = [
-    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture"],
+    ["请选择要填充的结账表单来源；不会自动选择", "other"],
     ["当前原生宿主或浏览器不支持选择结账表单", "unsupported"],
     ["无法列出当前页面的结账表单", "list-failed"],
     ["已选择结账表单", "selected"],
@@ -2888,4 +2898,72 @@ test("route revocation reattaches a fresh client after the positive cleanup and 
     /\bgoto\b|sendMessage|relayMessage|postMessage|addInitScript|routeStatusTraceProbe|\binput\(|click_label|wait_label/,
   );
   assert.match(checkpoint, /^\s+let revoked = null;$/m);
+});
+
+
+test("detail-fill diagnostic contract rejects unknown fields and phases", () => {
+  assert.deepEqual([...DETAIL_FILL_DIAGNOSTIC_PHASES], [
+    "handler-entry",
+    "early-guard",
+    "gesture-refused",
+    "request-sent",
+    "reply-null",
+    "reply-present",
+    "adopt-refused",
+    "adopted",
+  ]);
+  const valid = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "request-sent" },
+    { phase: "reply-present" },
+    { phase: "adopted" },
+  ];
+  assert.deepEqual(sanitizeDetailFillDiagnostic(valid), valid);
+  for (const invalid of [
+    null,
+    [],
+    [{ phase: "early-guard", isTrusted: true, userActivation: false }],
+    [{ phase: "handler-entry", isTrusted: true }],
+    [{ phase: "handler-entry", isTrusted: 1, userActivation: false }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false, origin: "x" }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "unknown" }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "request-sent", extra: true }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "request-sent" }, { phase: "request-sent" }],
+  ]) {
+    assert.equal(sanitizeDetailFillDiagnostic(invalid), null);
+  }
+});
+
+test("picker failure reads only sanitized diagnostic records", async () => {
+  const valid = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "gesture-refused" },
+  ];
+  const popup = pickerPopup([TOP_LABEL], {
+    noPicker: true,
+    diagnosticLog: valid,
+  });
+  await assert.rejects(
+    () => openCheckoutPicker(popup, eventually),
+    (error) => {
+      assert.deepEqual(error.pickerDiagnostic, valid);
+      assert.equal(error.pickerStatus, "other");
+      return true;
+    },
+  );
+  assert.equal(popup.evaluated.length, 2);
+  assert.match(popup.evaluated[0], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__/);
+  assert.match(popup.evaluated[1], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__/);
+  assert.deepEqual(popup.clicked, ["#detail-fill"]);
+
+  const bad = pickerPopup([TOP_LABEL], {
+    noPicker: true,
+    diagnosticLog: [
+      { phase: "handler-entry", isTrusted: true, userActivation: false, origin: "x" },
+    ],
+  });
+  await assert.rejects(
+    () => openCheckoutPicker(bad, eventually),
+    (error) => error.pickerDiagnostic === null,
+  );
 });
