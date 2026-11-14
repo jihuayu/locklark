@@ -249,6 +249,7 @@ func (a *App) onevraSidebarView(c *ui.Context) {
 				oneui.SidebarSection(c, "浏览", func() {
 					a.onevraSidebarItem(c, "全部", lucide.List(), a.v2.nav == navAllItems && a.v2.vaultID == "all", len(a.v2.rows), func() { a.navigate(navAllItems) })
 					a.onevraSidebarItem(c, "收藏", lucide.Star(), a.v2.nav == navFavorites, a.onevraFavoriteCount(), func() { a.navigate(navFavorites) })
+					a.onevraSidebarItem(c, "Watchtower 安全体检", lucide.Shield(), a.v2.nav == navWatchtower, 0, func() { a.navigate(navWatchtower) })
 					a.onevraSidebarItem(c, "归档", lucide.Archive(), a.v2.nav == navArchive, archivedCount, func() { a.navigate(navArchive) })
 					a.onevraSidebarItem(c, "回收站", lucide.Trash(), a.v2.nav == navRecentlyDelete, trashedCount, func() { a.navigate(navRecentlyDelete) })
 				})

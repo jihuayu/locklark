@@ -56,9 +56,7 @@ type v2State struct {
 	historyOpen     bool
 	settingsOpen    bool
 	settingsSection string
-	showWatchtower  bool
 	watchtower      *WatchtowerReport
-	watchtowerErr   string
 	ignored         map[string]bool
 
 	generator generatorState
@@ -263,7 +261,6 @@ func (a *App) navigate(target string) {
 		a.v2.nav = navWatchtower
 		a.v2.category = ""
 		a.v2.tag = ""
-		a.v2.showWatchtower = true
 	case "recently_deleted", "recently deleted", "trash", "trashed", "recentlydeleted", "回收站", "最近删除":
 		a.v2.nav = navRecentlyDelete
 		a.v2.category = ""

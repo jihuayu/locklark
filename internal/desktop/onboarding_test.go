@@ -222,12 +222,24 @@ func TestClassicCreationStillRequiresMatchingSavedSecret(t *testing.T) {
 	}
 }
 
-func TestSettingsUseMenusAndDesktopOmitsWatchtower(t *testing.T) {
+func TestSettingsUseMenusAndDesktopExposesWatchtower(t *testing.T) {
 	a := newOnevraTestApp()
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	tester := newOnevraTestTesterSize(a, 1280, 1000)
-	if tester.HasText("Watchtower 安全体检") {
-		t.Fatal("desktop still exposes Watchtower")
+	if !tester.HasText("Watchtower 安全体检") {
+		t.Fatal("desktop does not expose the wired Watchtower entry")
+	}
+	if err := tester.Click("Watchtower 安全体检"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.nav != navWatchtower {
+		t.Fatalf("Watchtower entry selected nav %q", a.v2.nav)
+	}
+	tester.Frame()
+	for _, want := range []string{"Watchtower 安全体检", "运行本地检查", "尚未运行安全扫描"} {
+		if !tester.HasText(want) {
+			t.Fatalf("wired Watchtower view missing %q", want)
+		}
 	}
 	a.openSettings()
 	tester.Frame()
