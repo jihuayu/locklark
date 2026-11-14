@@ -257,13 +257,29 @@ class SafariPackagingTests(unittest.TestCase):
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
             self.assertEqual(after[mode]["manifest.json"], expected)
 
-    def test_build_script_builds_default_baseline_before_safari(self) -> None:
+    def test_build_script_default_order_and_strict_prebuilt_branch(self) -> None:
         script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
-        baseline = script.index('node "$ROOT/browser-extension/build.js"')
-        safari = script.index('node "$ROOT/browser-extension/build.js" safari')
+        strict_start = script.index('if [[ "$REQUIRE_PREBUILT" == "1" ]]; then')
+        else_marker = script.index("\nelse\n", strict_start)
+        strict = script[strict_start:else_marker]
+        default = script[else_marker:]
+        baseline = default.index('node "$ROOT/browser-extension/build.js"')
+        safari = default.index('node "$ROOT/browser-extension/build.js" safari')
         verify = script.index("--verify-dist")
-        self.assertLess(baseline, safari, "default baseline must be built first")
-        self.assertLess(safari, verify, "Safari must be built before verification")
+        self.assertLess(baseline, safari, "default baseline must still be built first")
+        self.assertLess(safari, verify, "default Safari must still precede verification")
+        self.assertIn("browserrelease.prebuilt", strict)
+        self.assertNotIn('node "$ROOT/browser-extension/build.js"', strict)
+        for token in (
+            "LOCKLARK_BROWSER_REQUIRE_PREBUILT",
+            "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR",
+            "LOCKLARK_BROWSER_EXTENSION_CHROMIUM",
+            "LOCKLARK_BROWSER_EXTENSION_FIREFOX",
+            "LOCKLARK_BROWSER_EXTENSION_SAFARI",
+        ):
+            self.assertIn(token, script)
+        self.assertIn("REQUIRE_PREBUILT", strict)
+        self.assertIn("PREPARED_DIR", strict)
 
     def test_existing_chrome_and_firefox_manifests_are_byte_identical(self) -> None:
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
