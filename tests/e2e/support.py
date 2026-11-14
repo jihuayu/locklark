@@ -3442,6 +3442,32 @@ def _checkout_picker_status(diagnostic: dict[str, Any]) -> Any:
     return _PICKER_STATUS_INVALID
 
 
+_PICKER_DIAGNOSTIC_FRAMES = ("before", "after", "failure")
+_PICKER_DIAGNOSTIC_FIELDS = (
+    "focus", "visible", "active", "hasBeenActive", "targetLive",
+)
+
+
+def _checkout_picker_diagnostics(value: Any) -> dict[str, Any] | None:
+    """Sanitize the optional fixed picker activation probes; never raw text."""
+
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, Any] = {}
+    for frame in _PICKER_DIAGNOSTIC_FRAMES:
+        probe = value.get(frame)
+        if not isinstance(probe, dict):
+            return None
+        fixed: dict[str, Any] = {}
+        for field in _PICKER_DIAGNOSTIC_FIELDS:
+            entry = probe.get(field)
+            if entry not in (True, False, "unavailable"):
+                return None
+            fixed[field] = entry
+        out[frame] = fixed
+    return out
+
+
 def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | None:
     """Reduce the one fixed diagnostic line across ``streams``; ``None`` if unusable."""
 
@@ -3486,6 +3512,9 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     picker_status = _checkout_picker_status(diagnostic)
     if picker_status is _PICKER_STATUS_INVALID:
         return None
+    picker_diagnostics = _checkout_picker_diagnostics(
+        diagnostic.get("pickerDiagnostics")
+    )
     # Mirrors the native sender, which writes pickerStatus only when no native
     # helper error is the original failure: the two never coexist in one
     # record, so their coexistence rejects the whole record.
@@ -3502,6 +3531,8 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     optional = {"sourceFrames": source_frames} if source_frames else {}
     if picker_status is not None:
         optional["pickerStatus"] = picker_status
+        if stage == "checkout-picker-cancel:picker" and picker_diagnostics is not None:
+            optional["pickerDiagnostics"] = picker_diagnostics
     if native is not None:
         return {
             "stage": stage, "kind": "native-helper", "native": native,
