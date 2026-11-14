@@ -131,37 +131,50 @@ func TestSettingsDeveloperAuditAndImportActionsOpenExistingPages(t *testing.T) {
 }
 
 func TestCLIRequestActivityShowsApprovedAndRefusedRequestsAfterRestart(t *testing.T) {
-	path, key, _, row := desktopFixture(t)
-	session, err := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	a, base := desktopCLIRunFixture(t)
+	a.launch = func(fn func()) { fn() }
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.notifyBrowserBrokerUnlocked()
+	// Exercise the canonical scope with the actual private fixture executable
+	// and its real execution pin, not the summary-only placeholder digest.
+	pin, err := clibinding.ComputeProgramSHA256(base.Scope.Program)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.Lock()
-
-	a := New()
-	a.launch = func(fn func()) { fn() }
-	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
-	a.session = session
-	a.brokerSession = session
-	a.brokerEpoch = 1
+	base.Scope.ProgramSH = pin
+	session := a.session
 	approved := false
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) {
 		return approved, nil
 	}
-	request := browserhost.BrokerCLIRequest{
-		V:         1,
-		VaultPath: path,
-		Targets:   []personal.CLIBrokerTarget{{Slot: "TOKEN", ID: row.ID, Revision: row.Revision, Field: "password"}},
-	}
 	peer := browserhost.Peer{User: "fixture", PID: 4242, Process: `C:\Tools\gh.exe`}
-
-	if _, err := a.handleCLIRun(context.Background(), peer, request); err == nil {
-		t.Fatal("refused CLI request disclosed values")
+	// handleCLIRun clears the caller-owned target backing array, so every call
+	// (refused first, approved second) gets a fresh request, targets, and nonce.
+	freshRequest := func() browserhost.BrokerCLIRequest {
+		req := base
+		req.Scope = base.Scope.Clone()
+		req.Scope.Nonce = desktopFreshNonce(t)
+		req.Targets = append([]personal.CLIBrokerTarget(nil), base.Targets...)
+		return req
 	}
+
+	refusedRequest := freshRequest()
+	if resp, err := a.handleCLIRun(context.Background(), peer, refusedRequest); err == nil {
+		t.Fatal("refused CLI request disclosed values")
+	} else if desktopHasCLIPrepared(resp) {
+		t.Fatal("refused CLI request returned prepared values")
+	}
+	desktopAssertCallerTargetsCleared(t, "refused", refusedRequest)
+
 	approved = true
-	if _, err := a.handleCLIRun(context.Background(), peer, request); err != nil {
+	approvedRequest := freshRequest()
+	resp, err := a.handleCLIRun(context.Background(), peer, approvedRequest)
+	if err != nil {
 		t.Fatalf("approved CLI request failed: %v", err)
 	}
+	desktopAssertCLIPrepared(t, "approved", resp, nil, desktopCLITargetsFixture())
+	desktopReleaseCLIPrepared(resp)
+	desktopAssertCallerTargetsCleared(t, "approved", approvedRequest)
 
 	// A fresh App proves the audit page reads owner-only, non-secret request
 	// metadata persisted beside the settings file rather than only showing a
@@ -173,7 +186,7 @@ func TestCLIRequestActivityShowsApprovedAndRefusedRequestsAfterRestart(t *testin
 		UTC:    "2026-11-13T10:00:00Z",
 		Action: "item.run.bundle",
 		Result: "intent",
-		Item:   row.ID,
+		Item:   base.Targets[0].ID,
 	}}
 	restarted.v2Mode = true
 	restarted.openSettings()
