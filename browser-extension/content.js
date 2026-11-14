@@ -1640,7 +1640,8 @@
     otpScanning = false,
     otpScanTimer = null,
     otpObserver = null,
-    otpScans = 0;
+    otpScans = 0,
+    otpGeneration = 0;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
   function otpHash(text) {
@@ -1790,7 +1791,7 @@
     }
     button(box, "忽略", () => dismiss());
   }
-  function stopOTPCapture() {
+  function stopOTPCapture(cancel = true) {
     if (otpScanTimer) {
       clearTimeout(otpScanTimer);
       otpScanTimer = null;
@@ -1801,6 +1802,10 @@
       } catch {}
       otpObserver = null;
     }
+    // A budget stop retires scheduling but still permits the in-flight 24th
+    // decode to offer its result. An explicit stop invalidates that generation
+    // so a late decode can never offer.
+    if (cancel) otpGeneration++;
   }
   async function otpScan() {
     if (
@@ -1812,7 +1817,7 @@
     )
       return;
     if (otpScans >= OTP_SCAN_LIMIT) {
-      stopOTPCapture();
+      stopOTPCapture(false);
       return;
     }
     // Candidate discovery is cheap and bounded. Do it before any page-text
@@ -1821,17 +1826,35 @@
     const candidates = otpImages();
     if (!candidates.length) return;
     if (!otpPageRelevant(candidates)) return;
+    const generation = otpGeneration;
     otpScanning = true;
     try {
       for (const node of candidates) {
+        if (generation !== otpGeneration) return;
+        // Check the budget before every decode, then advance exactly once.
+        // The 24th decode is still inside the budget and may offer; the budget
+        // stop only retires scheduling and disconnects immediately.
+        if (otpScans >= OTP_SCAN_LIMIT) {
+          stopOTPCapture(false);
+          break;
+        }
         otpSeen.add(node);
         otpScans++;
-        if (otpScans >= OTP_SCAN_LIMIT) stopOTPCapture();
+        const finalBudgetDecode = otpScans >= OTP_SCAN_LIMIT;
+        if (finalBudgetDecode) stopOTPCapture(false);
         const found = await otpDecode(node);
-        if (!found) continue;
+        if (generation !== otpGeneration) return;
+        if (!found) {
+          if (finalBudgetDecode) break;
+          continue;
+        }
         const key = otpHash(found.raw);
-        if (otpPrompted.has(key)) continue;
+        if (otpPrompted.has(key)) {
+          if (finalBudgetDecode) break;
+          continue;
+        }
         otpPrompted.add(key);
+        if (generation !== otpGeneration) return;
         await otpOffer(node, found.raw, found.parsed);
         break;
       }
@@ -1841,10 +1864,15 @@
   }
   function scheduleOTPScan(delay = 1500) {
     if (otpScans >= OTP_SCAN_LIMIT) {
-      stopOTPCapture();
+      stopOTPCapture(false);
       return;
     }
-    if (otpScanTimer || !otpDetector || siteSettings.otpCapture === false) return;
+    if (!otpDetector) return;
+    if (siteSettings.otpCapture === false) {
+      stopOTPCapture(true);
+      return;
+    }
+    if (otpScanTimer) return;
     otpScanTimer = setTimeout(() => {
       otpScanTimer = null;
       void otpScan();
@@ -2224,6 +2252,7 @@
     document.addEventListener("DOMContentLoaded", startObserver, { once: true });
   else startObserver();
   window.addEventListener("pagehide", () => {
+    stopOTPCapture(true);
     dismiss();
     dismissPending();
     if (request) void send({ type: "passkey-cancel", id: request.id });

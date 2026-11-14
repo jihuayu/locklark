@@ -214,6 +214,7 @@ function makeHarness(options = {}) {
   const timers = [];
   const mutationObservers = [];
   const detections = { count: 0 };
+  const pendingDetections = [];
   let timerSerial = 0;
 
   const body = new Element("body");
@@ -281,6 +282,10 @@ function makeHarness(options = {}) {
       const index = list.indexOf(listener);
       if (index >= 0) list.splice(index, 1);
     },
+    _listeners: windowListeners,
+    dispatchEvent(event) {
+      return dispatch(windowObject, event);
+    },
     postMessage() {},
   };
   windowObject.top = windowObject;
@@ -342,6 +347,11 @@ function makeHarness(options = {}) {
     }
     async detect(node) {
       detections.count++;
+      if (options.deferDecode) {
+        return await new Promise((resolve) => {
+          pendingDetections.push({ node, resolve });
+        });
+      }
       if (!node || typeof node._qr !== "string") return [];
       return [{ rawValue: node._qr }];
     }
@@ -423,6 +433,21 @@ function makeHarness(options = {}) {
     document,
     sent,
     detections: () => detections.count,
+    pendingDecodes: () => pendingDetections.length,
+    resolveDetection(index = 0) {
+      const pending = pendingDetections.splice(index, 1)[0];
+      if (!pending) return false;
+      pending.resolve(
+        typeof pending.node?._qr === "string"
+          ? [{ rawValue: pending.node._qr }]
+          : [],
+      );
+      return true;
+    },
+    pagehide() {
+      windowObject.dispatchEvent({ type: "pagehide" });
+    },
+    flush: () => flush(),
     otpObserver: () =>
       mutationObservers.find(
         (observer) =>
@@ -810,4 +835,67 @@ test("the OTP MutationObserver disconnects at the scan limit", async () => {
   h.triggerOTPMutation();
   await h.runTimers();
   assert.equal(h.detections(), scanned, "no decode after the scan limit");
+});
+
+test("a candidate batch crossing the scan limit never decodes past 24", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 23; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 23, "the budget is partially consumed");
+
+  for (let index = 23; index < 27; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "only the remaining budget is decoded");
+  assert.equal(h.otpObserver()?.disconnected, true);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "the remaining batch stays undecoded");
+});
+
+test("the 24th valid candidate is offered inside the budget", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 23; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 23);
+
+  h.image(OTPAUTH);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24);
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    true,
+    "the 24th in-budget result is still offered",
+  );
+  assert.equal(h.otpObserver()?.disconnected, true);
+});
+
+test("a stop while decode is pending never offers the late result", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.pagehide();
+  assert.equal(h.otpObserver()?.disconnected, true);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+    "a late result after an explicit stop must not be offered",
+  );
 });
