@@ -1630,6 +1630,19 @@ async function reachDeadline(h) {
   assert.equal(await h.fireDelay(ROUTE_TTL_DELAY), 1, "the deadline timer did not fire");
 }
 
+test("a route claim returns the grant's original absolute epoch-ms deadline unchanged", async () => {
+  const route = await openRouteFixture({ fakeTimers: true });
+  // A claim 2.5 s into the grant must still report the original deadline,
+  // not a floored remainder and not a renewed TTL.
+  route.h.advanceClock(2500);
+  const claim = await route.claim();
+  assert.equal(claim?.type, "route-claimed");
+  assert.equal(claim.expires_at_ms, 1_700_000_000_000 + ROUTE_TTL_DELAY);
+  assert.equal(Number.isSafeInteger(claim.expires_at_ms), true);
+  assert.equal(claim.expires_in_seconds, undefined, "the route claim still reported seconds");
+  await route.h.send({ type: "disconnect" });
+});
+
 test("an idle route grant is revoked and its lifecycle port told route-revoked at its original expiry", async () => {
   const { route, port } = await expiryRoute();
   const nativeBefore = route.nativeReads().length;

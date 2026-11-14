@@ -14,11 +14,12 @@
   // Kept separate from the per-copy native clipboard port: this channel only
   // carries this route's token and tells the page when the worker revoked it.
   const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
-  // The worker's route TTL: a claim may never report more than this.
-  const ROUTE_TTL_SECONDS = 120;
-  // The route claim's original deadline stays here if a network round trip or
-  // a callback lets the local timer fire a little early. Re-arming always
-  // uses exactly this instant; it is never restarted from a full TTL.
+  // The worker's route TTL: a claim may never report a deadline farther away
+  // than this from the moment the page validates it.
+  const ROUTE_TTL_MS = 120000;
+  // The route claim's original absolute deadline stays here if a callback
+  // lets the local timer fire a little early. Re-arming always uses exactly
+  // this instant; it is never restarted from a full TTL.
   let routeExpiryTimer = null,
     routeExpiryDeadline = 0,
     busy = false,
@@ -1557,17 +1558,23 @@
     routeExpiryTimer = null;
     routeExpiryDeadline = 0;
   }
-  // The page's own copy of the grant's deadline: one absolute local instant
-  // derived once from the remaining seconds the claim returned. No pageshow,
-  // visibility change or later route message ever re-derives or extends it.
-  function armRouteDeadline(seconds) {
+  // The page's own copy of the grant's deadline is the absolute UTC epoch-ms
+  // instant the claim returned. It is never rebuilt from a rounded remainder.
+  // Recheck it at the instant of arming so a claim that expired between
+  // validation and this call still fails closed. No pageshow, visibility
+  // change or later route message ever re-derives or extends it.
+  function armRouteDeadline(deadline) {
     clearRouteDeadline();
-    const deadline = Date.now() + seconds * 1000;
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(deadline) ||
+      deadline <= now ||
+      deadline - now > ROUTE_TTL_MS
+    )
+      return false;
     routeExpiryDeadline = deadline;
-    routeExpiryTimer = setTimeout(
-      fireRouteDeadline,
-      Math.max(0, deadline - Date.now()),
-    );
+    routeExpiryTimer = setTimeout(fireRouteDeadline, deadline - now);
+    return true;
   }
   // Any grant still live but past an authoritative deadline is dead, so the
   // page fails closed rather than wait for a timer the worker may never fire.
@@ -1665,26 +1672,32 @@
     } catch {}
     routeReportClose();
   }
+  // Validate the claim and return its original absolute deadline in UTC epoch
+  // milliseconds, or 0 on any malformed, expired or overlong reply. The page
+  // arms this exact instant and never guesses a TTL of its own.
   function validRouteClaim(reply) {
     const detail = reply?.detail;
-    const expires = reply?.expires_in_seconds;
-    return (
-      !!reply &&
-      reply.type === "route-claimed" &&
-      reply.token === routeToken &&
-      // A positive bounded remainder is required: the page schedules its own
-      // fail-closed wipe from it and never guesses a TTL of its own.
-      Number.isSafeInteger(expires) &&
-      expires >= 1 &&
-      expires <= ROUTE_TTL_SECONDS &&
-      !!detail &&
-      typeof detail.id === "string" &&
-      /^[a-f0-9]{32}$/.test(detail.id) &&
-      typeof detail.revision === "string" &&
-      /^[a-f0-9]{64}$/.test(detail.revision) &&
-      reply.item_id === detail.id &&
-      reply.revision === detail.revision
-    );
+    const deadline = reply?.expires_at_ms;
+    const now = Date.now();
+    if (
+      !reply ||
+      reply.type !== "route-claimed" ||
+      reply.token !== routeToken ||
+      // A finite, still-future deadline no farther than the worker's standard
+      // 120-second TTL is required. There is no seconds rounding or grace.
+      !Number.isSafeInteger(deadline) ||
+      deadline <= now ||
+      deadline - now > ROUTE_TTL_MS ||
+      !detail ||
+      typeof detail.id !== "string" ||
+      !/^[a-f0-9]{32}$/.test(detail.id) ||
+      typeof detail.revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(detail.revision) ||
+      reply.item_id !== detail.id ||
+      reply.revision !== detail.revision
+    )
+      return 0;
+    return deadline;
   }
   // The route page has no action-popup state: the claim is the only read and
   // its already-approved detail is the only thing rendered.
@@ -1703,13 +1716,18 @@
     // A claim that resolves after Back/pagehide is dropped, and its grant has
     // already been revoked by the route-close report.
     if (routeClosed || popupInactive) return;
-    if (!routeToken || !validRouteClaim(reply)) {
+    const deadline = routeToken ? validRouteClaim(reply) : 0;
+    if (!deadline) {
       failRoute();
       return;
     }
-    // Only the remainder the worker returned arms the wipe: the worker never
-    // extends expiresAt, so that remainder is the grant's original deadline.
-    armRouteDeadline(reply.expires_in_seconds);
+    // Only the worker's original absolute deadline arms the wipe. If it
+    // passed between validation and arming, fail closed before any detail
+    // can be assigned or rendered.
+    if (!armRouteDeadline(deadline) || routeDeadlinePassed()) {
+      revokeRouteView();
+      return;
+    }
     showRouteStatus("");
     const detail = reply.detail;
     lastState = {

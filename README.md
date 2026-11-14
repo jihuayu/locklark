@@ -70,6 +70,10 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 引用不是权限，也不表示 OTP 已配置。恢复后库 ID 和修订更新，须重新取得引用。超长或含控制/Unicode 格式字符的标题会导致整个引用目录拒绝，可使用 `list` 与直接 ID 入口修正。此入口不增加 MCP 原值能力，未实现 run/inject、通用导入或完整 op 兼容；详细验证见[个人引用验收](docs/personal-references-validation.md)。
 
+## 只读 vaultfile 检查
+
+`locklark vaultfile inspect --file sealed.llv --checkpoint trusted.json` 在 profile、TTY、会话和解锁之前分发，只读取显式 sealed 文件和调用者提供的 checkpoint。它验证 policy chain 与 content signature，不解密 KDBX，也不初始化 account、session、provider 或 workspace；`policy=verified` 与 `payload=not_decrypted` 分开显示。checkpoint 格式和边界见[只读 vaultfile 检查](docs/vaultfile-inspect.md)。
+
 ## 离线创建个人库
 
 在自己的交互终端运行下面四条命令。选择已存在的本地父目录。Unix 文件系统须支持硬链接及目录同步；Windows 使用不覆盖目标的写穿移动；建库拒绝覆盖已有文件。不需要服务器或团队账号。

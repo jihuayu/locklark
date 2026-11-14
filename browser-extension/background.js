@@ -5118,10 +5118,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       token: grant.token,
       item_id: grant.itemId,
       revision: grant.revision,
-      expires_in_seconds: Math.max(
-        0,
-        Math.floor((grant.expiresAt - Date.now()) / 1000),
-      ),
+      // The grant's original absolute UTC epoch-millisecond deadline. It is
+      // returned unchanged, never rounded or extended, so the route page can
+      // arm exactly this instant instead of reconstructing it from a floored
+      // remainder.
+      expires_at_ms: grant.expiresAt,
       detail,
     };
   }
