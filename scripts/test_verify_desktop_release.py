@@ -470,6 +470,7 @@ func main() {
         executable: bytes | None = None,
         plist: bytes | None = None,
         entries: list[dict] | None = None,
+        extra_entries: list[dict] | None = None,
     ) -> bytes:
         if entries is None:
             executable = executable or self.universal(version)
@@ -500,6 +501,8 @@ func main() {
                     "linkname": "../MacOS",
                 },
             ]
+            if extra_entries:
+                entries.extend(extra_entries)
         return self.tar_gz(entries)
 
 
@@ -1356,6 +1359,81 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
                 self.assertIn(
                     "bytes" if name == "size" else "signature", result.stderr
                 )
+
+    def test_08_link_targets_volume_and_ads_are_rejected(self) -> None:
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        cases = {
+            "drive-absolute": "C:/outside",
+            "drive-relative": "C:outside",
+            "alternate-data-stream": "../MacOS:stream",
+        }
+        for name, target in cases.items():
+            with self.subTest(kind="full-archive", case=name):
+                assets = self.release.assets()
+                bad_darwin = self.go.darwin_archive(
+                    extra_entries=[
+                        {
+                            "name": DARWIN_BUNDLE
+                            + "/Contents/Resources/unsafe",
+                            "type": "symlink",
+                            "linkname": target,
+                        }
+                    ]
+                )
+                self.write_release(assets, windows, bad_darwin)
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn("darwin-universal archive", result.stderr)
+                self.assertIn("invalid target", result.stderr)
+
+            with self.subTest(kind="delta", case=name):
+                assets = self.release.assets()
+                index, blobs = self.go.delta_parts(
+                    darwin, "darwin-universal", "1.1.0"
+                )
+                link = next(
+                    entry for entry in index["entries"] if entry.get("link")
+                )
+                link["link"] = target
+                payload = self.go.build_delta(index, blobs)
+                _, delta = self.release.write_delta(
+                    assets, "darwin-universal", "1.1.0", payload
+                )
+                self.write_release(
+                    assets, windows, darwin, darwin_deltas=[delta]
+                )
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn(
+                    "darwin-universal delta from 1.1.0", result.stderr
+                )
+                self.assertIn("invalid target", result.stderr)
+
+    def test_09_benign_relative_framework_link_remains_valid(self) -> None:
+        assets = self.release.assets()
+        windows = self.windows_archive
+        darwin = self.go.darwin_archive(
+            extra_entries=[
+                {
+                    "name": DARWIN_BUNDLE
+                    + "/Contents/Resources/framework",
+                    "type": "symlink",
+                    "linkname": "../MacOS",
+                }
+            ]
+        )
+        payload = self.go.delta(darwin, "darwin-universal", OLD_VERSION)
+        delta_name, delta = self.release.write_delta(
+            assets, "darwin-universal", OLD_VERSION, payload
+        )
+        self.write_release(
+            assets, windows, darwin, darwin_deltas=[delta]
+        )
+
+        result = self.release.run(assets)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(delta_name, parse_checksums(assets / "SHA256SUMS"))
 
     def test_actual_bytes_size_and_signature_stay_failclosed(self) -> None:
         def tampered_payload(assets: Path, manifest: dict) -> None:

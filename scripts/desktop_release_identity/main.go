@@ -766,7 +766,10 @@ func deltaPath(raw string) (string, error) {
 }
 
 func checkLink(name, target string) error {
-	if target == "" || len(target) > maxLinkLength || strings.ContainsAny(target, "\\\x00") {
+	// Windows treats a colon as a drive or alternate-data-stream separator,
+	// and os.Symlink turns the slash in C:/outside into a backslash. Reject
+	// colons on every platform so full archives and deltas share one rule.
+	if target == "" || len(target) > maxLinkLength || strings.ContainsAny(target, "\\:\x00") {
 		return fmt.Errorf("link %q has an invalid target", name)
 	}
 	for _, r := range target {
