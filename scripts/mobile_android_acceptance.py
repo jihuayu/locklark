@@ -43,6 +43,8 @@ OPERATIONS = {"unknown", "wait", "locate", "tap", "type-text", "keyboard-check",
 COMMANDS = {"unknown", "properties", "display", "install", "app-reset", "private-dir", "launch", "force-stop", "ui-dump",
             "ui-read", "ui-cleanup", "tap", "text", "scroll", "key", "ime", "lifecycle", "db-copy"}
 STDERR_CLASSES = {"unknown", "empty", "offline", "service-missing", "permission", "timeout", "spawn-error", "other"}
+FAILURE_ORIGINS = {"transport", "service", "permission", "remote-other", "timeout", "spawn"}
+FAILURE_OUTPUT_LIMIT = 8192
 TARGETS = {"unknown", "row", "field-picker", "generate-key", "new-master", "repeat-master", "backup-ack", "create-vault",
            "new-login", "login-title", "username", "login-password", "generate-password", "save-login", "show-username",
            "show-password", "show-otp", "hide", "edit", "edit-value", "save-field", "field-password", "field-otp",
@@ -228,11 +230,12 @@ def safe_host_diagnosis(value):
                "control": CONTROL_STATES, "wait": WAIT_STATES, "identity": IDENTITY_STATES,
                "ime": {"unknown", "shown", "hidden"}, "operation": OPERATIONS, "target": TARGETS, "step": CREATE_STEPS,
                "command": COMMANDS, "command_exit": {"unknown", "pending", "ok", "nonzero", "timeout", "error"},
-               "stderr_class": STDERR_CLASSES,
+               "stderr_class": STDERR_CLASSES, "failure_origin": FAILURE_ORIGINS,
                "bounds": {"unknown", "missing", "ready", "disabled", "hidden", "invalid-bounds", "offscreen"},
                "exception": EXCEPTIONS, "helper": HELPERS,
                "reason": {"unknown", "assertion", "python-contract", "xml", "deadline", "wait-expired", "control-not-actionable", "command-failed"}}
-    result = {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed else "unknown"
+    result = {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed
+              else ("remote-other" if key == "failure_origin" else "unknown")
               for key, allowed in choices.items()}
     for key, lower, upper in (("exit_code", -255, 255), ("source_line", 1, 100000)):
         number = value.get(key)
@@ -281,6 +284,34 @@ def adb_stderr_class(raw):
     if b"permission denied" in lowered or b"permission denial" in lowered or b"securityexception" in lowered or b"device unauthorized" in lowered:
         return "permission"
     return "other"
+
+
+def adb_failure_origin(stdout, stderr):
+    """Reduce a bounded prefix of both streams to one fixed failure origin.
+
+    A host command can report its failure on either stream. Only fixed markers
+    are inspected, and no captured text, argv, serial, or factor is retained.
+    """
+    def bounded(raw):
+        if isinstance(raw, str):
+            return raw[:FAILURE_OUTPUT_LIMIT].encode("utf-8", "replace")
+        return bytes(raw[:FAILURE_OUTPUT_LIMIT]) if isinstance(raw, (bytes, bytearray)) else b""
+
+    raw = (bounded(stdout) + b"\n" + bounded(stderr)).lower()
+    # Fixed precedence makes a multi-marker failure deterministic.
+    if any(marker in raw for marker in (b"can't find service", b"cannot find service", b"service not found",
+                                        b"service not available", b"unknown service")):
+        return "service"
+    if any(marker in raw for marker in (b"permission denied", b"permission denial", b"securityexception",
+                                        b"device unauthorized")):
+        return "permission"
+    if (any(marker in raw for marker in (b"device offline", b"no devices/emulators found", b"error: closed",
+                                         b"failed to get feature set", b"connection reset", b"broken pipe",
+                                         b"cannot connect to daemon", b"adb server version", b"protocol fault",
+                                         b"transport error", b"device still connecting"))
+            or re.search(rb"\bdevice\b[^\r\n]{0,192}\bnot found\b", raw)):
+        return "transport"
+    return "remote-other"
 
 
 def verify_audit(events, disclosures, mutations, generated_id, *, expected_exports=0, expected_audits=1):
@@ -413,20 +444,23 @@ class AndroidAcceptance:
         # Never record argv: input text includes synthetic complete factors.
         self.counter += 1
         result = None
-        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None, "stderr_class": "unknown"})
+        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None,
+                               "stderr_class": "unknown", "failure_origin": "remote-other"})
         try:
             result = subprocess.run(self.adb + list(map(str, arguments)),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             stdout, stderr = result.stdout, result.stderr
         except subprocess.TimeoutExpired as error:
             stdout, stderr = error.stdout or b"", error.stderr or b""
-            self.diagnosis.update({"command_exit": "timeout", "stderr_class": "timeout"})
+            self.diagnosis.update({"command_exit": "timeout", "stderr_class": "timeout", "failure_origin": "timeout"})
         except OSError:
-            self.diagnosis.update({"command_exit": "error", "stderr_class": "spawn-error"})
+            self.diagnosis.update({"command_exit": "error", "stderr_class": "spawn-error", "failure_origin": "spawn"})
             raise
         if result is not None:
             self.diagnosis.update({"command_exit": "ok" if result.returncode == 0 else "nonzero", "exit_code": result.returncode,
                                    "stderr_class": adb_stderr_class(stderr)})
+            if result.returncode != 0:
+                self.diagnosis["failure_origin"] = adb_failure_origin(stdout, stderr)
         if oracle:
             path = self.root / oracle
             path.write_bytes(stdout)
@@ -734,7 +768,7 @@ class AndroidAcceptance:
         if not self.started:
             return
         preserved = {key: self.diagnosis[key] for key in ("operation", "target", "step", "command", "command_exit", "exit_code",
-                     "stderr_class", "bounds", "exception", "helper", "source_line", "reason")}
+                     "stderr_class", "failure_origin", "bounds", "exception", "helper", "source_line", "reason")}
         deadline = time.monotonic() + min(10, self.args.timeout)
         try:
             try:
