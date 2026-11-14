@@ -32,16 +32,18 @@ type ItemDraft struct {
 	CreditCard vault.CreditCardDetails
 	Identity   vault.IdentityDetails
 
-	NewTag          string
-	NewSectionTitle string
-	NewFieldLabel   string
-	NewFieldType    vault.FieldType
-	NewFieldValue   string
-	NewFieldSection int
-	NewURL          string
-	NewURLLabel     string
-	NewURLMatch     string
-	NewAttachment   string
+	NewTag            string
+	NewSectionTitle   string
+	NewFieldLabel     string
+	NewFieldType      vault.FieldType
+	NewFieldValue     string
+	NewFieldSection   int
+	NewFieldProtected bool
+	FieldDialogOpen   bool
+	NewURL            string
+	NewURLLabel       string
+	NewURLMatch       string
+	NewAttachment     string
 }
 
 // field is a small template helper.
@@ -580,9 +582,6 @@ func (a *App) newItem(category vault.ItemCategory) {
 	a.v2.detailPlain = nil
 	a.v2.selectedID, a.v2.selectedRevision = "", ""
 	a.selected = nil
-	if a.v2.nav == navWatchtower {
-		a.v2.nav = navAllItems
-	}
 	a.v2.settingsOpen = false
 	a.v2.generator.open = false
 	a.v2.historyOpen = false
@@ -831,6 +830,75 @@ func (a *App) addField(sectionIndex int, label, typ, value string) {
 
 func (a *App) AddField(sectionIndex int, label, typ, value string) {
 	a.addField(sectionIndex, label, typ, value)
+}
+
+// SetFieldProtection switches a custom field between plaintext (明文) and encrypted (加密).
+func (d *ItemDraft) SetFieldProtection(sectionIndex, fieldIndex int, encrypted bool) {
+	if d == nil || sectionIndex < 0 || sectionIndex >= len(d.Sections) {
+		return
+	}
+	fields := d.Sections[sectionIndex].Fields
+	if fieldIndex < 0 || fieldIndex >= len(fields) {
+		return
+	}
+	f := &d.Sections[sectionIndex].Fields[fieldIndex]
+	f.Protected = encrypted
+	if encrypted && f.Type == vault.FieldTypeString {
+		f.Type = vault.FieldTypeConcealed
+	} else if !encrypted && f.Type == vault.FieldTypeConcealed {
+		f.Type = vault.FieldTypeString
+	}
+}
+
+func (a *App) openAddCustomFieldDialog(sectionIndex int) {
+	if a.v2.draft == nil {
+		return
+	}
+	a.v2.draft.FieldDialogOpen = true
+	a.v2.draft.NewFieldSection = sectionIndex
+	a.v2.draft.NewFieldLabel = ""
+	a.v2.draft.NewFieldValue = ""
+	a.v2.draft.NewFieldType = vault.FieldTypeString
+	a.v2.draft.NewFieldProtected = false
+	a.v2.editorError = ""
+}
+
+func (a *App) confirmAddCustomField() {
+	draft := a.v2.draft
+	if draft == nil {
+		return
+	}
+	secIdx := draft.NewFieldSection
+	if secIdx < 0 || secIdx >= len(draft.Sections) {
+		a.addSection("自定义字段")
+		secIdx = len(draft.Sections) - 1
+	}
+	if secIdx < 0 || secIdx >= len(draft.Sections) {
+		return
+	}
+	label := strings.TrimSpace(draft.NewFieldLabel)
+	if label == "" {
+		label = "自定义字段"
+	}
+	typ := vault.FieldTypeString
+	if draft.NewFieldProtected {
+		typ = vault.FieldTypeConcealed
+	} else if draft.NewFieldType != "" && draft.NewFieldType != vault.FieldTypeConcealed {
+		typ = draft.NewFieldType
+	}
+	f := vault.CustomField{
+		ID:        nextFieldID(draft.Sections[secIdx]),
+		Label:     label,
+		Type:      typ,
+		Value:     draft.NewFieldValue,
+		Protected: draft.NewFieldProtected,
+	}
+	draft.Sections[secIdx].Fields = append(draft.Sections[secIdx].Fields, f)
+	draft.FieldDialogOpen = false
+	draft.NewFieldLabel = ""
+	draft.NewFieldValue = ""
+	draft.NewFieldProtected = false
+	a.v2.editorError = ""
 }
 
 func (a *App) removeField(sectionIndex, fieldIndex int) {

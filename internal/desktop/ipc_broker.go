@@ -8,10 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
+	"github.com/oneo-me/onevra/source/shells/plain"
 )
 
 var errCLIRunRefused = errors.New("refused")
@@ -52,6 +56,7 @@ func (a *App) browserBrokerCallbacks() browserhost.BrokerCallbacks {
 		RequestUnlockFocus: func() {
 			a.dispatch(func() {
 				if a.win != nil {
+					a.winHidden = false
 					a.win.Show()
 					a.win.Focus()
 				}
@@ -117,6 +122,7 @@ func (a *App) cancelPendingCLIRun() {
 	if p != nil {
 		p.choose(false)
 	}
+	a.hideApprovalWindow()
 }
 
 func (a *App) notifyBrowserBrokerUnlocked() {
@@ -152,28 +158,39 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	}
 	a.brokerMu.Unlock()
 	if s == nil || !s.Unlocked() || path == "" || path != req.VaultPath {
+		_ = a.recordCLIActivity("unavailable", peer, req)
 		return browserhost.BrokerCLIResponse{}, browserhost.ErrBrokerUnavailable
 	}
 	approved := false
 	if a.cliApprover != nil {
 		ok, e := a.cliApprover(ctx, peer, req)
 		if e != nil {
+			_ = a.recordCLIActivity("failed", peer, req)
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
 		approved = ok
 	} else {
 		ok, e := a.requestCLIRunApproval(ctx, peer, req, s, epoch)
 		if e != nil {
+			_ = a.recordCLIActivity("failed", peer, req)
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
 		approved = ok
 	}
 	if !approved {
+		_ = a.recordCLIActivity("refused", peer, req)
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
 	values, e := s.ExtractCLIBrokerTargets(req.Targets)
 	if e != nil {
+		_ = a.recordCLIActivity("failed", peer, req)
 		return browserhost.BrokerCLIResponse{}, e
+	}
+	if e := a.recordCLIActivity("approved", peer, req); e != nil {
+		for key := range values {
+			delete(values, key)
+		}
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
 	return browserhost.BrokerCLIResponse{V: 1, Values: values}, nil
 }
@@ -193,7 +210,12 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	a.cliPending = p
 	a.brokerMu.Unlock()
 	a.dispatch(func() {
+		if a.onevra.shellActive && a.win != nil && (a.winHidden || !a.win.IsVisible()) {
+			a.showApprovalWindow()
+			return
+		}
 		if a.win != nil {
+			a.winHidden = false
 			a.win.Show()
 			a.win.Focus()
 			a.win.Invalidate()
@@ -207,6 +229,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 		}
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
+			a.hideApprovalWindow()
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -218,6 +241,12 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 			a.cliPending = nil
 		}
 		a.brokerMu.Unlock()
+		a.dispatch(func() {
+			a.hideApprovalWindow()
+			if a.win != nil {
+				a.win.Invalidate()
+			}
+		})
 		return false, errCLIRunRefused
 	}
 }
@@ -228,10 +257,104 @@ func (a *App) approveCLIRun(approved bool) {
 	p := a.cliPending
 	a.brokerMu.Unlock()
 	if p == nil || p.decided {
+		a.hideApprovalWindow()
 		return
 	}
 	p.decided = true
 	p.choose(approved)
+	a.hideApprovalWindow()
+}
+
+func (a *App) hideApprovalWindow() {
+	if a.approvalWin != nil && !a.approvalWin.IsDestroyed() {
+		a.approvalWin.Hide()
+	}
+}
+
+func (a *App) showApprovalWindow() {
+	if a.approvalWin == nil || a.approvalWin.IsDestroyed() {
+		shell := plain.NewShell(plain.ShellOptions{
+			Title:     "Locklark · CLI 凭据请求审批",
+			Width:     560,
+			Height:    430,
+			MinWidth:  500,
+			MinHeight: 380,
+			Hidden:    true,
+			Theme:     a.onevraTheme,
+			Content:   a.cliApprovalPopupView,
+		})
+		win := shell.Window()
+		win.SetAlwaysOnTop(true)
+		win.SetResizable(false)
+		win.SetMinimizable(false)
+		win.SetMaximizable(false)
+		win.OnClose(func(e *mygo.CloseEvent) {
+			e.PreventDefault()
+			a.approveCLIRun(false)
+			win.Hide()
+		})
+		a.approvalWin = win
+	}
+	a.approvalWin.Center()
+	a.approvalWin.Show()
+	a.approvalWin.Focus()
+	a.approvalWin.Invalidate()
+}
+
+func (a *App) cliApprovalPopupView(c *ui.Context) {
+	c.SetTheme(a.onevraTheme(c))
+	t := c.Theme()
+	a.brokerMu.Lock()
+	p := a.cliPending
+	a.brokerMu.Unlock()
+	ui.Column(c.Key("cli-approval-popup")).Fill().Background(t.Background).Padding(t.Space(4)).Gap(t.Space(2.5)).Children(func() {
+		if p == nil {
+			oneui.Text(c, "暂无待处理的 CLI 凭据请求。").TextColor(t.TextMuted)
+			return
+		}
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+			iconBox := ui.Box(c).Size(t.Space(9), t.Space(9)).Shrink(0).Radius(t.Space(2.25)).
+				Background(t.Accent.Alpha(.14)).AlignItems(ui.Center).Justify(ui.Center)
+			iconBox.Children(func() {
+				oneui.Icon(c, lucide.SquareTerminal()).Size(t.Space(4.5), t.Space(4.5)).TextColor(t.Accent)
+			})
+			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+				oneui.Text(c, "批准本地 CLI 凭据请求").FontSize(t.Rem(1.18)).Bold().TextColor(t.Text)
+				oneui.Text(c, "调用进程：PID "+uintString(p.peer.PID)+" · "+p.peer.Process).FontSize(t.Rem(.78)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+			})
+			oneui.Badge(c, "单次授权", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+		})
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(2.5)).Gap(t.Space(1)).Children(func() {
+			vaultName := vaultDisplayBaseName(p.request.VaultPath)
+			if vaultName == "" {
+				vaultName = p.request.VaultPath
+			}
+			oneui.Text(c, "绑定金库："+vaultName+" · 请求用户："+p.peer.User).FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+			oneui.Text(c, "请求字段槽位 ("+intString(len(p.request.Targets))+")：").FontSize(t.Rem(.78)).Bold().TextColor(t.Text)
+			for _, target := range p.request.Targets {
+				oneui.Text(c, "• "+target.Slot+" ← "+target.Field+" · "+shortDigest(target.ID)).FontSize(t.Rem(.76)).TextColor(t.Text)
+			}
+		})
+		oneui.Text(c, "批准后，以上固定字段将一次性交给本机 CLI 进程；主密码与 Secret Key 永不交付。").
+			FontSize(t.Rem(.76)).Bold().TextColor(t.Warning).Wrap()
+		ui.Spacer(c)
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(t.Space(1.5)).Children(func() {
+			oneui.Button(c, "打开主窗口", oneui.ButtonGhost).OnClick(func() {
+				a.hideApprovalWindow()
+				if a.win != nil {
+					a.winHidden = false
+					a.win.Show()
+					a.win.Focus()
+					a.win.Invalidate()
+				}
+			})
+			ui.Row(c).Gap(t.Space(1.5)).Children(func() {
+				oneui.Button(c, "拒绝本次请求", oneui.ButtonOutline).OnClick(func() { a.approveCLIRun(false) })
+				oneui.Button(c, "仅批准本次 CLI 请求", oneui.ButtonPrimary).OnClick(func() { a.approveCLIRun(true) })
+			})
+		})
+	})
 }
 
 func (a *App) cliApprovalView(c *ui.Context) {

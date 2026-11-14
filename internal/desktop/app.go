@@ -19,6 +19,8 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
+	updatenative "github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
@@ -26,8 +28,9 @@ import (
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
 	"github.com/oneo-me/onevra/source/shells/plain"
-	"github.com/oneo-me/onevra/source/theme"
 )
 
 type outcome struct {
@@ -72,12 +75,18 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
+	cliActivity    cliActivityState
+	cliSettings    cliIntegrationState
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
 	browser                                        *browserhost.Connection
 	browserLabel                                   string
 	cancel                                         context.CancelFunc
+	quitting                                       bool
+	deviceSecrets                                  deviceSecretStore
+	showSecretFallback                             bool
+	confirmForgetDevice                            bool
 	systemStore                                    osunlock.Store
 	win                                            *mygo.Window
 	dispatch                                       func(func())
@@ -120,10 +129,19 @@ type App struct {
 	clipboardClearSeconds atomic.Int64
 	backgroundStop        chan struct{}
 	backgroundRunningFlag uint32
+	onboarding            bool
+	forgetPassword        string
+	reexportPassword      string
+	kitSavedPath          string
+	auditFilter           string
+	winHidden             bool
+	approvalWin           *mygo.Window
 }
 
 func New() *App {
 	a := &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	a.deviceSecrets = mygo.Secrets.Service(deviceSecretService)
+	a.path = DefaultVaultPath()
 	a.settings = DefaultSettings()
 	a.settingsPath = SettingsPath()
 	a.settingsLoaded = true
@@ -380,6 +398,13 @@ func (a *App) Lock() {
 	a.secret = ""
 	a.confirmation = ""
 	a.issued = ""
+	a.showSecretFallback = false
+	a.confirmForgetDevice = false
+	a.forgetPassword = ""
+	a.reexportPassword = ""
+	if a.approvalWin != nil {
+		a.approvalWin.Hide()
+	}
 	a.value = ""
 	a.username = ""
 	a.title = ""
@@ -415,11 +440,23 @@ func (a *App) Lock() {
 func (a *App) unlock() {
 	path := a.path
 	pw := []byte(a.password)
-	key, e := personal.ParseSecret(a.secret)
+	secret := a.secret
+	if secret == "" && !a.showSecretFallback {
+		loaded, err := a.loadDeviceSecret(path)
+		if err != nil {
+			clear(pw)
+			a.showSecretFallback = true
+			a.status = "此设备尚未保存 Secret Key；请使用应急资料，或选择正确的金库文件"
+			return
+		}
+		secret = loaded
+	}
+	key, e := personal.ParseSecret(secret)
 	a.password = ""
 	a.secret = ""
 	if e != nil {
 		clear(pw)
+		a.showSecretFallback = true
 		a.status = "Secret Key 格式不正确"
 		return
 	}
@@ -430,6 +467,7 @@ func (a *App) unlock() {
 		if e != nil {
 			return outcome{err: e}
 		}
+		rememberErr := a.storeDeviceSecret(path, secret)
 		if ctx.Err() != nil {
 			s.Lock()
 			return outcome{err: personal.ErrSessionLocked}
@@ -446,23 +484,46 @@ func (a *App) unlock() {
 			a.scope = "active"
 			a.page = "vault"
 			a.v2Mode = !classicLayoutRequested()
+			a.showSecretFallback = false
+			a.onboarding = false
+			a.create = false
+			_ = a.SetVaultPath(path)
 			a.touchActivity()
 			a.loadV2Metadata()
 			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
+			if rememberErr != nil {
+				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
+			}
 			a.startBrowserBroker()
 			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
 func (a *App) createVaultFile() {
-	if a.password == "" || a.password != a.confirmation || subtle.ConstantTimeCompare([]byte(a.issued), []byte(a.secret)) != 1 {
-		a.status = "请确认主密码，并重新输入离线保存的 Secret Key"
-		return
+	classic := classicLayoutRequested()
+	if classic {
+		if a.password == "" || a.password != a.confirmation || subtle.ConstantTimeCompare([]byte(a.issued), []byte(a.secret)) != 1 {
+			a.status = "请确认主密码，并重新输入离线保存的 Secret Key"
+			return
+		}
+	} else {
+		if strings.TrimSpace(a.path) == "" {
+			a.path = DefaultVaultPath()
+		}
+		if a.password == "" || a.password != a.confirmation || a.issued == "" {
+			a.status = "请设置并确认一致的主密码"
+			return
+		}
 	}
 	path := a.path
 	pw := []byte(a.password)
-	key, e := personal.ParseSecret(a.secret)
+	secret := a.issued
+	if classic {
+		secret = a.secret
+	}
+	key, e := personal.ParseSecret(secret)
 	if e != nil {
+		clear(pw)
 		a.status = "密钥确认不正确"
 		return
 	}
@@ -473,6 +534,11 @@ func (a *App) createVaultFile() {
 	a.run(func() outcome {
 		defer clear(pw)
 		defer clear(key)
+		if !classic {
+			if dirErr := os.MkdirAll(filepath.Dir(path), 0700); dirErr != nil {
+				return outcome{err: dirErr}
+			}
+		}
 		if e := personal.Create(path, string(pw), key); e != nil {
 			return outcome{err: e}
 		}
@@ -480,6 +546,12 @@ func (a *App) createVaultFile() {
 		if e != nil {
 			return outcome{err: e}
 		}
+		var kitPath string
+		var kitErr error
+		if !classic {
+			kitPath, kitErr = autoSaveEmergencyKit(path, secret)
+		}
+		rememberErr := a.storeDeviceSecret(path, secret)
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
 			a.armIdleTimer()
@@ -487,10 +559,24 @@ func (a *App) createVaultFile() {
 			a.scope = "active"
 			a.page = "vault"
 			a.create = false
-			a.v2Mode = !classicLayoutRequested()
+			a.onboarding = false
+			a.v2Mode = !classic
+			if kitPath != "" {
+				a.kitSavedPath = kitPath
+			}
+			_ = a.SetVaultPath(path)
 			a.touchActivity()
 			a.loadV2Metadata()
-			a.status = "金库已创建，Secret Key 请继续离线保管"
+			if kitPath != "" {
+				a.status = "金库已创建，应急文件已自动保存至 " + filepath.Base(kitPath)
+			} else if kitErr != nil {
+				a.status = "金库已创建，但应急文件自动保存失败，请立即在设置中手动导出"
+			} else {
+				a.status = "金库已创建，Secret Key 请继续离线保管"
+			}
+			if rememberErr != nil {
+				a.status += "；此设备未能保存 Secret Key，下次请使用应急文件"
+			}
 			a.startBrowserBroker()
 			a.notifyBrowserBrokerUnlocked()
 		}}
@@ -648,6 +734,9 @@ func (a *App) View(c *ui.Context) {
 		a.armIdleTimer()
 	}
 	c.After(time.Second)
+	if !classicLayoutRequested() {
+		c.SetTheme(a.onevraTheme(c))
+	}
 	t := c.Theme()
 	a.brokerMu.Lock()
 	cliPending := a.cliPending != nil
@@ -661,7 +750,7 @@ func (a *App) View(c *ui.Context) {
 		return
 	}
 	ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(14).Children(func() {
-		if !a.onevra.shellActive {
+		if !a.onevra.shellActive && (classicLayoutRequested() || a.session != nil) {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
 				ui.Text(c, "LOCKLARK").FontSize(22).Bold().TextColor(t.Text)
 				ui.Text(c, "本地金库").TextColor(t.TextMuted).Grow(1)
@@ -674,7 +763,22 @@ func (a *App) View(c *ui.Context) {
 			})
 		}
 		if a.session == nil {
-			a.lockView(c)
+			ui.Scroll(c).Grow(1).FillWidth().Children(func() {
+				ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(24, 0).Children(func() {
+					if !classicLayoutRequested() {
+						switch {
+						case a.onboarding:
+							a.onboardingView(c)
+						case a.create:
+							a.createVaultView(c)
+						default:
+							a.lockView(c)
+						}
+					} else {
+						a.lockView(c)
+					}
+				})
+			})
 		} else if a.sshApproval != nil {
 			a.sshApprovalView(c)
 		} else if a.browser != nil {
@@ -697,59 +801,227 @@ func (a *App) View(c *ui.Context) {
 	})
 }
 func (a *App) lockView(c *ui.Context) {
+	if classicLayoutRequested() {
+		a.classicLockView(c)
+		return
+	}
+	c.SetTheme(a.onevraTheme(c))
 	t := c.Theme()
-	ui.Column(c).Width(560).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
-		heading := "解锁金库"
-		if a.create {
-			heading = "创建离线金库"
-		}
-		ui.Text(c, heading).FontSize(26).Bold().TextColor(t.Text)
-		ui.Text(c, "主密码与 Secret Key 仅在本机原生窗口输入，全程离线完成派生与加解密。").FontSize(13).TextColor(t.TextMuted)
-		ui.Row(c).FillWidth().AlignItems(ui.End).Gap(8).Children(func() {
-			ui.TextInput(c, &a.path).Label("金库文件").Placeholder("金库文件的完整路径").Disabled(a.busy).Grow(1)
-			ui.Button(c, "选择金库位置…").Disabled(a.busy).OnClick(a.chooseVault)
+	baseName := vaultDisplayBaseName(a.path)
+	heading := "解锁本地金库"
+	if baseName != "" {
+		heading = "解锁 " + baseName
+	}
+
+	ui.Column(c.Key("unlock-card")).Role(ui.RoleGroup).Label("解锁当前设备金库").
+		FillWidth().MaxWidth(460).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+		Padding(t.Space(5)).Gap(t.Space(3)).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+			mark := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).Background(t.Accent).
+				AlignItems(ui.Center).Justify(ui.Center)
+			mark.Children(func() {
+				oneui.Icon(c, lucide.LockKeyhole()).Size(t.Space(5), t.Space(5)).TextColor(t.AccentText)
+			})
+			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
+				oneui.Text(c, heading).FontSize(t.Rem(1.3)).Bold().TextColor(t.Text).SingleLine()
+				oneui.Text(c, "解锁金库 · 本机已完成设备绑定，日常解锁只需主密码。"+osunlock.Requirement()).
+					FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			})
 		})
-		ui.TextInput(c, &a.password).Label("主密码").Placeholder("主密码").Password().Disabled(a.busy)
-		if a.create {
-			ui.TextInput(c, &a.confirmation).Label("确认主密码").Placeholder("再次输入主密码").Password().Disabled(a.busy)
-			if a.issued == "" {
-				ui.Button(c, "生成 Secret Key").Disabled(a.busy).OnClick(func() {
-					key, e := personal.NewSecret()
-					if e != nil {
-						a.status = "密钥生成失败"
-						return
-					}
-					a.issued = personal.FormatSecret(key)
-					clear(key)
-				})
-			} else {
-				ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(6).Children(func() {
-					ui.Text(c, "请立即离线备份此 Secret Key；一旦遗失，无法仅凭主密码恢复金库：").FontSize(12).TextColor(t.Warning)
-					ui.Text(c, a.issued).FontSize(17).Bold().TextColor(t.Text)
+
+		// Bound vault pill (replaces raw path box & "选择金库位置…" / "创建新金库" in Onevra mode)
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).
+			Border(1, t.Border).Radius(t.Radius).Background(t.Background).
+			Padding(t.Space(1.5), t.Space(2.5)).Children(func() {
+			oneui.Icon(c, lucide.FileLock()).Size(t.Space(4), t.Space(4)).TextColor(t.Accent)
+			locText := displayVaultLocation(a.path)
+			if baseName != "" {
+				locText = baseName + " · " + locText
+			}
+			oneui.Text(c, locText).FontSize(t.Rem(.78)).Bold().TextColor(t.Text).Grow(1).SingleLine()
+			if a.path != "" {
+				if _, err := a.loadDeviceSecret(a.path); err == nil {
+					oneui.Badge(c, "已记住密钥", oneui.BadgeOptions{Tone: oneui.BadgeSuccess})
+				} else {
+					oneui.Badge(c, "需应急恢复", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+				}
+			}
+		})
+
+		pwInput := oneui.TextBox(c, &a.password, oneui.TextBoxOptions{}).
+			Label("主密码").Placeholder("输入主密码解锁").Password().Disabled(a.busy)
+		pwInput.OnSubmit(a.unlock)
+
+		if a.showSecretFallback {
+			ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Warning.Alpha(.06)).
+				Padding(t.Space(2.5)).Gap(t.Space(1)).Children(func() {
+				oneui.Text(c, "此设备没有可用的已保存 Secret Key，请从应急文件粘贴一次。").FontSize(t.Rem(.76)).Bold().TextColor(t.Warning).Wrap()
+				oneui.Text(c, "成功解锁后会在本机系统凭据存储中重新保存，之后仍然只需主密码。").FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
+			})
+			oneui.TextBox(c, &a.secret, oneui.TextBoxOptions{}).
+				Label("Secret Key").Placeholder("LL1-…（从应急文件粘贴一次）").Password().Disabled(a.busy).
+				OnSubmit(a.unlock)
+		}
+
+		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+			oneui.Button(c, "解锁", oneui.ButtonPrimary).FillWidth().Disabled(a.busy).OnClick(a.unlock)
+			oneui.Button(c, "使用"+osunlock.Label()+"解锁", oneui.ButtonSecondary).FillWidth().Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
+		})
+
+		ui.Row(c).FillWidth().Wrap().Justify(ui.SpaceBetween).Gap(t.Space(1)).Children(func() {
+			if !a.showSecretFallback {
+				oneui.Button(c, "使用应急资料…", oneui.ButtonGhost).Disabled(a.busy).OnClick(func() {
+					a.showSecretFallback = true
+					a.secret = ""
+					a.status = "请输入应急文件中的 Secret Key"
 				})
 			}
-		}
-		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
-		if a.create {
-			ui.Row(c).Gap(8).Children(func() {
-				ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVaultFile)
-				ui.Button(c, "返回解锁").Disabled(a.busy).OnClick(func() { a.Lock(); a.create = false; a.status = "" })
+			oneui.Button(c, "打开其他金库…", oneui.ButtonGhost).Disabled(a.busy).OnClick(a.openExistingVault)
+			oneui.Button(c, "退出当前设备…", oneui.ButtonGhost).Disabled(a.busy || a.path == "").OnClick(func() {
+				a.confirmForgetDevice = true
+				a.forgetPassword = ""
+				a.status = "确认退出前需验证当前金库主密码；不会删除金库文件"
 			})
-		} else {
-			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
-				ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
-				ui.Button(c, "创建新金库").Disabled(a.busy).OnClick(func() { a.Lock(); a.create = true; a.status = "" })
-			})
-			ui.Text(c, "首次或过期后需先完整解锁并在「安全设置」中启用快捷解锁；验证失败时可随时使用主密码与 Secret Key。").FontSize(12).TextColor(t.TextMuted)
-			ui.Text(c, osunlock.Requirement()).FontSize(12).TextColor(t.TextMuted)
+		})
+
+		if a.confirmForgetDevice {
+			a.forgetDeviceConfirmView(c)
 		}
 	})
+}
+
+func (a *App) classicLockView(c *ui.Context) {
+	t := c.Theme()
+	width, _ := c.Size()
+	ui.Row(c.Key("unlock-onboarding")).Role(ui.RoleGroup).Label("解锁与本地安全").
+		FillWidth().MaxWidth(1120).Padding(t.Space(4)).Gap(t.Space(4)).AlignItems(ui.Start).Children(func() {
+		if width >= 900 {
+			a.lockIntroView(c)
+		}
+		ui.Column(c).Grow(1).MinWidth(0).MaxWidth(720).Gap(t.Space(2.5)).Children(func() {
+			a.lockFormView(c)
+		})
+	})
+}
+
+func (a *App) lockIntroView(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Width(300).Shrink(0).Gap(t.Space(2.5)).Padding(t.Space(2), 0).Children(func() {
+		mark := ui.Box(c).Size(t.Space(12), t.Space(12)).Radius(t.Space(3)).Background(t.Accent).
+			AlignItems(ui.Center).Justify(ui.Center)
+		mark.Children(func() {
+			oneui.Icon(c, lucide.LockKeyhole()).Size(t.Space(6), t.Space(6)).TextColor(t.AccentText)
+		})
+		ui.Text(c, "你的密码，只属于你。").FontSize(25).Bold().TextColor(t.Text).Wrap()
+		ui.Text(c, "Locklark 在本机完成解密与密钥派生。日常解锁只需要主密码，Secret Key 交由系统凭据存储保护。").FontSize(13).TextColor(t.TextMuted).Wrap()
+		ui.Box(c).FillWidth().Height(1).Background(t.Border).Margin(t.Space(1), 0)
+		for _, feature := range []struct{ title, detail string }{
+			{"离线解密", "金库文件和字段值不会因为解锁而上传。"},
+			{"本机身份", "Secret Key 只在首次授权或应急恢复时输入。"},
+			{"后台锁定", "关闭窗口会隐藏到托盘并立即锁定金库。"},
+		} {
+			ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(t.Space(1.5)).Children(func() {
+				ui.Box(c).Size(t.Space(1.5), t.Space(1.5)).Shrink(0).Radius(t.Space(.75)).
+					Background(t.Accent).Margin(t.Space(.6), 0, 0, 0)
+				ui.Column(c).Grow(1).Gap(t.Space(.25)).Children(func() {
+					ui.Text(c, feature.title).FontSize(13).Bold().TextColor(t.Text)
+					ui.Text(c, feature.detail).FontSize(12).TextColor(t.TextMuted).Wrap()
+				})
+			})
+		}
+	})
+}
+
+func (a *App) lockFormView(c *ui.Context) {
+	t := c.Theme()
+	heading := "解锁金库"
+	if a.create {
+		heading = "创建离线金库"
+	}
+	ui.Text(c, heading).FontSize(26).Bold().TextColor(t.Text)
+	if a.create {
+		ui.Text(c, "创建时在本机生成一次 Secret Key；加密派生与数据处理全程离线完成。").FontSize(13).TextColor(t.TextMuted).Wrap()
+	} else {
+		ui.Text(c, "日常解锁只需主密码；本设备的 Secret Key 由系统凭据存储保护，不会来回显示。"+osunlock.Requirement()).FontSize(13).TextColor(t.TextMuted).Wrap()
+	}
+	ui.Row(c).FillWidth().AlignItems(ui.End).Gap(8).Children(func() {
+		ui.TextInput(c, &a.path).Label("金库文件").Placeholder("金库文件的完整路径").Disabled(a.busy).Grow(1)
+		ui.Button(c, "选择金库位置…").Disabled(a.busy).OnClick(a.chooseVault)
+	})
+	ui.TextInput(c, &a.password).Label("主密码").Placeholder("主密码").Password().Disabled(a.busy)
+	if a.create {
+		ui.TextInput(c, &a.confirmation).Label("确认主密码").Placeholder("再次输入主密码").Password().Disabled(a.busy)
+		if a.issued == "" {
+			ui.Button(c, "生成 Secret Key").Disabled(a.busy).OnClick(func() {
+				key, e := personal.NewSecret()
+				if e != nil {
+					a.status = "密钥生成失败"
+					return
+				}
+				a.issued = personal.FormatSecret(key)
+				clear(key)
+			})
+		} else {
+			ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(6).Children(func() {
+				ui.Text(c, "请立即离线备份此 Secret Key；一旦遗失，无法仅凭主密码恢复金库：").FontSize(12).TextColor(t.Warning)
+				ui.Text(c, a.issued).FontSize(17).Bold().TextColor(t.Text)
+				ui.Row(c).FillWidth().Wrap().Gap(8).Children(func() {
+					ui.Button(c, "复制 Secret Key").Disabled(a.busy).OnClick(a.copyIssuedSecret)
+					ui.Button(c, "保存应急文件…").Disabled(a.busy).OnClick(a.chooseEmergencyKit)
+				})
+				ui.Text(c, "应急文件包含明文密钥，不含主密码。请离线保存或打印，并与金库文件分开保管。").FontSize(12).TextColor(t.TextMuted).Wrap()
+			})
+		}
+		ui.TextInput(c, &a.secret).Label("Secret Key 确认").Placeholder("重新输入刚生成的 Secret Key").Password().Disabled(a.busy)
+		ui.Row(c).Gap(8).Wrap().Children(func() {
+			ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVaultFile)
+			ui.Button(c, "返回解锁").Disabled(a.busy).OnClick(func() { a.Lock(); a.create = false; a.status = "" })
+		})
+		return
+	}
+
+	if a.showSecretFallback {
+		ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Warning.Alpha(.06)).Padding(t.Space(2.5)).Gap(6).Children(func() {
+			ui.Text(c, "此设备没有可用的已保存 Secret Key，请从应急文件粘贴一次。").FontSize(12).Bold().TextColor(t.Warning)
+			ui.Text(c, "成功解锁后会在本机系统凭据存储中重新保存，之后仍然只需主密码。").FontSize(12).TextColor(t.TextMuted).Wrap()
+		})
+		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（仅从应急文件使用）").Password().Disabled(a.busy)
+	}
+	ui.Row(c).Gap(8).Wrap().Children(func() {
+		ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
+		ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
+		ui.Button(c, "创建新金库").Disabled(a.busy).OnClick(func() { a.Lock(); a.create = true; a.status = "" })
+		if !a.showSecretFallback {
+			ui.Button(c, "使用应急资料…").Disabled(a.busy).OnClick(func() {
+				a.showSecretFallback = true
+				a.secret = ""
+				a.status = "请输入应急文件中的 Secret Key"
+			})
+		}
+		ui.Button(c, "退出当前设备…").Disabled(a.busy || a.path == "").OnClick(func() {
+			a.confirmForgetDevice = true
+			a.status = "确认后只会移除此设备的 Secret Key，不会删除金库文件"
+		})
+	})
+	if a.confirmForgetDevice {
+		ui.Column(c).FillWidth().Border(1, t.Danger).Radius(t.Radius).Background(t.Danger.Alpha(.06)).Padding(t.Space(2.5)).Gap(8).Children(func() {
+			ui.Text(c, "退出当前设备？").Bold().TextColor(t.Danger)
+			ui.Text(c, "这会移除此设备保存的 Secret Key，金库文件不会删除。下次使用应急文件重新授权此设备。").FontSize(12).TextColor(t.TextMuted).Wrap()
+			ui.Row(c).Gap(8).Wrap().Children(func() {
+				ui.Button(c, "确认退出当前设备").Disabled(a.busy).OnClick(a.forgetDeviceSecret)
+				ui.Button(c, "取消退出").Disabled(a.busy).OnClick(func() {
+					a.confirmForgetDevice = false
+					a.status = ""
+				})
+			})
+		})
+	}
+	ui.Text(c, "Secret Key 不写入普通设置文件；系统凭据存储不可用时，应用会要求使用一次应急资料。").FontSize(12).TextColor(t.TextMuted).Wrap()
 }
 func (a *App) vaultView(c *ui.Context) {
 	t := c.Theme()
 	ui.Row(c).FillWidth().Padding(0, 0, 8, 0).Gap(8).Children(func() {
-		tabs := []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}}
+		tabs := []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"transfer", "导入与导出"}}
 		if classicLayoutRequested() {
 			// Keep the classic tab as the only "安全设置" control there; the
 			// Onevra shell hides its gear in this mode.
@@ -777,8 +1049,6 @@ func (a *App) vaultView(c *ui.Context) {
 		a.securityView(c)
 	case "activity":
 		a.activityView(c)
-	case "health":
-		a.healthView(c)
 	case "transfer":
 		a.transferView(c)
 	default:
@@ -906,6 +1176,27 @@ func (a *App) addView(c *ui.Context) {
 	ui.TextInput(c, &a.generationLength).Label("密码长度（22–256）").Disabled(a.busy)
 	ui.Button(c, "生成强密码并保存").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(func() { a.saveNative(true) })
 }
+func auditMatchesFilter(action, filter string) bool {
+	if filter == "" || filter == "all" {
+		return true
+	}
+	lower := strings.ToLower(action)
+	switch filter {
+	case "session":
+		return strings.Contains(lower, "unlock") || strings.Contains(lower, "lock") ||
+			strings.Contains(lower, "session") || strings.Contains(lower, "system") ||
+			strings.Contains(lower, "import") || strings.Contains(lower, "export")
+	case "item":
+		return strings.HasPrefix(lower, "item.") || strings.Contains(lower, "vault")
+	case "external":
+		return strings.Contains(lower, "ssh") || strings.Contains(lower, "cli") ||
+			strings.Contains(lower, "browser") || strings.Contains(lower, "reveal") ||
+			strings.Contains(lower, "copy") || strings.Contains(lower, "otp")
+	default:
+		return true
+	}
+}
+
 func (a *App) activityView(c *ui.Context) {
 	t := c.Theme()
 	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
@@ -932,25 +1223,81 @@ func (a *App) activityView(c *ui.Context) {
 		})
 	})
 }
-func (a *App) healthView(c *ui.Context) {
+
+func (a *App) activityContentView(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
-			ui.Column(c).Grow(1).Gap(4).Children(func() {
-				ui.Text(c, "本地安全体检").FontSize(20).Bold().TextColor(t.Text)
-				ui.Text(c, "基于本地离线规则检测弱密码、重复密码与未启用 2FA 的登录条目，不发起任何联网查询。").FontSize(13).TextColor(t.TextMuted)
+	filter := a.auditFilter
+	if filter == "" {
+		filter = "all"
+	}
+	filtered := make([]personal.Event, 0, len(a.audit))
+	for _, e := range a.audit {
+		if auditMatchesFilter(e.Action, filter) {
+			filtered = append(filtered, e)
+		}
+	}
+
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Wrap().Gap(t.Space(1.5)).Children(func() {
+		chips := []struct{ id, label string }{
+			{"all", "全部"},
+			{"session", "会话与解锁"},
+			{"item", "条目变更"},
+			{"external", "密钥与外部请求"},
+		}
+		for _, chip := range chips {
+			chip := chip
+			variant := oneui.ButtonOutline
+			if filter == chip.id {
+				variant = oneui.ButtonSecondary
+			}
+			oneui.Button(c, chip.label, variant).OnClick(func() {
+				a.auditFilter = chip.id
 			})
-			ui.Button(c, "确认扫描活动登录").Disabled(a.busy).OnClick(func() {
-				s := a.session
-				a.run(func() outcome {
-					report, e := s.Health()
-					return outcome{err: e, apply: func() { a.report = fmt.Sprintf("%+v", report) }}
+		}
+		ui.Box(c).Grow(1)
+		oneui.Button(c, "刷新活动", oneui.ButtonSecondary).Disabled(a.busy || a.session == nil).OnClick(func() {
+			s := a.session
+			a.run(func() outcome { events, e := s.Audit(); return outcome{err: e, apply: func() { a.audit = events }} })
+		})
+	})
+
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+		Padding(t.Space(3)).Gap(t.Space(1.5)).Children(func() {
+		if len(a.audit) == 0 {
+			oneui.Text(c, "暂无已加载的审计事件，请点击「刷新活动」从当前金库读取离线签名账本。").
+				FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			return
+		}
+		if len(filtered) == 0 {
+			oneui.Text(c, "当前筛选条件下暂无审计记录；可切换回「全部」查看完整事件。").
+				FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			return
+		}
+		for i, e := range filtered {
+			if i > 0 {
+				ui.Box(c).FillWidth().Height(1).Background(t.Border)
+			}
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+					oneui.Text(c, e.Action).FontSize(t.Rem(.84)).Bold().TextColor(t.Text).SingleLine()
+					meta := e.UTC
+					if e.Item != "" {
+						meta = e.Item + " · " + meta
+					}
+					if e.Actor != "" {
+						meta = e.Actor + " · " + meta
+					}
+					oneui.Text(c, meta).FontSize(t.Rem(.72)).TextColor(t.TextMuted).Wrap()
 				})
+				tone := oneui.BadgeNeutral
+				if strings.EqualFold(e.Result, "ok") || strings.EqualFold(e.Result, "success") {
+					tone = oneui.BadgeSuccess
+				} else if strings.Contains(strings.ToLower(e.Result), "deny") || strings.Contains(strings.ToLower(e.Result), "fail") || strings.Contains(strings.ToLower(e.Result), "err") {
+					tone = oneui.BadgeDanger
+				}
+				oneui.Badge(c, e.Result, oneui.BadgeOptions{Tone: tone})
 			})
-		})
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Children(func() {
-			ui.Text(c, a.report).FontSize(13).TextColor(t.Text)
-		})
+		}
 	})
 }
 func importDirectory() string {
@@ -1077,10 +1424,14 @@ func (a *App) transferView(c *ui.Context) {
 	})
 }
 func Run() error {
+	// Draw MyGo's updater window in native UI as well: Locklark ships no
+	// WebView runtime, and development builds keep the updater disabled.
+	mygo.Use(updatenative.Plugin)
 	a := New()
 	if e := a.LoadSettings(); e != nil {
 		a.status = "安全设置文件无法读取；已使用默认值"
 	}
+	a.syncInitialVaultState()
 	a.startBackgroundLoop()
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
 	mygo.App.SetName("Locklark")
@@ -1107,15 +1458,24 @@ func Run() error {
 				MinWidth:      980,
 				MinHeight:     680,
 				StateKey:      "locklark.main",
-				Theme:         theme.Onevra,
+				Theme:         a.onevraTheme,
 				HeaderLeading: a.onevraHeaderLeading,
 				HeaderActions: a.onevraHeaderActions,
 				Content:       a.View,
 			})
 			a.win = shell.Window()
 		}
+		a.applyAppearanceToRuntime()
 		a.dispatch = a.win.Update
-		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
+		a.win.OnShow(func() { a.winHidden = false })
+		a.win.OnClose(a.handleMainWindowClose)
+		a.win.OnMinimize(func() {
+			if !a.quitting && a.win != nil {
+				a.Lock()
+				a.winHidden = true
+				a.win.Hide()
+			}
+		})
 		a.clipboardWrite = nativeclipboard.Write
 		a.clipboardClear = nativeclipboard.ClearOwned
 		// The broker may have started before the UI thread existed; publish the
@@ -1123,6 +1483,12 @@ func Run() error {
 		a.refreshClipboardClearSeconds(a.settingsSnapshot())
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
+		mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+			a.quitting = true
+			if a.approvalWin != nil {
+				a.approvalWin.Close()
+			}
+		})
 		mygo.App.OnQuit(a.Lock)
 		a.startBrowserBroker()
 		a.registerQuickSearch(mygo.GlobalShortcut.Register)
@@ -1134,7 +1500,14 @@ func Run() error {
 		}
 		var pngIcon bytes.Buffer
 		_ = png.Encode(&pngIcon, icon)
-		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
+		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.winHidden = false; a.win.Show(); a.win.Focus() }}, updater.MenuItem(), {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.quitting = true
+			a.Lock()
+			if a.approvalWin != nil {
+				a.approvalWin.Close()
+			}
+			mygo.App.Quit()
+		}}})})
 	})
 	err := mygo.App.Run()
 	a.stopBackgroundLoop()
@@ -1144,6 +1517,25 @@ func Run() error {
 		return sshagent.ErrUnavailable
 	}
 	return err
+}
+
+// handleMainWindowClose keeps the desktop process alive in the tray. The
+// explicit quit path flips quitting in OnBeforeQuit and the tray menu before
+// asking MyGo to close the windows.
+func (a *App) handleMainWindowClose(e *mygo.CloseEvent) {
+	if a.quitting {
+		return
+	}
+	e.PreventDefault()
+	a.Lock()
+	a.winHidden = true
+	win := a.win
+	if e.Window != nil {
+		win = e.Window
+	}
+	if win != nil {
+		win.Hide()
+	}
 }
 
 func (a *App) systemUnlock() {
@@ -1188,6 +1580,12 @@ func (a *App) securityView(c *ui.Context) {
 			ui.Text(c, shortcut).FontSize(13).TextColor(t.TextMuted)
 		})
 		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(12).Gap(6).Children(func() {
+			ui.Text(c, "应用更新").Bold().TextColor(t.Text)
+			ui.Text(c, "当前版本："+desktopVersionLabel()).FontSize(13).TextColor(t.TextMuted)
+			ui.Text(c, "安装版通过 GitHub Releases 检查更新；更新包必须通过内置 Ed25519 公钥验证。开发构建不会自动联网检查。").FontSize(12).TextColor(t.TextMuted)
+			ui.Button(c, "检查更新…").Disabled(a.busy).OnClick(updater.CheckForUpdates)
+		})
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(12).Gap(6).Children(func() {
 			ui.Text(c, "快捷解锁："+osunlock.Label()).Bold().TextColor(t.Text)
 			ui.Text(c, osunlock.Description()).FontSize(13).TextColor(t.Text)
 			ui.Text(c, osunlock.Requirement()).FontSize(12).TextColor(t.TextMuted)
@@ -1212,7 +1610,6 @@ func (a *App) securityView(c *ui.Context) {
 		})
 	})
 }
-
 
 func (a *App) chooseVault() {
 	win, create := a.win, a.create

@@ -76,12 +76,20 @@ func (a *App) onevraHeaderActions(c *ui.Context) {
 // navigation, item collection, and a focused detail/editor surface. The two
 // Onevra splitters preserve keyboard resizing and native accessibility.
 func (a *App) onevraVaultView(c *ui.Context) {
+	c.SetTheme(a.onevraTheme(c))
 	if a.v2.largeTypeOpen {
 		a.largeTypeView(c)
 		return
 	}
 	a.drainPendingV2Reload()
 	ui.Column(c).Key(a.generation).Fill().Children(func() {
+		if a.v2.settingsOpen {
+			ui.Column(c).Grow(1).FillWidth().MinHeight(0).Children(func() {
+				a.settingsView(c)
+			})
+			a.onevraStatusBar(c)
+			return
+		}
 		outer := oneui.Split(c, &a.onevra.sidebarWidth, func() {
 			a.onevraSidebarView(c)
 		}, func() {
@@ -94,41 +102,188 @@ func (a *App) onevraVaultView(c *ui.Context) {
 			)
 			inner.Label("调整条目列表和详情宽度")
 			inner.Fill()
-		}, oneui.SplitOptions{FirstMin: 190, SecondMin: 620, Default: onevraSidebarDefaultWidth})
+		}, oneui.SplitOptions{FirstMin: 176, SecondMin: 620, Default: onevraSidebarDefaultWidth})
 		outer.Label("调整导航和内容宽度")
 		outer.Fill()
 		a.onevraStatusBar(c)
+		a.onevraVaultDialogs(c)
 	})
+}
+
+func (a *App) onevraVaultDialogs(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c.Key("dialog-new-vault")).Children(func() {
+		oneui.Dialog(c, &a.v2.newVaultOpen, oneui.DialogOptions{Label: "新建子保险库"}, func(panel ui.Element) {
+			panel.Width(420).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))
+			panel.Children(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
+					oneui.Text(c, "新建保险库").FontSize(t.Rem(1.12)).Bold()
+					oneui.Text(c, "子保险库存储在同一加密 .ll 金库文件内，用于按工作/个人/项目分组管理凭据。").
+						FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+					oneui.TextBox(c, &a.v2.newVaultName, oneui.TextBoxOptions{}).
+						Label("保险库名称").Placeholder("例如：工作基础设施、开源维护").Disabled(a.busy)
+					oneui.TextBox(c, &a.v2.newVaultDesc, oneui.TextBoxOptions{}).
+						Label("备注说明（可选）").Placeholder("用途或访问边界说明").Disabled(a.busy)
+					ui.Row(c).FillWidth().Justify(ui.End).Gap(t.Space(1.5)).Children(func() {
+						if oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).Clicked() {
+							a.v2.newVaultOpen = false
+						}
+						if oneui.Button(c, "创建保险库", oneui.ButtonPrimary).
+							Disabled(a.busy || strings.TrimSpace(a.v2.newVaultName) == "").Clicked() {
+							if _, err := a.createVault(a.v2.newVaultName, a.v2.newVaultDesc, a.v2.newVaultIcon); err != nil {
+								a.status = message(err)
+							} else {
+								a.v2.newVaultOpen = false
+							}
+						}
+					})
+				})
+			})
+		})
+	})
+
+	ui.Column(c.Key("dialog-move-vault")).Children(func() {
+		oneui.Dialog(c, &a.onevra.moveDialogOpen, oneui.DialogOptions{Label: "移动或复制到其他保险库"}, func(panel ui.Element) {
+			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))
+			panel.Children(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
+					oneui.Text(c, "跨保险库整理条目").FontSize(t.Rem(1.12)).Bold()
+					ui.Row(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+						moveVariant := oneui.ButtonOutline
+						copyVariant := oneui.ButtonOutline
+						if !a.onevra.moveCopyMode {
+							moveVariant = oneui.ButtonSecondary
+						} else {
+							copyVariant = oneui.ButtonSecondary
+						}
+						if oneui.Button(c, "移动条目", moveVariant).Grow(1).Clicked() {
+							a.onevra.moveCopyMode = false
+						}
+						if oneui.Button(c, "复制副本", copyVariant).Grow(1).Clicked() {
+							a.onevra.moveCopyMode = true
+						}
+					})
+					if len(a.v2.vaults) > 0 {
+						if a.onevra.moveTargetVaultID == "" {
+							a.onevra.moveTargetVaultID = a.v2.vaults[0].ID
+						}
+						options := make([]oneui.NativeSelectOption[string], 0, len(a.v2.vaults))
+						for _, v := range a.v2.vaults {
+							options = append(options, oneui.NativeSelectOption[string]{Value: v.ID, Label: v.Name})
+						}
+						sel := oneui.NativeSelect(c, &a.onevra.moveTargetVaultID, options)
+						sel.Trigger.Label("目标保险库").FillWidth()
+					} else {
+						oneui.Text(c, "当前只有一个默认保险库；可先通过「+ 新建保险库」创建分组。").
+							FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+					}
+					ui.Row(c).FillWidth().Justify(ui.End).Gap(t.Space(1.5)).Children(func() {
+						if oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).Clicked() {
+							a.onevra.moveDialogOpen = false
+						}
+						actionLabel := "确认移动"
+						if a.onevra.moveCopyMode {
+							actionLabel = "确认复制"
+						}
+						if oneui.Button(c, actionLabel, oneui.ButtonPrimary).
+							Disabled(a.busy || a.onevra.moveTargetVaultID == "").Clicked() {
+							if _, _, err := a.moveSelectedToVault(a.onevra.moveTargetVaultID, a.onevra.moveCopyMode); err != nil {
+								a.status = message(err)
+							} else {
+								a.onevra.moveDialogOpen = false
+							}
+						}
+					})
+				})
+			})
+		})
+	})
+}
+
+func (a *App) onevraSidebarStateCounts() (archived, trashed int) {
+	for _, row := range a.v2.all {
+		switch row.State {
+		case "archived":
+			archived++
+		case "trashed":
+			trashed++
+		}
+	}
+	return archived, trashed
+}
+
+func isCoreSidebarCategory(category vault.ItemCategory) bool {
+	switch category {
+	case vault.CategoryLogin, vault.CategorySecureNote, vault.CategoryAPICredential, vault.CategorySSHKey:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) onevraSidebarView(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).Fill().MinWidth(0).Background(t.Background.Mix(t.Text, .025)).
-		Padding(t.Space(3), t.Space(3), t.Space(3), t.Space(3)).Gap(t.Space(3)).Children(func() {
-		oneui.ScrollView(c, oneui.ScrollViewOptions{}).Fill().Children(func() {
+	archivedCount, trashedCount := a.onevraSidebarStateCounts()
+	ui.Column(c).Fill().MinWidth(0).Background(t.Background.Mix(t.Text, .035)).
+		Padding(t.Space(2.5)).Gap(t.Space(2)).Children(func() {
+		// Top current-vault switcher
+		switcherBtn := oneui.Button(c, "当前："+a.onevraVaultLabel(), oneui.ButtonOutline).FillWidth()
+		oneui.MenuButton(c, switcherBtn, func(m *oneui.Menu) {
+			if m.Item("全部保险库").Chosen() {
+				a.SelectVault("all")
+			}
+			for _, v := range a.v2.vaults {
+				v := v
+				if m.Item(v.Name).Chosen() {
+					a.SelectVault(v.ID)
+				}
+			}
+			m.Separator()
+			if m.Item("+ 新建保险库…").Chosen() {
+				a.beginNewVault()
+			}
+		})
+
+		oneui.ScrollView(c, oneui.ScrollViewOptions{}).Grow(1).Fill().Children(func() {
 			oneui.Sidebar(c).Children(func() {
-				oneui.SidebarSection(c, "工作区", func() {
+				oneui.SidebarSection(c, "浏览", func() {
 					a.onevraSidebarItem(c, "全部", lucide.List(), a.v2.nav == navAllItems && a.v2.vaultID == "all", len(a.v2.rows), func() { a.navigate(navAllItems) })
 					a.onevraSidebarItem(c, "收藏", lucide.Star(), a.v2.nav == navFavorites, a.onevraFavoriteCount(), func() { a.navigate(navFavorites) })
-					a.onevraSidebarItem(c, "Watchtower 安全体检", lucide.Shield(), a.v2.nav == navWatchtower, 0, func() { a.navigate(navWatchtower) })
-					a.onevraSidebarItem(c, "归档", lucide.Archive(), a.v2.nav == navArchive, 0, func() { a.navigate(navArchive) })
-					a.onevraSidebarItem(c, "回收站", lucide.Trash(), a.v2.nav == navRecentlyDelete, 0, func() { a.navigate(navRecentlyDelete) })
+					a.onevraSidebarItem(c, "归档", lucide.Archive(), a.v2.nav == navArchive, archivedCount, func() { a.navigate(navArchive) })
+					a.onevraSidebarItem(c, "回收站", lucide.Trash(), a.v2.nav == navRecentlyDelete, trashedCount, func() { a.navigate(navRecentlyDelete) })
 				})
 
-				oneui.SidebarSection(c, "保险库", func() {
+				oneui.SidebarSection(c, "整理 · 保险库", func() {
 					a.onevraSidebarItem(c, "全部保险库", lucide.Vault(), a.v2.vaultID == "all", a.onevraVaultCount(), func() { a.SelectVault("all") })
 					for _, v := range a.v2.vaults {
 						v := v
 						a.onevraSidebarItem(c, v.Name, lucide.FolderKey(), a.v2.vaultID == v.ID, a.v2.vaultCount[v.ID], func() { a.SelectVault(v.ID) })
 					}
+					a.onevraSidebarItem(c, "+ 新建保险库", lucide.Plus(), false, 0, a.beginNewVault)
 				})
 
-				oneui.SidebarSection(c, "类别", func() {
+				oneui.SidebarSection(c, "类型", func() {
+					hiddenCount := 0
 					for _, category := range AllCategories() {
 						category := category
+						count := a.v2.categoryCount[category]
 						selected := a.v2.nav == navCategory && a.v2.category == category
-						a.onevraSidebarItem(c, CategoryDisplayName(category), onevraCategoryIcon(category), selected, a.v2.categoryCount[category], func() {
+						show := a.onevra.showAllCategories || selected || count > 0 || (len(a.v2.all) == 0 && isCoreSidebarCategory(category))
+						if !show {
+							hiddenCount++
+							continue
+						}
+						a.onevraSidebarItem(c, CategoryDisplayName(category), onevraCategoryIcon(category), selected, count, func() {
 							a.FilterByCategory(category)
+						})
+					}
+					if hiddenCount > 0 {
+						a.onevraSidebarItem(c, "展开全部类别", lucide.ChevronDown(), false, 0, func() {
+							a.onevra.showAllCategories = true
+						})
+					} else if a.onevra.showAllCategories {
+						a.onevraSidebarItem(c, "收起空类别", lucide.ChevronUp(), false, 0, func() {
+							a.onevra.showAllCategories = false
 						})
 					}
 				})
@@ -145,6 +300,11 @@ func (a *App) onevraSidebarView(c *ui.Context) {
 				}
 			})
 		})
+
+		ui.Box(c).FillWidth().Height(1).Background(t.Border)
+		if oneui.Button(c, "设置", oneui.ButtonGhost).FillWidth().Clicked() {
+			a.openSettings()
+		}
 	})
 }
 
@@ -204,6 +364,15 @@ func (a *App) onevraListView(c *ui.Context) {
 				if oneui.IconButton(c, lucide.Plus(), "新建登录", oneui.IconButtonToolbar).Clicked() {
 					a.newItem(vault.CategoryLogin)
 				}
+				newMore := oneui.Button(c, "新建…", oneui.ButtonOutline).Disabled(a.busy)
+				oneui.MenuButton(c, newMore, func(m *oneui.Menu) {
+					for _, cat := range AllCategories() {
+						cat := cat
+						if m.Item(CategoryDisplayName(cat)).Chosen() {
+							a.newItem(cat)
+						}
+					}
+				})
 			})
 		})
 		ui.Box(c).FillWidth().Height(1).Background(t.Border)
@@ -290,8 +459,6 @@ func (a *App) onevraDetailPane(c *ui.Context) {
 					a.settingsView(c)
 				case a.v2.generator.open:
 					a.generatorView(c)
-				case a.v2.nav == navWatchtower:
-					a.v2WatchtowerView(c)
 				case a.v2.editing && a.v2.draft != nil:
 					a.v2EditorView(c)
 				default:
@@ -335,11 +502,61 @@ func (a *App) onevraDetailView(c *ui.Context) {
 				}
 			}
 		}
-		if oneui.IconButton(c, lucide.Ellipsis(), "更多操作", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
-			a.status = "更多条目操作显示在详情底部"
+		if oneui.IconButton(c, lucide.FileClock(), "历史", oneui.IconButtonPlain).Disabled(a.busy || len(detail.History) == 0).Clicked() {
+			a.openHistory()
 		}
+		moreBtn := oneui.IconButton(c, lucide.Ellipsis(), "更多操作", oneui.IconButtonPlain).Disabled(a.busy)
+		oneui.MenuButton(c, moreBtn, func(m *oneui.Menu) {
+			if detail.State != "trashed" {
+				if m.Item("复制副本").Chosen() {
+					_, _, _ = a.duplicateSelected()
+				}
+				if m.Item("移动到其他保险库…").Chosen() {
+					a.openMoveVaultDialog(false)
+				}
+				if m.Item("复制到其他保险库…").Chosen() {
+					a.openMoveVaultDialog(true)
+				}
+				m.Separator()
+				if detail.State == "archived" {
+					if m.Item("取消归档条目").Chosen() {
+						a.unarchiveSelected()
+					}
+				} else {
+					if m.Item("归档条目").Chosen() {
+						a.archiveSelected()
+					}
+				}
+				if m.Item("移至回收站").Chosen() {
+					a.trashSelected()
+				}
+			} else if m.Item("恢复到金库").Chosen() {
+				a.restoreSelected()
+			}
+		})
 		if oneui.IconButton(c, lucide.X(), "关闭详情", oneui.IconButtonPlain).Clicked() {
 			a.clearSelection()
+		}
+	})
+
+	// 3-cell protection & boundary summary strip
+	encCount, plainCount := customFieldProtectionStats(detail)
+	customSummary := "无自定义字段"
+	if encCount+plainCount > 0 {
+		customSummary = fmt.Sprintf("%d 加密 · %d 明文", encCount, plainCount)
+	}
+	ui.Row(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+		cells := []struct{ label, value string }{
+			{"所属保险库", a.vaultNameForID(detail.VaultID)},
+			{"敏感保护", "密码默认遮蔽"},
+			{"自定义字段", customSummary},
+		}
+		for _, cell := range cells {
+			ui.Column(c).Grow(1).MinWidth(0).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+				Padding(t.Space(1.5), t.Space(2)).Gap(t.Space(.25)).Children(func() {
+				oneui.Text(c, cell.label).FontSize(t.Rem(.68)).TextColor(t.TextMuted).SingleLine()
+				oneui.Text(c, cell.value).FontSize(t.Rem(.78)).Bold().TextColor(t.Text).SingleLine().Ellipsis("…")
+			})
 		}
 	})
 
@@ -502,16 +719,161 @@ func (a *App) onevraFieldCard(c *ui.Context, detail *personal.ItemDetail) {
 	})
 }
 
+func (a *App) openMoveVaultDialog(copyMode bool) {
+	a.onevra.moveCopyMode = copyMode
+	target := ""
+	if detail := a.detailForView(); detail != nil {
+		for _, v := range a.v2.vaults {
+			if v.ID != detail.VaultID {
+				target = v.ID
+				break
+			}
+		}
+	}
+	if target == "" && len(a.v2.vaults) > 0 {
+		target = a.v2.vaults[0].ID
+	}
+	a.onevra.moveTargetVaultID = target
+	a.onevra.moveDialogOpen = true
+}
+
+func (a *App) vaultNameForID(vaultID string) string {
+	targetID := vaultID
+	if targetID == "" {
+		targetID = vault.DefaultVaultID
+	}
+	for _, v := range a.v2.vaults {
+		if v.ID == targetID {
+			return v.Name
+		}
+	}
+	if targetID == vault.DefaultVaultID {
+		return "Personal"
+	}
+	return "默认保险库"
+}
+
+func customFieldIsEncrypted(f vault.CustomField) bool {
+	return f.Protected || f.Type == vault.FieldTypeConcealed || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP
+}
+
+func customFieldProtectionStats(detail *personal.ItemDetail) (encCount, plainCount int) {
+	if detail == nil {
+		return 0, 0
+	}
+	for _, s := range detail.Sections {
+		for _, f := range s.Fields {
+			if customFieldIsEncrypted(f) {
+				encCount++
+			} else {
+				plainCount++
+			}
+		}
+	}
+	return encCount, plainCount
+}
+
 func (a *App) onevraCustomFieldsCard(c *ui.Context, detail *personal.ItemDetail) {
-	fields := v2DetailFields(detail)
-	if len(fields) == 0 {
+	if detail == nil {
 		return
 	}
 	t := c.Theme()
+
+	// 1. Dedicated 自定义字段 card with explicit 加密 vs 明文 badges
+	encCount, plainCount := customFieldProtectionStats(detail)
+	if encCount+plainCount > 0 {
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+				oneui.Text(c, "自定义字段").Bold().Grow(1)
+				if encCount > 0 {
+					oneui.Badge(c, fmt.Sprintf("%d 加密", encCount), oneui.BadgeOptions{Tone: oneui.BadgeAccent})
+				}
+				if plainCount > 0 {
+					oneui.Badge(c, fmt.Sprintf("%d 明文", plainCount), oneui.BadgeOptions{Tone: oneui.BadgeNeutral})
+				}
+			})
+			for _, s := range detail.Sections {
+				for _, f := range s.Fields {
+					key := s.ID + "/" + f.ID
+					label := strings.TrimSpace(f.Label)
+					if label == "" {
+						label = f.ID
+					}
+					if s.Title != "" && s.Title != "自定义字段" && s.Title != "常规" {
+						label = s.Title + " · " + label
+					}
+					encrypted := customFieldIsEncrypted(f)
+					if !encrypted {
+						val := visible(f.Value)
+						if val == "" {
+							val = "（空）"
+						}
+						ui.Column(c).FillWidth().MinWidth(0).Gap(t.Space(.5)).Children(func() {
+							ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1)).Children(func() {
+								oneui.Text(c, label).FontSize(t.Rem(.74)).Bold().TextColor(t.TextMuted).Width(110).SingleLine().Ellipsis("…")
+								oneui.Badge(c, "明文", oneui.BadgeOptions{Tone: oneui.BadgeNeutral})
+								if f.Type == vault.FieldTypeText {
+									ui.Spacer(c)
+								} else {
+									oneui.Text(c, val).FontSize(t.Rem(.86)).TextColor(t.Text).Grow(1).MinWidth(0)
+								}
+								if oneui.IconButton(c, lucide.Copy(), "复制 "+label, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
+									a.copyField(key)
+								}
+							})
+							if f.Type == vault.FieldTypeText && f.Value != "" {
+								oneui.Text(c, visible(f.Value)).FontSize(t.Rem(.82)).Wrap()
+							}
+						})
+					} else {
+						plain := a.plainDetail()
+						revealed := a.v2.revealed[key]
+						value := v2FieldDisplay(detail, plain, key, revealed)
+						ui.Column(c).FillWidth().MinWidth(0).Gap(t.Space(.5)).Children(func() {
+							ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1)).Children(func() {
+								oneui.Text(c, label).FontSize(t.Rem(.74)).Bold().TextColor(t.TextMuted).Width(110).SingleLine().Ellipsis("…")
+								oneui.Badge(c, "加密", oneui.BadgeOptions{Tone: oneui.BadgeAccent})
+								if f.Type == vault.FieldTypeText {
+									ui.Spacer(c)
+								} else {
+									oneui.Text(c, visible(value)).FontSize(t.Rem(.86)).TextColor(t.Text).Grow(1).MinWidth(0)
+								}
+								btnLabel := "显示 " + label
+								if revealed {
+									btnLabel = "隐藏 " + label
+								}
+								if oneui.IconButton(c, onevraRevealIcon(revealed), btnLabel, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
+									a.revealField(key)
+								}
+								if oneui.IconButton(c, lucide.Copy(), "复制 "+label, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
+									a.copyField(key)
+								}
+							})
+							if f.Type == vault.FieldTypeText && revealed {
+								oneui.Text(c, visible(value)).FontSize(t.Rem(.82)).Wrap()
+							}
+						})
+					}
+				}
+			}
+		})
+	}
+
+	// 2. 附加信息 card (extra URLs, credit card, identity fields)
+	var extra []v2DetailField
+	for _, f := range v2DetailFields(detail) {
+		if !strings.Contains(f.Key, "/") {
+			extra = append(extra, f)
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
 	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
 		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-		oneui.Text(c, "更多字段").Bold()
-		for _, f := range fields {
+		oneui.Text(c, "附加信息").Bold()
+		for _, f := range extra {
 			a.v2DetailFieldRow(c, detail, f.Key, f.Label)
 		}
 	})
@@ -600,8 +962,6 @@ func (a *App) onevraNavTitle() string {
 	switch a.v2.nav {
 	case navFavorites:
 		return "收藏"
-	case navWatchtower:
-		return "Watchtower"
 	case navRecentlyDelete:
 		return "回收站"
 	case navArchive:

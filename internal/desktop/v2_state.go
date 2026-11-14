@@ -16,7 +16,6 @@ import (
 const (
 	navAllItems       = "all"
 	navFavorites      = "favorites"
-	navWatchtower     = "watchtower"
 	navRecentlyDelete = "recently_deleted"
 	navArchive        = "archive"
 	navCategory       = "category"
@@ -53,13 +52,10 @@ type v2State struct {
 	editing     bool
 	draft       *ItemDraft
 
-	historyOpen    bool
-	settingsOpen   bool
-	showWatchtower bool
-	watchtower     *WatchtowerReport
-	watchtowerErr  string
-	ignored        map[string]bool
-
+	historyOpen     bool
+	settingsOpen    bool
+	settingsSection string
+	ignored         map[string]bool
 
 	generator generatorState
 
@@ -145,7 +141,7 @@ func (a *App) currentFilter() personal.ItemFilter {
 		state = "archived"
 	case navRecentlyDelete:
 		state = "trashed"
-	case navAllItems, navFavorites, navWatchtower, navCategory, navTag:
+	case navAllItems, navFavorites, navCategory, navTag:
 		state = "active"
 	}
 	filter := personal.ItemFilter{
@@ -241,7 +237,7 @@ func legacyRows(rows []personal.ItemSummary) []personal.Row {
 
 // navigate switches the sidebar view. Supported targets:
 //
-//	all, favorites, watchtower, recently_deleted, archive
+//	all, favorites, recently_deleted, archive
 //	category:<slug>, tag:<name>, vault:<id|all>
 //	<category slug>            (e.g. "credit_card")
 func (a *App) navigate(target string) {
@@ -258,11 +254,6 @@ func (a *App) navigate(target string) {
 		a.v2.nav = navFavorites
 		a.v2.category = ""
 		a.v2.tag = ""
-	case "watchtower", "health", "安全体检":
-		a.v2.nav = navWatchtower
-		a.v2.category = ""
-		a.v2.tag = ""
-		a.v2.showWatchtower = true
 	case "recently_deleted", "recently deleted", "trash", "trashed", "recentlydeleted", "回收站", "最近删除":
 		a.v2.nav = navRecentlyDelete
 		a.v2.category = ""
@@ -334,7 +325,6 @@ func (a *App) FilterByTag(tag string) {
 	a.touchActivity()
 	a.reloadV2(false)
 }
-
 
 func (a *App) showAllItems()        { a.navigate(navAllItems) }
 func (a *App) showFavorites()       { a.navigate(navFavorites) }
@@ -536,9 +526,6 @@ func (a *App) drainPendingV2Reload() {
 // selectItem loads the masked detail for a list row.
 func (a *App) selectItem(id, revision string) {
 	a.EnableV2()
-	if a.v2.nav == navWatchtower {
-		a.v2.nav = navAllItems
-	}
 	a.v2.settingsOpen = false
 	a.v2.generator.open = false
 	a.v2.historyOpen = false
@@ -593,7 +580,7 @@ func (a *App) selectVault(id string) {
 		id = "all"
 	}
 	a.v2.vaultID = id
-	if id == "all" || a.v2.nav == navWatchtower {
+	if id == "all" {
 		a.v2.nav = navAllItems
 	}
 	a.touchV2Query()
@@ -828,6 +815,9 @@ func idleLockLabel(d time.Duration) string {
 
 func (a *App) openSettings() {
 	a.v2.settingsOpen = true
+	if a.v2.settingsSection == "" {
+		a.v2.settingsSection = settingsSectionSecurity
+	}
 	a.touchActivity()
 }
 
@@ -835,4 +825,3 @@ func (a *App) closeSettings() {
 	a.v2.settingsOpen = false
 	a.touchActivity()
 }
-

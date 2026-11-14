@@ -111,6 +111,7 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	a.path = path
 	a.secret = secret
 	a.password = "fixture"
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	var mu sync.Mutex
 	approved := true
 	a.cliApprover = func(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (bool, error) {
