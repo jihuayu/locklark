@@ -257,6 +257,28 @@ class SafariPackagingTests(unittest.TestCase):
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
             self.assertEqual(after[mode]["manifest.json"], expected)
 
+    def test_swift_scratch_path_is_shared_and_ci_external(self) -> None:
+        script = (SAFARI / "scripts/test_safari_swift.sh").read_text("utf-8")
+        self.assertIn(
+            'SCRATCH="${LOCKLARK_SWIFT_SCRATCH:-$ROOT/safari/.build}"',
+            script,
+        )
+        commands = re.findall(r"swift (?:test|build)\b[^\n]*", script)
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertIn('--scratch-path "$SCRATCH"', command)
+        workflow = (ROOT / ".github/workflows/check.yml").read_text("utf-8")
+        start = workflow.index(
+            "- name: Test Safari transport policy and compile the macOS app"
+        )
+        end = workflow.index("- run: go test", start)
+        step = workflow[start:end]
+        self.assertIn(
+            "LOCKLARK_SWIFT_SCRATCH: ${{ runner.temp }}/locklark-safari-swift",
+            step,
+        )
+        self.assertNotIn("${{ github.workspace }}", step.split("run: |", 1)[0])
+
     def test_build_script_default_order_and_strict_prebuilt_branch(self) -> None:
         script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
         strict_start = script.index('if [ "$REQUIRE_PREBUILT" = "1" ]; then')

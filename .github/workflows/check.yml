@@ -304,6 +304,8 @@ jobs:
           go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
       - name: Test Safari transport policy and compile the macOS app
         timeout-minutes: 15
+        env:
+          LOCKLARK_SWIFT_SCRATCH: ${{ runner.temp }}/locklark-safari-swift
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
