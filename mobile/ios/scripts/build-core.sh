@@ -8,16 +8,19 @@ ios_dir="$(cd "$(dirname "$0")/.." && pwd)"
 repo_dir="$(cd "$ios_dir/../.." && pwd)"
 go_bin="${GO_BIN:-go}"
 export GOTOOLCHAIN=go1.27.3
-export GOBIN="$ios_dir/Build/Tools"
-export PATH="$GOBIN:$PATH"
-mkdir -p "$GOBIN"
 cd "$repo_dir"
-for tool in gomobile gobind; do
-  # go.mod tool directive: builds the exact golang.org/x/mobile require version.
-  "$go_bin" install "golang.org/x/mobile/cmd/$tool"
-done
-python3 "$repo_dir/mobile/core/scripts/verify_mobile_tools.py" --go "$go_bin" "$GOBIN/gomobile" "$GOBIN/gobind"
-gomobile init
-gomobile bind -target=ios,iossimulator -iosversion=17.0 -prefix Mobilecore -trimpath -o "$ios_dir/Build/Mobilecore.xcframework" ./mobile/core
+tools="$ios_dir/Build/Tools"
+MOBILE_BOOTSTRAP_REPO="$repo_dir" \
+MOBILE_BOOTSTRAP_GO="$go_bin" \
+MOBILE_BOOTSTRAP_TOOLS="$tools/bin" \
+MOBILE_BOOTSTRAP_GOPATH="$ios_dir/Build/GOPATH" \
+  source "$repo_dir/mobile/core/scripts/mobile-tool-bootstrap.sh"
+# Verification is deliberately after init: init installs gobind, and must not
+# overwrite the pinned tools with an implicit latest build.
+python3 "$repo_dir/mobile/core/scripts/verify_mobile_tools.py" --go "$go_bin" \
+  "$tools/bin/gomobile" "$tools/bin/gobind"
+test "$(command -v gomobile)" = "$tools/bin/gomobile"
+test "$(command -v gobind)" = "$tools/bin/gobind"
+"$tools/bin/gomobile" bind -target=ios,iossimulator -iosversion=17.0 -prefix Mobilecore -trimpath -o "$ios_dir/Build/Mobilecore.xcframework" ./mobile/core
 test -f "$ios_dir/Build/Mobilecore.xcframework/Info.plist"
 echo "ios core XCFramework built"

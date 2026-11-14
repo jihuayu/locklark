@@ -26,6 +26,9 @@ jobs:
       - run: bun test ./plugins/github-pull-reader
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
       - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
+      - if: runner.os == 'Linux'
+        name: Test pinned mobile tool bootstrap contract
+        run: python3 -m unittest discover -s mobile/core/scripts -p test_mobile_tool_bootstrap.py
       - run: go mod verify
       - run: go vet ./...
       - name: Check reachable Go vulnerabilities
