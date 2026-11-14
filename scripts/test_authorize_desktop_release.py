@@ -1333,6 +1333,38 @@ class AuthorizationTests(unittest.TestCase):
         decision, _ = self.authorize_via_gh(no_proof)
         self.assert_refused(decision, trust.Refusal.BRANCH_RULES_ABSENT)
 
+    def test_branch_ruleset_proof_rejects_extra_conditions_key(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        detail = self.valid_branch_ruleset()
+        conditions = detail["conditions"]
+        assert isinstance(conditions, dict)
+        conditions["unknown_scope"] = "narrow"
+        stdout = self.gh_fixture_stdout()
+        stdout[trust.branch_protection_api(REPOSITORY)] = json.dumps(
+            self.classic_protection_without_bypass()
+        )
+        stdout[trust.branch_rulesets_api(REPOSITORY)] = json.dumps([[{"id": 11}]])
+        stdout[trust.ruleset_api(REPOSITORY, 11)] = json.dumps(detail)
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(decision, trust.Refusal.BRANCH_RULES_INSUFFICIENT)
+
+    def test_branch_ruleset_proof_rejects_extra_ref_name_key(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        detail = self.valid_branch_ruleset()
+        conditions = detail["conditions"]
+        assert isinstance(conditions, dict)
+        ref_name = conditions["ref_name"]
+        assert isinstance(ref_name, dict)
+        ref_name["unknown_scope"] = "narrow"
+        stdout = self.gh_fixture_stdout()
+        stdout[trust.branch_protection_api(REPOSITORY)] = json.dumps(
+            self.classic_protection_without_bypass()
+        )
+        stdout[trust.branch_rulesets_api(REPOSITORY)] = json.dumps([[{"id": 11}]])
+        stdout[trust.ruleset_api(REPOSITORY, 11)] = json.dumps(detail)
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(decision, trust.Refusal.BRANCH_RULES_INSUFFICIENT)
+
     def test_present_classic_bypass_is_not_rescued_by_ruleset_proof(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
         cases: list[tuple[str, object]] = [

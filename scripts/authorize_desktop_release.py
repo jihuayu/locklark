@@ -1380,10 +1380,10 @@ def _check_pull_request_reviews(protection: Mapping[str, object]) -> int | None:
 
 def _branch_ref_conditions_match(detail: Mapping[str, object]) -> bool:
     conditions = detail.get("conditions")
-    if not isinstance(conditions, dict):
+    if not isinstance(conditions, dict) or set(conditions) != {"ref_name"}:
         return False
     ref_name = conditions.get("ref_name")
-    if not isinstance(ref_name, dict):
+    if not isinstance(ref_name, dict) or set(ref_name) != {"include", "exclude"}:
         return False
     return (
         ref_name.get("include") == [f"refs/heads/{DEFAULT_BRANCH}"]
