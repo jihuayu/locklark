@@ -69,6 +69,7 @@ func TestVerifyManagedTransitionWrongPolicyLink(t *testing.T) {
 		sp.Document = docFor(&sp.Policy)
 		signPolicyProof(sp, x.priv)
 	})
+	assertManagedNegativeSignatures(t, nextEnc, x.pub, k.dev1, "device-1", "device-1")
 	err := VerifyManagedTransition(oldEnc, nextEnc, x.pin())
 	wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
 }
@@ -115,6 +116,7 @@ func TestVerifyManagedTransitionUnauthorizedDelegateRefused(t *testing.T) {
 		sp.Alg = PolicySigAlgEd25519
 		signPolicyProof(sp, x.priv2)
 	})
+	assertManagedNegativeSignatures(t, nextEnc, x.pub2, k.dev1, "device-2", "device-1")
 	err := VerifyManagedTransition(oldEnc, nextEnc, x.pin())
 	wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
 }
@@ -128,6 +130,7 @@ func TestVerifyManagedTransitionSelfEscalationRefused(t *testing.T) {
 		sp.Document = docFor(&sp.Policy)
 		signPolicyProof(sp, x.priv)
 	})
+	assertManagedNegativeSignatures(t, nextEnc, x.pub, k.dev1, "device-1", "device-1")
 	err := VerifyManagedTransition(oldEnc, nextEnc, x.pin())
 	wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
 }
@@ -218,4 +221,38 @@ func mutateManagedNext(t *testing.T, k *cpKeys, x *delegatedCP, base []byte, mut
 		t.Fatal(err)
 	}
 	return enc
+}
+
+// assertManagedNegativeSignatures independently proves the fixture negative
+// has the cryptographic shape it is meant to test: the current policy
+// document is signed by policyPub and the content is signed by contentPub
+// over the public domain-separated preimages. It deliberately does not call
+// VerifyPolicyCheckpoint or any authorization verification.
+func assertManagedNegativeSignatures(t *testing.T, encoded []byte, policyPub, contentPub ed25519.PublicKey, wantPolicySigner, wantContentSigner string) {
+	t.Helper()
+	f, err := ParseFile(encoded)
+	if err != nil {
+		t.Fatal("negative fixture does not parse")
+	}
+	sp := &f.SignedPolicyProofs[len(f.SignedPolicyProofs)-1]
+	if sp.SignerID != wantPolicySigner || sp.Alg != PolicySigAlgEd25519 {
+		t.Fatal("negative fixture policy signer is not the expected key identity")
+	}
+	policyMsg := append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...)
+	if !ed25519.Verify(policyPub, policyMsg, sp.Sig) {
+		t.Fatal("negative fixture policy document signature does not verify")
+	}
+	if f.Header.AuthorDeviceID != wantContentSigner ||
+		f.ContentSignature.SignerID != wantContentSigner ||
+		f.ContentSignature.Alg != SigAlgEd25519 {
+		t.Fatal("negative fixture content signer is not the expected key identity")
+	}
+	pre, err := ContentSigningBytes(f)
+	if err != nil {
+		t.Fatal("negative fixture content signing bytes failed")
+	}
+	contentMsg := append([]byte(DomainContentSignature+"\x00"), pre...)
+	if !ed25519.Verify(contentPub, contentMsg, f.ContentSignature.Sig) {
+		t.Fatal("negative fixture content signature does not verify")
+	}
 }
