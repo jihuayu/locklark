@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
-tmp=$(mktemp -d /private/tmp/mobile-tool-bootstrap-test.XXXXXX)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/mobile-tool-bootstrap-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fake_go="$tmp/fake-go"
 cat > "$fake_go" <<'GO'

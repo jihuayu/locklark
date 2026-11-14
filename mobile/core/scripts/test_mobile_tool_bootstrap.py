@@ -17,7 +17,7 @@ VERSION = "v0.0.0-20260908204917-8b95e45f8d3e"
 
 class ShimTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
         self.args_file = self.root / "args"
         self.real_go = self.root / "go"
