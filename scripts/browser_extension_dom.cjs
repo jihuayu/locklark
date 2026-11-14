@@ -251,6 +251,7 @@ const path = require("node:path");
   } finally {
     await browser.close();
   }
+  if (browserName === "chromium") await require("./browser_otp_storage_dom.cjs")();
 })().catch((error) => {
   console.error(error.message);
   console.error("Browser DOM acceptance failed");
