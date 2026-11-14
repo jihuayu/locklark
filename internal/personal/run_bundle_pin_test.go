@@ -238,8 +238,12 @@ func TestRunBundlePinRealChild(t *testing.T) {
 func TestRunBundleRequestPinShape(t *testing.T) {
 	f := newBundleTestFixture(t)
 	targets := []BundleTarget{{Slot: "token", ID: f.loginID, Revision: f.loginRevision, Field: "password"}}
+	program := filepath.Join(t.TempDir(), "pin-shape-program")
+	if runtime.GOOS == "windows" {
+		program += ".exe"
+	}
 	request := RunBundleRequest{
-		Program:        filepath.Join(t.TempDir(), "pin-shape-program"),
+		Program:        program,
 		Args:           []string{"--version"},
 		Directory:      t.TempDir(),
 		TimeoutSeconds: 10,
