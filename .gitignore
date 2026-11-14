@@ -9,6 +9,10 @@
 /demo-out/
 /.mygo-release/
 *.provisionprofile
+*.p12
+*.pfx
+mygo-update.key
+mygo-update.pub
 *.kdbx
 *.1pux
 *.age

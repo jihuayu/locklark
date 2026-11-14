@@ -471,7 +471,7 @@ func TestV2DetailAndEditorViewsRenderRichItem(t *testing.T) {
 	editor := ui.NewTester(a.View, 1200, 2400)
 	for _, label := range []string{
 		"编辑条目", "分区与自定义字段", "添加字段", "添加分区", "添加网址", "添加标签",
-		"匹配：默认", "标签", "网址",
+		"自动填充匹配", "默认", "标签", "网址",
 	} {
 		if !editor.HasText(label) {
 			t.Fatalf("editor pane missing %q", label)

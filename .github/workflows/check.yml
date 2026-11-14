@@ -52,6 +52,22 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Assert release contract toolchain
+        run: |
+          command -v go
+          go version
+          command -v openssl
+          openssl version
+          command -v git
+          git --version
+      - name: Install ordered release contract test dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/locklark-release-contracts"
+          "$RUNNER_TEMP/locklark-release-contracts/bin/python" -m pip install --disable-pip-version-check -r scripts/requirements-test.txt
       - name: Download Linux primary binaries
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -71,6 +87,12 @@ jobs:
           python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
           python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
           python3 -m unittest discover -s scripts -p 'test_*native*.py'
+      - name: Test ordered release contract runner
+        run: |
+          "$RUNNER_TEMP/locklark-release-contracts/bin/python" -m unittest scripts.test_run_release_contracts
+      - name: Run ordered release security contracts once
+        run: |
+          "$RUNNER_TEMP/locklark-release-contracts/bin/python" scripts/run_release_contracts.py
   go:
     needs: [linux-build, contracts]
     # Keep failure reporting, but never start this expensive layer when the
