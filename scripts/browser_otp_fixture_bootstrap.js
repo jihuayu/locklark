@@ -1,10 +1,9 @@
-// Test-only content-script bootstrap for the real extension storage smoke.
+// Test-only content-script bootstrap for the real extension storage cases.
 // It is prepended before production core.js/content.js in the copied bundle.
-// It provides only a synthetic BarcodeDetector that always reports no match and
-// a delegating MutationObserver wrapper. The OTP observer is identified from
-// the callback's unique scheduleOTPScan reference, never from observe options.
-// All other observers are delegated without counting. No runtime, storage,
-// approval, permission, or product hook is touched.
+// It provides a synthetic BarcodeDetector that always reports no match, a
+// delegated MutationObserver counter for the one OTP callback, and a delegated
+// body.innerText read counter. It never reads or publishes text, touches
+// runtime/storage/approvals, changes permissions, or adds product hooks.
 (() => {
   "use strict";
   const root = document.documentElement;
@@ -13,12 +12,58 @@
   let disconnected = 0;
   let active = 0;
   let target = "missing";
+  let bodyRead = 0;
+  let bodyReady = "pending";
+  const pendingDecodes = [];
   function publish() {
     root.dataset.locklarkOtpFixtureDecode = String(decodes);
     root.dataset.locklarkOtpFixtureObserved = String(observed);
     root.dataset.locklarkOtpFixtureDisconnected = String(disconnected);
     root.dataset.locklarkOtpFixtureActive = String(active);
     root.dataset.locklarkOtpFixtureTarget = target;
+    root.dataset.locklarkOtpFixtureBodyRead = String(bodyRead);
+    root.dataset.locklarkOtpFixtureBodyReady = bodyReady;
+    root.dataset.locklarkOtpFixturePending = String(pendingDecodes.length);
+  }
+  function installBodyRead() {
+    if (bodyReady !== "pending") return;
+    if (!document.body) return;
+    const native = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "innerText",
+    );
+    if (!native || typeof native.get !== "function") {
+      bodyReady = "unavailable";
+      publish();
+      return;
+    }
+    try {
+      Object.defineProperty(document.body, "innerText", {
+        configurable: true,
+        enumerable: false,
+        get() {
+          bodyRead++;
+          publish();
+          return native.get.call(this);
+        },
+        set(value) {
+          if (typeof native.set !== "function")
+            throw TypeError("innerText setter unavailable");
+          native.set.call(this, value);
+        },
+      });
+      bodyReady = "ready";
+    } catch {
+      bodyReady = "unavailable";
+    }
+    publish();
+  }
+  if (!installBodyRead()) {
+    if (document.readyState === "loading")
+      document.addEventListener("DOMContentLoaded", installBodyRead, {
+        once: true,
+      });
+    else installBodyRead();
   }
   class FixtureBarcodeDetector {
     static async getSupportedFormats() {
@@ -27,9 +72,19 @@
     async detect() {
       decodes++;
       publish();
+      if (root.dataset.locklarkOtpFixtureDefer === "1") {
+        return await new Promise((resolve) => {
+          pendingDecodes.push(resolve);
+          publish();
+        });
+      }
       return [];
     }
   }
+  document.addEventListener("locklark-otp-fixture-release", () => {
+    for (const resolve of pendingDecodes.splice(0)) resolve([]);
+    publish();
+  });
   globalThis.BarcodeDetector = FixtureBarcodeDetector;
   const NativeMutationObserver = globalThis.MutationObserver;
   if (typeof NativeMutationObserver === "function") {

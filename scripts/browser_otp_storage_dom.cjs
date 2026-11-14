@@ -1,6 +1,6 @@
-// Minimal real-extension smoke: full-channel headless Chromium, real service
-// worker/storage.onChanged, and exact production content.js. The only test-only
-// content script is a fixture decoder plus a delegating MutationObserver count.
+// Real-extension OTP case smoke: full-channel headless Chromium, real service
+// worker/storage.onChanged, exact production content.js, and a single copied
+// fixture bundle. The bootstrap is the only test-only content script.
 "use strict";
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -21,12 +21,88 @@ function fixedFailure(message) {
   throw Error(message);
 }
 
-async function waitFixed(page, predicate, category) {
+async function waitFixed(page, predicate, arg, category) {
   try {
-    await page.waitForFunction(predicate, null, { timeout: 5000 });
+    await page.waitForFunction(predicate, arg, { timeout: 5000 });
   } catch {
     fixedFailure("OTP storage smoke: " + category);
   }
+}
+
+async function state(page) {
+  return await page.evaluate(() => {
+    const data = document.documentElement.dataset;
+    return {
+      decode: Number(data.locklarkOtpFixtureDecode || 0),
+      observed: Number(data.locklarkOtpFixtureObserved || 0),
+      disconnected: Number(data.locklarkOtpFixtureDisconnected || 0),
+      active: Number(data.locklarkOtpFixtureActive || 0),
+      target: data.locklarkOtpFixtureTarget,
+      bodyRead: Number(data.locklarkOtpFixtureBodyRead || 0),
+      bodyReady: data.locklarkOtpFixtureBodyReady,
+      pending: Number(data.locklarkOtpFixturePending || 0),
+    };
+  });
+}
+
+async function openCase(context, spec) {
+  const page = await context.newPage();
+  const title = spec.title ? "<title>" + spec.title + "</title>" : "";
+  const heading = spec.heading ? "<h1>" + spec.heading + "</h1>" : "";
+  const html =
+    "<!doctype html><html><head>" +
+    title +
+    "</head><body>" +
+    heading +
+    (spec.body || "") +
+    "</body></html>";
+  await page.route("**/*", (route) =>
+    route.fulfill({ contentType: "text/html", body: html }),
+  );
+  await page.goto("https://otp-storage.fixture.test" + spec.path);
+  await waitFixed(
+    page,
+    () => {
+      const data = document.documentElement.dataset;
+      return (
+        data.locklarkOtpFixtureTarget === "identified" &&
+        data.locklarkOtpFixtureBodyReady === "ready"
+      );
+    },
+    null,
+    "fixture target or body read unavailable",
+  );
+  return page;
+}
+
+async function addCandidates(page, count) {
+  await page.evaluate((amount) => {
+    for (let index = 0; index < amount; index++) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 128;
+      canvas.height = 128;
+      canvas.style.cssText = "display:block;width:128px;height:128px";
+      document.body.append(canvas);
+    }
+  }, count);
+}
+
+async function waitDecode(page, count, category) {
+  await waitFixed(
+    page,
+    (wanted) =>
+      Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0) >=
+      wanted,
+    count,
+    category,
+  );
+}
+
+async function setOtpCapture(worker, enabled) {
+  await worker.evaluate(
+    async (value) => chrome.storage.local.set({ otpCapture: value }),
+    enabled,
+  );
 }
 
 module.exports = async function run() {
@@ -84,69 +160,126 @@ module.exports = async function run() {
     );
     assert.equal(JSON.stringify(permissions), originalPermissions);
 
-    const page = await context.newPage();
-    await page.route("**/*", (route) =>
-      route.fulfill({
-        contentType: "text/html",
-        body: "<!doctype html><html><body><h1>Fixture setup</h1></body></html>",
-      }),
-    );
-    await page.goto("https://otp-storage.fixture.test/settings/2fa");
+    const empty = await openCase(context, {
+      path: "/ordinary/empty",
+      body: "<p>No candidate</p>",
+    });
+    await empty.waitForTimeout(2300);
+    let current = await state(empty);
+    assert.equal(current.decode, 0);
+    assert.equal(current.bodyRead, 0);
+    await setOtpCapture(worker, false);
     await waitFixed(
-      page,
-      () =>
-        Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 1 &&
-        document.documentElement.dataset.locklarkOtpFixtureTarget === "identified",
-      "OTP observer target not uniquely identified",
+      empty,
+      () => Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 0,
+      null,
+      "empty case did not disconnect",
     );
-    const initial = await page.evaluate(() => ({
-      decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
-      active: Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0),
-      target: document.documentElement.dataset.locklarkOtpFixtureTarget,
-    }));
-    assert.equal(initial.decode, 0);
-    assert.equal(initial.active, 1);
-    assert.equal(initial.target, "identified");
+    await setOtpCapture(worker, true);
+    await waitFixed(
+      empty,
+      () => Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 1,
+      null,
+      "empty case did not rearm",
+    );
+    current = await state(empty);
+    assert.equal(current.decode, 0);
+    assert.equal(current.bodyRead, 0);
+    await empty.close();
 
-    await worker.evaluate(
-      async () => chrome.storage.local.set({ otpCapture: false }),
-    );
-    await waitFixed(
-      page,
-      () =>
-        Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0) >= 1 &&
-        Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 0,
-      "OTP observer did not disconnect",
-    );
-    const afterDisable = await page.evaluate(() => ({
-      decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
-      disconnected: Number(document.documentElement.dataset.locklarkOtpFixtureDisconnected || 0),
-    }));
-    assert.equal(afterDisable.decode, 0);
-    assert.ok(afterDisable.disconnected >= 1);
+    const bodyOnly = await openCase(context, {
+      path: "/ordinary/body-only",
+      body:
+        "<p>Scan this QR code with your authenticator app</p>" +
+        '<canvas width="128" height="128" style="display:block;width:128px;height:128px"></canvas>',
+    });
+    await bodyOnly.waitForTimeout(2300);
+    current = await state(bodyOnly);
+    assert.equal(current.decode, 0);
+    assert.equal(current.bodyRead, 0);
+    await bodyOnly.close();
 
-    await worker.evaluate(
-      async () => chrome.storage.local.set({ otpCapture: true }),
+    const title = await openCase(context, {
+      path: "/ordinary/title",
+      title: "Scan this QR code with your authenticator app",
+    });
+    await addCandidates(title, 1);
+    await waitDecode(title, 1, "title case did not decode");
+    current = await state(title);
+    assert.ok(current.decode > 0);
+    assert.equal(current.bodyRead, 0);
+    await title.close();
+
+    const heading = await openCase(context, {
+      path: "/ordinary/heading",
+      heading: "Scan this QR code with your authenticator app",
+    });
+    await addCandidates(heading, 1);
+    await waitDecode(heading, 1, "heading case did not decode");
+    current = await state(heading);
+    assert.ok(current.decode > 0);
+    assert.equal(current.bodyRead, 0);
+    await heading.close();
+
+    const limit = await openCase(context, {
+      path: "/ordinary/limit",
+      title: "Scan this QR code with your authenticator app",
+    });
+    await addCandidates(limit, 7);
+    await waitDecode(limit, 7, "limit batch 7");
+    await addCandidates(limit, 8);
+    await waitDecode(limit, 15, "limit batch 15");
+    await addCandidates(limit, 8);
+    await waitDecode(limit, 23, "limit batch 23");
+    await addCandidates(limit, 3);
+    await waitDecode(limit, 24, "limit batch 24");
+    current = await state(limit);
+    assert.equal(current.decode, 24);
+    assert.equal(current.active, 0);
+    assert.ok(current.disconnected >= 1);
+    await addCandidates(limit, 1);
+    await setOtpCapture(worker, false);
+    await setOtpCapture(worker, true);
+    await limit.waitForTimeout(500);
+    current = await state(limit);
+    assert.equal(current.decode, 24);
+    assert.equal(current.active, 0);
+    await limit.close();
+
+    const pending = await openCase(context, {
+      path: "/ordinary/pending",
+      title: "Scan this QR code with your authenticator app",
+    });
+    await pending.evaluate(() => {
+      document.documentElement.dataset.locklarkOtpFixtureDefer = "1";
+    });
+    await addCandidates(pending, 1);
+    await waitDecode(pending, 1, "pending decode did not start");
+    current = await state(pending);
+    assert.equal(current.pending, 1);
+    await setOtpCapture(worker, false);
+    await setOtpCapture(worker, true);
+    await pending.waitForTimeout(1500);
+    await pending.evaluate(() =>
+      document.dispatchEvent(new Event("locklark-otp-fixture-release")),
     );
-    await waitFixed(
-      page,
-      () =>
-        Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0) >= 2 &&
-        Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0) === 1 &&
-        document.documentElement.dataset.locklarkOtpFixtureTarget === "identified",
-      "OTP observer did not rearm uniquely",
+    await waitDecode(pending, 2, "fresh scan did not start");
+    current = await state(pending);
+    assert.equal(current.pending, 1);
+    await pending.evaluate(() =>
+      document.dispatchEvent(new Event("locklark-otp-fixture-release")),
     );
-    const afterEnable = await page.evaluate(() => ({
-      decode: Number(document.documentElement.dataset.locklarkOtpFixtureDecode || 0),
-      observed: Number(document.documentElement.dataset.locklarkOtpFixtureObserved || 0),
-      active: Number(document.documentElement.dataset.locklarkOtpFixtureActive || 0),
-      target: document.documentElement.dataset.locklarkOtpFixtureTarget,
-    }));
-    assert.equal(afterEnable.decode, 0);
-    assert.ok(afterEnable.observed >= 2);
-    assert.equal(afterEnable.active, 1);
-    assert.equal(afterEnable.target, "identified");
-    console.log("OTP storage smoke: decode=0 initial_observed=true disconnected=true rearmed=true");
+    await pending.waitForTimeout(500);
+    current = await state(pending);
+    assert.equal(current.decode, 2);
+    assert.equal(current.pending, 0);
+    assert.equal(current.active, 1);
+    assert.equal(current.target, "identified");
+    await pending.close();
+
+    console.log(
+      "OTP storage smoke: empty=true body_only=0 title_positive=true heading_positive=true limit=24 limit_disconnect=true limit_no_rearm=true pending_old=1 pending_fresh=1",
+    );
   } finally {
     if (context) await context.close();
     fs.rmSync(root, { recursive: true, force: true });
