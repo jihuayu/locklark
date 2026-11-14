@@ -33,20 +33,14 @@ func TestInspectRealFixture(t *testing.T) {
 	before := sha256.Sum256(vaultRaw)
 
 	outPath := filepath.Join(dir, "stdout.json")
-	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
+	out := createPrivateOutput(t, outPath)
 	if err := run([]string{"--file", vaultPath, "--checkpoint", checkpointPath}, out); err != nil {
 		t.Fatal(err)
 	}
 	if err := out.Close(); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(outPath)
-	if err != nil || info.Mode().Perm()&0077 != 0 {
-		t.Fatalf("stdout file is not private: %v", err)
-	}
+	assertPrivateOutput(t, outPath)
 	raw, err := os.ReadFile(outPath)
 	if err != nil {
 		t.Fatal(err)
