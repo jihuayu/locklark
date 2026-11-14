@@ -37,7 +37,7 @@ import {
   prepareSharedEnvironment,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
-import { requirePrebuiltChromium } from "./browser_extension_prebuilt.mjs";
+import { loadPrebuiltBeforeState } from "./browser_native_prebuilt.mjs";
 
 async function main() {
 let ownedState = null;
@@ -69,16 +69,9 @@ assert(
     ),
   "Unsupported acceptance failure stage",
 );
-const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
-ownedState = state;
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
-let prebuilt;
-try {
-  prebuilt = requirePrebuiltChromium(root, env);
-} catch {
-  console.error("prebuilt Chromium input rejected");
-  process.exit(1);
-}
+const { prebuilt, state } = loadPrebuiltBeforeState(root, env);
+ownedState = state;
 const { extension, register } = prebuilt;
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.

@@ -3,7 +3,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -683,4 +689,46 @@ test("normal main catches local listen failure and cleans owned setup", async ()
     await new Promise((resolve) => blocker.close(resolve));
     rmSync(state, { recursive: true, force: true });
   }
+});
+
+
+test("prebuilt failure is bounded before state creation", () => {
+  const prefixName = `locklark-browser-acceptance-prebuilt-negative-${process.pid}-${Date.now()}-`;
+  const statePrefix = join("/tmp", prefixName);
+  const boundary = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const prebuilt = new URL(
+    "./browser_native_prebuilt.mjs",
+    import.meta.url,
+  ).href;
+  const child = [
+    `import { runNativeMain } from ${JSON.stringify(boundary)};`,
+    `import { loadPrebuiltBeforeState } from ${JSON.stringify(prebuilt)};`,
+    "await runNativeMain(async () => {",
+    "  loadPrebuiltBeforeState(process.cwd(), {},",
+    `    ${JSON.stringify(statePrefix)});`,
+    "});",
+  ].join("\n");
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", child],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr,
+    "prebuilt Chromium input rejected\nNative browser acceptance failed\n",
+  );
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /731|\/tmp\/locklark-browser-acceptance|actor|Error:|\bat /,
+  );
+  assert.deepEqual(
+    readdirSync("/tmp").filter((name) => name.startsWith(prefixName)),
+    [],
+  );
 });
