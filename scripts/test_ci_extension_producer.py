@@ -54,6 +54,23 @@ def stage_shell(name: str) -> str:
     return "\n".join(shell)
 
 
+def step_commands(job_name: str, step_name: str) -> list[str]:
+    source = block(job_name)
+    marker = f"      - name: {step_name}\n"
+    if source.count(marker) != 1:
+        raise AssertionError("workflow step is not unique")
+    start = source.index(marker)
+    run_marker = "        run: |\n"
+    run_at = source.index(run_marker, start)
+    commands = []
+    for line in source[run_at + len(run_marker):].splitlines():
+        if line.startswith("          "):
+            commands.append(line[10:])
+        elif line.strip():
+            break
+    return commands
+
+
 def ci_required_shell() -> str:
     source = block("ci-required")
     marker = "        run: |\n"
@@ -157,6 +174,33 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
                         (target / "manifest.json").read_text(encoding="utf-8"),
                         product,
                     )
+
+    def test_edge_install_contract_runs_once_after_official_chromium(self):
+        prepare = "Prepare Chromium once and strict smoke"
+        units = "Run original release and legacy unit tests"
+        edge = "node --test scripts/test_browser_edge_install.mjs"
+        chromium = (
+            'python3 -m browserrelease --product chromium '
+            '--output "$out/prepared/v2pairs"'
+        )
+        strict = "python3 -m browserrelease.prebuilt --product chromium \\"
+        producer = block("extension-producer")
+        self.assertLess(producer.index(prepare), producer.index(units))
+        commands = step_commands("extension-producer", prepare)
+        prepare_at = commands.index(chromium)
+        self.assertEqual(commands[prepare_at + 1], strict)
+        self.assertIn(
+            '--prepared-dir "$out/prepared/v2pairs" '
+            "--dist browser-extension/dist/chromium",
+            commands[prepare_at + 2],
+        )
+        unit_commands = step_commands("extension-producer", units)
+        self.assertEqual(
+            [line for line in unit_commands if line == edge], [edge]
+        )
+        early = step_commands("web-core", "Test browser extension")
+        self.assertFalse(any(edge in line for line in early))
+        self.assertEqual(text().count(edge), 1)
 
     def test_actual_ci_required_shell_rejects_non_success(self):
         shell = ci_required_shell()
