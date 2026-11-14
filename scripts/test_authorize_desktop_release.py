@@ -450,6 +450,29 @@ class AuthorizationTests(unittest.TestCase):
                     for name in sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)
                 ],
             },
+            trust.environment_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ): {
+                "name": trust.RELEASE_METADATA_ENVIRONMENT,
+                "deployment_branch_policy": {
+                    "protected_branches": False,
+                    "custom_branch_policies": True,
+                },
+            },
+            trust.environment_branch_policies_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ): {
+                "total_count": 1,
+                "branch_policies": [{"id": 2, "name": "main", "type": "branch"}],
+            },
+            trust.environment_secrets_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ): {
+                "total_count": 1,
+                "secrets": [
+                    {"name": trust.RELEASE_METADATA_READ_TOKEN_NAME},
+                ],
+            },
             trust.repository_secrets_api(REPOSITORY): {
                 "total_count": 0,
                 "secrets": [],
@@ -495,6 +518,12 @@ class AuthorizationTests(unittest.TestCase):
             trust.branch_rulesets_api(REPOSITORY),
             trust.environment_branch_policies_api(REPOSITORY),
             trust.environment_secrets_api(REPOSITORY),
+            trust.environment_branch_policies_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ),
+            trust.environment_secrets_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ),
             trust.repository_secrets_api(REPOSITORY),
             trust.organization_secrets_api(OWNER),
         }
@@ -754,6 +783,180 @@ class AuthorizationTests(unittest.TestCase):
             self.dispatch_decision(event=null_branch),
             trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
         )
+
+    def test_dispatch_release_metadata_environment_is_isolated(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        metadata_environment = trust.environment_api(
+            REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+        )
+        metadata_policies = trust.environment_branch_policies_api(
+            REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+        )
+        metadata_secrets = trust.environment_secrets_api(
+            REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+        )
+
+        def production_secrets_with(extra: str) -> dict[str, object]:
+            names = sorted(trust.REQUIRED_ENVIRONMENT_SECRETS) + [extra]
+            return {
+                "total_count": len(names),
+                "secrets": [{"name": name} for name in names],
+            }
+
+        policy = {
+            "name": trust.RELEASE_METADATA_ENVIRONMENT,
+            "deployment_branch_policy": {
+                "protected_branches": False,
+                "custom_branch_policies": True,
+            },
+        }
+        cases: list[tuple[str, dict[str, object], trust.Refusal]] = [
+            (
+                "metadata environment absent",
+                {metadata_environment: trust.ApiResponse(404, None)},
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_ABSENT,
+            ),
+            (
+                "metadata environment unreadable",
+                {metadata_environment: trust.ApiResponse(403, None)},
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_UNREADABLE,
+            ),
+            (
+                "metadata environment unknown",
+                {metadata_environment: trust.ApiResponse(500, None)},
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_UNKNOWN,
+            ),
+            (
+                "metadata environment wrong name",
+                {
+                    metadata_environment: {
+                        **policy,
+                        "name": trust.PRODUCTION_ENVIRONMENT,
+                    }
+                },
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_UNKNOWN,
+            ),
+            (
+                "metadata environment no policy",
+                {
+                    metadata_environment: {
+                        "name": trust.RELEASE_METADATA_ENVIRONMENT,
+                        "deployment_branch_policy": None,
+                    }
+                },
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+            ),
+            (
+                "metadata environment extra branch",
+                {
+                    metadata_policies: {
+                        "total_count": 2,
+                        "branch_policies": [
+                            {"id": 2, "name": "main", "type": "branch"},
+                            {"id": 3, "name": "release", "type": "branch"},
+                        ],
+                    }
+                },
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+            ),
+            (
+                "metadata policy absent",
+                {metadata_policies: trust.ApiResponse(404, None)},
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+            ),
+            (
+                "metadata policy unreadable",
+                {metadata_policies: trust.ApiResponse(403, None)},
+                trust.Refusal.RELEASE_METADATA_ENVIRONMENT_UNREADABLE,
+            ),
+            (
+                "metadata secret name absent",
+                {metadata_secrets: {"total_count": 0, "secrets": []}},
+                trust.Refusal.RELEASE_METADATA_SECRET_MISSING,
+            ),
+            (
+                "metadata secret unreadable",
+                {metadata_secrets: trust.ApiResponse(403, None)},
+                trust.Refusal.RELEASE_METADATA_SECRET_UNREADABLE,
+            ),
+            (
+                "metadata secret unknown",
+                {metadata_secrets: trust.ApiResponse(500, None)},
+                trust.Refusal.RELEASE_METADATA_SECRET_UNKNOWN,
+            ),
+            (
+                "token also in production environment",
+                {
+                    trust.environment_secrets_api(REPOSITORY): (
+                        production_secrets_with(
+                            trust.RELEASE_METADATA_READ_TOKEN_NAME
+                        )
+                    )
+                },
+                trust.Refusal.RELEASE_METADATA_SECRET_LEAK,
+            ),
+            (
+                "token in repository scope",
+                {
+                    trust.repository_secrets_api(REPOSITORY): {
+                        "total_count": 1,
+                        "secrets": [
+                            {"name": trust.RELEASE_METADATA_READ_TOKEN_NAME}
+                        ],
+                    }
+                },
+                trust.Refusal.RELEASE_METADATA_SECRET_LEAK,
+            ),
+        ]
+        for label, overrides, expected in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses.update(overrides)
+                self.assert_refused(
+                    self.dispatch_decision(transport=transport), expected
+                )
+
+    def test_dispatch_metadata_refusal_writes_no_outputs(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        transport = self.valid_transport()
+        transport.responses[trust.workflow_run_api(REPOSITORY, RUN_ID)] = (
+            self.dispatch_run_payload()
+        )
+        transport.responses[
+            trust.environment_api(REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT)
+        ] = trust.ApiResponse(404, None)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            event_path = root / "event.json"
+            event_path.write_text(
+                json.dumps(self.dispatch_event()), encoding="utf-8"
+            )
+            output = root / "output"
+            output.write_text("sentinel\n", encoding="utf-8")
+            code = routing.main(
+                [
+                    "--event",
+                    str(event_path),
+                    "--repository",
+                    REPOSITORY,
+                    "--git-repo",
+                    str(self.git.root),
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    "1",
+                    "--sha",
+                    self.git.tip,
+                    "--workflow-sha",
+                    self.git.tip,
+                    "--github-output",
+                    str(output),
+                ],
+                transport=transport,
+            )
+            self.assertEqual(code, 1)
+            self.assertEqual(output.read_text(encoding="utf-8"), "sentinel\n")
 
     def test_dispatch_rejects_event_run_and_identity_mismatches(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
@@ -2856,13 +3059,29 @@ class AuthorizationTests(unittest.TestCase):
             trust.environment_api(REPOSITORY),
             trust.environment_branch_policies_api(REPOSITORY),
             trust.environment_secrets_api(REPOSITORY),
+            trust.environment_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ),
+            trust.environment_branch_policies_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ),
+            trust.environment_secrets_api(
+                REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT
+            ),
             trust.repository_secrets_api(REPOSITORY),
             trust.organization_secrets_api(OWNER),
         ]
         for path in allowed:
             trust.validate_readonly_endpoint(path)
+        for environment in ("other", "release-metadata-preview", ""):
+            with self.subTest(environment=environment):
+                with self.assertRaises(trust.UnsafeEndpoint):
+                    trust.environment_api(REPOSITORY, environment)
         forbidden = [
             f"{trust.environment_secrets_api(REPOSITORY).split('?', 1)[0]}/MYGO_UPDATER_PRIVATE_KEY",
+            "/repos/acme/widget/environments/other",
+            "/repos/acme/widget/environments/other/secrets",
+            f"{trust.environment_secrets_api(REPOSITORY, trust.RELEASE_METADATA_ENVIRONMENT).split('?', 1)[0]}/RELEASE_METADATA_READ_TOKEN",
             "/repos/acme/widget/actions/secrets/MYGO_UPDATER_PRIVATE_KEY",
             "/orgs/acme/actions/secrets/MACOS_CERTIFICATE",
             "/repos/acme/widget/actions/workflows/release.yml/dispatches",

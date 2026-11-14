@@ -64,9 +64,34 @@ every legacy tag-triggered workflow or script in historical tag trees is
 disabled or made inert. Committing the new workflow cannot retroactively stop
 workflows embedded in old tags.
 
-The builtin token may lack administrative or secret-metadata scopes needed to
-prove some policy inputs. The helper then refuses with a fixed enum. Do not
-widen the token, grant extra permissions, or weaken the gate to force a pass.
+### External read-metadata credential
+
+The `authorize` job runs in the separate `release-metadata` environment and
+uses only the owner-supplied `RELEASE_METADATA_READ_TOKEN` environment secret
+for metadata API calls. It never falls back to the builtin `github.token` for
+those reads and never receives production signing keys. The checkout step
+continues to use the builtin read-only token with persisted credentials
+disabled.
+
+The owner must create and protect `release-metadata` with an exact `main`-only
+deployment branch policy **before** storing the token or dispatching the
+workflow. A GitHub environment reference can otherwise auto-create an empty
+environment. Source checks run after the token exists and cannot prove that
+bootstrap delivery was safe.
+
+Fill the blank environment secret outside this task with a repository-scoped
+fine-grained token whose read scopes cover Administration, Secrets,
+Environments, Actions, and Metadata. No write grant is recommended. Git object
+fetching uses the separate builtin read-only checkout token.
+
+Ruleset `bypass_actors` visibility depends on the repository user/write role
+versus the token's read scopes; the primary GitHub documentation does not
+guarantee that an owner's read-only token can see every bypass actor. Do not
+assume invisibility means empty. The explicit bypass proof is still mandatory:
+absent or redacted metadata refuses. Live positive policy and read-only scope
+verification remain external acceptance work. Existing real repository policy
+and secret facts remain private; this source checkpoint makes no claim that any
+repository is configured safely.
 
 ## Future CI hook
 

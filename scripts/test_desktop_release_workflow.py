@@ -134,7 +134,7 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
     def test_authorize_runs_first_with_read_only_permissions(self) -> None:
         self.assertEqual(list(self.jobs)[0], "authorize")
         authorize = self.jobs["authorize"]
-        self.assertNotIn("environment", authorize)
+        self.assertEqual(authorize["environment"], "release-metadata")
         self.assertEqual(
             authorize["permissions"],
             {"contents": "read", "actions": "read"},
@@ -143,7 +143,22 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
             set(authorize["outputs"]),
             {"tag", "commit", "version", "prerelease"},
         )
-        self.assertNotIn("secrets.", yaml.safe_dump(authorize))
+        authorize_dump = yaml.safe_dump(authorize)
+        self.assertIn("secrets.RELEASE_METADATA_READ_TOKEN", authorize_dump)
+        self.assertNotIn("${{ github.token }}", authorize_dump)
+        for production_secret in (
+            "MYGO_UPDATER_PRIVATE_KEY",
+            "MACOS_CERTIFICATE",
+            "MACOS_CERTIFICATE_PASSWORD",
+            "MACOS_SIGNING_IDENTITY",
+            "MACOS_PROVISIONING_PROFILE",
+            "APPLE_ID",
+            "APPLE_TEAM_ID",
+            "APPLE_APP_PASSWORD",
+            "WINDOWS_CERTIFICATE",
+            "WINDOWS_CERTIFICATE_PASSWORD",
+        ):
+            self.assertNotIn(production_secret, authorize_dump)
 
         authorize_checkouts = checkouts(authorize)
         self.assertEqual(len(authorize_checkouts), 1)
@@ -170,9 +185,20 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(
             "python3 scripts/desktop_release_routing.py", run
         )
-        self.assertEqual(
-            authorize["steps"][-1]["env"], {"GH_TOKEN": "${{ github.token }}"}
+        self.assertIn("REFUSE release_metadata_credential_missing", run)
+        self.assertLess(
+            run.index("REFUSE release_metadata_credential_missing"),
+            run.index("python3 scripts/desktop_release_routing.py"),
         )
+        self.assertEqual(
+            authorize["steps"][-1]["env"],
+            {"GH_TOKEN": "${{ secrets.RELEASE_METADATA_READ_TOKEN }}"},
+        )
+        for name, job in self.jobs.items():
+            if name != "authorize":
+                self.assertNotIn(
+                    "RELEASE_METADATA_READ_TOKEN", yaml.safe_dump(job), name
+                )
 
     def test_all_downstream_jobs_depend_on_authorize(self) -> None:
         self.assertEqual(

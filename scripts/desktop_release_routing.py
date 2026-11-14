@@ -4,7 +4,8 @@
 This module is wired by ``.github/workflows/desktop-release.yml`` in the C2b
 checkpoint. It binds a ``repository_dispatch`` event with action
 ``desktop-release`` to the canonical current run, then reuses the C1
-release-trust policy gates before resolving the exact candidate tag and its
+release-trust policy gates plus the isolated release-metadata environment and
+token-name proof before resolving the exact candidate tag and its
 default-branch ancestry. Wiring does not make the source contract an actual
 external policy acceptance.
 
@@ -409,7 +410,11 @@ def _run_dispatch_authorization(
     )
 
     default_branch_sha = trust._check_policy_metadata(
-        transport, repository, repository_info, git
+        transport,
+        repository,
+        repository_info,
+        git,
+        require_release_metadata=True,
     )
     git.ensure_commit(
         binding.workflow_sha,

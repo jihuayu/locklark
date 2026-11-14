@@ -58,6 +58,11 @@ from typing import Mapping, Protocol, Sequence
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
 DEFAULT_BRANCH = "main"
 PRODUCTION_ENVIRONMENT = "production"
+RELEASE_METADATA_ENVIRONMENT = "release-metadata"
+RELEASE_METADATA_READ_TOKEN_NAME = "RELEASE_METADATA_READ_TOKEN"
+ALLOWED_ENVIRONMENTS = frozenset(
+    {PRODUCTION_ENVIRONMENT, RELEASE_METADATA_ENVIRONMENT}
+)
 
 # These are the production credentials required by the current release
 # workflow. The Windows pair is optional today, but if it exists anywhere it
@@ -113,10 +118,10 @@ _API_ENDPOINT_PATTERNS = tuple(
         r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/branches/main/protection$",
         r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rulesets(?:\?[A-Za-z0-9_=&.-]+)?$",
         r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/rulesets/[0-9]+(?:\?[A-Za-z0-9_=&.-]+)?$",
-        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production$",
-        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/(?:production|release-metadata)$",
+        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/(?:production|release-metadata)/"
         r"deployment-branch-policies(?:\?[A-Za-z0-9_=&.-]+)?$",
-        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+        r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/(?:production|release-metadata)/"
         r"secrets(?:\?[A-Za-z0-9_=&.-]+)?$",
         r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/secrets(?:\?[A-Za-z0-9_=&.-]+)?$",
         r"^/orgs/[A-Za-z0-9_.-]+/actions/secrets(?:\?[A-Za-z0-9_=&.-]+)?$",
@@ -135,12 +140,12 @@ _LIST_ENDPOINT_KEYS: tuple[tuple[re.Pattern[str], str | None], ...] = tuple(
             None,
         ),
         (
-            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/(?:production|release-metadata)/"
             r"deployment-branch-policies(?:\?[A-Za-z0-9_=&.-]+)?$",
             "branch_policies",
         ),
         (
-            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/production/"
+            r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/environments/(?:production|release-metadata)/"
             r"secrets(?:\?[A-Za-z0-9_=&.-]+)?$",
             "secrets",
         ),
@@ -221,6 +226,17 @@ class Refusal(str, Enum):
     BRANCH_POLICIES_UNREADABLE = "branch_policies_unreadable"
     BRANCH_POLICIES_UNKNOWN = "branch_policies_unknown"
     BRANCH_POLICIES_INSUFFICIENT = "branch_policies_insufficient"
+
+    RELEASE_METADATA_CREDENTIAL_MISSING = "release_metadata_credential_missing"
+    RELEASE_METADATA_ENVIRONMENT_ABSENT = "release_metadata_environment_absent"
+    RELEASE_METADATA_ENVIRONMENT_UNREADABLE = "release_metadata_environment_unreadable"
+    RELEASE_METADATA_ENVIRONMENT_UNKNOWN = "release_metadata_environment_unknown"
+    RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT = "release_metadata_environment_insufficient"
+    RELEASE_METADATA_SECRET_ABSENT = "release_metadata_secret_absent"
+    RELEASE_METADATA_SECRET_UNREADABLE = "release_metadata_secret_unreadable"
+    RELEASE_METADATA_SECRET_UNKNOWN = "release_metadata_secret_unknown"
+    RELEASE_METADATA_SECRET_MISSING = "release_metadata_secret_missing"
+    RELEASE_METADATA_SECRET_LEAK = "release_metadata_secret_leak"
 
     SECRETS_ENVIRONMENT_ABSENT = "secrets_environment_absent"
     SECRETS_ENVIRONMENT_UNREADABLE = "secrets_environment_unreadable"
@@ -355,24 +371,33 @@ def ruleset_api(repository: str, ruleset_id: int) -> str:
     return f"/repos/{repository}/rulesets/{ruleset_id}?includes_parents=true"
 
 
+def _environment_name(environment: str) -> str:
+    if not isinstance(environment, str) or environment not in ALLOWED_ENVIRONMENTS:
+        raise UnsafeEndpoint("environment is not in the metadata allowlist")
+    return environment
+
+
 def environment_api(
     repository: str, environment: str = PRODUCTION_ENVIRONMENT
 ) -> str:
-    return f"/repos/{repository}/environments/{environment}"
+    return f"/repos/{repository}/environments/{_environment_name(environment)}"
 
 
 def environment_branch_policies_api(
     repository: str, environment: str = PRODUCTION_ENVIRONMENT
 ) -> str:
     return _paged(
-        f"/repos/{repository}/environments/{environment}/deployment-branch-policies"
+        f"/repos/{repository}/environments/"
+        f"{_environment_name(environment)}/deployment-branch-policies"
     )
 
 
 def environment_secrets_api(
     repository: str, environment: str = PRODUCTION_ENVIRONMENT
 ) -> str:
-    return _paged(f"/repos/{repository}/environments/{environment}/secrets")
+    return _paged(
+        f"/repos/{repository}/environments/{_environment_name(environment)}/secrets"
+    )
 
 
 def repository_secrets_api(repository: str) -> str:
@@ -1736,70 +1761,81 @@ def _check_tag_rules(transport: ReadOnlyTransport, repository: str) -> None:
 
 
 def _check_environment(
-    transport: ReadOnlyTransport, repository: str
+    transport: ReadOnlyTransport,
+    repository: str,
+    environment: str = PRODUCTION_ENVIRONMENT,
+    *,
+    absent: Refusal = Refusal.ENVIRONMENT_ABSENT,
+    unreadable: Refusal = Refusal.ENVIRONMENT_UNREADABLE,
+    unknown: Refusal = Refusal.ENVIRONMENT_UNKNOWN,
+    insufficient: Refusal = Refusal.ENVIRONMENT_INSUFFICIENT,
+    branch_absent: Refusal = Refusal.BRANCH_POLICIES_ABSENT,
+    branch_unreadable: Refusal = Refusal.BRANCH_POLICIES_UNREADABLE,
+    branch_unknown: Refusal = Refusal.BRANCH_POLICIES_UNKNOWN,
+    branch_insufficient: Refusal = Refusal.BRANCH_POLICIES_INSUFFICIENT,
 ) -> tuple[Mapping[str, object], Sequence[object]]:
     payload = _api_call(
         transport,
-        environment_api(repository),
+        environment_api(repository, environment),
         list_response=False,
-        absent=Refusal.ENVIRONMENT_ABSENT,
-        unreadable=Refusal.ENVIRONMENT_UNREADABLE,
-        unknown=Refusal.ENVIRONMENT_UNKNOWN,
+        absent=absent,
+        unreadable=unreadable,
+        unknown=unknown,
     )
-    environment = _mapping(
+    metadata = _mapping(
         payload,
-        Refusal.ENVIRONMENT_UNKNOWN,
-        "environment metadata is not an object",
+        unknown,
+        f"{environment} environment metadata is not an object",
     )
-    if environment.get("name") != PRODUCTION_ENVIRONMENT:
+    if metadata.get("name") != environment:
         _refuse(
-            Refusal.ENVIRONMENT_UNKNOWN,
-            "production environment metadata names a different environment",
+            unknown,
+            f"{environment} environment metadata names a different environment",
         )
-    policy = environment.get("deployment_branch_policy")
+    policy = metadata.get("deployment_branch_policy")
     if not isinstance(policy, dict):
         _refuse(
-            Refusal.ENVIRONMENT_INSUFFICIENT,
-            "production environment has no deployment branch policy",
+            insufficient,
+            f"{environment} environment has no deployment branch policy",
         )
     if policy.get("custom_branch_policies") is not True or policy.get(
         "protected_branches"
     ) is not False:
         _refuse(
-            Refusal.ENVIRONMENT_INSUFFICIENT,
-            "production environment does not use a custom default-branch-only policy",
+            insufficient,
+            f"{environment} environment does not use a custom default-branch-only policy",
         )
     policies_payload = _api_call(
         transport,
-        environment_branch_policies_api(repository),
+        environment_branch_policies_api(repository, environment),
         list_response=True,
-        absent=Refusal.BRANCH_POLICIES_ABSENT,
-        unreadable=Refusal.BRANCH_POLICIES_UNREADABLE,
-        unknown=Refusal.BRANCH_POLICIES_UNKNOWN,
+        absent=branch_absent,
+        unreadable=branch_unreadable,
+        unknown=branch_unknown,
     )
     policies = _list_items(
         policies_payload,
         key="branch_policies",
-        reason=Refusal.BRANCH_POLICIES_UNKNOWN,
-        detail="deployment branch policy metadata is malformed",
+        reason=branch_unknown,
+        detail=f"{environment} deployment branch policy metadata is malformed",
     )
     names: list[str] = []
     policy_ids: set[int] = set()
     for item in policies:
         if not isinstance(item, dict):
             _refuse(
-                Refusal.BRANCH_POLICIES_UNKNOWN,
-                "deployment branch policy entry is malformed",
+                branch_unknown,
+                f"{environment} deployment branch policy entry is malformed",
             )
         policy_id = _positive_int(
             item.get("id"),
-            Refusal.BRANCH_POLICIES_UNKNOWN,
-            "deployment branch policy id is malformed",
+            branch_unknown,
+            f"{environment} deployment branch policy id is malformed",
         )
         if policy_id in policy_ids:
             _refuse(
-                Refusal.BRANCH_POLICIES_UNKNOWN,
-                "deployment branch policy list contains duplicate ids",
+                branch_unknown,
+                f"{environment} deployment branch policy list contains duplicate ids",
             )
         policy_ids.add(policy_id)
         name = item.get("name")
@@ -1810,26 +1846,26 @@ def _check_environment(
             or policy_type not in ("branch", "tag")
         ):
             _refuse(
-                Refusal.BRANCH_POLICIES_UNKNOWN,
-                "deployment branch policy entry is malformed",
+                branch_unknown,
+                f"{environment} deployment branch policy entry is malformed",
             )
         if policy_type != "branch":
             _refuse(
-                Refusal.BRANCH_POLICIES_INSUFFICIENT,
-                "production environment permits non-branch deployments",
+                branch_insufficient,
+                f"{environment} environment permits non-branch deployments",
             )
         if "*" in name or "?" in name:
             _refuse(
-                Refusal.BRANCH_POLICIES_INSUFFICIENT,
-                "production environment permits a wildcard deployment branch",
+                branch_insufficient,
+                f"{environment} environment permits a wildcard deployment branch",
             )
         names.append(name)
     if names != [DEFAULT_BRANCH]:
         _refuse(
-            Refusal.BRANCH_POLICIES_INSUFFICIENT,
-            "production environment is not restricted exactly to main",
+            branch_insufficient,
+            f"{environment} environment is not restricted exactly to main",
         )
-    return environment, policies
+    return metadata, policies
 
 
 def _secret_names(
@@ -1855,11 +1891,18 @@ def _secret_names(
     return names
 
 
+@dataclass(frozen=True)
+class SecretInventory:
+    production_environment: frozenset[str]
+    repository: frozenset[str]
+    organization: frozenset[str] | None
+
+
 def _check_secrets(
     transport: ReadOnlyTransport,
     repository: str,
     repository_info: RepositoryInfo,
-) -> None:
+) -> SecretInventory:
     payload = _api_call(
         transport,
         environment_secrets_api(repository),
@@ -1900,6 +1943,7 @@ def _check_secrets(
             + ", ".join(sorted(leaked)),
         )
 
+    organization_names: set[str] = set()
     if repository_info.owner_type == "Organization":
         organization_payload = _api_call(
             transport,
@@ -1921,6 +1965,67 @@ def _check_secrets(
                 "production credentials must not be organization-scoped: "
                 + ", ".join(sorted(leaked)),
             )
+    return SecretInventory(
+        production_environment=frozenset(environment_names),
+        repository=frozenset(repository_names),
+        organization=(
+            frozenset(organization_names)
+            if repository_info.owner_type == "Organization"
+            else None
+        ),
+    )
+
+
+def _check_release_metadata(
+    transport: ReadOnlyTransport,
+    repository: str,
+    secrets: SecretInventory,
+) -> None:
+    """Prove the isolated read-metadata environment and token placement."""
+
+    _check_environment(
+        transport,
+        repository,
+        RELEASE_METADATA_ENVIRONMENT,
+        absent=Refusal.RELEASE_METADATA_ENVIRONMENT_ABSENT,
+        unreadable=Refusal.RELEASE_METADATA_ENVIRONMENT_UNREADABLE,
+        unknown=Refusal.RELEASE_METADATA_ENVIRONMENT_UNKNOWN,
+        insufficient=Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+        branch_absent=Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+        branch_unreadable=Refusal.RELEASE_METADATA_ENVIRONMENT_UNREADABLE,
+        branch_unknown=Refusal.RELEASE_METADATA_ENVIRONMENT_UNKNOWN,
+        branch_insufficient=Refusal.RELEASE_METADATA_ENVIRONMENT_INSUFFICIENT,
+    )
+    payload = _api_call(
+        transport,
+        environment_secrets_api(repository, RELEASE_METADATA_ENVIRONMENT),
+        list_response=True,
+        absent=Refusal.RELEASE_METADATA_SECRET_ABSENT,
+        unreadable=Refusal.RELEASE_METADATA_SECRET_UNREADABLE,
+        unknown=Refusal.RELEASE_METADATA_SECRET_UNKNOWN,
+    )
+    names = _secret_names(
+        payload,
+        reason=Refusal.RELEASE_METADATA_SECRET_UNKNOWN,
+        label="release-metadata environment",
+    )
+    if RELEASE_METADATA_READ_TOKEN_NAME not in names:
+        _refuse(
+            Refusal.RELEASE_METADATA_SECRET_MISSING,
+            "release-metadata environment is missing the metadata read token name",
+        )
+    leaked = RELEASE_METADATA_READ_TOKEN_NAME in secrets.production_environment or (
+        RELEASE_METADATA_READ_TOKEN_NAME in secrets.repository
+    )
+    if secrets.organization is not None:
+        leaked = leaked or (
+            RELEASE_METADATA_READ_TOKEN_NAME in secrets.organization
+        )
+    if leaked:
+        _refuse(
+            Refusal.RELEASE_METADATA_SECRET_LEAK,
+            "metadata read token name must exist only in release-metadata",
+        )
 
 
 def _check_policy_metadata(
@@ -1928,6 +2033,8 @@ def _check_policy_metadata(
     repository: str,
     repository_info: RepositoryInfo,
     git: GitReader,
+    *,
+    require_release_metadata: bool = False,
 ) -> str:
     """Run the shared C1 policy gates and return the protected main tip."""
 
@@ -1935,7 +2042,9 @@ def _check_policy_metadata(
     _check_protection(transport, repository, repository_info.full_name)
     _check_tag_rules(transport, repository)
     _check_environment(transport, repository)
-    _check_secrets(transport, repository, repository_info)
+    secrets = _check_secrets(transport, repository, repository_info)
+    if require_release_metadata:
+        _check_release_metadata(transport, repository, secrets)
     git.ensure_commit(default_branch_sha, Refusal.DEFAULT_BRANCH_OBJECT_MISSING)
     return default_branch_sha
 

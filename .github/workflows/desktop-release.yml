@@ -4,8 +4,9 @@ name: Desktop Release
 # verify external credential isolation and main protection, and disable or
 # make inert every legacy tag-triggered workflow/script in historical tag
 # trees. Committing this file cannot retroactively stop workflows embedded in
-# old tags. The builtin token may lack admin/secret metadata scopes; the
-# authorizer refuses with fixed enums rather than widening permissions.
+# old tags. The authorize job uses the separate release-metadata environment
+# and the owner-supplied RELEASE_METADATA_READ_TOKEN; it never falls back to
+# github.token for API metadata and never receives production signing keys.
 
 "on":
   repository_dispatch:
@@ -25,6 +26,7 @@ jobs:
   authorize:
     name: Authorize trusted release dispatch
     runs-on: ubuntu-latest
+    environment: release-metadata
     permissions:
       contents: read
       actions: read
@@ -45,9 +47,13 @@ jobs:
         id: authorize
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_METADATA_READ_TOKEN }}
         run: |
           set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "REFUSE release_metadata_credential_missing" >&2
+            exit 1
+          fi
           python3 scripts/desktop_release_routing.py \
             --event "$GITHUB_EVENT_PATH" \
             --repository "$GITHUB_REPOSITORY" \

@@ -22,7 +22,26 @@ The release remains a draft for review. Installed applications cannot see it
 through GitHub's `releases/latest/download` endpoint until the draft is
 published.
 
-## Required production environment secrets
+## Required release environment secrets
+
+### Release metadata reader
+
+The separate `release-metadata` environment must be pre-created and protected
+to an exact `main`-only deployment policy before it is referenced, because a
+GitHub environment reference can otherwise auto-create an empty environment.
+Store the blank environment secret `RELEASE_METADATA_READ_TOKEN` only after
+that protection exists; filling its value is an owner step outside this task.
+
+The token is a repository-scoped fine-grained read-only token covering
+Administration, Secrets, Environments, Actions, and Metadata for the metadata
+API. No write scope is recommended. The workflow checkout uses the separate
+builtin read-only token. The authorize job never receives production signing
+keys, and it never falls back to the builtin token for metadata API reads.
+
+A ruleset's `bypass_actors` may be redacted depending on the repository
+user/write role and token scope. Absent or redacted bypass metadata is refused;
+do not treat it as empty. Live positive policy and read-only scope verification
+remain external acceptance work.
 
 ### Update signing key
 
