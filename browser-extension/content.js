@@ -191,7 +191,9 @@
     if (Date.now() - siteLink.at > SITE_LINK_TTL) return null;
     return siteLink.linked;
   }
+  let otpSettingsRevision = 0;
   const settingsReady = (async () => {
+    const revision = otpSettingsRevision;
     try {
       const value = await api.storage?.local?.get?.([
         "showInlineMenu",
@@ -204,7 +206,10 @@
         siteSettings.showInlineMenu = value.showInlineMenu !== false;
         siteSettings.showInlineGenerator = value.showInlineGenerator !== false;
         siteSettings.pasteProtection = value.pasteProtection !== false;
-        siteSettings.otpCapture = value.otpCapture !== false;
+        // A storage change that arrived while this initial read was pending
+        // wins; the late initial value must not resurrect a disabled generation.
+        if (revision === otpSettingsRevision)
+          siteSettings.otpCapture = value.otpCapture !== false;
         siteSettings.disabledInlineMenuOrigins = Array.isArray(
           value.disabledInlineMenuOrigins,
         )
@@ -247,6 +252,19 @@
     },
     observer = null,
     scanTimer = null;
+  try {
+    api.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "local" || !changes || typeof changes !== "object") return;
+      const change = changes.otpCapture;
+      if (!change || typeof change !== "object" || !("newValue" in change)) return;
+      otpSettingsRevision++;
+      const enabled = change.newValue !== false;
+      siteSettings.otpCapture = enabled;
+      if (!enabled) stopOTPCapture(true);
+      else if (otpDetector) startOTPObserver(), scheduleOTPScan(1200);
+      else void installOTPCapture();
+    });
+  } catch {}
   function element(tag, textValue, className) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -1639,7 +1657,12 @@
   let otpDetector = null,
     otpScanning = false,
     otpScanTimer = null,
-    otpScans = 0;
+    otpObserver = null,
+    otpScans = 0,
+    otpGeneration = 0,
+    otpInstalling = false,
+    otpVisibilityListener = false,
+    otpRearmPending = false;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
   function otpHash(text) {
@@ -1648,21 +1671,53 @@
       hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
     return hash.toString(36) + ":" + text.length;
   }
-  function otpPageRelevant() {
+  function otpPageRelevant(candidates = []) {
     if (
       /2fa|mfa|two[-_]?factor|authenticator|totp|otp|setup|security/i.test(
         location.pathname + location.search,
       )
     )
       return true;
+    // Never read body.innerText here: it forces a full-page style/layout flush
+    // on every mutation. Title, headings, dialogs, forms and the candidate's
+    // nearest container are layout-free and enough to recognize setup pages.
+    const pieces = [];
     try {
-      const text = String(document.body?.innerText || "").slice(0, 20000);
-      return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
-        text,
+      pieces.push(String(document.title || ""));
+    } catch {}
+    let nodes = [];
+    try {
+      nodes = document.querySelectorAll(
+        "h1,h2,h3,[role='dialog'],dialog,form",
       );
     } catch {
-      return false;
+      nodes = [];
     }
+    for (const node of nodes) {
+      if (pieces.length >= 64) break;
+      try {
+        pieces.push(String(node.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    for (const node of candidates) {
+      if (pieces.length >= 72) break;
+      try {
+        let container = null;
+        if (typeof node.closest === "function")
+          container = node.closest("form,[role='dialog'],dialog,main,section");
+        if (!container) {
+          const parent = node.parentElement || null;
+          const tag = String(parent?.tagName || "").toUpperCase();
+          if (parent && tag !== "BODY" && tag !== "HTML") container = parent;
+        }
+        if (container)
+          pieces.push(String(container.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    const text = pieces.join("\n").slice(0, 20000);
+    return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
+      text,
+    );
   }
   function otpImages() {
     const found = [];
@@ -1716,26 +1771,40 @@
     }
     return null;
   }
-  async function otpOffer(anchor, raw, parsed) {
-    if (host) return;
+  function otpContextActive(generation, anchor, panelHost = null) {
+    if (generation !== otpGeneration) return false;
+    if (siteSettings.otpCapture === false) return false;
+    if (document.visibilityState !== "visible") return false;
+    if (!anchor?.isConnected) return false;
+    return panelHost ? host === panelHost : !host;
+  }
+  async function otpOffer(anchor, raw, parsed, generation) {
+    if (!otpContextActive(generation, anchor)) return;
     let reply;
     try {
       reply = await send({ type: "inline-otp-capture", otpauth: raw });
     } catch {
       return;
     }
+    // A sent capture request cannot be recalled. It is never treated as
+    // approval; a late response after stop/hide/disable only loses the right to
+    // open or update UI.
+    if (!otpContextActive(generation, anchor)) return;
     if (!reply?.ok) {
-      if (reply?.reason === "no-item")
+      if (otpContextActive(generation, anchor) && reply?.reason === "no-item")
         showToast("未找到此网站的登录，请先保存登录再添加两步验证");
       return;
     }
-    if (host || !anchor.isConnected) return;
+    if (!otpContextActive(generation, anchor)) return;
     const box = panel(anchor, "保存两步验证");
+    const panelHost = host;
     note(box, "检测到此页面的两步验证二维码：" + (reply.label || parsed.label));
     const status = note(box, "", "status");
     const items = Array.isArray(reply.items) ? reply.items.slice(0, 10) : [];
     for (const item of items) {
+      if (!otpContextActive(generation, anchor, panelHost)) return;
       button(box, "保存到 " + (item.title || "未命名登录"), async () => {
+        if (!otpContextActive(generation, anchor, panelHost)) return;
         status.textContent = "正在保存…";
         let result;
         try {
@@ -1747,6 +1816,9 @@
         } catch {
           result = { ok: false };
         }
+        // The save request may already be in flight, but a late response must
+        // not dismiss, toast, or update a panel from a canceled generation.
+        if (!otpContextActive(generation, anchor, panelHost)) return;
         if (result?.ok) {
           dismiss();
           showToast("已保存两步验证");
@@ -1757,64 +1829,153 @@
     }
     button(box, "忽略", () => dismiss());
   }
+  function stopOTPCapture(cancel = true) {
+    if (otpScanTimer) {
+      clearTimeout(otpScanTimer);
+      otpScanTimer = null;
+    }
+    if (otpObserver) {
+      try {
+        otpObserver.disconnect();
+      } catch {}
+      otpObserver = null;
+    }
+    // A budget stop retires scheduling but still permits the in-flight 24th
+    // decode to offer its result. An explicit stop invalidates that generation
+    // so a late decode can never offer.
+    if (cancel) {
+      otpGeneration++;
+      otpRearmPending = false;
+    }
+  }
   async function otpScan() {
+    if (otpScanning) {
+      // A rearm/visibility/settings request arrived while the old scan still
+      // owns the single scan slot. Let its finally schedule one fresh scan.
+      otpRearmPending = true;
+      return;
+    }
     if (
-      otpScanning ||
       !otpDetector ||
       siteSettings.otpCapture === false ||
       document.visibilityState !== "visible" ||
-      otpScans >= OTP_SCAN_LIMIT ||
-      host ||
-      !otpPageRelevant()
+      host
     )
       return;
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture(false);
+      return;
+    }
+    // Candidate discovery is cheap and bounded. Do it before any page-text
+    // relevance check so ordinary pages never pay for relevance work and a
+    // scan with no QR-sized candidate exits without touching the page text.
+    const candidates = otpImages();
+    if (!candidates.length) return;
+    if (!otpPageRelevant(candidates)) return;
+    const generation = otpGeneration;
     otpScanning = true;
     try {
-      for (const node of otpImages()) {
+      for (const node of candidates) {
+        if (generation !== otpGeneration) return;
+        // Check the budget before every decode, then advance exactly once.
+        // The 24th decode is still inside the budget and may offer; the budget
+        // stop only retires scheduling and disconnects immediately.
+        if (otpScans >= OTP_SCAN_LIMIT) {
+          stopOTPCapture(false);
+          break;
+        }
         otpSeen.add(node);
         otpScans++;
+        const finalBudgetDecode = otpScans >= OTP_SCAN_LIMIT;
+        if (finalBudgetDecode) stopOTPCapture(false);
         const found = await otpDecode(node);
-        if (!found) continue;
+        if (!otpContextActive(generation, node)) return;
+        if (!found) {
+          if (finalBudgetDecode) break;
+          continue;
+        }
         const key = otpHash(found.raw);
-        if (otpPrompted.has(key)) continue;
+        if (otpPrompted.has(key)) {
+          if (finalBudgetDecode) break;
+          continue;
+        }
         otpPrompted.add(key);
-        await otpOffer(node, found.raw, found.parsed);
+        if (!otpContextActive(generation, node)) return;
+        await otpOffer(node, found.raw, found.parsed, generation);
         break;
       }
     } finally {
       otpScanning = false;
+      if (
+        otpRearmPending &&
+        siteSettings.otpCapture !== false &&
+        document.visibilityState === "visible" &&
+        otpScans < OTP_SCAN_LIMIT &&
+        !host
+      ) {
+        otpRearmPending = false;
+        scheduleOTPScan(1200);
+      } else if (otpRearmPending) {
+        otpRearmPending = false;
+      }
     }
   }
   function scheduleOTPScan(delay = 1500) {
-    if (otpScanTimer || !otpDetector || siteSettings.otpCapture === false) return;
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture(false);
+      return;
+    }
+    if (!otpDetector) return;
+    if (siteSettings.otpCapture === false) {
+      stopOTPCapture(true);
+      return;
+    }
+    if (otpScanTimer) return;
     otpScanTimer = setTimeout(() => {
       otpScanTimer = null;
       void otpScan();
     }, delay);
   }
-  async function installOTPCapture() {
-    if (typeof BarcodeDetector !== "function") return;
+  function startOTPObserver() {
+    if (otpScans >= OTP_SCAN_LIMIT) return;
+    if (otpObserver || typeof MutationObserver !== "function") return;
     try {
-      const formats = await BarcodeDetector.getSupportedFormats?.();
-      if (Array.isArray(formats) && !formats.includes("qr_code")) return;
-      otpDetector = new BarcodeDetector({ formats: ["qr_code"] });
+      otpObserver = new MutationObserver(() => scheduleOTPScan());
+      otpObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
     } catch {
-      otpDetector = null;
-      return;
+      otpObserver = null;
     }
-    await settingsReady;
-    if (siteSettings.otpCapture === false) return;
-    scheduleOTPScan(2000);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") scheduleOTPScan(1200);
-    });
-    if (typeof MutationObserver === "function") {
+  }
+  async function installOTPCapture() {
+    if (otpInstalling || typeof BarcodeDetector !== "function") return;
+    otpInstalling = true;
+    try {
       try {
-        new MutationObserver(() => scheduleOTPScan()).observe(
-          document.documentElement,
-          { childList: true, subtree: true },
-        );
-      } catch {}
+        const formats = await BarcodeDetector.getSupportedFormats?.();
+        if (Array.isArray(formats) && !formats.includes("qr_code")) return;
+        otpDetector = new BarcodeDetector({ formats: ["qr_code"] });
+      } catch {
+        otpDetector = null;
+        return;
+      }
+      await settingsReady;
+      if (!otpVisibilityListener) {
+        otpVisibilityListener = true;
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            startOTPObserver();
+            scheduleOTPScan(1200);
+          } else stopOTPCapture(true);
+        });
+      }
+      if (siteSettings.otpCapture === false) return;
+      scheduleOTPScan(2000);
+      startOTPObserver();
+    } finally {
+      otpInstalling = false;
     }
   }
   void installOTPCapture();
@@ -2163,6 +2324,7 @@
     document.addEventListener("DOMContentLoaded", startObserver, { once: true });
   else startObserver();
   window.addEventListener("pagehide", () => {
+    stopOTPCapture(true);
     dismiss();
     dismissPending();
     if (request) void send({ type: "passkey-cancel", id: request.id });

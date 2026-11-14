@@ -1,7 +1,13 @@
 """Independent oracle known-vector checks; outputs no private fixture material."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
 import unittest
 from browser_otp_hmac import codes
-from browser_otp_privacy_acceptance import check_output
+from browser_otp_privacy_acceptance import check_child_result, check_output, read_handoff, validate_handoff
 
 
 class BrowserOTPOracle(unittest.TestCase):
@@ -36,3 +42,176 @@ class BrowserOTPPrivacy(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrowserOTPPrivacyHandoff(unittest.TestCase):
+    def make_state(self):
+        suffix = str(os.getpid()) + str(time.time_ns())
+        state = Path("/tmp") / ("locklark-browser-acceptance-" + suffix)
+        state.mkdir(mode=0o700)
+        self.addCleanup(shutil.rmtree, state, ignore_errors=True)
+        return state
+
+    def test_real_node_private_pipe_handoff(self):
+        state = self.make_state()
+        helper = Path(__file__).resolve().parent / "browser_native_setup.mjs"
+        read_fd, write_fd = os.pipe()
+        environment = dict(
+            os.environ,
+            LOCKLARK_TEST_DIAGNOSTIC_FD=str(write_fd),
+            LOCKLARK_TEST_HANDOFF_STATE=str(state),
+        )
+        script = (
+            "import { writeDiagnosticHandoff } from "
+            + json.dumps(helper.as_uri())
+            + "; writeDiagnosticHandoff(process.env.LOCKLARK_TEST_HANDOFF_STATE);"
+        )
+        try:
+            process = subprocess.Popen(
+                ["node", "--input-type=module", "-e", script],
+                env=environment,
+                pass_fds=(write_fd,),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            os.close(write_fd)
+            write_fd = None
+            stdout, stderr = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(stdout, "")
+            self.assertEqual(stderr, "")
+            payload = read_handoff(read_fd)
+            self.assertEqual(validate_handoff(payload), state)
+        finally:
+            if write_fd is not None:
+                os.close(write_fd)
+            os.close(read_fd)
+
+    def test_missing_malformed_foreign_and_oversize_handoff_rejected(self):
+        for raw in (
+            b"",
+            b"no-newline",
+            b"/tmp/locklark-browser-acceptance-123\n\n",
+            b"/var/tmp/locklark-browser-acceptance-123\n",
+            b"/tmp/locklark-browser-acceptance-123/../../tmp/foreign\n",
+            b"x" * 4097,
+        ):
+            with self.assertRaises(ValueError):
+                validate_handoff(raw)
+
+    def test_non_owned_symlink_and_non_private_state_rejected(self):
+        state = self.make_state()
+        payload = (str(state) + "\n").encode()
+        self.assertEqual(validate_handoff(payload), state)
+        with self.assertRaises(ValueError):
+            validate_handoff(payload, expected_uid=os.getuid() + 1)
+
+        link = Path("/tmp") / (
+            "locklark-browser-acceptance-" + str(os.getpid()) + str(time.time_ns())
+        )
+        os.symlink(state, link)
+        self.addCleanup(link.unlink)
+        with self.assertRaises(ValueError):
+            validate_handoff((str(link) + "\n").encode())
+
+        os.chmod(state, 0o755)
+        with self.assertRaises(ValueError):
+            validate_handoff(payload)
+
+
+class BrowserOTPPrivacyResult(unittest.TestCase):
+    STAGE = "otp-6:positive:driver-arguments-failure"
+    PRIVACY_PREFIX = "Native browser privacy diagnostic: "
+
+    def run_child(self, body):
+        return subprocess.run(
+            ["node", "--input-type=module", "-e", body],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+
+    def privacy_line(self, source):
+        return self.PRIVACY_PREFIX + json.dumps(
+            {"scan_source": source}, separators=(",", ":")
+        )
+
+    def assert_exact_result(self, result, stage_line, privacy_line=None):
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, stage_line + "\n")
+        self.assertEqual(
+            result.stderr,
+            "" if privacy_line is None else privacy_line + "\n",
+        )
+        self.assertNotIn("SyntaxError", result.stdout + result.stderr)
+        self.assertNotIn("console.log", result.stdout + result.stderr)
+        self.assertNotIn("process.exit", result.stdout + result.stderr)
+
+    def test_real_child_expected_primary_plus_artifact_privacy_rejected(self):
+        line = self.privacy_line("artifact")
+        result = self.run_child(
+            f"console.log({json.dumps(self.STAGE)});"
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"artifact"}));'
+            "process.exit(1);"
+        )
+        self.assert_exact_result(result, self.STAGE, line)
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(
+                (result.stdout + result.stderr).encode(), result.returncode
+            )
+        self.assertEqual(raised.exception.args, ("privacy-scan",))
+
+    def test_real_child_expected_primary_plus_controller_privacy_rejected(self):
+        line = self.privacy_line("controller")
+        result = self.run_child(
+            f"console.log({json.dumps(self.STAGE)});"
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"controller"}));'
+            "process.exit(1);"
+        )
+        self.assert_exact_result(result, self.STAGE, line)
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(
+                (result.stdout + result.stderr).encode(), result.returncode
+            )
+        self.assertEqual(raised.exception.args, ("privacy-scan",))
+
+    def test_real_child_clean_expected_primary_continues(self):
+        result = self.run_child(
+            f"console.log({json.dumps(self.STAGE)});"
+            "process.exit(1);"
+        )
+        self.assert_exact_result(result, self.STAGE)
+        check_child_result(
+            (result.stdout + result.stderr).encode(), result.returncode
+        )
+
+        missing = self.run_child(
+            'console.log("not-the-expected-stage");'
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"artifact"}));'
+            "process.exit(1);"
+        )
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stdout, "not-the-expected-stage\n")
+        self.assertEqual(missing.stderr, self.privacy_line("artifact") + "\n")
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(
+                (missing.stdout + missing.stderr).encode(), missing.returncode
+            )
+        self.assertEqual(raised.exception.args, ("privacy-failure-stage",))
+
+        syntax = self.run_child(
+            f"console.log({json.dumps(self.STAGE)});"
+            'console.error("synthetic");'
+            "process.exit(1); )"
+        )
+        self.assertEqual(syntax.returncode, 1)
+        self.assertEqual(syntax.stdout, "")
+        self.assertIn("SyntaxError", syntax.stderr)
+        self.assertNotEqual(syntax.stdout, self.STAGE + "\n")
+        self.assertNotEqual(syntax.stderr, self.privacy_line("artifact") + "\n")

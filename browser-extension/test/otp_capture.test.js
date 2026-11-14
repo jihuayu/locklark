@@ -212,6 +212,13 @@ function makeHarness(options = {}) {
   const documentListeners = {};
   const windowListeners = {};
   const timers = [];
+  const mutationObservers = [];
+  const detections = { count: 0 };
+  const pendingDetections = [];
+  const pendingCaptures = [];
+  const pendingSaves = [];
+  const storageListeners = [];
+  const pendingStorage = [];
   let timerSerial = 0;
 
   const body = new Element("body");
@@ -225,7 +232,8 @@ function makeHarness(options = {}) {
     visibilityState: "visible",
     documentElement,
     body,
-    baseURI: ORIGIN + "/settings/2fa",
+    title: options.title ?? "",
+    baseURI: ORIGIN + (options.pathname ?? "/settings/2fa"),
     activeElement: null,
     _listeners: documentListeners,
     createElement(tag) {
@@ -278,6 +286,10 @@ function makeHarness(options = {}) {
       const index = list.indexOf(listener);
       if (index >= 0) list.splice(index, 1);
     },
+    _listeners: windowListeners,
+    dispatchEvent(event) {
+      return dispatch(windowObject, event);
+    },
     postMessage() {},
   };
   windowObject.top = windowObject;
@@ -290,6 +302,8 @@ function makeHarness(options = {}) {
         sent.push(JSON.parse(JSON.stringify(message)));
         switch (message.type) {
           case "inline-otp-capture":
+            if (options.deferCapture)
+              return new Promise((resolve) => pendingCaptures.push(resolve));
             return Promise.resolve(
               options.captureReply || {
                 ok: true,
@@ -311,6 +325,8 @@ function makeHarness(options = {}) {
               options.commitReply || { saved: false, status: "保存失败" },
             );
           case "inline-otp-save":
+            if (options.deferSave)
+              return new Promise((resolve) => pendingSaves.push(resolve));
             return Promise.resolve(
               options.saveReply || { ok: true, revision: "c".repeat(64) },
             );
@@ -324,8 +340,17 @@ function makeHarness(options = {}) {
       },
     },
     storage: {
+      onChanged: {
+        addListener(listener) {
+          storageListeners.push(listener);
+        },
+      },
       local: {
-        get: async () => options.storage || {},
+        get: async () => {
+          if (options.deferStorage)
+            return await new Promise((resolve) => pendingStorage.push(resolve));
+          return options.storage || {};
+        },
       },
     },
   };
@@ -338,6 +363,12 @@ function makeHarness(options = {}) {
       this.formats = init?.formats || [];
     }
     async detect(node) {
+      detections.count++;
+      if (options.deferDecode) {
+        return await new Promise((resolve) => {
+          pendingDetections.push({ node, resolve });
+        });
+      }
       if (!node || typeof node._qr !== "string") return [];
       return [{ rawValue: node._qr }];
     }
@@ -350,9 +381,12 @@ function makeHarness(options = {}) {
       origin: ORIGIN,
       protocol: "https:",
       hostname: "example.test",
-      href: ORIGIN + "/settings/2fa",
-      pathname: "/settings/2fa",
-      search: "",
+      href:
+        ORIGIN +
+        (options.pathname ?? "/settings/2fa") +
+        (options.search ?? ""),
+      pathname: options.pathname ?? "/settings/2fa",
+      search: options.search ?? "",
     },
     isSecureContext: true,
     Element,
@@ -360,8 +394,20 @@ function makeHarness(options = {}) {
     HTMLTextAreaElement,
     HTMLSelectElement,
     MutationObserver: class {
-      observe() {}
-      disconnect() {}
+      constructor(callback) {
+        this.callback = callback;
+        this.target = null;
+        this.config = null;
+        this.disconnected = false;
+        mutationObservers.push(this);
+      }
+      observe(target, config) {
+        this.target = target;
+        this.config = config;
+      }
+      disconnect() {
+        this.disconnected = true;
+      }
     },
     BarcodeDetector,
     navigator: {},
@@ -381,9 +427,9 @@ function makeHarness(options = {}) {
         this.bubbles = Boolean(init.bubbles);
       }
     },
-    setTimeout: (fn) => {
+    setTimeout: (fn, delay = 0) => {
       const id = ++timerSerial;
-      timers.push({ id, fn });
+      timers.push({ id, fn, delay });
       return id;
     },
     clearTimeout: (id) => {
@@ -403,6 +449,75 @@ function makeHarness(options = {}) {
   const harness = {
     document,
     sent,
+    detections: () => detections.count,
+    pendingDecodes: () => pendingDetections.length,
+    pendingCaptures: () => pendingCaptures.length,
+    pendingSaves: () => pendingSaves.length,
+    resolveCapture(reply) {
+      const resolve = pendingCaptures.shift();
+      if (!resolve) return false;
+      resolve(
+        reply || {
+          ok: true,
+          captureId: "a".repeat(32),
+          label: "ACME Co · john@example.com",
+          items: [{ id: "b".repeat(32), title: "Example login" }],
+        },
+      );
+      return true;
+    },
+    resolveSave(reply) {
+      const resolve = pendingSaves.shift();
+      if (!resolve) return false;
+      resolve(reply || { ok: true, revision: "c".repeat(64) });
+      return true;
+    },
+    hide() {
+      document.visibilityState = "hidden";
+      document.dispatchEvent({ type: "visibilitychange" });
+    },
+    show() {
+      document.visibilityState = "visible";
+      document.dispatchEvent({ type: "visibilitychange" });
+    },
+    changeOtpSetting(value) {
+      for (const listener of storageListeners)
+        listener({ otpCapture: { newValue: value } }, "local");
+    },
+    resolveStorage(value) {
+      const resolve = pendingStorage.shift();
+      if (!resolve) return false;
+      resolve(value || {});
+      return true;
+    },
+    resolveDetection(index = 0) {
+      const pending = pendingDetections.splice(index, 1)[0];
+      if (!pending) return false;
+      pending.resolve(
+        typeof pending.node?._qr === "string"
+          ? [{ rawValue: pending.node._qr }]
+          : [],
+      );
+      return true;
+    },
+    pagehide() {
+      windowObject.dispatchEvent({ type: "pagehide" });
+    },
+    flush: () => flush(),
+    otpObserver: () =>
+      mutationObservers.find(
+        (observer) =>
+          observer.config?.childList === true &&
+          observer.config?.subtree === true &&
+          observer.config?.attributes !== true,
+      ),
+    triggerOTPMutation() {
+      for (const observer of mutationObservers) {
+        if (observer.disconnected) continue;
+        if (observer.config?.attributes === true) continue;
+        observer.callback([], observer);
+      }
+    },
     image(qr, attributes = {}) {
       const node = new Element("img");
       for (const [name, value] of Object.entries(attributes))
@@ -428,6 +543,14 @@ function makeHarness(options = {}) {
         timer.fn();
         await flush(4);
       }
+    },
+    async runTimerByDelay(delay) {
+      const index = timers.findIndex((timer) => timer.delay === delay);
+      if (index < 0) return false;
+      const [timer] = timers.splice(index, 1);
+      timer.fn();
+      await flush(4);
+      return true;
     },
     async click(label) {
       const node = harness
@@ -695,4 +818,337 @@ test("a failed save leaves the panel open with a status", async () => {
   await h.click("保存到 Example login");
   assert.match(h.panelText(), /保存失败/);
   assert.ok(h.panel(), "the panel stays open so the user can retry");
+});
+
+test("a page without a QR-sized candidate never reads innerText", async () => {
+  const h = makeHarness({ pathname: "/dashboard" });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "Scan this QR code with your authenticator app";
+    },
+  });
+  await h.runTimers();
+  assert.equal(reads, 0, "candidate discovery must run before page text");
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("layout-free heading and title text still recognizes a setup page", async () => {
+  const h = makeHarness({ pathname: "/dashboard" });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "";
+    },
+  });
+  const heading = h.document.createElement("h1");
+  heading.textContent = "Scan this QR code with your authenticator app";
+  h.document.documentElement.append(heading);
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.match(h.panelText(), /保存两步验证/);
+  assert.equal(reads, 0, "relevance must not force a layout flush");
+});
+
+test("body-only text is not used as a whole-page relevance signal", async () => {
+  const h = makeHarness({
+    pathname: "/dashboard",
+    bodyText: "Scan this QR code with your authenticator app",
+  });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "";
+    },
+  });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.panel(), null);
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+  assert.equal(reads, 0);
+});
+
+test("the OTP MutationObserver disconnects at the scan limit", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 24; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  assert.ok(h.detections() > 0, "the first batch was scanned");
+  assert.equal(h.otpObserver()?.disconnected, false);
+
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+
+  assert.equal(h.otpObserver()?.disconnected, true);
+  const scanned = h.detections();
+  assert.equal(scanned, 24, "each candidate is decoded at most once");
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), scanned, "no decode after the scan limit");
+});
+
+test("a candidate batch crossing the scan limit never decodes past 24", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 23; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 23, "the budget is partially consumed");
+
+  for (let index = 23; index < 27; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "only the remaining budget is decoded");
+  assert.equal(h.otpObserver()?.disconnected, true);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "the remaining batch stays undecoded");
+});
+
+test("the 24th valid candidate is offered inside the budget", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 23; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 23);
+
+  h.image(OTPAUTH);
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24);
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    true,
+    "the 24th in-budget result is still offered",
+  );
+  assert.equal(h.otpObserver()?.disconnected, true);
+});
+
+test("a hide or stop during a pending capture never opens the save panel", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.hide();
+  h.pagehide();
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("hiding during a pending decode cancels its offer", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.hide();
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+  assert.equal(h.panel(), null);
+});
+
+test("a late save response cannot close or update a hidden panel", async () => {
+  const h = makeHarness({ deferSave: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel());
+  await h.click("保存到 Example login");
+  assert.equal(h.pendingSaves(), 1);
+
+  h.hide();
+  assert.equal(h.resolveSave(), true);
+  await h.flush();
+  await h.flush();
+  assert.ok(h.panel(), "the late save response must not close the panel");
+  assert.match(h.panelText(), /正在保存/);
+  assert.doesNotMatch(h.panelText(), /已保存/);
+});
+
+test("runtime disable cancels a pending decode", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("runtime disable cancels a pending capture", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("runtime disable cancels a pending save response", async () => {
+  const h = makeHarness({ deferSave: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel());
+  await h.click("保存到 Example login");
+  assert.equal(h.pendingSaves(), 1);
+
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveSave(), true);
+  await h.flush();
+  await h.flush();
+  assert.ok(h.panel(), "the late save response must not close the panel");
+  assert.match(h.panelText(), /正在保存/);
+  assert.doesNotMatch(h.panelText(), /已保存/);
+});
+
+test("disable then enable rejects an old pending response", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("hidden then visible rejects an old pending generation", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.hide();
+  h.show();
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("a late initial settings read cannot overwrite a runtime disable", async () => {
+  const h = makeHarness({ deferStorage: true });
+  h.changeOtpSetting(false);
+  assert.equal(h.resolveStorage({ otpCapture: true }), true);
+  await h.flush();
+  await h.flush();
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("disable then enable rearms once after a busy old decode", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.flush();
+  assert.equal(await h.runTimerByDelay(2000), true);
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  h.changeOtpSetting(true);
+  assert.equal(await h.runTimerByDelay(1200), true);
+  assert.equal(h.pendingDecodes(), 1, "the busy timer did not start decode");
+
+  h.image(OTPAUTH);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  assert.equal(await h.runTimerByDelay(1200), true);
+  assert.equal(h.pendingDecodes(), 1, "one fresh decode was scheduled");
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.filter((message) => message.type === "inline-otp-capture").length,
+    1,
+    "duplicate state changes must not schedule duplicate scans",
+  );
+});
+
+test("a budget-exhausted observer is not rearmed", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 24; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24);
+  assert.equal(h.otpObserver()?.disconnected, true);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  h.hide();
+  h.show();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "the 24 budget is never reset");
+  assert.equal(h.otpObserver()?.disconnected, true);
+});
+
+test("a stop while decode is pending never offers the late result", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.pagehide();
+  assert.equal(h.otpObserver()?.disconnected, true);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+    "a late result after an explicit stop must not be offered",
+  );
 });

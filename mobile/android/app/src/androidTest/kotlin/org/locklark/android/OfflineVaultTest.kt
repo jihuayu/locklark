@@ -3,6 +3,7 @@ package org.locklark.android
 import android.app.KeyguardManager
 import android.content.pm.ApplicationInfo
 import android.graphics.Rect
+import android.view.ViewParent
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
@@ -12,6 +13,7 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
@@ -24,6 +26,7 @@ import org.locklark.android.security.NativeFailureCode
 import org.locklark.android.security.NativePhase
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -37,6 +40,10 @@ class OfflineVaultTest {
     private var currentControl = "unknown"
     private var controlPhase = "ready"
     private var imeHideRequested = false
+    private val observedViewport = Rect()
+    private val lastGeometry = AtomicReference<List<String>>(emptyList())
+    private fun rememberGeometry(entries: List<String>) { lastGeometry.set(entries) }
+    private var observedTicks = 0
     private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
         val fixture = File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json")
@@ -134,18 +141,108 @@ class OfflineVaultTest {
         val current = view(tag)
         return current?.isEnabled == true && current.isLaidOut && current.width > 0 && current.height > 0
     }
+    private fun appRoot(activity: MainActivity): View? =
+        activity.findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+    /**
+     * Bounded scrollBy delta toward [target]: the target's viewport-local rect
+     * (offsetDescendantRectToMyCoords) compared with [safe], the app-safe
+     * screen rect mapped into the same local space; 0 also when the target is
+     * in a nested scroller or the viewport is absent.
+     */
+    private fun scrollStep(activity: MainActivity, scroll: ScrollView, target: View, vertical: Boolean, safe: Rect): Int {
+        val root = appRoot(activity) ?: return 0
+        val targetRect = descendantRectInScroll(scroll, target) ?: return 0
+        return boundedScrollStep(targetRect, safeLocalRect(scroll, safe, root), vertical)
+    }
+    // Geometry values are bounded so the diagnostic stays a fixed-size number.
+    private fun frozen(value: Int): String = if (value in -999_999..999_999) value.toString() else "clamped"
+    /**
+     * Fixed numeric scroll geometry for failure context: the scroll offset, the
+     * ScrollView's screen position, padding and scroll range, the app-safe
+     * viewport mapped into viewport-local coordinates (viewport top/bottom)
+     * and in screen coordinates (safe top/bottom) and the target's full
+     * viewport-local rect and screen rect. Only coordinates and rectangle
+     * sizes, never text.
+     */
+    private fun scrollContext(activity: MainActivity, scroll: ScrollView?, target: View?): List<String> {
+        if (scroll == null || target == null) return listOf("scroll=none")
+        val rect = descendantRectInScroll(scroll, target) ?: return listOf("scroll=detached")
+        val location = IntArray(2).also { scroll.getLocationOnScreen(it) }
+        val targetScreen = IntArray(2).also { target.getLocationOnScreen(it) }
+        val screen = Rect(targetScreen[0], targetScreen[1], targetScreen[0] + target.width, targetScreen[1] + target.height)
+        val viewport = Rect()
+        if (!appViewport(activity, viewport)) return listOf("scroll=none")
+        val visible = appRoot(activity)?.let { safeLocalRect(scroll, viewport, it) } ?: Rect()
+        return listOf(
+            "scroll_y=" + frozen(scroll.scrollY),
+            "scroll_span=" + frozen(visible.height()),
+            "scroll_range=" + frozen(maxOf(0, scroll.getChildAt(0)?.height?.minus(scroll.height) ?: 0)),
+            "scroll_top=" + frozen(location[1]),
+            "scroll_height=" + frozen(scroll.height),
+            "scroll_pad_top=" + frozen(scroll.paddingTop),
+            "scroll_pad_bottom=" + frozen(scroll.paddingBottom),
+            "viewport_top=" + frozen(visible.top),
+            "viewport_bottom=" + frozen(visible.bottom),
+            "safe_top=" + frozen(viewport.top),
+            "safe_bottom=" + frozen(viewport.bottom),
+            "target_top=" + frozen(rect.top),
+            "target_bottom=" + frozen(rect.bottom),
+            "screen_top=" + frozen(screen.top),
+            "screen_bottom=" + frozen(screen.bottom),
+        )
+    }
+    /**
+     * Whether [target]'s full rect actually lies inside the app viewport of
+     * [activity]; computing an app viewport alone is not enough. On success
+     * [bounds] holds the target's full rect.
+     */
+    private fun targetInViewport(activity: MainActivity, target: View, bounds: Rect, viewport: Rect = Rect()): Boolean {
+        if (!appViewport(activity, viewport)) return false
+        return target.getGlobalVisibleRect(bounds) &&
+            bounds.width() == target.width && bounds.height() == target.height && viewport.contains(bounds)
+    }
+    /** One bounded native scroll toward a visible target; [moved] is set only if the container scrolled. */
+    private fun scrollToward(activity: MainActivity, target: View, moved: (Boolean) -> Unit): Boolean {
+        // The editor's own ScrollView: its content coordinates, not a page one.
+        val scroll = pageScroll(target) ?: return false
+        val safe = Rect()
+        if (!appViewport(activity, safe)) return false
+        // A partially visible target gets a bounded step too, toward full
+        // containment in the app-safe viewport.
+        val down = scrollStep(activity, scroll, target, true, safe)
+        val right = if (down == 0) scrollStep(activity, scroll, target, false, safe) else 0
+        val scrolled = scrollPageStep(target, true, down) || scrollPageStep(target, false, right)
+        moved(scrolled)
+        return scrolled
+    }
     private fun click(tag: String, dismissKeyboard: Boolean = true, deadline: Long = SystemClock.elapsedRealtime() + 180_000) {
         currentControl = tag
         controlPhase = "ready"
         imeHideRequested = false
+        observedViewport.setEmpty(); observedTicks = 0
         waitUntil("Native control unavailable", deadline) { ready(tag) }
         val bounds = Rect()
         val viewport = Rect()
         var previousBounds = Rect()
         var previousViewport = Rect()
         var previousVisible = false
-        var scrolledViewport: Rect? = null
-        var needsScroll = true
+        // Set when a bounded ScrollView.scrollBy or alignment was just issued, so
+        // the next observation can tell real container movement from a stuck
+        // range instead of waiting out the deadline.
+        var awaitingScroll = false
+        // The ScrollView offset captured BEFORE the last bounded scrollBy, and
+        // whether the target was partially visible when it was requested. A
+        // successful scroll changes the offset, so it is never mistaken for a
+        // stall.
+        var beforeOffset = Long.MIN_VALUE
+        var partial = false
+        // A control gets at most one native alignment request, only when a
+        // measured bounded step found no movable range. A second exhausted
+        // observation fails at once instead of re-requesting.
+        var alignedOnce = false
+        // The last live observation, attached to a failed wait so the
+        // diagnostic shows why the control was not clickable.
+        var liveGeometry: List<String> = emptyList()
         // IME appearance and padding/layout can arrive after a prior idle
         // observation. React to actual visibility while waiting, not only once
         // at entry. Only the owned window receives one hide request; BACK could
@@ -157,16 +254,14 @@ class OfflineVaultTest {
             var ime: Boolean? = null
             var requestedNow = false
             var scrolledNow = false
+            var inViewport = false
+            var stalled = false
             scenario.onActivity { activity ->
                 if (SystemClock.elapsedRealtime() >= deadline) return@onActivity
                 val target = activity.window.decorView.findViewWithTag<View>(tag)
                 ime = activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())
-                if (ime == null) {
-                    needsScroll = true
-                    return@onActivity
-                }
+                if (ime == null) return@onActivity
                 if (dismissKeyboard && ime == true) {
-                    needsScroll = true
                     if (!imeHideRequested && (activity.hasWindowFocus() || resumed) && SystemClock.elapsedRealtime() < deadline) {
                         activity.window.insetsController?.let { controller ->
                             imeHideRequested = true
@@ -177,14 +272,74 @@ class OfflineVaultTest {
                 } else if (target != null && target.isEnabled && target.isShown &&
                     (activity.hasWindowFocus() || resumed) &&
                     appViewport(activity, viewport)) {
-                    if ((needsScroll || scrolledViewport != viewport) && SystemClock.elapsedRealtime() < deadline) {
-                        target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
-                        scrolledViewport = Rect(viewport)
-                        needsScroll = false
-                        scrolledNow = true
-                    } else {
-                        visible = target.getGlobalVisibleRect(bounds) && bounds.width() == target.width &&
-                            bounds.height() == target.height && viewport.contains(bounds)
+                    val scroll: ScrollView? = pageScroll(target)
+                    // inViewport is only set when the control's own rect lies inside the
+                    // app viewport, not merely because an app viewport was computed.
+                    val shown = targetInViewport(activity, target, bounds, viewport)
+                    inViewport = shown
+                    val active = activity.hasWindowFocus() || resumed
+                    if (shown) {
+                        visible = true
+                    } else if (active && SystemClock.elapsedRealtime() < deadline) {
+                        liveGeometry = scrollContext(activity, scroll, target)
+                        // A previously issued bounded scrollBy succeeded only if
+                        // the container offset really differs from the one read
+                        // before the request; otherwise the range is exhausted.
+                        val pending = awaitingScroll
+                        val movedNow = scroll != null && pending && scrollOffset(scroll) != beforeOffset
+                        if (pending && !movedNow) {
+                            // One bounded request was issued and could not move
+                            // the container: fail fast instead of the deadline.
+                            stalled = true
+                        } else if (movedNow) {
+                            awaitingScroll = false; scrolledNow = true
+                        } else if (scroll == null) {
+                            // No owning ScrollView: the native alignment
+                            // request stays the only path, once.
+                            if (!alignedOnce) {
+                                target.requestRectangleOnScreen(Rect(0, 0, target.width, target.height), true)
+                                alignedOnce = true
+                            }
+                        } else {
+                            // Every not-yet-contained control now receives one
+                            // bounded ScrollView.scrollBy toward the app-safe
+                            // viewport, including a partially visible one whose
+                            // rect crosses an inset edge.
+                            partial = overlaps(bounds, viewport)
+                            val targetRect = descendantRectInScroll(scroll, target)
+                            val safe = appRoot(activity)?.let { safeLocalRect(scroll, viewport, it) } ?: Rect()
+                            val down = scrollStep(activity, scroll, target, true, viewport)
+                            val right = if (down == 0) scrollStep(activity, scroll, target, false, viewport) else 0
+                            var delta = if (down != 0) down else right
+                            // A control larger than the app-safe viewport
+                            // (or a step with no measurable geometry) can never
+                            // be fully contained: no-progress must not loop
+                            // into a step that only moves the overflow.
+                            val oversized = targetRect == null || safe.isEmpty ||
+                                targetRect.height() > safe.height() || targetRect.width() > safe.width()
+                            if (oversized) delta = 0
+                            val before = scrollOffset(scroll)
+                            val moved = delta != 0 && scrollPageStep(target, down != 0, delta)
+                            if (moved) {
+                                awaitingScroll = true; beforeOffset = before; scrolledNow = true
+                            } else if (!alignedOnce) {
+                                // No movable step (an exhausted range, an
+                                // oversized target, no owning scroller, or a
+                                // control not laid out in it): one native
+                                // alignment request remains.
+                                target.requestRectangleOnScreen(Rect(0, 0, target.width, target.height), true)
+                                alignedOnce = true
+                            } else if (partial || oversized) {
+                                // A partially visible or oversized control whose
+                                // range and alignment were both exhausted can
+                                // never be made fully visible: fail fast, and the
+                                // full-rect targetInViewport gate stays closed.
+                                stalled = true
+                            }
+                            // A fully offscreen control with no movable range is
+                            // still being laid out: the next observation
+                            // re-measures it.
+                        }
                     }
                 }
             }
@@ -202,13 +357,31 @@ class OfflineVaultTest {
                 return@waitUntil false
             }
             if (scrolledNow) {
+                rememberGeometry(liveGeometry)
                 previousBounds.setEmpty(); previousViewport.setEmpty()
                 previousVisible = false
                 controlPhase = "scroll"
                 return@waitUntil false
             }
-            controlPhase = "visibility"
-            val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport
+            // The stalled flag is raised only after the one allowed bounded
+            // request and alignment both made no progress, or after an
+            // oversized/partially visible target exhausted its range. It is
+            // terminal on the test thread, not thrown from scenario.onActivity.
+            // A missing tag is not stalled: it keeps the normal asynchronous
+            // observation until the existing deadline.
+            if (stalled) {
+                rememberGeometry(liveGeometry)
+                controlPhase = "clipped"
+                failWait("Native control not visible")
+            }
+            // An enabled control outside the app viewport is pending real
+            // scrolling, not a product failure; report its own phase.
+            controlPhase = if (inViewport) "visibility" else "offscreen"
+            // Only a stable full-rect observation inside the settled app viewport
+            // is a click target.
+            val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport &&
+                scrollComplete(viewport)
+            if (!stable) rememberGeometry(liveGeometry)
             previousBounds = Rect(bounds)
             previousViewport = Rect(viewport)
             previousVisible = visible
@@ -231,6 +404,14 @@ class OfflineVaultTest {
         }
         controlPhase = "released"
         instrumentation.waitForIdleSync()
+    }
+    private fun scrollComplete(viewport: Rect): Boolean {
+        if (viewport.isEmpty) {
+            viewport.set(observedViewport); observedTicks = 0
+            return false
+        }
+        if (viewport == observedViewport) observedTicks += 1 else { observedViewport.set(viewport); observedTicks = 0 }
+        return observedTicks >= 2
     }
     private fun appViewport(activity: MainActivity, viewport: Rect): Boolean {
         if (activity.window.decorView.rootWindowInsets == null) return false
@@ -461,4 +642,145 @@ class OfflineVaultTest {
             assertTrue("Late callback exposed a secret", text("secret-value").isEmpty())
         } finally { scenario.close() }
     }
+}
+
+/*
+ * Geometry shared by the page-scroll controller in OfflineVaultTest and the
+ * detached-layout geometry checks. Everything here is in ONE coordinate system:
+ * the owning ScrollView's viewport-local coordinates, the space that
+ * offsetDescendantRectToMyCoords returns and that scrollBy deltas act in.
+ * The app-safe screen rect is mapped into that space exactly once, by
+ * safeLocalRect, so no content, root/global or content-padded rect is mixed in.
+ */
+
+/** True when [a] and [b] share any area; either rectangle may be mutated. */
+internal fun overlaps(a: Rect, b: Rect): Boolean = Rect.intersects(a, b)
+
+/** The ScrollView's (scrollX, scrollY) as one comparable value. */
+internal fun scrollOffset(scroll: ScrollView): Long =
+    (scroll.scrollX.toLong() shl 32) or (scroll.scrollY.toLong() and 0xffffffffL)
+
+/**
+ * Bounded scrollBy delta that moves [target] toward the full containment of
+ * [visible], both viewport-local. 0 only when fully contained. Content is drawn
+ * at layout - scrollY, so a target past the trailing edge needs a positive
+ * delta and a target above the leading edge a negative one; the step is at
+ * least 1 and at most the half of the visible span and of the target, and near
+ * the viewport end it never exceeds the hidden part. The exact step size is not
+ * a contract: repetition must shrink the overflow monotonically until the
+ * target is fully contained.
+ *
+ * A target larger than the visible span can never be fully contained; it gets
+ * no-progress (0) instead of a step that would only move the overflow from one
+ * edge to the other.
+ */
+internal fun boundedScrollStep(target: Rect, visible: Rect, vertical: Boolean = true): Int {
+    if (visible.isEmpty) return 0
+    val (from, to, begin, end) = if (vertical)
+        listOf(target.top, target.bottom, visible.top, visible.bottom)
+    else listOf(target.left, target.right, visible.left, visible.right)
+    if (from >= begin && to <= end) return 0
+    val span = end - begin
+    val size = to - from
+    if (size > span) return 0
+    val clamp = maxOf(1, minOf(span / 2, size))
+    val raw = when {
+        // Past the trailing edge: pull the leading edge up by the hidden part.
+        to > end -> minOf(to - end, clamp)
+        // Above the leading edge: pull the trailing edge down.
+        from < begin -> -minOf(begin - from, clamp)
+        // Equal to the span but offset: align its leading edge.
+        else -> from - begin
+    }
+    // An edge-only overflow is never "in view": one unit toward that edge.
+    return if (raw == 0) (if (from < begin) -1 else 1) else raw
+}
+
+/** The page ScrollView that owns [target], searched up from the target only. */
+internal fun pageScroll(target: View): ScrollView? {
+    var parent: ViewParent? = target.parent
+    while (parent != null) {
+        if (parent is ScrollView) return parent as ScrollView
+        parent = parent.parent
+    }
+    return null
+}
+
+/**
+ * [target]'s full rect in [scroll]'s viewport-local coordinates. The raw
+ * offsetDescendantRectToMyCoords result is in the receiver's own coordinates,
+ * NOT its viewport-local ones: the API composes only the scroll of the
+ * ancestors between [target] and [scroll], never the receiver's own (scrollX,
+ * scrollY). The content is drawn at layout - scroll, so exactly the receiver's
+ * offset is subtracted on both axes to share the coordinate system that
+ * safeLocalRect and scrollBy deltas use. The result is the drawn position, not
+ * a stable content rect. Nested scrolling containers are not composed, so
+ * this returns null for a target inside a descendant ScrollView.
+ */
+internal fun descendantRectInScroll(scroll: ScrollView, target: View): Rect? {
+    if (pageScroll(target) !== scroll) return null
+    val rect = Rect(0, 0, target.width, target.height)
+    scroll.offsetDescendantRectToMyCoords(target, rect)
+    // offsetDescendantRectToMyCoords excludes the receiver's own scroll.
+    rect.offset(-scroll.scrollX, -scroll.scrollY)
+    return rect
+}
+
+/**
+ * The app-safe screen rect [safe] mapped into [scroll]'s viewport-local
+ * coordinates: safeScreen - the ScrollView's screen origin. Only screen rects
+ * are intersected (with [root]'s screen rect, so a parent clip is honoured
+ * before the map), then the result is clamped to the ScrollView's padding box
+ * [paddingLeft, paddingTop, width - paddingRight, height - paddingBottom],
+ * which is the stable window scrollTo can address. getLocationOnScreen is
+ * used for both rectangles and no global/content rect is mixed in. A
+ * ScrollView that is not shown or attached has no local window, unless
+ * [detached] allows deterministic detached fixtures (geometry checks only; the
+ * controller's click path always calls this for a live, shown target).
+ */
+internal fun safeLocalRect(scroll: ScrollView, safe: Rect, root: View, detached: Boolean = false): Rect {
+    if (!detached && (!scroll.isShown || !scroll.isAttachedToWindow)) return Rect()
+    if (scroll.width <= 0 || scroll.height <= 0) return Rect()
+    val location = IntArray(2).also { scroll.getLocationOnScreen(it) }
+    val origin = IntArray(2).also { root.getLocationOnScreen(it) }
+    val visible = Rect(safe)
+    visible.intersect(Rect(origin[0], origin[1], origin[0] + root.width, origin[1] + root.height))
+    if (visible.isEmpty) return Rect()
+    return Rect(visible).apply { offset(-location[0], -location[1]) }.apply {
+        intersect(Rect(scroll.paddingLeft, scroll.paddingTop,
+            scroll.width - scroll.paddingRight, scroll.height - scroll.paddingBottom))
+    }
+}
+
+/**
+ * One bounded native scroll step; true only if the owning container moved.
+ * [moved] receives the real (scrollX, scrollY) change, so a caller can compare
+ * it with the requested step instead of assuming it.
+ */
+internal fun scrollPageStep(target: View, vertical: Boolean, delta: Int, moved: (Int, Int) -> Unit = { _, _ -> }): Boolean {
+    val scroll = pageScroll(target) ?: return false
+    if (delta == 0) return false
+    val fromX = scroll.scrollX
+    val fromY = scroll.scrollY
+    if (vertical) scroll.scrollBy(0, delta) else scroll.scrollBy(delta, 0)
+    val dx = scroll.scrollX - fromX
+    val dy = scroll.scrollY - fromY
+    if (dx == 0 && dy == 0) return false
+    moved(dx, dy)
+    return true
+}
+
+/**
+ * Applies one requested (scroll by, real move) step on the owning ScrollView,
+ * measured from the offset before and after scrollBy. A detached ScrollView
+ * (only a test fixture) defers "cannot scroll" to a later layout pass: that
+ * flag would outlive an offset write, so it is cleared before each step.
+ */
+internal fun boundedScrollTo(scroll: ScrollView, target: View, vertical: Boolean, delta: Int): Pair<Int, Int> {
+    if (!scroll.isAttachedToWindow) scroll.suppressLayout(false)
+    val page = pageScroll(target) ?: return 0 to 0
+    val before = if (vertical) page.scrollY else page.scrollX
+    if (vertical) page.scrollBy(0, delta) else page.scrollBy(delta, 0)
+    val real = (if (vertical) page.scrollY else page.scrollX) - before
+    return if (real == 0) 0 to 0 else delta to real
 }

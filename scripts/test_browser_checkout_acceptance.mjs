@@ -2,6 +2,17 @@
 // These run without a browser, native host or private vault fixture.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer as createNetServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
@@ -9,6 +20,15 @@ import {
   checkoutRouteCase,
   chooseChildOrigin,
 } from "./browser_checkout_acceptance.mjs";
+import {
+  assertPrivateArtifacts,
+  assertPrivateText,
+  privacyDiagnostic,
+} from "./browser_save_acceptance.mjs";
+import {
+  sanitizeFailureReport,
+  sanitizeNativeSnapshot,
+} from "./browser_native_diagnostics.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
 const CARD_ORIGIN = "https://checkout.locklark.test:8443";
@@ -190,4 +210,525 @@ test("missing or duplicate public origins are never guessed or forced", async ()
     /Expected exactly one explicit checkout child origin/,
   );
   assert.deepEqual(duplicate.clicked, ["#detail-fill"]);
+});
+
+const PRIVACY_FIXTURE = {
+  Password: "synthetic-private-password",
+  CardVerification: "731",
+  CardPIN: "4826",
+  OTPCodes: ["654321"],
+};
+
+function privacyFailure(run) {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  assert.fail("privacy matcher did not fail");
+}
+
+function expectPrivacyFields(error, primaryErrorSeen, expected) {
+  const diagnostic = privacyDiagnostic(error, primaryErrorSeen);
+  assert.deepEqual(diagnostic, {
+    primary_error_seen: primaryErrorSeen,
+    ...expected,
+  });
+  return diagnostic;
+}
+
+test("privacy diagnostics keep only fixed fields and preserve primary", () => {
+  const failure = privacyFailure(() =>
+    assertPrivateText('{"cvv":"731"}', PRIVACY_FIXTURE, {
+      scan_source: "artifact",
+      artifact_class: "json",
+    }),
+  );
+  const diagnostic = expectPrivacyFields(failure, true, {
+    artifact_class: "json",
+    match_kind: "short_numeric",
+    canary_class: "CVV",
+    context_class: "credential_field",
+    scan_source: "artifact",
+  });
+  assert.doesNotMatch(
+    JSON.stringify(diagnostic),
+    /731|4826|654321|synthetic-private-password/,
+  );
+});
+
+test("privacy context is strict and unknown still fails", () => {
+  const cases = [
+    {
+      text: '{"pin":"4826"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "PIN",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"otp":"654321"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "otp",
+        canary_class: "OTP",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"password":"synthetic-private-password"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "exact",
+        canary_class: "exact",
+        context_class: "credential_field",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"timestamp":731}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "known_time_process_metadata",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"notes":"token 731"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "free_text",
+        scan_source: "controller",
+      },
+    },
+    {
+      text: '{"mystery":"731"}',
+      expected: {
+        artifact_class: "json",
+        match_kind: "short_numeric",
+        canary_class: "CVV",
+        context_class: "unknown",
+        scan_source: "controller",
+      },
+    },
+  ];
+  for (const item of cases) {
+    const failure = privacyFailure(() =>
+      assertPrivateText(item.text, PRIVACY_FIXTURE, {
+        scan_source: "controller",
+        artifact_class: item.expected.artifact_class,
+      }),
+    );
+    expectPrivacyFields(failure, false, item.expected);
+  }
+});
+
+test("mixed matches and adjacent metadata stay unknown", () => {
+  const cases = [
+    { text: '{"timestamp":731,"mystery":731}', artifact_class: "json" },
+    { text: "timestamp=731 mystery=731", artifact_class: "txt" },
+    { text: '{"timestamp":999,"mystery":"731"}', artifact_class: "json" },
+    { text: "timestamp=999 mystery=731", artifact_class: "txt" },
+    { text: '{"timestamp":731,"cvv":"731"}', artifact_class: "json" },
+    { text: "timestamp=731 cvv=731", artifact_class: "txt" },
+  ];
+  for (const item of cases) {
+    const failure = privacyFailure(() =>
+      assertPrivateText(item.text, PRIVACY_FIXTURE, {
+        scan_source: "controller",
+        artifact_class: item.artifact_class,
+      }),
+    );
+    expectPrivacyFields(failure, false, {
+      artifact_class: item.artifact_class,
+      match_kind: "short_numeric",
+      canary_class: "CVV",
+      context_class: "unknown",
+      scan_source: "controller",
+    });
+  }
+});
+
+test("artifact privacy failure reports class/source after primary", () => {
+  const state = mkdtempSync(join(tmpdir(), "locklark-privacy-"));
+  try {
+    writeFileSync(
+      join(state, "profile.log"),
+      '{"timestamp":731}\n',
+    );
+    const failure = privacyFailure(() =>
+      assertPrivateArtifacts(state, PRIVACY_FIXTURE),
+    );
+    const diagnostic = expectPrivacyFields(failure, true, {
+      artifact_class: "log",
+      match_kind: "short_numeric",
+      canary_class: "CVV",
+      context_class: "known_time_process_metadata",
+      scan_source: "artifact",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(diagnostic),
+      /locklark-privacy|731|4826|654321|synthetic-private-password/,
+    );
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+
+test("dual failure public output has no raw native data or path", () => {
+  const rawNative = {
+    available: true,
+    window: 424242,
+    x: 17,
+    y: 19,
+    clicks: [{ x: 1, y: 2, actor: "synthetic-actor" }],
+    controls: {
+      "批准本次填充": {
+        present: true,
+        enabled: true,
+        showing: true,
+        x: 3,
+        y: 4,
+        width: 5,
+        height: 6,
+      },
+      "取消本次填充": {
+        present: false,
+        enabled: false,
+        showing: false,
+      },
+      "备注正文": {
+        present: true,
+        enabled: false,
+        showing: true,
+        x: 7,
+        y: 8,
+        width: 9,
+        height: 10,
+      },
+    },
+  };
+  const safeNative = sanitizeNativeSnapshot(rawNative);
+  assert.deepEqual(safeNative, {
+    available: true,
+    clicks: 1,
+    controls: 2,
+    enabled: 1,
+    showing: 2,
+  });
+  assert.deepEqual(
+    sanitizeNativeSnapshot({
+      available: true,
+      clicks: [],
+      controls: [{ present: true, enabled: true, showing: true }],
+    }),
+    {
+      available: true,
+      clicks: 0,
+      controls: 0,
+      enabled: 0,
+      showing: 0,
+    },
+  );
+  assert.deepEqual(
+    sanitizeNativeSnapshot({
+      available: true,
+      clicks: [],
+      controls: { malformed: { enabled: true, showing: true } },
+    }),
+    {
+      available: true,
+      clicks: 0,
+      controls: 0,
+      enabled: 0,
+      showing: 0,
+    },
+  );
+  const rawReport = {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-stale:old-approval",
+    frames: ["/tmp/locklark-private/scripts/browser_native_acceptance.mjs:1:1"],
+    diagnostics: "/tmp/locklark-private",
+    popup: {
+      available: true,
+      status: "native-pending",
+      refreshDisabled: false,
+      candidates: 2,
+      path: "/tmp/locklark-private/failure-popup.png",
+    },
+    native: rawNative,
+  };
+  const report = sanitizeFailureReport(rawReport, [
+    "Synthetic checkout failure",
+  ]);
+  assert.deepEqual(report, {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-stale:old-approval",
+    popup: {
+      available: true,
+      status: "native-pending",
+      refreshDisabled: false,
+      candidates: 2,
+    },
+    native: {
+      available: true,
+      clicks: 1,
+      controls: 2,
+      enabled: 1,
+      showing: 2,
+    },
+  });
+  assert.deepEqual(
+    sanitizeFailureReport({ ...rawReport, native: safeNative }, [
+      "Synthetic checkout failure",
+    ]),
+    report,
+  );
+  const failure = privacyFailure(() =>
+    assertPrivateText('{"timestamp":731,"mystery":731}', PRIVACY_FIXTURE, {
+      scan_source: "artifact",
+      artifact_class: "json",
+    }),
+  );
+  const privacy = privacyDiagnostic(failure, true, {
+    scan_source: "artifact",
+  });
+  assert.equal(privacy.primary_error_seen, true);
+  assert.equal(privacy.context_class, "unknown");
+  const output = JSON.stringify({ report, privacy });
+  assert.match(output, /Synthetic checkout failure/);
+  assert.doesNotMatch(
+    output,
+    /\/tmp|locklark-private|424242|"window"|"x"|"y"|actor|\.png|731|4826|654321|synthetic-private-password|批准本次填充|取消本次填充|备注正文|"width"|"height"/,
+  );
+});
+
+function artifactFailure(files) {
+  const state = mkdtempSync(join(tmpdir(), "locklark-privacy-"));
+  try {
+    for (const [name, text] of files) {
+      writeFileSync(join(state, name), text);
+    }
+    return privacyFailure(() => assertPrivateArtifacts(state, PRIVACY_FIXTURE));
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
+}
+
+test("artifact privacy aggregates the full scan across files", () => {
+  const cases = [
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-credential.log", '{"cvv":"731"}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-credential.log", '{"cvv":"731"}\n'],
+        ["b-metadata.log", '{"timestamp":731}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-unknown.log", '{"mystery":"731"}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-unknown.log", '{"mystery":"731"}\n'],
+        ["b-metadata.log", '{"timestamp":731}\n'],
+      ],
+      artifact_class: "log",
+    },
+    {
+      files: [
+        ["a-metadata.log", '{"timestamp":731}\n'],
+        ["b-credential.json", '{"cvv":"731"}\n'],
+      ],
+      artifact_class: "unknown",
+    },
+  ];
+  for (const item of cases) {
+    const failure = artifactFailure(item.files);
+    const diagnostic = privacyDiagnostic(failure, false);
+    assert.equal(diagnostic.artifact_class, item.artifact_class);
+    assert.equal(diagnostic.match_kind, "short_numeric");
+    assert.equal(diagnostic.canary_class, "CVV");
+    assert.equal(diagnostic.context_class, "unknown");
+    assert.equal(diagnostic.scan_source, "artifact");
+    assert.equal(diagnostic.primary_error_seen, false);
+  }
+});
+
+test("artifact privacy keeps homogeneous contexts and still fails", () => {
+  const metadata = privacyDiagnostic(
+    artifactFailure([
+      ["a-metadata.log", '{"timestamp":731}\n'],
+      ["b-metadata.log", '{"pid":731}\n'],
+    ]),
+    false,
+  );
+  assert.equal(metadata.context_class, "known_time_process_metadata");
+  assert.equal(metadata.scan_source, "artifact");
+  const credential = privacyDiagnostic(
+    artifactFailure([
+      ["a-credential.log", '{"cvv":"731"}\n'],
+      ["b-credential.log", '{"pin":"731"}\n'],
+    ]),
+    false,
+  );
+  assert.equal(credential.context_class, "credential_field");
+  assert.equal(credential.scan_source, "artifact");
+});
+
+
+test("normal main boundary hides a synthetic dual failure", () => {
+  const helper = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const child = [
+    `import { runNativeMain } from ${JSON.stringify(helper)};`,
+    "await runNativeMain(async () => {",
+    '  console.log("primary: " + JSON.stringify({ reason: "Synthetic checkout failure" }));',
+    '  console.log("privacy: " + JSON.stringify({ primary_error_seen: true, artifact_class: "json", match_kind: "short_numeric", canary_class: "CVV", context_class: "unknown", scan_source: "artifact" }));',
+    '  throw new Error("raw canary 731 /tmp/locklark-private actor stack");',
+    "});",
+  ].join("\n");
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", child],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /primary: .*Synthetic checkout failure/);
+  assert.match(result.stdout, /privacy: .*"primary_error_seen":true/);
+  assert.doesNotMatch(result.stdout, /PASS/);
+  assert.equal(result.stderr, "Native browser acceptance failed\n");
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /731|\/tmp\/locklark-private|actor|Error:|\bat /,
+  );
+});
+
+
+test("normal main catches local listen failure and cleans owned setup", async () => {
+  const blocker = createNetServer();
+  await new Promise((resolve, reject) => {
+    blocker.once("error", reject);
+    blocker.listen(0, "127.0.0.1", resolve);
+  });
+  const port = blocker.address().port;
+  const state = mkdtempSync("/tmp/locklark-browser-acceptance-listen-");
+  writeFileSync(join(state, "diagnostics-private.log"), "synthetic");
+  const boundary = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const setup = new URL("./browser_native_setup.mjs", import.meta.url).href;
+  const child = [
+    'import { createServer } from "node:net";',
+    `import { runNativeMain } from ${JSON.stringify(boundary)};`,
+    `import { cleanupOwnedState, listenLoopback } from ${JSON.stringify(setup)};`,
+    "await runNativeMain(async () => {",
+    "  const state = process.env.LOCKLARK_TEST_OWNED_STATE;",
+    "  const server = createServer();",
+    "  let rejected = false;",
+    "  try {",
+    "    await listenLoopback(server, Number(process.env.LOCKLARK_TEST_LISTEN_PORT));",
+    "  } catch {",
+    "    rejected = true;",
+    "  }",
+    '  if (rejected) console.log("listen: rejected");',
+    "  if (server.listening) {",
+    "    await new Promise((resolve) => server.close(() => resolve()));",
+    "  }",
+    "  cleanupOwnedState(state);",
+    '  throw new Error("raw canary 731 /tmp/locklark-browser-acceptance-listen actor stack");',
+    "});",
+  ].join("\n");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", child],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LOCKLARK_TEST_LISTEN_PORT: String(port),
+          LOCKLARK_TEST_OWNED_STATE: state,
+        },
+      },
+    );
+    assert.equal(result.status, 1);
+    assert.equal(result.signal, null);
+    assert.match(result.stdout, /listen: rejected/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+    assert.equal(result.stderr, "Native browser acceptance failed\n");
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /731|\/tmp\/locklark-browser-acceptance-listen|actor|Error:|\bat /,
+    );
+    assert.equal(existsSync(state), false);
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+
+test("prebuilt failure is bounded before state creation", () => {
+  const prefixName = `locklark-browser-acceptance-prebuilt-negative-${process.pid}-${Date.now()}-`;
+  const statePrefix = join("/tmp", prefixName);
+  const boundary = new URL(
+    "./browser_native_error_boundary.mjs",
+    import.meta.url,
+  ).href;
+  const prebuilt = new URL(
+    "./browser_native_prebuilt.mjs",
+    import.meta.url,
+  ).href;
+  const child = [
+    `import { runNativeMain } from ${JSON.stringify(boundary)};`,
+    `import { loadPrebuiltBeforeState } from ${JSON.stringify(prebuilt)};`,
+    "await runNativeMain(async () => {",
+    "  loadPrebuiltBeforeState(process.cwd(), {},",
+    `    ${JSON.stringify(statePrefix)});`,
+    "});",
+  ].join("\n");
+  const result = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", child],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr,
+    "prebuilt Chromium input rejected\nNative browser acceptance failed\n",
+  );
+  assert.doesNotMatch(
+    result.stdout + result.stderr,
+    /731|\/tmp\/locklark-browser-acceptance|actor|Error:|\bat /,
+  );
+  assert.deepEqual(
+    readdirSync("/tmp").filter((name) => name.startsWith(prefixName)),
+    [],
+  );
 });

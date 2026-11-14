@@ -14,9 +14,21 @@ import {
   browserScreenshotsAllowed,
   assertPrivateText,
   assertPrivateArtifacts,
+  privacyDiagnostic,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
+
+import {
+  sanitizeFailureReport,
+  sanitizeNativeSnapshot,
+} from "./browser_native_diagnostics.mjs";
+import { runNativeMain } from "./browser_native_error_boundary.mjs";
+import {
+  cleanupOwnedState,
+  listenLoopback,
+  writeDiagnosticHandoff,
+} from "./browser_native_setup.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
@@ -26,7 +38,13 @@ import {
   prepareSharedEnvironment,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
+import { loadPrebuiltBeforeState } from "./browser_native_prebuilt.mjs";
 
+async function main() {
+let ownedState = null;
+let ownedServer = null;
+let setupComplete = false;
+try {
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 
 const scanController = captureControllerOutput();
@@ -52,8 +70,10 @@ assert(
     ),
   "Unsupported acceptance failure stage",
 );
-const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
+const { prebuilt, state } = loadPrebuiltBeforeState(root, env);
+ownedState = state;
+const { extension, register } = prebuilt;
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
 const sharedEnvironment =
@@ -156,8 +176,10 @@ const server = createServer(
     );
   },
 );
-await new Promise((r) => server.listen(0, "127.0.0.1", r));
+ownedServer = server;
+await listenLoopback(server);
 const origin = "https://login.locklark.test:" + server.address().port;
+setupComplete = true;
 let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -169,6 +191,16 @@ async function eventually(check, message, limit = 10000) {
   }
   throw Error(message);
 }
+let primaryErrorSeen = false;
+const recordPrivacyFailure = (error, source) => {
+  const diagnostic = privacyDiagnostic(error, primaryErrorSeen, {
+    scan_source: source,
+  });
+  console.error(
+    "Native browser privacy diagnostic: " + JSON.stringify(diagnostic),
+  );
+  throw Error("Native browser privacy acceptance failed");
+};
 try {
   execFileSync(
     go,
@@ -189,10 +221,8 @@ try {
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
   execFileSync(
-    go,
+    register,
     [
-      "run",
-      "./cmd/locklark-browser-register",
       "--browser",
       browserName === "edge" ? "edge" : "chrome",
       "--host",
@@ -202,10 +232,6 @@ try {
     ],
     { cwd: root, env, stdio: "inherit" },
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "chromium"], {
-    cwd: root,
-  });
-  const extension = join(root, "browser-extension/dist/chromium");
   browser = await chromium.launchPersistentContext(profile, {
     headless: false,
     channel: browserName === "edge" ? undefined : "chromium",
@@ -771,6 +797,7 @@ try {
   }
   }
 } catch (error) {
+  primaryErrorSeen = true;
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
@@ -825,21 +852,17 @@ try {
     "Changed checkout document did not finish",
     "Changed checkout document received a value",
   ];
-  const report = {
+  const rawReport = {
     reason: safeReasons.includes(error?.message)
       ? error.message
       : "unclassified acceptance failure",
-    frames:
-      typeof error?.stack === "string"
-        ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
-        : [],
     stage,
     popup: { available: false },
     native: { available: false },
   };
   if (lastPopup) {
     try {
-      report.popup = {
+      rawReport.popup = {
         available: true,
         status: popupStatusKind(await lastPopup.text("#status")),
         refreshDisabled: await lastPopup.disabled("#refresh"),
@@ -856,13 +879,17 @@ try {
   } catch {}
   if (nativeInput) {
     try {
-      report.native = { available: true, ...nativeInput([], true, true) };
+      const nativeSnapshot = nativeInput([], true, true);
+      rawReport.native = sanitizeNativeSnapshot({
+        ...nativeSnapshot,
+        available: true,
+      });
       if (browserScreenshotsAllowed(stage)) {
         execFileSync(
           "import",
           [
             "-window",
-            String(report.native.window),
+            String(nativeSnapshot.window),
             join(diagnostics, "failure-native.png"),
           ],
           { env, stdio: "ignore" },
@@ -870,20 +897,37 @@ try {
       }
     } catch {}
   }
+  const report = sanitizeFailureReport(rawReport, safeReasons);
   writeFileSync(
     join(diagnostics, "failure.json"),
     JSON.stringify(report, null, 2) + "\n",
     { mode: 0o600 },
   );
   console.error("Native browser diagnostic: " + JSON.stringify(report));
-  console.error("Synthetic diagnostic directory: " + diagnostics);
+  console.error("Synthetic diagnostic directory retained locally");
+  writeDiagnosticHandoff(state);
   throw Error("Native browser acceptance failed at " + stage);
 } finally {
   if (browser) await browser.close();
   await new Promise((r) => server.close(r));
   if (observedFixture) {
-    assertPrivateArtifacts(state, observedFixture);
+    try {
+      assertPrivateArtifacts(state, observedFixture);
+    } catch (error) {
+      recordPrivacyFailure(error, "artifact");
+    }
+    try {
+      scanController(observedFixture);
+    } catch (error) {
+      recordPrivacyFailure(error, "controller");
+    }
+  }
+}
+if (observedFixture) {
+  try {
     scanController(observedFixture);
+  } catch (error) {
+    recordPrivacyFailure(error, "controller");
   }
 }
 console.log(
@@ -896,5 +940,17 @@ console.log(
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );
 console.log("Private synthetic artifacts: " + state);
+} catch (error) {
+  if (!setupComplete) {
+    try {
+      if (ownedServer && ownedServer.listening) {
+        await new Promise((resolve) => ownedServer.close(() => resolve()));
+      }
+    } catch {}
+    cleanupOwnedState(ownedState);
+  }
+  throw error;
+}
+}
 
-if (observedFixture) scanController(observedFixture);
+await runNativeMain(main);
