@@ -3461,9 +3461,12 @@ def _checkout_picker_diagnostics(value: Any) -> dict[str, Any] | None:
         fixed: dict[str, Any] = {}
         for field in _PICKER_DIAGNOSTIC_FIELDS:
             entry = probe.get(field)
-            if entry not in (True, False, "unavailable"):
+            if type(entry) is bool:
+                fixed[field] = entry
+            elif type(entry) is str and entry == "unavailable":
+                fixed[field] = entry
+            else:
                 return None
-            fixed[field] = entry
         out[frame] = fixed
     return out
 
