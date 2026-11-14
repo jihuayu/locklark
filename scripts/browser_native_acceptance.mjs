@@ -33,7 +33,9 @@ import {
   recordNativeFailure,
 } from "./browser_native_failure_report.mjs";
 import {
+  prebuiltEnvConfigured,
   requirePrebuiltExtension,
+  validateNativeRegister,
 } from "./browser_extension_prebuilt.mjs";
 import {
   EDGE_BACKGROUND_URL,
@@ -232,7 +234,7 @@ if (edgePairDisconnect) {
 // their order; only a refused mixed run loses them.
 normalCheckoutMode = !routeDetailRead && !edgeManagerInstall;
 startupMarkup(0);
-if (register)
+if (register && (!prebuiltEnvConfigured() || edgeManagerInstall))
   assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
 assert(
   host && process.env.DISPLAY,
@@ -1616,6 +1618,9 @@ try {
   const prebuiltChromium = edgeManagerInstall
     ? null
     : requirePrebuiltExtension(root, "chromium");
+  const nativeRegister = prebuiltChromium
+    ? validateNativeRegister(process.env)
+    : register;
   // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
   const fixtureExecutable = browserFixtureExecutable({ go, root, env, state });
@@ -1644,8 +1649,8 @@ try {
     join(profile, "NativeMessagingHosts/org.locklark.browser.json"),
   ];
   execFileSync(
-    register || go,
-    register ? registerArgs : ["run", "./cmd/locklark-browser-register", ...registerArgs],
+    nativeRegister || go,
+    nativeRegister ? registerArgs : ["run", "./cmd/locklark-browser-register", ...registerArgs],
     { cwd: root, env, stdio: "inherit" },
   );
   let extension;

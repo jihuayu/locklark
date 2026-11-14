@@ -30,7 +30,10 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { requirePrebuiltExtension } from "./browser_extension_prebuilt.mjs";
+import {
+  requirePrebuiltExtension,
+  validateNativeRegister,
+} from "./browser_extension_prebuilt.mjs";
 import {
   acceptBrowserSave,
   captureControllerOutput,
@@ -97,7 +100,8 @@ const firefox =
   ).firefox.executablePath();
 const geckodriver = process.env.LOCKLARK_GECKODRIVER || "geckodriver";
 const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
-const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
+const rawRegister = process.env.LOCKLARK_BROWSER_REGISTER;
+const register = rawRegister ? resolve(rawRegister) : "";
 const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 const sharedClipboard = process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1";
@@ -742,7 +746,11 @@ for (const event of ["uncaughtException", "unhandledRejection"]) {
   });
 }
 try {
-  for (const path of [firefox, host, register])
+  const prebuilt = requirePrebuiltExtension(root, "firefox");
+  const nativeRegister = prebuilt
+    ? validateNativeRegister(process.env)
+    : register;
+  for (const path of [firefox, host, nativeRegister])
     assert(existsSync(path), "Missing required test input: " + path);
   const driverVersion = execFileSync(geckodriver, ["--version"], { env })
     .toString()
@@ -751,7 +759,6 @@ try {
     driverVersion.startsWith("geckodriver 0.36.0 "),
     "Use the pinned and verified geckodriver 0.36.0",
   );
-  const prebuilt = requirePrebuiltExtension(root, "firefox");
   let extension;
   if (prebuilt) {
     extension = prebuilt.extension;
@@ -923,7 +930,7 @@ try {
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
   observedFixture = fixture;
   execFileSync(
-    register,
+    nativeRegister,
     [
       "--browser",
       "firefox",

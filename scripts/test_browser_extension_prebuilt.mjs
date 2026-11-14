@@ -8,6 +8,8 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
+  chmodSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -156,12 +158,55 @@ test("missing and partial env, and consumer mismatch, fail without build", async
   assert.equal(existsSync(marker), false);
 });
 
+
+test("native register validation is absolute, regular, nonempty and executable", async () => {
+  const base = privateBase();
+  const helper = await import(pathToFileURL(HELPER));
+  const valid = join(base, "register");
+  writeFileSync(valid, "#!/bin/sh\nexit 0\n");
+  chmodSync(valid, 0o755);
+  assert.equal(
+    helper.validateNativeRegister({ LOCKLARK_BROWSER_REGISTER: valid }),
+    valid,
+  );
+  const invalid = [
+    {},
+    { LOCKLARK_BROWSER_REGISTER: "relative/register" },
+    { LOCKLARK_BROWSER_REGISTER: join(base, "missing") },
+  ];
+  const empty = join(base, "empty");
+  writeFileSync(empty, "");
+  chmodSync(empty, 0o755);
+  invalid.push({ LOCKLARK_BROWSER_REGISTER: empty });
+  const nonexec = join(base, "nonexec");
+  writeFileSync(nonexec, "#!/bin/sh\nexit 0\n");
+  chmodSync(nonexec, 0o644);
+  invalid.push({ LOCKLARK_BROWSER_REGISTER: nonexec });
+  const link = join(base, "link");
+  symlinkSync(valid, link);
+  invalid.push({ LOCKLARK_BROWSER_REGISTER: link });
+  for (const env of invalid) {
+    assert.throws(
+      () => helper.validateNativeRegister(env),
+      { message: helper.NATIVE_REGISTER_ERROR },
+    );
+    try {
+      helper.validateNativeRegister(env);
+    } catch (error) {
+      assert.equal(String(error.message).includes(base), false);
+    }
+  }
+});
+
 test("local default and native/Edge/T2 wiring remain explicit", () => {
   const native = readFileSync(NATIVE, "utf8");
   const firefox = readFileSync(FIREFOX_NATIVE, "utf8");
   const harness = readFileSync(HARNESS, "utf8");
   const support = readFileSync(SUPPORT, "utf8");
   assert.match(native, /edgeManagerInstall\s*\?\s*null\s*:\s*requirePrebuiltExtension/);
+  assert.match(native, /validateNativeRegister\(process\.env\)/);
+  assert.ok(native.indexOf("validateNativeRegister(process.env)") < native.lastIndexOf("browserFixtureExecutable"));
+  assert.match(firefox, /validateNativeRegister\(process\.env\)/);
   assert.ok(native.indexOf("try {") < native.indexOf("const prebuiltChromium"));
   assert.ok(native.indexOf("const prebuiltChromium") < native.lastIndexOf("browserFixtureExecutable"));
   assert.ok(firefox.indexOf("requirePrebuiltExtension(root, \"firefox\")") < firefox.indexOf("create private synthetic fixture"));
