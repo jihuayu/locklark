@@ -33,10 +33,13 @@ Store the blank environment secret `RELEASE_METADATA_READ_TOKEN` only after
 that protection exists; filling its value is an owner step outside this task.
 
 The token is a repository-scoped fine-grained read-only token covering
-Administration, Secrets, Environments, Actions, and Metadata for the metadata
-API. No write scope is recommended. The workflow checkout uses the separate
-builtin read-only token. The authorize job never receives production signing
-keys, and it never falls back to the builtin token for metadata API reads.
+Administration, Secrets, Environments, Actions, Metadata, and Contents for the
+metadata API. `Contents: read` is required for the
+`GET /repos/{repo}/branches/main` branch metadata read; the separate builtin
+checkout token only fetches Git objects and does not supply GH CLI/API scopes.
+No write scope is recommended. The authorize job never receives production
+signing keys, and it never falls back to the builtin token for metadata API
+reads.
 
 A ruleset's `bypass_actors` may be redacted depending on the repository
 user/write role and token scope. Absent or redacted bypass metadata is refused;

@@ -81,8 +81,10 @@ bootstrap delivery was safe.
 
 Fill the blank environment secret outside this task with a repository-scoped
 fine-grained token whose read scopes cover Administration, Secrets,
-Environments, Actions, and Metadata. No write grant is recommended. Git object
-fetching uses the separate builtin read-only checkout token.
+Environments, Actions, Metadata, and Contents. `Contents: read` is required
+because the same metadata token performs the `GET /repos/{repo}/branches/main`
+branch metadata read; the separate builtin checkout token only fetches Git
+objects and does not supply GH CLI/API scopes. No write grant is recommended.
 
 Ruleset `bypass_actors` visibility depends on the repository user/write role
 versus the token's read scopes; the primary GitHub documentation does not
