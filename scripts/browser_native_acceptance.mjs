@@ -2992,7 +2992,7 @@ try {
     phase("post-repair:route-click");
     // The physical row click starts the actual normal QuickFill=false route
     // path: one persistent route tab, never a popup item-get.
-    await popup.click(target);
+    await popup.click(target, { expectedRouteClose: true });
     let opened;
     await eventually(async () => {
       const candidates = (await routeTargets()).filter(
