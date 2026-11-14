@@ -25,7 +25,9 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _verify(product: str, prepared_dir: Path, dist_dir: Path, root: Path) -> dict:
+def _verify_details(
+    product: str, prepared_dir: Path, dist_dir: Path, root: Path
+) -> tuple[dict, dict[str, bytes], bytes]:
     if product not in allowlist.PRODUCTS:
         _fail()
     root = Path(root)
@@ -76,13 +78,29 @@ def _verify(product: str, prepared_dir: Path, dist_dir: Path, root: Path) -> dic
         "identity": allowlist.identity_for(product),
         "entries": len(rebuilt),
         "zip_sha256": _digest(zip_bytes),
-    }
+    }, rebuilt, zip_bytes
+
+
+def _verify(product: str, prepared_dir: Path, dist_dir: Path, root: Path) -> dict:
+    return _verify_details(product, prepared_dir, dist_dir, root)[0]
 
 
 def verify_prebuilt(product: str, prepared_dir: Path, dist_dir: Path, root: Path = ROOT) -> dict:
     """Return fixed metadata only after every strict consumer check passes."""
     try:
         return _verify(product, prepared_dir, dist_dir, root)
+    except ReleaseError:
+        raise ReleaseError(ERROR) from None
+    except Exception:
+        raise ReleaseError(ERROR) from None
+
+
+def verify_prebuilt_bytes(
+    product: str, prepared_dir: Path, dist_dir: Path, root: Path = ROOT
+) -> tuple[dict, dict[str, bytes], bytes]:
+    """Return verified bundle bytes and ZIP for race-free downstream reuse."""
+    try:
+        return _verify_details(product, prepared_dir, dist_dir, root)
     except ReleaseError:
         raise ReleaseError(ERROR) from None
     except Exception:
