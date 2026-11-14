@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/updater"
 )
 
@@ -46,17 +47,21 @@ func runUpdaterStartupHelperMain() (code int, handled bool) {
 		return 1, true
 	}
 
+	dir, e := os.MkdirTemp("", "locklark-updater-startup-")
+	if e != nil {
+		fmt.Fprintln(os.Stderr, "updater startup helper: cannot create owned data directory")
+		return 1, true
+	}
+	defer os.RemoveAll(dir)
+	// Keep the real HOME/CODEX_HOME and other user directories untouched.
+	// This helper process owns only its MyGo user-data directory.
+	mygo.App.SetPath(mygo.PathUserData, dir)
+
 	desktopStartupBoundary = func() error { return errUpdaterStartupBoundary }
 	var err error
 	if mode == "run" {
 		err = Run()
 	} else {
-		dir, e := os.MkdirTemp("", "locklark-updater-startup-")
-		if e != nil {
-			fmt.Fprintln(os.Stderr, "updater startup helper: cannot create settings directory")
-			return 1, true
-		}
-		defer os.RemoveAll(dir)
 		err = RunWithSettingsPath(filepath.Join(dir, "settings.json"))
 	}
 	if !errors.Is(err, errUpdaterStartupBoundary) {
@@ -116,24 +121,16 @@ func runUpdaterStartupHelper(t *testing.T, mode string) (string, int) {
 	if err != nil {
 		t.Fatalf("locate test binary: %v", err)
 	}
-	home := t.TempDir()
-	env := make([]string, 0, len(os.Environ())+4)
+	env := make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case updaterStartupHelperEnv, "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
-			"LOCKLARK_NATIVE_SMOKE", "LOCKLARK_NATIVE_FOREGROUND", "LOCKLARK_SCREENSHOTS":
+		case updaterStartupHelperEnv, "LOCKLARK_NATIVE_SMOKE", "LOCKLARK_NATIVE_FOREGROUND", "LOCKLARK_SCREENSHOTS":
 			continue
 		}
 		env = append(env, entry)
 	}
-	env = append(env,
-		updaterStartupHelperEnv+"="+mode,
-		"HOME="+home,
-		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
-		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
-		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
-	)
+	env = append(env, updaterStartupHelperEnv+"="+mode)
 	ctx, cancel := context.WithTimeout(context.Background(), updaterHelperTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestUpdaterStartupHelper$")
