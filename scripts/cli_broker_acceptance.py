@@ -46,13 +46,16 @@ ACTIVATION_RESULT = {"activated": True}
 TITLE = "Locklark · 本地金库"
 APPROVE_LABEL = "仅批准本次 CLI 请求"
 UNLOCK_FIELDS = ("金库文件", "主密码", "Secret Key")
+EMERGENCY_ENTRY_LABEL = "使用应急资料…"
+UNLOCK_READY_FIELDS = UNLOCK_FIELDS[:2] + (EMERGENCY_ENTRY_LABEL,)
+SECRET_FIELD = UNLOCK_FIELDS[2]
 UNLOCK_LABEL = "解锁"
 UNLOCKED_LABEL = "新建登录"
 
 # Optional read-only inspect diagnostic after the terminal unlock wait. Only
 # these fixed labels and fixed control record fields are read; every value must
 # be a built-in boolean. The status object is exactly four built-in booleans.
-LOCKED_CONTROLS = ("金库文件", "主密码", "Secret Key", UNLOCK_LABEL)
+LOCKED_CONTROLS = ("金库文件", "主密码", SECRET_FIELD, UNLOCK_LABEL)
 CONTROL_RECORD_FIELDS = ("present", "enabled", "showing")
 STATUS_FIELDS = ("available", "generic_unlock_error",
                  "secret_key_format_error", "processing")
@@ -121,14 +124,20 @@ def inspect_summary_line(summary):
 def unlock_plans(vault, master, secret):
     """Fixed synthetic unlock actions split into bounded driver plans.
 
-    The order is the original nine-action sequence. Each plan is one fresh
-    request, so the per-request observation budget is never shared across the
-    whole unlock flow; a failing plan still stops the sequence.
+    The default desktop starts with the Secret Key field hidden. The sequence
+    therefore enters the file and master password, clicks the exact explicit
+    "使用应急资料…" entry, re-proves the now-visible Secret Key control, and only
+    then enters the fixture factor and unlocks. Each plan is one fresh request,
+    so the per-request observation budget is never shared across the whole
+    unlock flow; a failing plan still stops the sequence and later actions are
+    never sent.
     """
     return (
         ({"click_label": "金库文件"}, {"key": "Super_L+a"}, {"text": str(vault)}),
         ({"click_label": "主密码"}, {"text": master}),
-        ({"click_label": "Secret Key"}, {"text": secret}),
+        ({"click_label": EMERGENCY_ENTRY_LABEL},),
+        ({"wait_label": SECRET_FIELD},),
+        ({"click_label": SECRET_FIELD}, {"text": secret}),
         ({"click_label": UNLOCK_LABEL},),
         ({"wait_label": UNLOCKED_LABEL},),
     )
@@ -899,7 +908,11 @@ class Acceptance:
 
     def wait_unlock_fields(self):
         retry_deadline = min(self.deadline, time.monotonic() + 45)
-        actions = [{"wait_label": label} for label in UNLOCK_FIELDS]
+        # Readiness proves the owned window's visible file/master controls and
+        # the exact explicit emergency entry. Secret Key is hidden until that
+        # entry is clicked, so it is deliberately not part of the initial wait;
+        # the unlock plans re-prove it after the real click.
+        actions = [{"wait_label": label} for label in UNLOCK_READY_FIELDS]
         while True:
             try:
                 self.driver(actions, "desktop")

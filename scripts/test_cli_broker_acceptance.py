@@ -487,11 +487,16 @@ class ActivationOrderTests(unittest.TestCase):
             instance.activation_request()
 
 
-def inspect_controls(present=True, showing=True, new_login=False):
+def inspect_controls(present=True, showing=True, new_login=False, hidden=()):
     """One synthetic existing label-keyed controls map with fixed records."""
+    hidden = set(hidden)
     labels = ("金库文件", "主密码", "Secret Key", "解锁")
     controls = {
-        label: {"present": present, "enabled": False, "showing": showing}
+        label: {
+            "present": present and label not in hidden,
+            "enabled": False,
+            "showing": showing and label not in hidden,
+        }
         for label in labels
     }
     controls["新建登录"] = {
@@ -500,10 +505,10 @@ def inspect_controls(present=True, showing=True, new_login=False):
     return controls
 
 
-def inspect_result(present=True, showing=True, new_login=False):
+def inspect_result(present=True, showing=True, new_login=False, hidden=()):
     """One synthetic inspect result carrying only the two fixed boolean maps."""
     return {
-        "controls": inspect_controls(present, showing, new_login),
+        "controls": inspect_controls(present, showing, new_login, hidden),
         "status": {
             "available": True,
             "generic_unlock_error": False,
@@ -563,6 +568,15 @@ class InspectSummaryTests(unittest.TestCase):
             "secret_key_format_error": True,
             "processing": False,
         })
+
+    def test_hidden_secret_is_reported_not_ready(self):
+        summary = acceptance.inspect_summary(
+            inspect_result(hidden=("Secret Key",)))
+        self.assertTrue(summary["snapshot_available"])
+        self.assertFalse(summary["locked_present"])
+        self.assertFalse(summary["locked_showing"])
+        self.assertFalse(summary["new_login_present"])
+        self.assertNotIn("Secret Key", acceptance.inspect_summary_line(summary))
 
     def test_malformed_status_or_controls_collapse_to_all_false(self):
         empty = acceptance.empty_inspect_summary()
@@ -685,13 +699,15 @@ class UnlockPlanTests(unittest.TestCase):
         return instance
 
     def original_actions(self, instance):
-        """The pre-split nine-action sequence, written independently here."""
+        """The complete explicit-entry unlock sequence, written independently."""
         return [
             {"click_label": "金库文件"},
             {"key": "Super_L+a"},
             {"text": str(instance.fixture.vault)},
             {"click_label": "主密码"},
             {"text": self.MASTER},
+            {"click_label": "使用应急资料…"},
+            {"wait_label": "Secret Key"},
             {"click_label": "Secret Key"},
             {"text": self.SECRET},
             {"click_label": "解锁"},
@@ -706,6 +722,8 @@ class UnlockPlanTests(unittest.TestCase):
                 {"text": str(instance.fixture.vault)},
             ],
             [{"click_label": "主密码"}, {"text": self.MASTER}],
+            [{"click_label": "使用应急资料…"}],
+            [{"wait_label": "Secret Key"}],
             [{"click_label": "Secret Key"}, {"text": self.SECRET}],
             [{"click_label": "解锁"}],
             [{"wait_label": "新建登录"}],
@@ -718,7 +736,74 @@ class UnlockPlanTests(unittest.TestCase):
         self.assertEqual(plans, tuple(tuple(plan) for plan in self.expected_plans(instance)))
         self.assertEqual([action for plan in plans for action in plan],
                          self.original_actions(instance))
-        self.assertEqual(len(plans), 5)
+        self.assertEqual(len(plans), 7)
+
+    def test_readiness_waits_exact_entry_but_not_hidden_secret(self):
+        instance = self.acceptance()
+        requests = []
+
+        def run_driver(request):
+            requests.append(json.loads(request))
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()):
+            instance.wait_unlock_fields()
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(
+            requests[0]["actions"],
+            [{"wait_label": label} for label in acceptance.UNLOCK_READY_FIELDS],
+        )
+        waited = [action.get("wait_label") for action in requests[0]["actions"]]
+        self.assertIn("使用应急资料…", waited)
+        self.assertNotIn("Secret Key", waited)
+
+    def test_readiness_refuses_when_real_entry_is_missing(self):
+        instance = self.acceptance()
+        instance.deadline = time.monotonic()
+        requests = []
+
+        def run_driver(request):
+            requests.append(json.loads(request))
+            raise acceptance.DriverRetry("control-missing")
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(acceptance.AcceptanceFailure):
+            instance.wait_unlock_fields()
+
+        self.assertEqual(len(requests), 1)
+        waited = [action.get("wait_label") for action in requests[0]["actions"]]
+        self.assertIn("使用应急资料…", waited)
+        self.assertNotIn("Secret Key", waited)
+        self.assertNotIn("native_unlock_fields_and_button", instance.checks)
+
+    def test_opt_in_precedes_reproved_secret_and_all_factors_remain(self):
+        instance = self.acceptance()
+        actions = [
+            action
+            for plan in acceptance.unlock_plans(
+                instance.fixture.vault, self.MASTER, self.SECRET
+            )
+            for action in plan
+        ]
+        labels = [action.get("click_label") for action in actions]
+        entry = labels.index("使用应急资料…")
+        secret = labels.index("Secret Key")
+        self.assertLess(entry, secret)
+        self.assertLess(
+            actions.index({"wait_label": "Secret Key"}), secret
+        )
+        for required in (
+            {"text": str(instance.fixture.vault)},
+            {"text": self.MASTER},
+            {"text": self.SECRET},
+            {"click_label": "使用应急资料…"},
+            {"click_label": "解锁"},
+            {"wait_label": "新建登录"},
+        ):
+            self.assertIn(required, actions)
 
     def test_each_plan_is_one_fresh_exact_driver_request(self):
         instance = self.acceptance()
@@ -768,6 +853,9 @@ class UnlockPlanTests(unittest.TestCase):
                          expected_plans[:3])
         self.assertEqual(len(requests), 3)
         self.assertFalse(any(request["actions"] == [] for request in requests))
+        sent = [action for request in requests for action in request["actions"]]
+        self.assertNotIn({"click_label": "Secret Key"}, sent)
+        self.assertNotIn({"click_label": "解锁"}, sent)
         self.assertEqual(instance.output_lines, [])
         self.assertNotIn("native_unlock_fields_and_button", instance.checks)
 
