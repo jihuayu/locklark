@@ -278,6 +278,39 @@ class AuthorizationTests(unittest.TestCase):
             "owner": {"login": OWNER, "type": owner_type},
         }
 
+    def valid_status_checks(self) -> dict[str, object]:
+        return {
+            "strict": True,
+            "contexts": [trust.REQUIRED_STATUS_CHECK_CONTEXT],
+            "checks": [
+                {
+                    "context": trust.REQUIRED_STATUS_CHECK_CONTEXT,
+                    "app_id": trust.GITHUB_ACTIONS_APP_ID,
+                }
+            ],
+        }
+
+    def valid_reviews(self) -> dict[str, object]:
+        return {
+            "required_approving_review_count": 1,
+            "dismiss_stale_reviews": True,
+            "require_last_push_approval": True,
+            "bypass_pull_request_allowances": {
+                "users": [],
+                "teams": [],
+                "apps": [],
+            },
+        }
+
+    def valid_protection(self) -> dict[str, object]:
+        return {
+            "required_status_checks": self.valid_status_checks(),
+            "required_pull_request_reviews": self.valid_reviews(),
+            "enforce_admins": {"enabled": True},
+            "allow_force_pushes": {"enabled": False},
+            "allow_deletions": {"enabled": False},
+        }
+
     def valid_transport(
         self,
         *,
@@ -301,16 +334,7 @@ class AuthorizationTests(unittest.TestCase):
                 "protected": True,
                 "commit": {"sha": default_commit},
             },
-            trust.branch_protection_api(REPOSITORY): {
-                "required_status_checks": {
-                    "strict": True,
-                    "contexts": ["check"],
-                    "checks": [{"context": "check"}],
-                },
-                "enforce_admins": {"enabled": True},
-                "allow_force_pushes": {"enabled": False},
-                "allow_deletions": {"enabled": False},
-            },
+            trust.branch_protection_api(REPOSITORY): self.valid_protection(),
             trust.rulesets_api(REPOSITORY): [
                 {"id": 7, "target": "tag", "enforcement": "active"}
             ],
@@ -668,6 +692,7 @@ class AuthorizationTests(unittest.TestCase):
 
     def test_protected_main_required_checks_and_no_force_delete(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
+        base = self.valid_protection()
         cases: list[tuple[str, object, trust.Refusal]] = [
             (
                 "protection absent",
@@ -675,55 +700,37 @@ class AuthorizationTests(unittest.TestCase):
                 trust.Refusal.BRANCH_PROTECTION_ABSENT,
             ),
             (
-                "no checks",
+                "contexts only",
                 {
+                    **base,
                     "required_status_checks": {
                         "strict": True,
-                        "contexts": [],
-                        "checks": [],
+                        "contexts": [trust.REQUIRED_STATUS_CHECK_CONTEXT],
                     },
-                    "enforce_admins": {"enabled": True},
-                    "allow_force_pushes": {"enabled": False},
-                    "allow_deletions": {"enabled": False},
                 },
                 trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             ),
             (
                 "force pushes",
-                {
-                    "required_status_checks": {"contexts": ["check"]},
-                    "enforce_admins": {"enabled": True},
-                    "allow_force_pushes": {"enabled": True},
-                    "allow_deletions": {"enabled": False},
-                },
+                {**base, "allow_force_pushes": {"enabled": True}},
                 trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             ),
             (
                 "deletions",
-                {
-                    "required_status_checks": {"contexts": ["check"]},
-                    "enforce_admins": {"enabled": True},
-                    "allow_force_pushes": {"enabled": False},
-                    "allow_deletions": {"enabled": True},
-                },
+                {**base, "allow_deletions": {"enabled": True}},
                 trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             ),
             (
                 "admins bypass",
-                {
-                    "required_status_checks": {"contexts": ["check"]},
-                    "enforce_admins": {"enabled": False},
-                    "allow_force_pushes": {"enabled": False},
-                    "allow_deletions": {"enabled": False},
-                },
+                {**base, "enforce_admins": {"enabled": False}},
                 trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             ),
             (
                 "missing force-push field",
                 {
-                    "required_status_checks": {"contexts": ["check"]},
-                    "enforce_admins": {"enabled": True},
-                    "allow_deletions": {"enabled": False},
+                    key: value
+                    for key, value in base.items()
+                    if key != "allow_force_pushes"
                 },
                 trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             ),
@@ -733,6 +740,197 @@ class AuthorizationTests(unittest.TestCase):
                 transport = self.valid_transport()
                 transport.responses[trust.branch_protection_api(REPOSITORY)] = payload
                 self.assert_refused(self.authorize(transport=transport), expected)
+
+    def test_required_status_check_is_exact_and_app_bound(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        base = self.valid_protection()
+        exact = {
+            "context": trust.REQUIRED_STATUS_CHECK_CONTEXT,
+            "app_id": trust.GITHUB_ACTIONS_APP_ID,
+        }
+        cases: list[tuple[str, object]] = [
+            ("missing checks", {"contexts": [trust.REQUIRED_STATUS_CHECK_CONTEXT]}),
+            ("empty checks", {"contexts": [], "checks": []}),
+            ("renamed check", {"checks": [{**exact, "context": "ci"}]}),
+            (
+                "missing required check",
+                {"checks": [{"context": "other", "app_id": 15368}]},
+            ),
+            ("any-app sentinel", {"checks": [{**exact, "app_id": -1}]}),
+            ("null app", {"checks": [{**exact, "app_id": None}]}),
+            ("boolean app", {"checks": [{**exact, "app_id": True}]}),
+            ("other app", {"checks": [{**exact, "app_id": 12345}]}),
+            (
+                "missing app",
+                {"checks": [{"context": trust.REQUIRED_STATUS_CHECK_CONTEXT}]},
+            ),
+            ("duplicate exact checks", {"checks": [exact, dict(exact)]}),
+            ("malformed entry", {"checks": [trust.REQUIRED_STATUS_CHECK_CONTEXT]}),
+        ]
+        for label, checks in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = {
+                    **base,
+                    "required_status_checks": checks,
+                }
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                )
+
+    def test_required_pull_request_reviews_are_fail_closed(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        base = self.valid_protection()
+        valid_reviews = self.valid_reviews()
+        bypass = valid_reviews["bypass_pull_request_allowances"]
+        assert isinstance(bypass, dict)
+        cases: list[tuple[str, object]] = [
+            ("missing reviews", {k: v for k, v in base.items() if k != "required_pull_request_reviews"}),
+            ("null reviews", {**base, "required_pull_request_reviews": None}),
+            (
+                "zero approvals",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "required_approving_review_count": 0,
+                    },
+                },
+            ),
+            (
+                "boolean approvals",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "required_approving_review_count": True,
+                    },
+                },
+            ),
+            (
+                "string approvals",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "required_approving_review_count": "1",
+                    },
+                },
+            ),
+            (
+                "stale approvals kept",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "dismiss_stale_reviews": False,
+                    },
+                },
+            ),
+            (
+                "last push not approved",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "require_last_push_approval": False,
+                    },
+                },
+            ),
+            (
+                "missing bypass metadata",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        key: value
+                        for key, value in valid_reviews.items()
+                        if key != "bypass_pull_request_allowances"
+                    },
+                },
+            ),
+            (
+                "users bypass",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": {
+                            **bypass,
+                            "users": [{"login": "untrusted"}],
+                        },
+                    },
+                },
+            ),
+            (
+                "teams bypass",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": {
+                            **bypass,
+                            "teams": [{"slug": "untrusted"}],
+                        },
+                    },
+                },
+            ),
+            (
+                "apps bypass",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": {
+                            **bypass,
+                            "apps": [{"slug": "untrusted"}],
+                        },
+                    },
+                },
+            ),
+            (
+                "unknown bypass class",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": {**bypass, "roles": []},
+                    },
+                },
+            ),
+            (
+                "malformed bypass class",
+                {
+                    **base,
+                    "required_pull_request_reviews": {
+                        **valid_reviews,
+                        "bypass_pull_request_allowances": {
+                            **bypass,
+                            "users": "nobody",
+                        },
+                    },
+                },
+            ),
+        ]
+        for label, payload in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = payload
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                )
+
+    def test_more_approvals_than_minimum_remain_valid(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        payload = self.valid_protection()
+        reviews = self.valid_reviews()
+        reviews["required_approving_review_count"] = 2
+        payload["required_pull_request_reviews"] = reviews
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = payload
+        decision = self.authorize(transport=transport)
+        self.assertTrue(decision.authorized, decision.detail)
 
     def test_unprotected_branch_metadata_is_refused(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
@@ -1105,6 +1303,8 @@ class AuthorizationTests(unittest.TestCase):
             "/repos/acme/widget/git/refs",
             "/repos/acme/widget/merges",
             "/repos/acme/widget/actions/runners",
+            "/repos/acme/widget/branches/main/protection/required_status_checks",
+            "/repos/acme/widget/branches/main/protection/required_pull_request_reviews",
         ]
         for path in forbidden:
             with self.subTest(path=path), self.assertRaises(trust.UnsafeEndpoint):

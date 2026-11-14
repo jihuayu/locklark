@@ -78,6 +78,10 @@ OPTIONAL_PRODUCTION_SECRETS = frozenset(
 PRODUCTION_SECRETS = REQUIRED_ENVIRONMENT_SECRETS | OPTIONAL_PRODUCTION_SECRETS
 
 REQUIRED_TAG_RULES = frozenset({"deletion", "update", "non_fast_forward"})
+# Classic-main policy is app-bound. 15368 is the public GitHub Actions app id;
+# a context listed only by name, or bound to any other app, is not trusted.
+REQUIRED_STATUS_CHECK_CONTEXT = "ci-required"
+GITHUB_ACTIONS_APP_ID = 15368
 # Organization administrators are the only bypass class treated as trusted.
 # Integrations, teams, users, and repository roles are not trusted to rewrite
 # release tags. An empty bypass list is also accepted.
@@ -1106,6 +1110,91 @@ def _check_branch(
     )
 
 
+def _check_required_status_checks(protection: Mapping[str, object]) -> None:
+    checks = protection.get("required_status_checks")
+    if not isinstance(checks, dict):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main has no required status checks",
+        )
+    entries = checks.get("checks")
+    if not isinstance(entries, list) or not entries:
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main has no app-bound required status checks",
+        )
+    matching: list[Mapping[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                "main required status check metadata is malformed",
+            )
+        context = entry.get("context")
+        if not isinstance(context, str) or not context:
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                "main required status check context is malformed",
+            )
+        if context == REQUIRED_STATUS_CHECK_CONTEXT:
+            matching.append(entry)
+    if len(matching) != 1:
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            f"main must require exactly one {REQUIRED_STATUS_CHECK_CONTEXT!r} check",
+        )
+    app_id = matching[0].get("app_id")
+    if (
+        isinstance(app_id, bool)
+        or not isinstance(app_id, int)
+        or app_id != GITHUB_ACTIONS_APP_ID
+    ):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "required status check is not bound to the expected GitHub Actions app",
+        )
+
+
+def _check_pull_request_reviews(protection: Mapping[str, object]) -> None:
+    reviews = protection.get("required_pull_request_reviews")
+    if not isinstance(reviews, dict):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main has no required pull request reviews",
+        )
+    count = reviews.get("required_approving_review_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main requires an invalid approving review count",
+        )
+    for field in ("dismiss_stale_reviews", "require_last_push_approval"):
+        if reviews.get(field) is not True:
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                f"main review setting {field} is not enabled",
+            )
+    bypass = reviews.get("bypass_pull_request_allowances")
+    if not isinstance(bypass, dict):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main review bypass metadata is absent or malformed",
+        )
+    expected = {"users", "teams", "apps"}
+    if set(bypass) != expected:
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main review bypass metadata has unknown allowances",
+        )
+    for key in expected:
+        value = bypass[key]
+        if not isinstance(value, list) or value:
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                f"main review bypass allowance {key} is not empty",
+            )
+
+
 def _check_protection(transport: ReadOnlyTransport, repository: str) -> None:
     payload = _api_call(
         transport,
@@ -1120,34 +1209,8 @@ def _check_protection(transport: ReadOnlyTransport, repository: str) -> None:
         Refusal.BRANCH_PROTECTION_UNKNOWN,
         "branch protection metadata is not an object",
     )
-    checks = protection.get("required_status_checks")
-    if not isinstance(checks, dict):
-        _refuse(
-            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
-            "main has no required status checks",
-        )
-    contexts = checks.get("contexts")
-    named_checks = checks.get("checks")
-    valid_contexts = (
-        isinstance(contexts, list)
-        and contexts
-        and all(isinstance(item, str) and item for item in contexts)
-    )
-    valid_checks = (
-        isinstance(named_checks, list)
-        and named_checks
-        and all(
-            isinstance(item, dict)
-            and isinstance(item.get("context"), str)
-            and item["context"]
-            for item in named_checks
-        )
-    )
-    if not valid_contexts and not valid_checks:
-        _refuse(
-            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
-            "main has no non-empty required status checks",
-        )
+    _check_required_status_checks(protection)
+    _check_pull_request_reviews(protection)
     for field, expected in (
         ("enforce_admins", True),
         ("allow_force_pushes", False),
