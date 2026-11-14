@@ -117,6 +117,7 @@ class FakeFrameworks:
         self.getpid = getpid
         self.requests = []
         self.activations = []
+        self.capability_calls = 0
         self.applications = {}
 
     def __getattr__(self, name):
@@ -127,6 +128,7 @@ class FakeFrameworks:
 
     # -- ApplicationServices ----------------------------------------------
     def AXIsProcessTrusted(self):
+        self.capability_calls += 1
         return True
 
     def AXUIElementCreateApplication(self, pid):
@@ -1330,6 +1332,33 @@ class OwnedGenerationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "process-untrusted")
         self.assertEqual(frameworks.requests, [])
 
+    def test_foreign_euid_matching_actual_generation_is_refused_before_capability(self):
+        foreign = os.geteuid() + 1
+        window, _ = owned_window()
+        frameworks = FakeFrameworks([window])
+        adapter = macos.MacAdapter(api=api_for(frameworks, libproc=_Libproc(uid=foreign)))
+        plan = contract.parse_request(json.dumps({
+            "title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+            "owned_generation": self.generation(euid=foreign), "actions": [],
+        }))
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(plan, adapter)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
+        self.assertEqual(frameworks.activations, [])
+
+    def test_generation_euid_check_fails_closed_on_base_exception(self):
+        window, _ = owned_window()
+        api, frameworks = self.api([window])
+        generation = self.generation()
+        with unittest.mock.patch.object(macos.os, "geteuid", side_effect=self.Fatal()):
+            with self.assertRaises(contract.ContractError) as error:
+                api.set_owned_generation(generation)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+
     def test_owned_windows_accepts_the_bound_live_generation(self):
         window, _ = owned_window()
         api, _ = self.api([window])
@@ -1340,6 +1369,30 @@ class OwnedGenerationTests(unittest.TestCase):
         api, frameworks = self.api([owned_window()[0]])
         self.assertIs(api.activate_process(OWNED_PID, EXE, self.generation()), True)
         self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_activation_foreign_euid_matching_actual_never_activates(self):
+        foreign = os.geteuid() + 1
+        api, frameworks = self.api([owned_window()[0]], uid=foreign)
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_process(OWNED_PID, EXE, self.generation(euid=foreign))
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.activations, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
+
+    def test_activation_provided_generation_euid_is_rejected_with_process_trust(self):
+        # Isolate the provided-generation boundary: process() is forced to
+        # report trust while the actual libproc generation still carries a
+        # foreign effective UID and the request mirrors it exactly.
+        foreign = os.geteuid() + 1
+        api, frameworks = self.api([owned_window()[0]], uid=foreign)
+        api.process = lambda pid: (EXE, True)
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_process(OWNED_PID, EXE, self.generation(euid=foreign))
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.activations, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
 
     def test_stale_wrong_euid_and_malformed_activation_never_activates(self):
         for value in (self.generation(start_usec=124),

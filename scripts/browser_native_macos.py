@@ -279,6 +279,24 @@ def _generation_shape(value, pid):
             and 0 <= value["start_usec"] < 1000000)
 
 
+def _generation_euid_matches(value):
+    """True only when the supplied generation names OUR effective UID.
+
+    ``proc_bsdinfo.pbi_uid`` is an effective UID, so a foreign-euid process can
+    otherwise describe itself consistently and still bind. Reading our own
+    effective UID here, with ``BaseException`` treated as a mismatch, keeps the
+    generation check aligned with the existing process-trust boundary.
+    """
+    try:
+        euid = os.geteuid()
+    except BaseException:
+        return False
+    return (type(euid) is int and euid >= 0
+            and type(value) is dict
+            and type(value.get("euid")) is int
+            and value["euid"] == euid)
+
+
 def _application_pid(application):
     """The exact built-in positive PID of one ``NSRunningApplication``, or None.
 
@@ -853,8 +871,9 @@ class QuartzApi:
         """Bind and PROVE the exact live generation before capability/AX.
 
         The request value is never trusted on its own: the complete shape is
-        validated and then compared with a fresh libproc read. A malformed,
-        stale or wrong-effective-UID value clears any prior binding and
+        validated, its effective UID must be OUR effective UID, and only then
+        is it compared with a fresh libproc read. A malformed, stale,
+        foreign-euid or wrong-effective-UID value clears any prior binding and
         refuses ``process-untrusted`` without touching AX.
         """
         pid = self.owned_pid_scope()
@@ -862,6 +881,9 @@ class QuartzApi:
             self._owned_scope_generation = None
             raise contract.ContractError("process-untrusted")
         expected = {field: generation[field] for field in contract.GENERATION_FIELDS}
+        if not _generation_euid_matches(expected):
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
         try:
             actual = self.process_generation(pid)
         except BaseException:
@@ -879,6 +901,8 @@ class QuartzApi:
         try:
             pid = self.owned_pid_scope()
             if pid is None or generation.get("pid") != pid:
+                return False
+            if not _generation_euid_matches(generation):
                 return False
             actual = self.process_generation(pid)
             return actual is not None and actual == generation
@@ -1871,9 +1895,9 @@ class QuartzApi:
 
         The legacy path/effective-UID proof is retained. When the CLI supplies
         a generation, its complete five-field libproc identity is checked
-        before and after the single activation; a malformed, stale or
-        wrong-effective-UID value refuses without activating. Both checks are
-        final: the caller never waits or retries after them.
+        before and after the single activation; a malformed, stale,
+        foreign-euid or wrong-effective-UID value refuses without activating.
+        Both checks are final: the caller never waits or retries after them.
         """
         path, trusted = self.process(pid)
         if not path:
@@ -1884,6 +1908,8 @@ class QuartzApi:
             raise contract.ContractError("process-untrusted")
         if generation is not None:
             if not _generation_shape(generation, pid):
+                raise contract.ContractError("process-untrusted")
+            if not _generation_euid_matches(generation):
                 raise contract.ContractError("process-untrusted")
             try:
                 actual = self.process_generation(pid)
