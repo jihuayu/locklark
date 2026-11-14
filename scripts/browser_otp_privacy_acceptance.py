@@ -71,6 +71,23 @@ def find_private_child_state(parent):
     return child
 
 
+def create_private_state_parent(prefix="locklark-browser-otp-privacy-"):
+    """Create the wrapper's own parent and canonicalize only that new path.
+
+    macOS temp paths commonly traverse a symlink such as /var -> /private/var.
+    The wrapper owns this fresh directory, so resolving it strictly after
+    creation is safe. Externally supplied parents still go through the strict
+    require_private_parent rules and are never canonicalized for the caller.
+    """
+    created = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        state = created.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("privacy-state") from None
+    os.chmod(state, 0o700)
+    return require_private_parent(state)
+
+
 def check_output(raw, fixture, first, last):
     if last < first or last - first > 600:
         raise ValueError("privacy-clock")
@@ -95,9 +112,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     script = "browser_native_acceptance.mjs" if args.engine == "chromium" else "browser_firefox_native_acceptance.mjs"
-    state = Path(tempfile.mkdtemp(prefix="locklark-browser-otp-privacy-"))
-    os.chmod(state, 0o700)
-    require_private_parent(state)
+    state = create_private_state_parent()
     environment = dict(
         os.environ,
         LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments",

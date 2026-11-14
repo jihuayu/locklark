@@ -1,13 +1,16 @@
 """Independent oracle known-vector checks; outputs no private fixture material."""
 import os
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from browser_otp_hmac import codes
 from browser_otp_privacy_acceptance import (
     check_output,
+    create_private_state_parent,
     find_private_child_state,
     require_private_parent,
 )
@@ -70,6 +73,30 @@ class BrowserOTPPrivateState(unittest.TestCase):
         parent = self.parent()
         child = self.child(parent)
         self.assertEqual(find_private_child_state(parent), child)
+
+    def test_created_parent_canonicalizes_symlink_temp_ancestor(self):
+        real = self.root / "real"
+        real.mkdir(mode=0o700)
+        link = self.root / "temp-link"
+        link.symlink_to(real, target_is_directory=True)
+        original = tempfile.mkdtemp
+
+        def under_symlink(prefix=None, dir=None):
+            return original(prefix=prefix, dir=link)
+
+        with mock.patch.object(tempfile, "mkdtemp", side_effect=under_symlink):
+            parent = create_private_state_parent(prefix="ll-otp-created-")
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        self.assertEqual(parent.parent, real.resolve())
+        self.assertTrue(parent.is_dir())
+        self.assertFalse(parent.is_symlink())
+        self.assertEqual(parent.resolve(strict=True), parent)
+        self.assertEqual(parent.stat().st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
+        # An explicitly supplied symlink is still refused, not canonicalized
+        # for the caller.
+        with self.assertRaises(ValueError):
+            require_private_parent(link)
 
     def test_parent_symlink_foreign_mode_and_wrong_parent_refuse(self):
         parent = self.parent()
