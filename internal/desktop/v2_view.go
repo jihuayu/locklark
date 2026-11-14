@@ -7,9 +7,15 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
+
+// WatchtowerReport is the desktop projection of the shared Watchtower report.
+// It is a distinct name so the v2 state does not expose the browser package's
+// wire types.
+type WatchtowerReport = watchtower.Report
 
 // Placeholders used by the v2 detail pane. A masked read returns empty values
 // for concealed fields, so "no value" and "withheld value" must not share a
@@ -22,8 +28,22 @@ const (
 // v2FieldDisplay resolves one field for display. Concealment is applied before
 // the emptiness check: a masked detail clears protected values, so rendering
 // them as empty would claim the item has no password or one-time code. An
-// unmasked value is used only for an explicit reveal of that field.
+// unmasked value is used only for an explicit reveal of that field, or for the
+// narrow password-only disclosure supplied to v2FieldDisplayWith.
 func v2FieldDisplay(masked, plain *personal.ItemDetail, key string, revealed bool) string {
+	return v2FieldDisplayWith(masked, plain, key, revealed, nil)
+}
+
+// v2FieldDisplayWith is v2FieldDisplay with a narrow fallback for the
+// password-only revealPasswords disclosure. The fallback is consulted only
+// when the field is concealed, not explicitly revealed, and no plaintext
+// detail is loaded (the masked detail itself is being rendered).
+func v2FieldDisplayWith(masked, plain *personal.ItemDetail, key string, revealed bool, narrow func() string) string {
+	if !revealed && masked != nil && plain == nil && isConcealedKey(masked, key) && narrow != nil {
+		if value := narrow(); value != "" {
+			return value
+		}
+	}
 	if revealed && plain != nil {
 		if value, ok := fieldValue(plain, key); ok {
 			if value == "" {
@@ -1001,4 +1021,187 @@ func (a *App) cycleNewURLMatchMode() {
 		return
 	}
 	a.v2.draft.NewURLMatch = nextMatchMode(a.v2.draft.NewURLMatch)
+}
+
+func watchtowerFlagBadge(flag string, reuseCount int) (string, oneui.BadgeTone) {
+	switch flag {
+	case "vulnerable":
+		return "已泄露", oneui.BadgeDanger
+	case "expired":
+		return "已过期", oneui.BadgeDanger
+	case "empty":
+		return "空密码", oneui.BadgeDanger
+	case "weak":
+		return "弱密码", oneui.BadgeDanger
+	case "common-pattern":
+		return "常见模式", oneui.BadgeWarning
+	case "short":
+		return "长度过短", oneui.BadgeWarning
+	case "low-variety":
+		return "字符单一", oneui.BadgeWarning
+	case "reused":
+		if reuseCount > 1 {
+			return fmt.Sprintf("重复密码 (%d 处)", reuseCount), oneui.BadgeWarning
+		}
+		return "重复密码", oneui.BadgeWarning
+	case "unsecured-http":
+		return "非加密 HTTP", oneui.BadgeWarning
+	case "expiring-soon":
+		return "即将过期", oneui.BadgeWarning
+	case "totp-not-stored":
+		return "未设 2FA", oneui.BadgeNeutral
+	case "passkey-not-stored":
+		return "未存通行密钥", oneui.BadgeNeutral
+	default:
+		return flag, oneui.BadgeNeutral
+	}
+}
+
+func (a *App) v2WatchtowerView(c *ui.Context) {
+	t := c.Theme()
+
+	// Header
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
+		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
+			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
+		iconBox.Children(func() {
+			oneui.Icon(c, lucide.Shield()).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
+		})
+		ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
+			oneui.Text(c, "Watchtower 安全体检").FontSize(t.Rem(1.35)).Bold().SingleLine()
+			oneui.Text(c, "本地检查全程离线运行；HIBP 泄露前缀核验需在浏览器扩展或 CLI 中显式启用。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+		})
+		oneui.Button(c, "运行本地检查", oneui.ButtonPrimary).Disabled(a.busy || a.session == nil).OnClick(func() {
+			s := a.session
+			if s == nil {
+				return
+			}
+			a.run(func() outcome {
+				report, err := s.Watchtower("", false)
+				return outcome{err: err, apply: func() { a.v2.watchtower = &report }}
+			})
+		})
+	})
+
+	report := a.v2.watchtower
+	if report == nil {
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(5)).AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(2)).Children(func() {
+			badgeBox := ui.Box(c).Size(t.Space(12), t.Space(12)).Radius(t.Space(3)).
+				Background(t.Accent.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center)
+			badgeBox.Children(func() {
+				oneui.Icon(c, lucide.ShieldCheck()).Size(t.Space(6), t.Space(6)).TextColor(t.Accent)
+			})
+			oneui.Text(c, "尚未运行安全扫描").FontSize(t.Rem(1.05)).Bold()
+			oneui.Text(c, "点击右上角「运行本地检查」开始扫描弱密码、重复密码及 2FA 配置缺失。").FontSize(t.Rem(.85)).TextColor(t.TextMuted).Wrap()
+		})
+		return
+	}
+
+	// Security Score Hero Card
+	scoreColor := t.Success
+	scoreStatus := "安全状态良好"
+	scoreTone := oneui.BadgeSuccess
+	switch {
+	case report.OverallScore < 50:
+		scoreColor = t.Danger
+		scoreStatus = "存在高危风险"
+		scoreTone = oneui.BadgeDanger
+	case report.OverallScore < 80:
+		scoreColor = t.Warning
+		scoreStatus = "建议尽快加固"
+		scoreTone = oneui.BadgeWarning
+	}
+
+	ui.Row(c).FillWidth().Border(1, scoreColor.Alpha(.45)).Radius(t.Radius).Background(t.Surface).
+		Padding(t.Space(3.5)).Wrap().AlignItems(ui.Center).Gap(t.Space(3)).Children(func() {
+		scoreBadge := ui.Column(c).MinWidth(110).Padding(t.Space(2), t.Space(3)).Radius(t.Radius).
+			Background(scoreColor.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(.25))
+		scoreBadge.Children(func() {
+			oneui.Text(c, fmt.Sprintf("%d", report.OverallScore)).FontSize(t.Rem(2.1)).Bold().TextColor(scoreColor)
+			oneui.Text(c, "满分 100").FontSize(t.Rem(.72)).TextColor(t.TextMuted)
+		})
+		ui.Column(c).Grow(1).MinWidth(180).Gap(t.Space(1)).Children(func() {
+			ui.Row(c).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+				oneui.Text(c, fmt.Sprintf("安全评分 %d / 100", report.OverallScore)).FontSize(t.Rem(1.15)).Bold()
+				oneui.Badge(c, scoreStatus, oneui.BadgeOptions{Tone: scoreTone})
+			})
+			oneui.Text(c, fmt.Sprintf("已检查 %d 项 · 跳过 %d 项", report.Checked, report.Skipped)).FontSize(t.Rem(.84)).TextColor(t.TextMuted)
+		})
+	})
+
+	// Summary Stat Pills / Boxes
+	stats := []struct {
+		label string
+		count int
+		color ui.Color
+	}{
+		{"已泄露", report.Counts.Vulnerable, t.Danger},
+		{"重复密码", report.Counts.Reused, t.Warning},
+		{"弱密码", report.Counts.Weak, t.Danger},
+		{"非加密 HTTP", report.Counts.UnsecuredHTTP, t.Warning},
+		{"未设 2FA", report.Counts.TOTPNotStored, t.Warning},
+		{"即将过期", report.Counts.Expiring, t.Warning},
+	}
+	ui.Row(c).FillWidth().Wrap().Gap(t.Space(2)).Children(func() {
+		for _, stat := range stats {
+			stat := stat
+			borderColor := t.Border
+			numColor := t.Text
+			bgColor := t.Surface
+			if stat.count > 0 {
+				borderColor = stat.color.Alpha(.5)
+				numColor = stat.color
+				bgColor = stat.color.Alpha(.06)
+			}
+			ui.Column(c).Grow(1).MinWidth(120).Border(1, borderColor).Radius(t.Radius).Background(bgColor).
+				Padding(t.Space(2), t.Space(2.5)).Gap(t.Space(.5)).Children(func() {
+				oneui.Text(c, stat.label).FontSize(t.Rem(.76)).TextColor(t.TextMuted).SingleLine()
+				oneui.Text(c, fmt.Sprintf("%d", stat.count)).FontSize(t.Rem(1.25)).Bold().TextColor(numColor)
+			})
+		}
+	})
+
+	if len(report.Findings) == 0 {
+		a.onevraNoticeCard(c, "全部检查通过", "未发现已知安全隐患，当前保险库状态良好。", t.Success)
+		return
+	}
+
+	// Findings Cards
+	oneui.Text(c, fmt.Sprintf("待处理风险条目 (%d)", len(report.Findings))).FontSize(t.Rem(.92)).Bold().TextColor(t.TextMuted)
+	for _, finding := range report.Findings {
+		finding := finding
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+					oneui.Text(c, visible(finding.Title)).FontSize(t.Rem(1.0)).Bold().SingleLine().Ellipsis("…")
+					meta := fmt.Sprintf("密码强度 %d / 100", finding.StrengthScore)
+					if finding.Origin != "" {
+						meta = visible(finding.Origin) + " · " + meta
+					}
+					oneui.Text(c, meta).FontSize(t.Rem(.76)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+				})
+				oneui.Button(c, "打开条目", oneui.ButtonSecondary).Disabled(a.busy).OnClick(func() {
+					a.selectItem(finding.ID, finding.Revision)
+				})
+			})
+			if len(finding.Flags) > 0 {
+				ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
+					for _, flag := range finding.Flags {
+						label, tone := watchtowerFlagBadge(flag, finding.ReuseCount)
+						oneui.Badge(c, label, oneui.BadgeOptions{Tone: tone})
+					}
+				})
+			}
+			if finding.BreachCount > 0 {
+				ui.Row(c).FillWidth().Border(1, t.Danger.Alpha(.45)).Radius(t.Radius).Background(t.Danger.Alpha(.08)).
+					Padding(t.Space(1.5), t.Space(2)).AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+					oneui.Icon(c, lucide.TriangleAlert()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.Danger)
+					oneui.Text(c, fmt.Sprintf("该密码在公开泄露库中出现 %d 次，请立即更换。", finding.BreachCount)).
+						FontSize(t.Rem(.8)).TextColor(t.Danger).Grow(1).Wrap()
+				})
+			}
+		})
+	}
 }

@@ -39,6 +39,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     checkoutPicker = null;
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
+    GENERATED_TTL = 5 * 60 * 1000,
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000,
     CHECKOUT_PICKER_TTL = 30000,
@@ -47,6 +48,25 @@ if (typeof importScripts === "function") importScripts("core.js");
     OTP_CAPTURE_LIMIT = 8;
   const CONDITIONAL_INTENT_LIMIT = 64,
     CONDITIONAL_OPTIONS_MAX = 32768;
+  // An ordinary (non-QuickFill) vault row opens the existing popup UI in a
+  // persistent extension tab. The route is memory only: a fresh opaque token,
+  // the exact item/revision, the source HTTPS tab and the native
+  // capability/epoch it was created under. It never outlives its tab.
+  const ROUTE_TTL = 2 * 60 * 1000,
+    ROUTE_LIMIT = 4,
+    // The only messages a route tab may send. Everything else is refused
+    // before it reaches the ordinary popup handler.
+    ROUTE_MESSAGE_TYPES = new Set([
+      "route-claim",
+      "route-copy-field",
+      "item-get",
+      "copy-field",
+      "reveal-field",
+      "fill",
+      "otp",
+      "open-and-fill",
+      "route-close",
+    ]);
   // Conditional (autofill) Passkey intents are metadata-only and never set
   // pendingPasskey: an unselected conditional request must not block ordinary
   // fill, save or OTP operations.
@@ -156,7 +176,13 @@ if (typeof importScripts === "function") importScripts("core.js");
   const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
     retired = new Set(),
-    epochWaiters = new Set();
+    epochWaiters = new Set(),
+    routeGrants = new Map(),
+    routeTabs = new Map(),
+    // Grants whose tabs.create() is still in flight. Browsers deliver the new
+    // tab's onActivated/onUpdated before that promise resolves, so the tab id
+    // is adopted from those events and never confused with an ordinary switch.
+    routeBoots = new Set();
   function advanceEpoch() {
     epoch++;
     for (const abort of [...epochWaiters]) abort();
@@ -242,9 +268,42 @@ if (typeof importScripts === "function") importScripts("core.js");
     for (const record of stagedSaves.values()) zeroStaged(record);
     stagedSaves.clear();
   }
+  // Generated plaintext is released by its own timer, not only by a later
+  // visit to the popup or history. A released session never comes back: after
+  // lock, disconnect, session reset or a resumed worker there is no entry.
+  let generatedTimer = null,
+    generatedTimerAt = 0;
   function clearGeneratedHistory() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
     for (const entry of generatedHistory) entry.password = "";
     generatedHistory.length = 0;
+  }
+  function releaseGenerated() {
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  function scheduleGeneratedPrune() {
+    if (generatedTimer) clearTimeout(generatedTimer);
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    if (!generatedHistory.length) return;
+    let next = Infinity;
+    for (const entry of generatedHistory)
+      if (Number.isSafeInteger(entry.expiresAt) && entry.expiresAt < next)
+        next = entry.expiresAt;
+    if (!Number.isFinite(next)) return;
+    generatedTimerAt = next;
+    generatedTimer = setTimeout(
+      releaseGenerated,
+      Math.max(0, Math.min(next - Date.now(), 24 * 60 * 60 * 1000)),
+    );
+    generatedTimer.unref?.();
   }
   function clearLastFilled() {
     for (const entry of lastFilledCredentials.values()) entry.password = "";
@@ -255,6 +314,86 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearGeneratedHistory();
     clearLastFilled();
   }
+  function pruneGenerated(now = Date.now()) {
+    for (let index = generatedHistory.length - 1; index >= 0; index--) {
+      const entry = generatedHistory[index];
+      if (now < entry.expiresAt) continue;
+      entry.password = "";
+      generatedHistory.splice(index, 1);
+    }
+  }
+  // A worker that was suspended and resumed starts with an empty heap, so no
+  // old entry can return and there is no timer to reuse. Discard any armed
+  // deadline from a previous session and only arm one for live entries.
+  function resumeGenerated() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  resumeGenerated();
+
+  // One-time card-fill authorizations. The popup, the inline menu and the
+  // context menu mint only {v: 2, scope, at, nonce} synchronously inside a
+  // trusted click. Claimed tab, frame or document ids are never accepted: the
+  // worker binds each nonce to the context the browser reports for that same
+  // request (the active tab for popup/menu requests, the message sender for
+  // content frames). Each nonce is consumed exactly once within a short TTL,
+  // and the injected frame receives a plain authorization flag, never the
+  // nonce.
+  const USER_GESTURE_TTL = 10 * 1000,
+    GESTURE_REPLAY_LIMIT = 64;
+  const consumedGestures = new Map(),
+    gestureReplayOrder = [];
+  function userGestureValid(value) {
+    return (
+      !!value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).sort().join(",") === "at,nonce,scope,v" &&
+      value.v === 2 &&
+      value.scope === "credit_card" &&
+      typeof value.nonce === "string" &&
+      /^[a-f0-9]{32}$/.test(value.nonce) &&
+      Number.isSafeInteger(value.at) &&
+      value.at > 0
+    );
+  }
+  function forgetConsumedGestures(now = Date.now()) {
+    while (
+      gestureReplayOrder.length &&
+      gestureReplayOrder[0].expiresAt <= now
+    )
+      consumedGestures.delete(gestureReplayOrder.shift().nonce);
+  }
+  // True only for a fresh, never-seen nonce bound to the browser-observed
+  // context given by the caller; the nonce is recorded as consumed before
+  // returning. Replays, stale, malformed or unbound values are refused and
+  // consume nothing.
+  function consumeUserGesture(value, c) {
+    if (!userGestureValid(value) || !c) return false;
+    const now = Date.now();
+    if (value.at > now + 1000 || now - value.at > USER_GESTURE_TTL) return false;
+    forgetConsumedGestures(now);
+    if (consumedGestures.has(value.nonce)) return false;
+    // The registry only holds nonces that still have time left, so a full
+    // registry refuses this request rather than dropping a live nonce and
+    // letting its replay through again.
+    if (gestureReplayOrder.length >= GESTURE_REPLAY_LIMIT) return false;
+    const record = {
+      nonce: value.nonce,
+      tabId: c.tabId,
+      frameId: c.frameId || 0,
+      documentId: c.documentId,
+      expiresAt: value.at + USER_GESTURE_TTL,
+    };
+    consumedGestures.set(record.nonce, record);
+    gestureReplayOrder.push(record);
+    return true;
+  }
   function pruneStaged() {
     const now = Date.now();
     for (const [stageId, record] of stagedSaves)
@@ -264,6 +403,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         entry.password = "";
         lastFilledCredentials.delete(tabId);
       }
+    pruneGenerated(now);
   }
   function stagedForTab(tabId, origin) {
     pruneStaged();
@@ -730,6 +870,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearConditionalIntentsWithNotify();
     refreshPasskeyConditionalSupport();
     invalidateClipboardGrants();
+    revokeAllRoutes();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -906,7 +1047,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (result && typeof result.catch === "function") result.catch(() => {});
     } catch {}
   }
-  function contextMenuClicked(info) {
+  // The same 32-hex nonce the popup and inline menu mint inside a click.
+  function menuNonce() {
+    return [...crypto.getRandomValues(new Uint8Array(16))]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  function contextMenuClicked(info, menuTab) {
     const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
     if (id === "locklark-connect") {
       void connect();
@@ -948,7 +1095,26 @@ if (typeof importScripts === "function") importScripts("core.js");
       return;
     }
     if (kind === "fill-card") {
-      void fillItemCategory(itemId, revision, "card");
+      // The context-menu click is a trusted click the worker itself receives;
+      // the menu branch mints the same at+nonce proof on that click and binds
+      // it to the tab Chrome reports for that click through fillItemCategory.
+      const userGesture = {
+        v: 2,
+        scope: "credit_card",
+        at: Date.now(),
+        nonce: menuNonce(),
+      };
+      const clickedTab =
+        menuTab &&
+        typeof menuTab === "object" &&
+        !Array.isArray(menuTab) &&
+        Number.isSafeInteger(menuTab.id) &&
+        menuTab.id > 0 &&
+        Number.isSafeInteger(menuTab.windowId) &&
+        menuTab.windowId > 0
+          ? { id: menuTab.id, windowId: menuTab.windowId }
+          : null;
+      void fillItemCategory(itemId, revision, "card", userGesture, clickedTab);
     }
   }
   function commandInvoked(command) {
@@ -987,7 +1153,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     return promise;
   }
   function request(type, fields = {}, timeout = 35000, requestId = id()) {
-    if (!port) return Promise.reject(Error("refused"));
+    if (!port) {
+      return Promise.reject(Error("refused"));
+    }
     const promise = startCall(type, requestId, timeout);
     try {
       port.postMessage({ v: 1, id: requestId, type, ...fields });
@@ -1005,7 +1173,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     return promise;
   }
-  async function capture(frameId = 0) {
+  // Browser-observed identity of the active tab and its top document (and of
+  // the sender frame when frameId > 0).
+  async function captureTopDocument(frameId = 0) {
     if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (
@@ -1063,6 +1233,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       tabId: tab.id,
       windowId: tab.windowId,
       origin,
+      // The exact top-level URL the browser reported for this capture. A
+      // route is bound to it, so any later path/query/fragment change ends
+      // the route even when the origin is unchanged. Never sent to native:
+      // fields() whitelists only capability/origin/tab/document.
+      url: tab.url,
       documentId,
       frameId,
       topDocumentId,
@@ -1203,19 +1378,35 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function startCheckoutPicker(message) {
-    if (Object.keys(message).sort().join(",") !== "id,revision,type")
+    if (Object.keys(message).sort().join(",") !== "id,revision,type,userGesture")
       throw Error("refused");
     if (
       !/^[a-f0-9]{32}$/.test(message.id || "") ||
       !/^[a-f0-9]{64}$/.test(message.revision || "")
     )
       throw Error("refused");
+    // The popup only supplies the nonce. The tab, its top frame and the
+    // nonce's age all come from the browser below.
+    const userGesture = message.userGesture;
     // A new picker always invalidates the previous public choice set.
     clearCheckoutPicker();
     if (!capability || pending || pendingOTP || pendingPasskey)
       throw Error("refused");
     if (!checkoutFramePolicy()) {
       status = "当前原生宿主或浏览器不支持选择结账表单";
+      throw Error("refused");
+    }
+    const generation = epoch,
+      expectedCapability = capability;
+    // Freeze the exact top document now; a picker started for a page that was
+    // already replaced is useless and must not inherit this tab's grant.
+    // The top document is identity-checked by the bounded all-frame probe
+    // below, which also proves the tab did not change mid-enumeration.
+    const frozenCapture = await captureTopDocument(0);
+    if (generation !== epoch || capability !== expectedCapability)
+      throw Error("refused");
+    if (!consumeUserGesture(userGesture, frozenCapture)) {
+      clearCheckoutPicker();
       throw Error("refused");
     }
     const item = await getVaultItem(message.id, message.revision);
@@ -1228,10 +1419,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       item.readOnly
     )
       throw Error("refused");
-    const generation = epoch,
-      expectedCapability = capability;
-    const capture = await checkoutCaptureFrames();
     if (generation !== epoch || capability !== expectedCapability)
+      throw Error("refused");
+    const capture = await checkoutCaptureFrames();
+    if (
+      generation !== epoch ||
+      capability !== expectedCapability ||
+      capture.tabId !== frozenCapture.tabId ||
+      capture.windowId !== frozenCapture.windowId ||
+      capture.topDocumentId !== frozenCapture.topDocumentId
+    )
       throw Error("refused");
     const candidates = new Map();
     for (const frame of capture.frames) {
@@ -1259,6 +1456,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       topOrigin: capture.topOrigin,
       topDocumentId: capture.topDocumentId,
       signature: checkoutFrameSignature(capture),
+      userAuthorized: userGesture,
       candidates,
       createdAt: Date.now(),
       expiresAt,
@@ -1293,6 +1491,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       picker.revision !== message.revision ||
       picker.epoch !== epoch ||
       picker.capability !== capability ||
+      // The picker's own TTL alone governs selection; a consumed gesture does
+      // not retire the list the user is looking at.
       Date.now() > picker.expiresAt
     ) {
       clearCheckoutPicker();
@@ -1309,7 +1509,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     const chosen = consumeCheckoutChoice(message);
     if (!chosen) throw Error("refused");
     status = "已选择结账表单，正在核对当前页面";
-    void checkoutFill(chosen.picker, chosen.entry).catch(() => {});
+    // The picker exists only because a fresh one-time gesture was consumed for
+    // its exact tab/document. The grant is detached from any replayable request
+    // value and can authorize only this one crossing of the async gap.
+    const grant = Object.freeze({
+      nonce: chosen.picker.userAuthorized.nonce,
+      tabId: chosen.picker.tabId,
+      windowId: chosen.picker.windowId,
+      documentId: chosen.picker.topDocumentId,
+    });
+    void checkoutFill(chosen.picker, chosen.entry, grant).catch(() => {});
     return true;
   }
   function cancelCheckoutPickerMessage(message) {
@@ -1435,9 +1644,22 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!profile) throw Error("refused");
     return profile;
   }
-  async function checkoutFill(picker, target) {
+  async function checkoutFill(picker, target, grant = null) {
     const generation = epoch;
     if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    // The picker can only exist after a fresh gesture was consumed for it; the
+    // caller must pass the exact frozen grant derived from that consumption.
+    if (
+      !grant ||
+      !Object.isFrozen(grant) ||
+
+      grant.nonce !== picker?.userAuthorized?.nonce ||
+      grant.tabId !== picker?.tabId ||
+      grant.windowId !== picker?.windowId ||
+      grant.documentId !== picker?.topDocumentId ||
+      !picker.topDocumentId
+    )
+      throw Error("refused");
     const intent = {
       kind: "checkout",
       itemId: picker.itemId,
@@ -1540,6 +1762,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             fill.fields,
             Date.now() + 1500,
             intent.frameId === 0,
+            true,
           ],
         });
       } finally {
@@ -1635,7 +1858,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function current(expected) {
-    const now = await capture(expected.frameId || 0);
+    const now = await captureTopDocument(expected.frameId || 0);
     if (!core.sameContext(expected, now)) throw Error("refused");
   }
   async function runWatchtower(message) {
@@ -1649,7 +1872,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     let c = context;
     if (!c) {
       try {
-        c = await capture();
+        c = await captureTopDocument();
       } catch {
         if (generation !== epoch) throw Error("refused");
         const site = await activeSite();
@@ -1944,7 +2167,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     matchCategory = category;
     updateBadge();
     const generation = epoch,
-      c = await capture(frameId);
+      c = await captureTopDocument(frameId);
     await current(c);
     if (generation !== epoch) throw Error("refused");
     const fieldsToSend = fields(c);
@@ -1976,8 +2199,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
-  async function fill(itemId, revision, category = "login") {
+  async function fill(
+    itemId,
+    revision,
+    category = "login",
+    userAuthorized = false,
+  ) {
     if (!validCategory(category)) throw Error("refused");
+    if (category === "credit_card" && userAuthorized !== true)
+      throw Error("refused");
     const row = rows.find(
         (r) =>
           r.id === itemId &&
@@ -2033,13 +2263,23 @@ if (typeof importScripts === "function") importScripts("core.js");
                 category === "identity"
                   ? core.fillIdentityDocument
                   : core.fillCardDocument,
-              args: [
-                c.origin,
-                data,
-                Date.now() + 1500,
-                (c.frameId || 0) > 0,
-                category,
-              ],
+              args:
+                category === "credit_card"
+                  ? [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                      true,
+                    ]
+                  : [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                    ],
             }),
             generation,
           );
@@ -2269,7 +2509,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     status = "正在捕获当前登录";
     let captured;
     try {
-      const c = await bounded(capture(), generation);
+      const c = await bounded(captureTopDocument(), generation);
       intent.tabId = c.tabId;
       intent.windowId = c.windowId;
       if (itemId && !core.sameContext(c, previous)) throw Error("refused");
@@ -2417,22 +2657,26 @@ if (typeof importScripts === "function") importScripts("core.js");
     return { ...core.generatePassword(options), historyId: "" };
   }
   function recordGenerated(origin, username, generated) {
+    const createdAt = Date.now();
     const entry = {
       id: id(),
       origin,
       username: typeof username === "string" ? username : "",
       password: generated.password,
       profile: generated.profile,
-      createdAt: Date.now(),
+      createdAt,
+      expiresAt: createdAt + GENERATED_TTL,
     };
     generatedHistory.unshift(entry);
     while (generatedHistory.length > HISTORY_LIMIT) {
       const removed = generatedHistory.pop();
       if (removed) removed.password = "";
     }
+    scheduleGeneratedPrune();
     return entry.id;
   }
   function generatedHistoryView() {
+    pruneGenerated();
     return generatedHistory.map((entry) => ({
       id: entry.id,
       origin: entry.origin,
@@ -3137,13 +3381,139 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
-  api.tabs.onActivated.addListener(() => {
+  // A route survives only while its tab stays the active tab of its window.
+  // The one exception is the route's own startup: the browser activates the
+  // tab it just opened before tabs.create() resolves, and that activation must
+  // neither cancel the captured source context nor advance its epoch. Any
+  // later tab change revokes the route; an ordinary switch still cancels.
+  function bindRouteTab(grant, tabId, windowId) {
+    grant.tabId = tabId;
+    if (Number.isSafeInteger(windowId)) grant.windowId = windowId;
+    routeBoots.delete(grant);
+    routeTabs.set(tabId, grant);
+  }
+  // Returns "startup" for the route's own first activation and "switch" for
+  // anything else (including a later re-activation of an already open route).
+  function routeActivation(tabId, windowId) {
+    for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
+      if (grant.tabId !== tabId) continue;
+      if (grant.startupActivation === true) {
+        revokeRoute(grant);
+        return "switch";
+      }
+      grant.startupActivation = true;
+      grant.activated = true;
+      return "startup";
+    }
+    // The grant may not know its tab id yet: the activation can arrive before
+    // tabs.create() resolves. Adopt it, then confirm the tab really is the
+    // route page; a mismatch fails closed as an ordinary switch.
+    const boot = [...routeBoots].find(
+      (grant) => !Number.isSafeInteger(windowId) || grant.windowId === windowId,
+    );
+    if (!boot) return "switch";
+    bindRouteTab(boot, tabId, windowId);
+    boot.startupActivation = true;
+    boot.activated = true;
+    boot.initialLoad = {};
+    // Only this route's own startup may survive a lookup that is not yet
+    // exact. A transiently absent tab, or the same exact id/window whose
+    // navigation is still initializing with the exact route URL as its
+    // browser-reported pendingUrl, keeps the routeTabs binding and resets the
+    // one startup activation so a later activation of the same route tab can
+    // consume it. Nothing is synthesized: the grant stays unusable until every
+    // ordinary routeAnchors() check sees an exact, live, active URL and source.
+    // A wrong id/window, or a current URL that is not the route with no exact
+    // pendingUrl, still fails closed exactly as before.
+    const verifyActivationTarget = (tab) => {
+      if (routeTabs.get(tabId) !== boot) return;
+      if (!tab) {
+        boot.startupActivation = false;
+        return;
+      }
+      if (tab.id !== tabId || tab.windowId !== boot.windowId) {
+        revokeRoute(boot);
+        cancelContext();
+        return;
+      }
+      if (typeof tab.url === "string" && tab.url === boot.routeURL) {
+        return;
+      }
+      if (tab.pendingUrl === boot.routeURL) {
+        boot.startupActivation = false;
+        return;
+      }
+      revokeRoute(boot);
+      cancelContext();
+    };
+    try {
+      Promise.resolve(api.tabs.get(tabId)).then(verifyActivationTarget, () =>
+        verifyActivationTarget(null),
+      );
+    } catch {
+      verifyActivationTarget(null);
+    }
+    return "startup";
+  }
+  api.tabs.onActivated.addListener((info) => {
+    const kind = Number.isSafeInteger(info?.tabId)
+      ? routeActivation(info.tabId, info.windowId)
+      : "switch";
+    for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
+      // Only the tab that was just activated may keep a route; every other
+      // grant is no longer the active tab and ends now.
+      if (kind === "startup" && grant.tabId === info.tabId) continue;
+      revokeRoute(grant);
+    }
+    if (kind !== "startup") cancelContext();
     clearCheckoutPicker();
-    cancelContext();
     updateBadge();
     rebuildContextMenus();
   });
+  // Only the route tab's initial loading of its own exact URL is accepted;
+  // any other URL change on it is a navigation and revokes. The source page
+  // is not scripted or closed here, only checked: leaving its origin revokes.
+  function routeTabUpdated(tabId, change) {
+    let grant = routeTabs.get(tabId);
+    if (!grant && "url" in change) {
+      // Initial load can be reported before tabs.create() resolves.
+      const boot = [...routeBoots].find(
+        (candidate) => candidate.routeURL && candidate.routeURL === change.url,
+      );
+      if (boot) {
+        // Do not set startupActivation here: onActivated may still follow, and
+        // that event is what consumes the one permitted startup activation.
+        bindRouteTab(boot, tabId);
+        boot.initialLoad = {};
+        grant = boot;
+      }
+    }
+    if (!grant) return;
+    if ("url" in change && change.url !== grant.routeURL) {
+      revokeRoute(grant);
+      return;
+    }
+    if (change.status === "complete" && grant.initialLoad) {
+      grant.initialLoad = null;
+    }
+  }
+  // A route dies with its exact source page: any URL change (same origin
+  // included) and any new load of the source tab (a reload or document
+  // replacement keeps the URL) revoke it. Only events for the captured tab
+  // matter; the source never has to stay active.
+  function routeSourceUpdated(tabId, change) {
+    const hasURL = "url" in change && change.url !== undefined;
+    if (!hasURL && change.status !== "loading") return;
+    for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
+      if (grant.source.tabId !== tabId) continue;
+      if (change.status === "loading" || (hasURL && change.url !== grant.source.url)) {
+        revokeRoute(grant);
+      }
+    }
+  }
   api.tabs.onUpdated.addListener((tabId, change) => {
+    routeTabUpdated(tabId, change || {});
+    routeSourceUpdated(tabId, change || {});
     const session = multiStepSessions.get(tabId);
     if (session && "url" in change) {
       try {
@@ -3173,6 +3543,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     void processOpenAndFill(tabId, change);
   });
   api.tabs.onRemoved?.addListener((tabId) => {
+    for (const boot of [...routeBoots]) if (boot.tabId === tabId) revokeRoute(boot);
+    if (routeTabs.has(tabId)) revokeRoute(routeTabs.get(tabId));
+    for (const grant of [...routeGrants.values()])
+      if (grant.source.tabId === tabId) revokeRoute(grant);
     if (checkoutPicker?.tabId === tabId) clearCheckoutPicker();
     multiStepSessions.delete(tabId);
     clearConditionalIntentsForTab(tabId);
@@ -3357,7 +3731,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       } catch {
         password = core.generatePasswordString(options);
       }
-      const c = await capture();
+      const c = await captureTopDocument();
       await current(c);
       const results = await api.scripting.executeScript({
         target: { tabId: c.tabId, documentIds: [c.documentId] },
@@ -3379,10 +3753,37 @@ if (typeof importScripts === "function") importScripts("core.js");
       updateBadge();
     }
   }
-  async function fillItemCategory(itemId, revision, category) {
+  async function fillItemCategory(
+    itemId,
+    revision,
+    category,
+    userGesture = null,
+    clickedTab = null,
+  ) {
     const kind = core.normalizeCategory(category);
     if (kind !== "card" && kind !== "identity") {
       status = "此条目类别不支持填充";
+      return;
+    }
+    if (kind === "card" && !userGestureValid(userGesture)) {
+      status = "本次信用卡填充需要明确的用户操作";
+      return;
+    }
+    // The card menu entry is authorized only for the exact tab Chrome reported
+    // for that click; a missing or malformed tab identity binds nothing.
+    if (
+      kind === "card" &&
+      !(
+        clickedTab &&
+        typeof clickedTab === "object" &&
+        !Array.isArray(clickedTab) &&
+        Number.isSafeInteger(clickedTab.id) &&
+        clickedTab.id > 0 &&
+        Number.isSafeInteger(clickedTab.windowId) &&
+        clickedTab.windowId > 0
+      )
+    ) {
+      status = "本次信用卡填充需要明确的用户操作";
       return;
     }
     if (
@@ -3402,7 +3803,17 @@ if (typeof importScripts === "function") importScripts("core.js");
     const intent = { kind: "profile", itemId, revision, injectionStarted: false };
     pending = intent;
     try {
-      const c = await capture();
+      const c = await captureTopDocument();
+      // Bind the menu click's nonce to the tab and document the browser
+      // reports before any native request leaves, and require that context to
+      // be the tab Chrome attached to the click itself.
+      if (
+        kind === "card" &&
+        (c.tabId !== clickedTab.id || c.windowId !== clickedTab.windowId)
+      )
+        throw Error("refused");
+      if (kind === "card" && !consumeUserGesture(userGesture, c))
+        throw Error("refused");
       await current(c);
       const profileKind = kind === "card" ? "credit_card" : "identity";
       const match = await request(
@@ -3456,7 +3867,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               : core.fillIdentityDocument,
           args:
             kind === "card"
-              ? [c.origin, fill.fields, Date.now() + 1500, true]
+              ? [c.origin, fill.fields, Date.now() + 1500, true, true]
               : [c.origin, fill.fields, Date.now() + 1500, false, "identity"],
         });
       } finally {
@@ -4138,6 +4549,728 @@ if (typeof importScripts === "function") importScripts("core.js");
     return fieldValue(message, true);
   }
 
+  /* ---------------------------------------------------------------- *
+   * Persistent approval routes.                                       *
+   *                                                                   *
+   * An ordinary (non-QuickFill) vault row must not start `item-get`    *
+   * from the action popup: native desktop V2 focuses the desktop app, *
+   * Chrome destroys that popup and the approved detail is lost. The   *
+   * popup first asks for a route tab that shows the same popup UI.    *
+   * Only this worker's memory knows the target and the source page.   *
+   * ---------------------------------------------------------------- */
+  const ROUTE_URL = (api.runtime.getURL || ((path) => path))("popup.html");
+  function routeURL(token) {
+    return ROUTE_URL + "#route=" + token;
+  }
+  // The browser's own tab identity: the extension page itself, no query, no
+  // other extension document. The fragment (the route token) is not part of
+  // the identity check; the worker's map decides which token is live.
+  function routePageURL(sender, tab) {
+    if (!sender?.tab || sender.id !== api.runtime.id) return "";
+    if (typeof sender.url !== "string" || typeof tab?.url !== "string") return "";
+    if (sender.url.split("#")[0] !== ROUTE_URL) return "";
+    if (tab.url.split("#")[0] !== ROUTE_URL) return "";
+    if (sender.frameId !== 0 || sender.tab.id !== tab.id) return "";
+    // No origin comparison: a chrome-extension: URL has an opaque origin
+    // (new URL(...).origin === "null"). The runtime id plus these exact
+    // extension URLs are the authoritative identity.
+    return sender.tab.url;
+  }
+  // Exactly one exact fragment token, nothing else.
+  function routeTokenFromPage(pageURL) {
+    const match = /^[^#]*#route=([a-f0-9]{64})$/.exec(pageURL || "");
+    return match ? match[1] : "";
+  }
+  // A grant still exists, still belongs to this exact page regardless of the
+  // fragment the page claims, and still holds the live capability/epoch. It
+  // is live while open and after its single claim has moved it to claimed, so
+  // the approved read that the claim started can finish.
+  function routeLive(grant) {
+    return (
+      !!grant &&
+      routeGrants.get(grant.token) === grant &&
+      (grant.state === "open" || grant.state === "claimed") &&
+      grant.expiresAt > Date.now() &&
+      grant.capability !== "" &&
+      grant.capability === capability &&
+      grant.epoch === epoch &&
+      (routeTabs.get(grant.tabId) || null) === grant
+    );
+  }
+  // Revocation only drops worker memory. It never closes, navigates or
+  // scripts the route tab (or any page): the page learns `revoked` on its own
+  // port, or its next request is refused.
+  function revokeRoute(grant) {
+    if (!grant) return;
+    const known =
+      routeGrants.get(grant.token) === grant ||
+      routeTabs.get(grant.tabId) === grant ||
+      routeBoots.has(grant);
+    routeGrants.delete(grant.token);
+    routeBoots.delete(grant);
+    if ((routeTabs.get(grant.tabId) || null) === grant) routeTabs.delete(grant.tabId);
+    // Every route port loses its unused native grant and the approved field
+    // selectors; nothing it still holds can authorize a prepare or commit.
+    for (const state of grant.clients) {
+      clipboardDropGrant(state, true);
+      state.routeDetail = null;
+    }
+    grant.clients.clear();
+    grant.routeDetail = null;
+    // Tell this route's own page that it is dead, then close the channel. No
+    // detail or value ever travels here: only the token.
+    const lifecycle = [...(grant.lifecyclePorts || [])];
+    grant.lifecyclePorts?.clear();
+    for (const state of lifecycle) {
+      routeLifecyclePorts.delete(state);
+      try {
+        state.port.postMessage({ type: "route-revoked", token: grant.token });
+      } catch {}
+      try {
+        state.port.disconnect();
+      } catch {}
+    }
+    if (known) {
+      grant.state = "revoked";
+      routeGrantsChanged();
+    }
+  }
+  // The one deadline timer always follows the grant set now, rather than
+  // waiting for a revoked grant's former deadline. A revoke during
+  // scheduleRouteExpiry()'s own callback leaves the re-arm to pruneRoutes().
+  let routeScheduling = false;
+  function routeGrantsChanged() {
+    if (!routeScheduling) scheduleRouteExpiry();
+  }
+  // The single wake-up for route deadlines. A grant's expiresAt is never
+  // moved: activity on the route is not a renewal, and every re-arm always
+  // targets the earliest original deadline. Firing only runs the ordinary
+  // pruneRoutes() path, so an idle grant is revoked exactly as any other
+  // expiry and its lifecycle ports receive route-revoked. No alarms permission
+  // is involved; the timer lives only as long as the worker does.
+  let routeExpiryTimer = null;
+  function clearRouteExpiryTimer() {
+    if (routeExpiryTimer !== null) clearTimeout(routeExpiryTimer);
+    routeExpiryTimer = null;
+  }
+  function scheduleRouteExpiry() {
+    clearRouteExpiryTimer();
+    const previous = routeScheduling;
+    routeScheduling = true;
+    try {
+      // Bound and still-pending grants alike carry the original deadline.
+      let next = Infinity;
+      for (const grant of new Set([
+        ...routeGrants.values(),
+        ...routeTabs.values(),
+        ...routeBoots,
+      ]))
+        if (Number.isSafeInteger(grant.expiresAt) && grant.expiresAt < next)
+          next = grant.expiresAt;
+      if (!Number.isFinite(next)) return;
+      routeExpiryTimer = setTimeout(fireRouteExpiry, Math.max(0, next - Date.now()));
+      routeExpiryTimer?.unref?.();
+    } finally {
+      routeScheduling = previous;
+    }
+  }
+  // A timer may be delivered a little early. It never revokes on its own:
+  // the ordinary deadline predicate decides, and pruneRoutes() re-arms for
+  // exactly the same absolute deadline (clearing it when no grant is left).
+  function fireRouteExpiry() {
+    routeExpiryTimer = null;
+    pruneRoutes();
+  }
+  function revokeAllRoutes() {
+    const grants = new Set([...routeGrants.values(), ...routeTabs.values()]);
+    for (const grant of grants) revokeRoute(grant);
+    routeGrants.clear();
+    routeTabs.clear();
+  }
+  // Every grant's original deadline is honoured here, whether its tab is
+  // bound or its create is still pending.
+  function pruneRoutes() {
+    for (const grant of routeGrantSet())
+      if (Number.isSafeInteger(grant.expiresAt) && grant.expiresAt <= Date.now())
+        revokeRoute(grant);
+    scheduleRouteExpiry();
+  }
+  // Every grant counts toward ROUTE_LIMIT, whether its tab is bound or its
+  // tabs.create() is still pending: a pending create holds a route slot.
+  function routeGrantSet() {
+    return new Set([...routeGrants.values(), ...routeTabs.values(), ...routeBoots]);
+  }
+  function routeGrantCount() {
+    return routeGrantSet().size;
+  }
+  // A pending create is not yet an ordinary routeTabs entry, so routeLive()
+  // is necessarily false for it; its state is checked directly. Child fields
+  // are read only after the object identity of this exact boot is confirmed.
+  function routeBootLive(boot) {
+    return (
+      !!boot &&
+      routeBoots.has(boot) &&
+      routeGrants.get(boot.token) === boot &&
+      // Only an unbound create is a boot: bindRouteTab() moves it to
+      // routeTabs and clears routeBoots in the same step.
+      boot.tabId === 0 &&
+      boot.state === "open" &&
+      boot.expiresAt > Date.now() &&
+      boot.capability !== "" &&
+      boot.capability === capability &&
+      boot.epoch === epoch
+    );
+  }
+  // The route document may connect its lifecycle port before the browser
+  // reports its activation or initial load and before tabs.create() resolves.
+  // The exact pending boot is recognised before routeMessage() can revoke it,
+  // and is verified only against the browser's own report of the created tab.
+  // The sender is only ever compared structurally: Port.sender is a getter
+  // that need not return the same object reference twice.
+  async function bindEarlyRouteTab(sender) {
+    if (
+      !sender?.tab ||
+      sender.id !== api.runtime.id ||
+      sender.frameId !== 0 ||
+      !Number.isSafeInteger(sender.tab.id) ||
+      sender.tab.id < 1 ||
+      typeof sender.url !== "string" ||
+      typeof sender.tab.url !== "string"
+    )
+      return null;
+    // The browser's own tab must still be exactly the tab the sender carries.
+    // routePageURL() then applies the same admission contract as the ordinary
+    // route path, including a sender.url that lags within this tab: only the
+    // extension-page base is checked there, while the browser-reported tab is
+    // the current exact page. The token is taken from that verified page only,
+    // never from the sender's own claim.
+    const tab = await routeTabAt(sender.tab.id, sender.tab.url);
+    if (!tab) {
+      return null;
+    }
+    const pageURL = routePageURL(sender, tab);
+    if (!pageURL || pageURL !== tab.url) {
+      return null;
+    }
+    const token = routeTokenFromPage(pageURL);
+    if (!token) {
+      return null;
+    }
+    const boots = [...routeBoots].filter(
+      (candidate) => candidate.token === token,
+    );
+    // Equal tokens cannot share this set, so a single match is the routed
+    // grant: safe to hand to a revoking check before it is re-verified.
+    const boot = boots.length === 1 ? boots[0] : null;
+    if (
+      !boot ||
+      boot.routeURL !== pageURL ||
+      boot.routeURL !== routeURL(boot.token) ||
+      // Every mutable field is read after the await: the boot may have been
+      // revoked, bound by the browser's own event or claimed meanwhile.
+      !routeBootLive(boot)
+    ) {
+      return null;
+    }
+    // The browser's own tab must carry the exact route URL, sit in the source
+    // window, be the active tab, and agree with the sender's tab window.
+    if (
+      tab.windowId !== boot.windowId ||
+      tab.active !== true ||
+      sender.tab.windowId !== tab.windowId
+    ) {
+      // A replaced, moved or inactive tab is not this route any more.
+      revokeRoute(boot);
+      return null;
+    }
+    // Bind exactly as the create continuation would once tabs.create()
+    // resolves; onActivated still consumes the one permitted startup switch.
+    bindRouteTab(boot, tab.id, tab.windowId);
+    boot.activated = true;
+    boot.initialLoad = null;
+    return { boot, tabId: tab.id, windowId: tab.windowId };
+  }
+  async function routeTabAt(tabId, expectedURL) {
+    if (!Number.isSafeInteger(tabId) || tabId < 1 || !expectedURL) return null;
+    try {
+      const tab = await api.tabs.get(tabId);
+      if (
+        !tab ||
+        tab.id !== tabId ||
+        typeof tab.url !== "string" ||
+        tab.url !== expectedURL
+      )
+        return null;
+      return tab;
+    } catch {
+      return null;
+    }
+  }
+  async function routeSourceAt(source) {
+    if (!Number.isSafeInteger(source.tabId) || source.tabId < 1) return null;
+    try {
+      const tab = await api.tabs.get(source.tabId);
+      if (
+        !tab ||
+        tab.id !== source.tabId ||
+        tab.windowId !== source.windowId ||
+        typeof tab.url !== "string" ||
+        !core.validHTTPSOrigin(core.originFromURL(tab.url)) ||
+        core.originFromURL(tab.url) !== source.origin ||
+        // The exact captured URL includes path, query and fragment. A reload
+        // that keeps the URL is caught by the load event below.
+        tab.url !== source.url
+      )
+        return null;
+      return tab;
+    } catch {
+      return null;
+    }
+  }
+  // Both anchors are re-read after every await: a closed, moved or retargeted
+  // route tab and a navigated, closed or moved source page both revoke. Only
+  // the route tab must be the active tab; opening it makes the captured
+  // source inactive, so the source only has to stay the same tab in its
+  // window at the exact captured URL and origin. A reload at the same URL is
+  // caught by the source tab's load event, never by inventing document data.
+  async function routeAnchors(grant) {
+    if (grant.epoch !== epoch || grant.capability !== capability) return false;
+    const [tab, source] = await Promise.all([
+      routeTabAt(grant.tabId, grant.routeURL),
+      routeSourceAt(grant.source),
+    ]);
+    return (
+      !!tab &&
+      tab.windowId === grant.windowId &&
+      tab.active === true &&
+      !!source
+    );
+  }
+  function requireRoute(grant) {
+    if (!routeLive(grant)) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+  }
+  async function revalidateRoute(grant) {
+    requireRoute(grant);
+    if (!(await routeAnchors(grant))) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    requireRoute(grant);
+  }
+  // Called after every await that yields while a route-owned native response
+  // may be in flight. A revoked route discards the response before it can
+  // reach the popup cache or the page.
+  async function routeSettled(grant) {
+    try {
+      if (!routeLive(grant) || !(await routeAnchors(grant))) revokeRoute(grant);
+    } catch {
+      revokeRoute(grant);
+    }
+  }
+  async function createRoute(message, sender) {
+    await settingsReady;
+    const allowed = ["type", "id", "revision", "quick_fill"];
+    if (
+      !capability ||
+      !message ||
+      Object.keys(message).some((key) => !allowed.includes(key)) ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      // QuickFill keeps its existing direct detail path; a route is only for
+      // the native V2 approval flow of an ordinary click.
+      (message.quick_fill !== undefined && message.quick_fill !== false)
+    )
+      throw Error("refused");
+    // Only this extension's action popup (no tab) may create a route, and the
+    // source is the HTTPS top document the worker captured for `match`.
+    if (!sender || sender.id !== api.runtime.id || sender.tab || sender.url !== ROUTE_URL)
+      throw Error("refused");
+    const source = context,
+      sourceTab = source ? await routeSourceAt(source) : null;
+    if (
+      !source ||
+      !sourceTab ||
+      !Number.isSafeInteger(source.tabId) ||
+      source.tabId < 1 ||
+      !Number.isSafeInteger(source.windowId) ||
+      source.windowId < 1 ||
+      source.frameId !== 0 ||
+      typeof source.documentId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(source.documentId) ||
+      typeof source.origin !== "string" ||
+      core.originFromURL(source.origin) !== source.origin ||
+      !core.validHTTPSOrigin(source.origin) ||
+      typeof source.url !== "string" ||
+      // The page must not have moved since match captured it.
+      source.url !== sourceTab.url ||
+      // A pending fill, OTP or open-and-fill owns the source page; a route
+      // must not be created underneath it.
+      pending ||
+      pendingOTP ||
+      pendingPasskey ||
+      pendingOpenAndFill
+    )
+      throw Error("refused");
+    const requestEpoch = epoch,
+      requestCapability = capability,
+      requestSource = {
+        tabId: source.tabId,
+        windowId: source.windowId,
+        documentId: source.documentId,
+        origin: source.origin,
+        url: source.url,
+      };
+    // The source may have moved while it was read; the route now binds the
+    // captured document and the browser-checked same tab/window/URL/origin.
+    if (requestEpoch !== epoch || requestCapability !== capability || !capability)
+      throw Error("refused");
+    pruneRoutes();
+    for (const existing of new Set([...routeGrants.values(), ...routeTabs.values()]))
+      if (existing.source.tabId === requestSource.tabId && existing.itemId === message.id)
+        revokeRoute(existing);
+    while (routeGrantCount() >= ROUTE_LIMIT) {
+      const oldest = [...routeGrantSet()].sort(
+        (left, right) => left.expiresAt - right.expiresAt,
+      )[0];
+      if (!oldest) break;
+      revokeRoute(oldest);
+    }
+    const token = id() + id();
+    const grant = {
+      token,
+      itemId: message.id,
+      revision: message.revision,
+      source: requestSource,
+      tabId: 0,
+      windowId: sourceTab.windowId,
+      routeURL: "",
+      capability: requestCapability,
+      epoch: requestEpoch,
+      state: "open",
+      expiresAt: Date.now() + ROUTE_TTL,
+      clients: new Set(),
+      lifecyclePorts: new Set(),
+    };
+    grant.routeURL = routeURL(token);
+    grant.windowId = sourceTab.windowId;
+    // Registered before tabs.create: the browser may report this tab's
+    // activation and initial load before that promise resolves.
+    routeGrants.set(token, grant);
+    routeBoots.add(grant);
+    let created;
+    try {
+      // The route must stay in the captured source tab's window.
+      created = await api.tabs.create({
+        url: routeURL(token),
+        active: true,
+        windowId: sourceTab.windowId,
+      });
+    } catch {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    if (!created || !Number.isSafeInteger(created.id) || created.id < 1) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    // A lock, disconnect, source navigation or cap eviction may have revoked
+    // this grant while tabs.create() was in flight. The browser may already
+    // have opened the tab, so fail closed without binding, returning or
+    // closing it.
+    // A lifecycle port admitted from this still-pending boot has already
+    // bound the very tab the browser returns: that is the same route, not a
+    // second one. The page may also have claimed its single read already, so
+    // "claimed" is this same live route; revocation sets "revoked" and still
+    // fails closed here.
+    const adoptedByPort =
+      grant.tabId === created.id &&
+      routeTabs.get(grant.tabId) === grant &&
+      (grant.state === "open" || grant.state === "claimed") &&
+      [...grant.lifecyclePorts].some((state) => state.early === true);
+    const stillOwned =
+      routeGrants.get(grant.token) === grant &&
+      ((grant.state === "open" &&
+        ((grant.tabId === 0 && routeBoots.has(grant)) ||
+          (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant))) ||
+        adoptedByPort);
+    if (!stillOwned) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    if (grant.tabId === 0) {
+      // No activation event was observed: bind what the browser returned. The
+      // grant is live only once the route tab is the active tab (checked by
+      // every claim, copy and read through routeAnchors()).
+      bindRouteTab(grant, created.id, created.windowId);
+    } else if (grant.tabId !== created.id) {
+      revokeRoute(grant);
+      throw Error("refused");
+    } else {
+      routeBoots.delete(grant);
+    }
+    scheduleRouteExpiry();
+    return {
+      type: "route-created",
+      token,
+      tab_id: grant.tabId,
+      expires_in_seconds: Math.floor(ROUTE_TTL / 1000),
+    };
+  }
+  async function routeClaim(message, grant) {
+    if (
+      !grant ||
+      Object.keys(message).sort().join(",") !== "token,type" ||
+      message.token !== grant.token
+    )
+      throw Error("refused");
+    // The state transition below is synchronous, so a concurrent second claim
+    // sees "claimed" and neither claim can start a second read. There is no
+    // re-read path: a duplicate claim is refused outright.
+    if (grant.state !== "open") throw Error("refused");
+    grant.state = "claimed";
+    return routeApprovedDetail(grant);
+  }
+  // The same native V2 `item-get` the action popup used, under a fresh native
+  // list row: the route names the exact item and revision, the host decides
+  // and approves. There is no field-cache or candidate fallback, and the
+  // result is never written to detailCache.
+  async function routeApprovedDetail(grant) {
+    requireRoute(grant);
+    const requestEpoch = epoch,
+      requestCapability = capability,
+      list = await request(
+        "vault-search",
+        {
+          capability: requestCapability,
+          query: "",
+          category: "all",
+          state: "all",
+        },
+        12000,
+      );
+    requireRoute(grant);
+    if (
+      requestEpoch !== epoch ||
+      requestCapability !== capability ||
+      !list ||
+      // The V2 native host answers vault-search with "items" (items + vaults);
+      // "vault-items" stays accepted for older hosts. Either shape must pass
+      // core.validResponse and the exact row is still matched below.
+      (list.type !== "items" && list.type !== "vault-items") ||
+      !core.validResponse(list)
+    )
+      throw Error("refused");
+    const row = list.items.find(
+      (item) =>
+        item &&
+        !Array.isArray(item) &&
+        item.id === grant.itemId &&
+        item.revision === grant.revision,
+    );
+    if (!row) throw Error("refused");
+    if (!(await routeAnchors(grant))) throw Error("refused");
+    requireRoute(grant);
+    const response = await request(
+      "item-get",
+      {
+        capability: requestCapability,
+        item_id: grant.itemId,
+        revision: grant.revision,
+      },
+      12000,
+    );
+    const live = routeLive(grant);
+    if (!live) {
+      // A late approval for a revoked or locked route is scrubbed here.
+      if (response && typeof response === "object") response.item = null;
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    if (
+      requestEpoch !== epoch ||
+      requestCapability !== capability ||
+      !core.validResponse(response) ||
+      response.type !== "item-detail"
+    )
+      throw Error("refused");
+    const detail = publicDetail(response.item);
+    if (
+      !detail ||
+      detail.id !== grant.itemId ||
+      detail.revision !== grant.revision ||
+      (detail.readOnly === true || detail.unavailable)
+    )
+      throw Error("refused");
+    await routeSettled(grant);
+    if (!routeLive(grant)) {
+      scrubDetail(detail);
+      throw Error("refused");
+    }
+    // Field selectors of the approved detail, kept on the grant so this
+    // route's own clipboard ports get them whether they were admitted before
+    // or after the claim. No field value is retained.
+    setRouteDetail(grant, detail);
+    return {
+      type: "route-claimed",
+      token: grant.token,
+      item_id: grant.itemId,
+      revision: grant.revision,
+      // The grant's original absolute UTC epoch-millisecond deadline. It is
+      // returned unchanged, never rounded or extended, so the route page can
+      // arm exactly this instant instead of reconstructing it from a floored
+      // remainder.
+      expires_at_ms: grant.expiresAt,
+      detail,
+    };
+  }
+  // The route-scoped selector binding: item id, revision and field ids only.
+  // A route port gets it at admission and on claim, and loses it on revoke.
+  function setRouteDetail(grant, detail) {
+    grant.routeDetail = {
+      id: detail.id,
+      revision: detail.revision,
+      fields: core.flattenItemFields(detail).map((entry) => entry.id),
+    };
+    for (const client of grant.clients) client.routeDetail = grant.routeDetail;
+  }
+  // Only a projectable value may leave a route: the public detail projection
+  // with anything the user has not asked to see blanked in place.
+  function scrubDetail(detail) {
+    if (!detail) return;
+    detail.password = "";
+    detail.notes = "";
+    detail.username = "";
+    if (Array.isArray(detail.attachments)) detail.attachments.length = 0;
+    for (const entry of Array.isArray(detail.fields) ? detail.fields : [])
+      if (entry && typeof entry === "object") entry.value = "";
+  }
+  async function routeFieldValue(message, grant, copy) {
+    const fields = copy
+      ? "field,item_id,revision,token,type"
+      : "field,id,item_id,revision,token,type";
+    if (
+      !grant ||
+      !message ||
+      Object.keys(message).sort().join(",") !== fields ||
+      message.token !== grant.token ||
+      message.item_id !== grant.itemId ||
+      message.revision !== grant.revision ||
+      (copy
+        ? !core.validCopyFieldSelector(message.field)
+        : !/^(?:username|password|notes|url|otp|cc-number|cc-csc|cc-pin|section:[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,128})$/.test(
+            message.field || "",
+          ))
+    )
+      throw Error("refused");
+    // Field values only exist for a claimed route that is still open: copying
+    // or revealing from the vault list beside the route is refused.
+    requireRoute(grant);
+    if (grant.state !== "claimed") throw Error("refused");
+    await revalidateRoute(grant);
+    const field = message.field;
+    // The exact item/revision/field is re-read from the native vault under the
+    // same V2 approval; the route never borrows the popup's cached detail.
+    const response = await request(
+      "item-get",
+      { capability: grant.capability, item_id: grant.itemId, revision: grant.revision },
+      12000,
+    );
+    requireRoute(grant);
+    if (
+      grant.capability !== capability ||
+      !core.validResponse(response) ||
+      response.type !== "item-detail"
+    )
+      throw Error("refused");
+    const detail = publicDetail(response.item);
+    if (
+      !detail ||
+      detail.id !== grant.itemId ||
+      detail.revision !== grant.revision ||
+      !core.flattenItemFields(detail).some((entry) => entry.id === field)
+    )
+      throw Error("refused");
+    const requestEpoch = epoch,
+      requestCapability = capability;
+    await routeSettled(grant);
+    requireRoute(grant);
+    if (requestEpoch !== epoch || requestCapability !== capability)
+      throw Error("refused");
+    const value = await request(
+      copy ? "item-copy-field" : "item-reveal-field",
+      {
+        capability: requestCapability,
+        item_id: grant.itemId,
+        revision: grant.revision,
+        field,
+        action: copy ? "copy" : "reveal",
+      },
+      12000,
+    );
+    // The native approval is final: the route and both anchors, and the
+    // request epoch/capability, are re-read before the owned reply may carry
+    // a value. An event already queued for a source or route-tab change must
+    // not let the value leave after the browser anchor moved.
+    await routeSettled(grant);
+    if (requestEpoch !== epoch || requestCapability !== capability) {
+      if (value && typeof value === "object") value.value = "";
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    const live = routeLive(grant);
+    if (!live) {
+      if (value && typeof value === "object") value.value = "";
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    if (
+      requestEpoch !== epoch ||
+      requestCapability !== capability ||
+      !core.validResponse(value) ||
+      value.type !== "field-value" ||
+      value.item_id !== grant.itemId ||
+      value.revision !== grant.revision ||
+      value.field !== field ||
+      typeof value.value !== "string"
+    ) {
+      if (value && typeof value === "object") value.value = "";
+      throw Error("refused");
+    }
+    const hostExpires = Number.isSafeInteger(value.expires_in_seconds)
+      ? Math.max(0, value.expires_in_seconds)
+      : 0;
+    const expires = copy
+      ? hostExpires > 0
+        ? Math.min(30, hostExpires)
+        : 30
+      : value.field === "otp"
+        ? hostExpires
+        : hostExpires > 0
+          ? Math.min(30, hostExpires)
+          : 30;
+    return {
+      field: value.field,
+      value: value.value,
+      revision: value.revision,
+      expires_in_seconds: expires,
+      copied: value.copied,
+      clearAfterSeconds: expires,
+    };
+  }
+  function routeClose(message, grant) {
+    if (
+      !grant ||
+      Object.keys(message).sort().join(",") !== "token,type" ||
+      message.token !== grant.token
+    )
+      return null;
+    revokeRoute(grant);
+    return { type: "route-closed", token: grant.token };
+  }
+
   // Native clipboard leasing (capability native-clipboard-lease-v1).
   //
   // The popup is the only client. It opens one private runtime port, so no
@@ -4145,6 +5278,12 @@ if (typeof importScripts === "function") importScripts("core.js");
   // at most one outstanding grant, and every message carries fresh bounded
   // selectors: the background never borrows another popup's grant.
   const NATIVE_CLIPBOARD_PORT_NAME = "native-clipboard";
+  // A route tab's own lifetime signal. It carries only the route token; it is
+  // how a real worker revocation reaches the persistent page that still holds
+  // the already-approved detail.
+  const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
+  const ROUTE_LIFECYCLE_MAX_PORTS = 8;
+  const routeLifecyclePorts = new Set();
   const NATIVE_CLIPBOARD_MAX_PORTS = 4;
   const NATIVE_CLIPBOARD_MAX_REQUEST_IDS = 32;
   const NATIVE_CLIPBOARD_MAX_GRANT_SECONDS = 15;
@@ -4222,15 +5361,43 @@ if (typeof importScripts === "function") importScripts("core.js");
       core.validCopyFieldSelector(message.field)
     );
   }
+  // A route tab's port may only ever name that route's exact item/revision.
+  // The ordinary popup port has no route and keeps its own selector check.
+  function clipboardBound(state, message) {
+    if (!state.route) return true;
+    const grant = state.route;
+    return (
+      grant.clients.has(state) &&
+      routeLive(grant) &&
+      grant.state === "claimed" &&
+      message.item_id === grant.itemId &&
+      message.revision === grant.revision &&
+      fieldAllowedByRouteDetail(state, message)
+    );
+  }
+  // A route port may only ask native to prepare or copy a field the route's
+  // own approved detail actually has. The remembered detail holds selectors
+  // only (id/revision/field ids), never a field value.
+  function fieldAllowedByRouteDetail(state, message) {
+    const detail = state.routeDetail;
+    return (
+      !!detail &&
+      detail.id === message.item_id &&
+      detail.revision === message.revision &&
+      detail.fields.includes(message.field)
+    );
+  }
   function clipboardRefused(requestId) {
     return { type: "refused", request_id: requestId, unknown: false };
   }
   async function clipboardPrepare(state, message) {
     const requestId = message.request_id;
+    const route = state.route || null;
     if (
       Object.keys(message).sort().join(",") !==
         "field,item_id,request_id,revision,type" ||
       !clipboardSelector(message) ||
+      !clipboardBound(state, message) ||
       !clipboardRequestIdFresh(state, requestId) ||
       state.grant ||
       state.preparing ||
@@ -4268,6 +5435,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       requestEpoch !== epoch ||
       requestCapability !== capability ||
       !clipboardPortAlive(state) ||
+      !clipboardBound(state, message) ||
       state.preparing !== preparation ||
       state.grant ||
       !core.validResponse(response) ||
@@ -4324,6 +5492,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "copy_ticket,field,item_id,request_id,revision,type" ||
       !clipboardRequestIdFresh(state, requestId) ||
       !clipboardSelector(message) ||
+      !clipboardBound(state, message) ||
       !grant ||
       grant.committed ||
       grant.epoch !== epoch ||
@@ -4353,7 +5522,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     } catch {
       response = null;
     }
-    const grantLive = state.grant === grant && clipboardPortAlive(state);
+    const grantLive =
+      state.grant === grant &&
+      clipboardPortAlive(state) &&
+      (!state.route || routeLive(state.route));
     if (state.grant === grant) state.grant = null;
     // An unknown outcome is reported as uncertain and never retried: the
     // desktop may already own the clipboard bytes.
@@ -4409,11 +5581,125 @@ if (typeof importScripts === "function") importScripts("core.js");
         return Promise.resolve(null);
     }
   }
+  // A route tab's port is admitted only for the exact claimed, live route the
+  // browser reports; its grants die with the route. The ordinary popup sender
+  // (core.validSender) and its grants are unchanged.
+  async function routeClipboardGrant(sender) {
+    if (!sender?.tab || sender.id !== api.runtime.id) return null;
+    if (typeof sender.url !== "string" || !sender.url.includes("#route="))
+      return null;
+    const tab = await routeTabAt(sender.tab.id, sender.tab.url);
+    const pageURL = routePageURL(sender, tab);
+    const token = routeTokenFromPage(pageURL);
+    const grant = token ? routeGrants.get(token) || null : null;
+    if (
+      !grant ||
+      !routeLive(grant) ||
+      sender.tab.id !== grant.tabId ||
+      // A port exists before the page can claim; the route's own tab and URL
+      // are the admission, and its selector binding keeps it to one target.
+      !(await routeAnchors(grant))
+    ) {
+      revokeRoute(grant);
+      return null;
+    }
+    return grant;
+  }
+  // A route lifecycle port is bound by the browser's sender identity to one
+  // live route: same extension, top frame, exact tab and exact route URL with
+  // the exact token. It is opened before the claim and carries no data except
+  // that token.
+  async function openRouteLifecyclePort(port, sender) {
+    const reject = () => {
+      try {
+        port?.disconnect?.();
+      } catch {}
+    };
+    if (!port || port.name !== ROUTE_LIFECYCLE_PORT_NAME) return reject();
+    // One slot is taken before the first await, so an unverified port cannot
+    // open more than the cap. Until admission a refusal only frees the slot:
+    // the route itself is untouched by a sender that has not been verified.
+    const state = { port, grant: null, early: false };
+    if (routeLifecyclePorts.size >= ROUTE_LIFECYCLE_MAX_PORTS) return reject();
+    routeLifecyclePorts.add(state);
+    port.onDisconnect?.addListener?.(() => {
+      state.grant?.lifecyclePorts.delete(state);
+      routeLifecyclePorts.delete(state);
+      void api.runtime.lastError;
+    });
+    const drop = () => {
+      routeLifecyclePorts.delete(state);
+      return reject();
+    };
+    if (!sender?.tab || sender.id !== api.runtime.id || sender.frameId !== 0)
+      return drop();
+    // The pending boot is adopted before routeMessage(): for an unbound boot
+    // that call is refused and would revoke the grant first. This boot is
+    // browser-verified already, so its port may arrive before the create
+    // continuation binds it; that path never revokes.
+    const early = await bindEarlyRouteTab(sender);
+    let grant = early ? early.boot : null;
+    if (!grant) {
+      try {
+        grant = await routeMessage(sender);
+      } catch {}
+    }
+    // Compare the browser-attached sender structurally; a Port getter is not
+    // guaranteed to return the same object reference twice.
+    const bound = port?.sender;
+    if (
+      !bound ||
+      bound.id !== sender.id ||
+      bound.url !== sender.url ||
+      bound.frameId !== sender.frameId ||
+      bound.tab?.id !== sender.tab.id ||
+      bound.tab?.url !== sender.tab.url
+    )
+      return drop();
+    // bindEarlyRouteTab() has already validated the pending boot against the
+    // browser's own report of the created tab and adopted it exactly as the
+    // create continuation would, so from here on it is an ordinary bound
+    // route and the unchanged liveness and anchor checks apply.
+    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId) return drop();
+    // The route just adopted must pass the ordinary anchor checks once more,
+    // after every await, before its port is admitted. A mismatch ends it.
+    if (early) {
+      const anchors = await routeAnchors(grant);
+      if (!routeLive(grant) || sender.tab.id !== grant.tabId || !anchors) {
+        revokeRoute(grant);
+        return drop();
+      }
+    }
+    state.grant = grant;
+    state.early = !!early;
+    grant.lifecyclePorts.add(state);
+    try {
+      port.postMessage({ type: "route-ready", token: grant.token });
+    } catch {
+      revokeRoute(grant);
+    }
+  }
+
   function openClipboardPort(port, sender) {
+    if (
+      sender &&
+      sender.id === api.runtime.id &&
+      sender.tab &&
+      !core.validSender(sender, api.runtime)
+    ) {
+      routeClipboardGrant(sender).then(
+        (grant) => admitClipboardPort(port, sender, grant),
+        () => admitClipboardPort(port, sender, null),
+      );
+      return;
+    }
+    admitClipboardPort(port, sender, null);
+  }
+  function admitClipboardPort(port, sender, route) {
     if (
       !port ||
       port.name !== NATIVE_CLIPBOARD_PORT_NAME ||
-      !core.validSender(sender, api.runtime)
+      (!route && !core.validSender(sender, api.runtime))
     ) {
       try {
         port?.disconnect?.();
@@ -4434,8 +5720,15 @@ if (typeof importScripts === "function") importScripts("core.js");
       order: [],
       closed: false,
       timer: null,
+      route,
     };
     clipboardPorts.add(state);
+    if (route) {
+      route.clients.add(state);
+      // Opened after the claim (the popup's Copy click): start with the
+      // grant's approved selectors; an open/unclaimed grant has none.
+      if (route.routeDetail) state.routeDetail = route.routeDetail;
+    }
     port.onMessage.addListener((message) => {
       clipboardPortMessage(state, message)
         .then((reply) => {
@@ -4452,6 +5745,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     port.onDisconnect.addListener(() => {
       state.closed = true;
       clipboardPorts.delete(state);
+      state.route?.clients.delete(state);
       clipboardDropGrant(state, true);
       void api.runtime.lastError;
     });
@@ -4564,7 +5858,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function contentContext(sender) {
-    const c = await capture(sender.frameId);
+    const c = await captureTopDocument(sender.frameId);
     if (
       c.tabId !== sender.tab.id ||
       c.windowId !== sender.tab.windowId ||
@@ -4794,12 +6088,24 @@ if (typeof importScripts === "function") importScripts("core.js");
       else if (message.type === "inline-fill")
         category = message.category ?? "login";
       if (!validCategory(category)) throw Error("refused");
+      // The inline menu is the only page-side card entry; its nonce is bound
+      // to the browser-verified sender frame/document, never a page claim.
+      if (
+        category === "credit_card" &&
+        !consumeUserGesture(message.userGesture, c)
+      )
+        throw Error("refused");
       if (message.type === "inline-fill") {
-        await fill(message.id, message.revision, category);
+        await fill(
+          message.id,
+          message.revision,
+          category,
+          category === "credit_card",
+        );
       } else if (message.type === "inline-fill-identity") {
         await fill(message.id, message.revision, "identity");
       } else if (message.type === "inline-fill-card") {
-        await fill(message.id, message.revision, "credit_card");
+        await fill(message.id, message.revision, "credit_card", true);
       } else if (message.type === "inline-otp") {
         await otp(message.id, message.revision);
       } else {
@@ -5545,7 +6851,125 @@ if (typeof importScripts === "function") importScripts("core.js");
   // Private popup runtime port. Only the extension's own popup page may open
   // it, and only the native host can make the capability available.
   api.runtime.onConnect?.addListener((port) => {
+    if (port?.name === ROUTE_LIFECYCLE_PORT_NAME) {
+      openRouteLifecyclePort(port, port?.sender).catch(() => {
+        try {
+          port.disconnect();
+        } catch {}
+      });
+      return;
+    }
     openClipboardPort(port, port?.sender);
+  });
+  // A route tab is admitted only by the browser's sender identity: the exact
+  // extension page, its exact tab, its exact route URL and fragment. It can
+  // then send only ROUTE_MESSAGE_TYPES to the route handlers below; it never
+  // receives the ordinary popup state or actions.
+  // Shared admission: the browser's sender identity must agree with a live
+  // route's exact tab and URL. `sender.url` may lag within one tab, so only
+  // its extension page prefix and frame are checked here; every claim, copy
+  // or read below re-queries the tab and the source anchors afterwards.
+  async function routeMessage(sender) {
+    const tab = sender?.tab
+      ? await routeTabAt(sender.tab.id, sender.tab.url)
+      : null;
+    const pageURL = routePageURL(sender, tab);
+    const token = routeTokenFromPage(pageURL);
+    const grant = token ? routeGrants.get(token) || null : null;
+    if (
+      !grant ||
+      !routeLive(grant) ||
+      sender.tab.id !== grant.tabId ||
+      !(await routeAnchors(grant))
+    ) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    return grant;
+  }
+  function validRouteRequest(message) {
+    return (
+      !!message &&
+      typeof message === "object" &&
+      !Array.isArray(message) &&
+      typeof message.type === "string" &&
+      ROUTE_MESSAGE_TYPES.has(message.type)
+    );
+  }
+  async function routeRequest(message, sender) {
+    if (!validRouteRequest(message)) throw Error("refused");
+    const grant = await routeMessage(sender);
+    requireRoute(grant);
+    switch (message.type) {
+      case "route-claim":
+        return routeClaim(message, grant);
+      case "route-close": {
+        const closed = routeClose(message, grant);
+        return closed || { type: "route-closed", token: grant.token };
+      }
+      case "route-copy-field": {
+        const copy = await routeFieldValue(message, grant, true);
+        return { copiedField: copy };
+      }
+      // The one approved read happens inside the claim. A route tab may not
+      // spend a second native item-get, so this branch never starts one. The
+      // ordinary action-popup item-get path is a different listener and is
+      // unchanged.
+      case "item-get":
+        throw Error("refused");
+      // The remaining allowed actions only exist in the action popup or need
+      // a page to target. A route tab is never a fill target and keeps fill,
+      // OTP and open-and-fill disabled in this checkpoint: fail closed.
+      case "fill":
+      case "otp":
+      case "open-and-fill":
+      case "copy-field":
+      case "reveal-field":
+        revokeRoute(grant);
+        throw Error("refused");
+      default:
+        // No route message ever falls back to an approved-detail read.
+        throw Error("refused");
+    }
+  }
+  api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (core.validSender(sender, api.runtime)) return false;
+    if (!sender?.tab || sender.id !== api.runtime.id) return false;
+    if (!validRouteRequest(message)) {
+      // Any other message from an extension tab of a live route is refused
+      // and the route ends; unrelated extension pages are simply not ours.
+      const pageURL =
+        typeof sender.url === "string" && typeof sender.tab.url === "string"
+          ? routeTokenFromPage(routePageURL(sender, sender.tab))
+          : "";
+      if (pageURL) revokeRoute(routeGrants.get(pageURL) || null);
+      return false;
+    }
+    routeRequest(message, sender).then(
+      (reply) => sendResponse(reply || { error: "refused" }),
+      () => sendResponse({ error: "refused" }),
+    );
+    return true;
+  });
+  // The route tab reports its clamp in pagehide. That is a report, not a
+  // trusted signal, but honouring it can only end this page's own route
+  // early, and the sender identity and exact tab are still checked first.
+  // It only revokes: it never triggers a read.
+  api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (
+      message?.type !== "route-close" ||
+      core.validSender(sender, api.runtime) ||
+      !sender?.tab ||
+      sender.id !== api.runtime.id ||
+      routePageURL(sender, sender.tab) === ""
+    )
+      return false;
+    const token = routeTokenFromPage(sender.tab.url);
+    const grant = routeGrants.get(token);
+    if (grant && grant.tabId === sender.tab.id && message.token === token)
+      revokeRoute(grant);
+    sendResponse({ type: "route-closed" });
+    return false;
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
@@ -5716,7 +7140,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "commit-staged-save": {
           if (!/^[a-f0-9]{32}$/.test(message.stageId || ""))
             throw Error("refused");
-          const c = await capture();
+          const c = await captureTopDocument();
           const result = await commitStagedSave(
             message.stageId,
             {
@@ -5731,7 +7155,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         }
         case "dismiss-staged-save":
         case "never-save-origin": {
-          const c = await capture();
+          const c = await captureTopDocument();
           const stageId = /^[a-f0-9]{32}$/.test(message.stageId || "")
             ? message.stageId
             : "";
@@ -5763,14 +7187,15 @@ if (typeof importScripts === "function") importScripts("core.js");
           };
         }
         case "generator-fill": {
-          const c = await capture();
+          const c = await captureTopDocument();
           const result = await inlineGenerateFill(message, c, epoch);
           return { ...result, status };
         }
         case "generator-history-fill": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
-          const c = await capture();
+          pruneGenerated();
+          const c = await captureTopDocument();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
           );
@@ -5820,7 +7245,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "generator-history-save": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
-          const c = await capture();
+          pruneGenerated();
+          const c = await captureTopDocument();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
           );
@@ -5983,7 +7409,19 @@ if (typeof importScripts === "function") importScripts("core.js");
             !validCategory(category)
           )
             throw Error("refused");
-          void fill(message.id, message.revision, category).catch(() => {
+          if (category === "credit_card") {
+            // Bind the popup's nonce to the active tab and its top document
+            // as the browser reports them now, never to a popup claim.
+            const active = await captureTopDocument(0);
+            if (!consumeUserGesture(message.userGesture, active))
+              throw Error("refused");
+          }
+          void fill(
+            message.id,
+            message.revision,
+            category,
+            category === "credit_card",
+          ).catch(() => {
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
           break;
@@ -6037,6 +7475,12 @@ if (typeof importScripts === "function") importScripts("core.js");
           )
             throw Error("refused");
           extra.detail = await getVaultItem(message.id, message.revision);
+          break;
+        // An ordinary vault click asks for the persistent route instead, so
+        // its detail is never read from this transient action popup.
+        case "open-route":
+          pruneRoutes();
+          extra.routeCreated = await createRoute(message, sender);
           break;
         case "copy-field":
           extra.copiedField = await copyFieldValue(message);

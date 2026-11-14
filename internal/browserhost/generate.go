@@ -2,7 +2,6 @@ package browserhost
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -346,14 +345,6 @@ func memorableSeparator(name string) (string, error) {
 	return "", ErrGenerate
 }
 
-func newHistoryID() string {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(value[:])
-}
-
 // handleGenerate serves both the JSON `options` form used by the extension and
 // the v2 field form used by desktop/broker clients. It always delegates policy
 // and entropy accounting to generatePassword so there is a single generator.
@@ -385,9 +376,9 @@ func (c *Connection) handleGenerate(r Request) error {
 	if err != nil {
 		return c.refuse(r.ID)
 	}
-	history := ""
-	if r.SaveHistory == nil || *r.SaveHistory {
-		history = newHistoryID()
-	}
-	return c.response(Response{ID: r.ID, Type: "generated", GeneratedPassword: password, Profile: &profile, PasswordProfile: (*BrowserPasswordProfile)(&profile), HistoryID: history})
+	// The native generator has no persistent history store of its own. A
+	// caller-requested save_history never becomes a fabricated history ID:
+	// the browser may keep its separate bounded in-memory history, but only a
+	// real persisted entry may be reported as saved.
+	return c.response(Response{ID: r.ID, Type: "generated", GeneratedPassword: password, Profile: &profile, PasswordProfile: (*BrowserPasswordProfile)(&profile)})
 }

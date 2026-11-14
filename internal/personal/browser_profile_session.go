@@ -47,7 +47,7 @@ func (s *Session) PrepareBrowserProfileFill(t BrowserProfileTarget) (*NativeBrow
 		return nil, e
 	}
 	until := time.Now().Add(browserProfileTTL)
-	if idle := s.last.Add(s.idle); idle.Before(until) {
+	if idle, ok := s.idleDeadline(); ok && idle.Before(until) {
 		until = idle
 	}
 	r.browserProfile.until = until

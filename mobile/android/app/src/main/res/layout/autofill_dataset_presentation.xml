@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Static, non-secret Dataset presentation. It renders the same fixed text for
+  every user and every login and can never carry a credential, a title or any
+  per-request content.
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/autofill_dataset_presentation"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@color/ll_surface_muted"
+    android:gravity="center"
+    android:maxLines="2"
+    android:padding="12dp"
+    android:text="@string/autofill_dataset_presentation"
+    android:textColor="@color/ll_text_primary"
+    android:textSize="15sp" />

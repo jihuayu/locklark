@@ -9,6 +9,6 @@ if [[ ! -x "$JAVA_HOME/bin/javac" ]]; then
   exit 1
 fi
 if [[ $# -eq 0 ]]; then
-  set -- :policy:test :app:assembleDebug :app:assembleDebugAndroidTest
+  set -- :policy:test :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
 fi
 exec "$android_root/gradlew" -p "$android_root" --no-daemon "$@"

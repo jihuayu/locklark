@@ -17,6 +17,7 @@ export async function acceptBrowserPasskey({
   phase,
   observe,
   reconnect,
+  reconnectQuickFill,
 }) {
   phase("quick-pair");
   let popup = await openPopup();
@@ -315,7 +316,7 @@ export async function acceptBrowserPasskey({
   if (process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
     await acceptConditionalPasskey({
       origin, fixture, first: created.json, pageEval: (fn, arg) => page.evaluate(fn, arg),
-      clickDocument: async selector => { input([], false); await page.bringToFront(); await page.locator(selector).click(); },
+      clickDocument: async selector => { await page.bringToFront(); await page.locator(selector).click(); },
       inlineClick, inlinePresent,
       inspectConditional: async () => {
         const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
@@ -336,20 +337,29 @@ export async function acceptBrowserPasskey({
     });
   }
   if (process.env.LOCKLARK_TEST_OTHER_PROVIDER === "1") {
-    input([], false);
     await page.bringToFront();
     await acceptOtherProvider({
       page, cdp, origin, first: created.json, inlineClick,
       eventually, observe, phase,
     });
   }
+  // The conditional cleanup above intentionally re-pairs in normal mode
+  // (确认连接此扩展); that case stays unchanged. Non-destructive Passkey
+  // metadata opens still need an explicit quick pairing, so re-pair here with
+  // the real quick-fill control before signals/management inspect it. Item-get
+  // rows are never approved on the normal path.
+  if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1" ||
+      process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+    phase("passkey-metadata:explicit-quick-repair");
+    await reconnectQuickFill();
+  }
   if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1") {
     await acceptPasskeySignals({
       origin, fixture, first: created.json,
       pageEval: (fn, arg) => page.evaluate(fn, arg), inlineClick,
-      focusPage: async () => { input([], false); await page.bringToFront(); },
+      focusPage: async () => { await page.bringToFront(); },
       navigate: url => page.goto(url), openPopup, eventually, input, observe, phase,
-      dismissPopup: async () => { input([], false); await page.bringToFront(); await page.keyboard.press("Escape"); },
+      dismissPopup: async () => { await page.bringToFront(); await page.keyboard.press("Escape"); },
     });
   }
   if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
@@ -360,15 +370,14 @@ export async function acceptBrowserPasskey({
       dismissPopup: async () => { await page.bringToFront(); await page.keyboard.press("Escape"); },
       eventually, input, phase,
       conditionalSibling: async ({ first, second }) => {
-        input([], false);
         await page.bringToFront();
         await acceptConditionalSibling({
           origin, fixture, first, second, observe,
           pageEval: (fn, arg) => page.evaluate(fn, arg),
-          clickDocument: async selector => { input([], false); await page.bringToFront(); await page.locator(selector).click(); },
+          clickDocument: async selector => { await page.bringToFront(); await page.locator(selector).click(); },
           inlineClick,
           inlinePresent,
-          focusPage: async () => { input([], false); await page.bringToFront(); },
+          focusPage: async () => { await page.bringToFront(); },
           navigate: url => page.goto(url), eventually, input, phase,
         });
       },

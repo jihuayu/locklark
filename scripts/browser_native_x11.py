@@ -3,6 +3,20 @@
 Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
 libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
+
+One exact-title request is read-only: preserve_focus with inspect, exact title
+and executable, and no actions. It reports the public control states without
+raising, focusing or clicking anything, and a missing or unobservable window
+fails instead of reporting an absent window.
+
+The Edge 157 directory chooser has two closed purpose-bound actions:
+`chooser_navigate` carries the package directory and only sends the true
+Ctrl+L chord and then that path in the focused, raised owned chooser, with the
+driver's bounded 150ms UI boundary after the chord and after the path; it
+never sends Return or any other key. `chooser_open` is the separate action
+that only commits the real GTK Open button, clicked once at the point derived
+from the measured chooser geometry. The chooser request accepts no caller
+coordinate, label or extra action.
 """
 import ctypes as C
 import json
@@ -14,14 +28,20 @@ import time
 
 CONTROL_LABELS = (
     "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
-    "取消 / 使用其他验证器", "登录：login.locklark.test · passkey-test · passkey-test",
+    "取消 / 使用其他验证器", "确认连接（每次敏感操作需批准）",
+    "登录：login.locklark.test · passkey-test · passkey-test",
     "登录：login.locklark.test · passkey-other · passkey-other",
     "登录：login.locklark.test · signal-one · signal-one",
     "登录：login.locklark.test · signal-two · signal-two",
     "确认应用这些更新", "取消（不做任何更改）", "取消尚未提交的更新",
     "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
+    "批准本次附件操作",
+    "批准本次操作", "拒绝本次操作",
+    "批准本次字段披露", "拒绝本次字段披露",
+    "批准删除 Passkey", "拒绝删除 Passkey",
     "批准填充验证码", "拒绝填充验证码",
+    "仅批准本次 CLI 请求", "拒绝本次请求",
     "批准本次敏感字段填充", "拒绝本次敏感字段填充",
     "批准本次跨源银行卡填充", "拒绝本次跨源银行卡填充",
     "新登录标题", "批准保存登录", "拒绝保存登录", "批准更新登录", "拒绝更新登录",
@@ -72,6 +92,7 @@ FAILURE_REASONS = {
     "Native acceptance control not ready": "control-ready-timeout",
     "X display unavailable": "x-display",
     "Exact native-window absence request required": "absence-request",
+    "Exact read-only native inspection required": "inspection-request",
     "Native acceptance X query failed": "x-query",
     "Previous native acceptance window did not close": "window-close-timeout",
     "Native acceptance window must be unique": "window-ambiguous",
@@ -83,8 +104,1113 @@ FAILURE_REASONS = {
     "Acceptance input must be ASCII": "input-charset",
     "Acceptance keyboard mapping unavailable": "keyboard-mapping",
     "Acceptance shortcut unavailable": "shortcut-mapping",
+    "Chooser shortcut unavailable": "shortcut-mapping",
     "Native acceptance X input failed": "x-input",
+    "Chooser ownership request required": "chooser-request",
+    "Chooser owner window unavailable": "chooser-owner",
+    "Chooser owner window must be unique": "chooser-owner-ambiguous",
+    "Chooser must be a WM transient of the owner": "chooser-leader",
+    "Chooser must share the owner client leader": "chooser-leader",
+    "Chooser must belong to the owner browser process": "chooser-process",
+    "X window query refused": "x-query",
+    "Chooser action request required": "chooser-action-request",
+    "Chooser navigation path required": "chooser-navigate-path",
+    "Chooser must keep the requested title": "folder-title",
+    "Chooser must keep the measured geometry": "folder-geometry",
+    "Chooser folder point is not inside the chooser": "folder-point",
+    "Chooser folder pointer is not at the measured point": "folder-pointer",
+    "Chooser folder pointer is not over the owned chooser": "folder-overlay",
+    "Chooser folder input failed": "folder-input",
+    "Chooser focus failed": "chooser-focus",
+    "Chooser shortcut input failed": "chooser-shortcut",
 }
+
+
+# Fixed, request-carried attribution contract. Everything is ASCII: the
+# chooser title prefix, the exact --user-data-dir switch and the executable.
+OWNER_FIELDS = ("owner_title_prefix", "chooser_title_prefix", "user_data_dir", "executable")
+# The actual X property type is part of every proof: a 32-bit value of the
+# wrong type is not a WINDOW id and not a process id.
+PROPERTY_TYPES = {
+    "WM_TRANSIENT_FOR": "WINDOW",
+    "WM_CLIENT_LEADER": "WINDOW",
+    "_NET_WM_PID": "CARDINAL",
+}
+PROPERTY_LIMIT = 256
+PID_LIMIT = 4194304
+TREE_BUDGET = 4096
+PARENT_DEPTH = 8
+PROC_LINK_MAX = 4096
+CMDLINE_MAX = PROC_LINK_MAX * 4
+PROBE_KEYS = frozenset(OWNER_FIELDS) | {"actions", "ownership_probe", "preserve_focus"}
+INPUT_KEYS = frozenset(OWNER_FIELDS) | {
+    "actions", "owner", "owner_pid", "preserve_focus", "title", "title_prefix",
+}
+# The real Edge manager page title the Edge install caller observes as
+# Playwright page.title(). The folder-action request must keep carrying exactly
+# this title in `title`, `title_prefix` and owner_title_prefix: a prefix such as
+# "Ext" would match a different Edge window and is never the manager page
+# title.
+EDGE_MANAGER_TITLE = "Extensions"
+# The exactly verified native X11 top-level titles of the Edge 157 manager
+# window, checked against the same unique manager XID, its exact owner PID,
+# exact Edge executable/private profile and the chooser PID: the plain page
+# title and the profile-prefixed form whose U+200B sits exactly between
+# "Microsoft" and " Edge". The manager X window is selected and re-proven only
+# by exact equality against one of these two literals; the request itself
+# stays exactly EDGE_MANAGER_TITLE.
+EDGE_MANAGER_NATIVE_TITLES = (
+    EDGE_MANAGER_TITLE,
+    "Extensions - Profile 1 - Microsoft\u200b Edge",
+)
+# The two purpose-bound chooser actions, separate from the keyboard/coordinate
+# input shape. The chooser title must equal this exact literal, the manager
+# window must equal the observed manager title and the chooser must keep the
+# measured client size; the Open point is always derived from that geometry.
+# `chooser_navigate` only focuses/opens the GTK location entry with Ctrl+L and
+# types the package directory, never Return or any other key;
+# `chooser_open` only clicks the real GTK Open button once at the measured
+# point. Neither action accepts a caller coordinate, label, path in the wrong
+# action or any extra key.
+CHOOSER_NAVIGATE = {"chooser_navigate": True}
+CHOOSER_OPEN = {"chooser_open": True}
+CHOOSER_ACTIONS = {"navigate": CHOOSER_NAVIGATE, "open": CHOOSER_OPEN}
+FOLDER_MANAGER_FIELDS = ("title", "title_prefix")
+FOLDER_ACTION_KEYS = frozenset(OWNER_FIELDS) | set(FOLDER_MANAGER_FIELDS) | {
+    "chooser_action", "owner", "owner_pid",
+}
+# navigate carries exactly the existing absolute package directory; open
+# carries no path at all.
+FOLDER_NAVIGATE_KEYS = FOLDER_ACTION_KEYS | {"extension_dir"}
+FOLDER_OPEN_KEYS = FOLDER_ACTION_KEYS
+EDGE_CHOOSER_TITLE = "Select the extension directory."
+# The chooser client geometry measured on the owned Edge 157 screenshots: a
+# 1124x822 client at screen origin (82,33). The visible GTK Open button is
+# measured at local (1076,799) == (width-48, height-23), screen (1158,832).
+# That AT-SPI wait_label "Open" never resolved, so the click point is derived
+# from this measured geometry and never from a label or caller value.
+FOLDER_CHOOSER_SIZE = (1124, 822)
+FOLDER_CHOOSER_ORIGIN = (82, 33)
+FOLDER_OPEN_LOCAL = (1076, 799)
+FOLDER_POINT_OFFSETS = (("width", -48), ("height", -23))
+
+
+def folder_manager_title_matches(title):
+    """True only for an exact native Edge manager title literal, never a prefix.
+
+    Exact string equality against the two verified literals: no prefix/suffix
+    match and no Unicode or whitespace normalization.
+    """
+    return type(title) is str and title in EDGE_MANAGER_NATIVE_TITLES
+
+
+def parse_folder_action_request(request):
+    """Exact `{"chooser_navigate": true}` or `{"chooser_open": true}` request.
+
+    Returns the fixed attribution record, with `chooser` naming the one action
+    and `navigate_path` the package directory for navigate (None for open), or
+    None. The request is never the keyboard/coordinate shape: there is no
+    `actions`, no focus or geometry value and no click coordinate. The observed
+    page title is required and `title`, `title_prefix` and owner_title_prefix
+    must all equal exactly EDGE_MANAGER_TITLE; an absent, mismatched, generic,
+    decorated (native X11 form) or altered title is refused. Exactly one action
+    key is accepted: navigate carries exactly one absolute printable-ASCII
+    `extension_dir` and open carries none. The chooser title is the fixed
+    literal and the optional caller PID is bound exactly as in the owner input
+    shape.
+    Only the fixed attribution values are returned; values are never printed.
+    """
+    if type(request) is not dict:
+        return None
+    action = request.get("chooser_action")
+    if type(action) is not dict or len(action) != 1:
+        return None
+    key, value = next(iter(action.items()))
+    if key == "chooser_navigate" and value is True:
+        mode, allowed = "navigate", FOLDER_NAVIGATE_KEYS
+    elif key == "chooser_open" and value is True:
+        mode, allowed = "open", FOLDER_OPEN_KEYS
+    else:
+        return None
+    if set(request) - allowed:
+        return None
+    # Strict identity: the value must be the JSON boolean true, not 1 or "true".
+    if request.get("owner") is not True:
+        return None
+    required = OWNER_FIELDS + FOLDER_MANAGER_FIELDS
+    if mode == "navigate":
+        required += ("extension_dir",)
+    if not all(key in request for key in required):
+        return None
+    # The same exact real manager window binding as the keyboard request: the
+    # observed title is carried unchanged and is both of its own prefixes.
+    title = request["title"]
+    if title != EDGE_MANAGER_TITLE or \
+            request["title_prefix"] != title or request["owner_title_prefix"] != title:
+        return None
+    if request.get("chooser_title_prefix") != EDGE_CHOOSER_TITLE:
+        return None
+    navigate_path = None
+    if mode == "navigate":
+        navigate_path = ascii_path(request["extension_dir"])
+        if navigate_path is None:
+            return None
+    validated_pid = None
+    if "owner_pid" in request:
+        supplied = request["owner_pid"]
+        if type(supplied) is not int or not 1 < supplied <= PID_LIMIT:
+            return None
+        validated_pid = supplied
+    if ascii_path(request["user_data_dir"]) is None or \
+            ascii_path(request["executable"]) is None:
+        return None
+    normalized = {key: request[key] for key in OWNER_FIELDS}
+    normalized.update({key: request[key] for key in FOLDER_MANAGER_FIELDS})
+    normalized["caller_pid"] = validated_pid
+    normalized["probe"] = False
+    normalized["chooser"] = mode
+    normalized["navigate_path"] = navigate_path
+    return normalized
+
+
+def folder_point(width, height):
+    """The only permitted chooser-local point, (width-48, height-23), or None.
+
+    Valid only for the exact measured 1124x822 chooser client geometry, and
+    only when the derived point equals the measured real GTK Open button
+    center FOLDER_OPEN_LOCAL (1076, 799) and is strictly inside the geometry.
+    """
+    if type(width) is not int or type(height) is not int or \
+            (width, height) != FOLDER_CHOOSER_SIZE:
+        return None
+    offsets = dict(FOLDER_POINT_OFFSETS)
+    x, y = width + offsets["width"], height + offsets["height"]
+    if 0 < x < width and 0 < y < height and (x, y) == FOLDER_OPEN_LOCAL:
+        return x, y
+    return None
+
+
+def folder_output(action, click_count):
+    """Fixed action acknowledgement: no window, title, path, PID or coordinate.
+
+    `chooser_navigate` acknowledges the Ctrl+L chord and the one path only,
+    with zero clicks; `chooser_open` acknowledges exactly one physical XTest
+    click on the internally derived Open point. This acknowledgement is not
+    installation success: the caller still waits for the real extension
+    target, the manifest-derived ID and the one background.js service worker.
+    """
+    if type(click_count) is not int:
+        return None
+    if action == "navigate" and click_count == 0:
+        return {"chooser_action": "chooser_navigate", "clicks": 0}
+    if action == "open" and click_count == 1:
+        return {"chooser_action": "chooser_open", "clicks": 1}
+    return None
+
+
+def chooser_geometry(attributes):
+    """(width, height) of one real mapped, non-override-redirect window.
+
+    None for a missing attribute record, an unmapped or override-redirect
+    window, or a non-positive client size. The exact measured size is enforced
+    only by folder_point, so this helper never widens the permitted point.
+    """
+    if attributes is None or attributes.map_state != 2 or attributes.override_redirect:
+        return None
+    if type(attributes.width) is not int or type(attributes.height) is not int:
+        return None
+    if attributes.width <= 0 or attributes.height <= 0:
+        return None
+    return attributes.width, attributes.height
+
+
+# The pointer's real XQueryTree parent path to the root is bounded
+# independently of the title discovery depth.
+POINTER_PATH_DEPTH = 16
+
+
+def window_ancestry(parent_of, window, root, max_depth=POINTER_PATH_DEPTH):
+    """The actual XQueryTree parent chain window -> root, or None.
+
+    `parent_of(child)` returns the real XQueryTree parent of one window.
+    The walk refuses a non-positive window, a broken link, a cycle or a chain
+    deeper than `max_depth`; it never guesses. The root is never queried.
+    """
+    if type(window) is not int or type(root) is not int or window <= 0 or root <= 0 or \
+            type(max_depth) is not int or max_depth <= 0:
+        return None
+    chain = [window]
+    for _ in range(max_depth):
+        parent = parent_of(chain[-1])
+        if type(parent) is not int or parent <= 0 or parent in chain:
+            return None
+        chain.append(parent)
+        if parent == root:
+            return chain
+    return None
+
+
+def pointer_containment(parent_of, root, pointer_state, chain, expected_root, geometry):
+    """Exact pointer position and the actual X tree on the pointer's path.
+
+    This encodes XQueryPointer(display, root, ...): with the root as the
+    query window, `qroot` is the root itself, `qchild` is the root's child
+    containing the pointer (or 0 when the pointer is on the root directly),
+    and both (root_x, root_y) and (win_x, win_y) are relative to the root.
+
+    `pointer_state` is the real (qroot, qchild, root_x, root_y, win_x, win_y,
+    mask) result, `chain` is the window_ancestry of the chooser (chooser
+    first, root last) and `expected_root` is the chooser's root origin. The
+    only permitted point is derived from `geometry`, the measured chooser
+    (width, height): point = geometry + FOLDER_POINT_OFFSETS, strictly inside.
+    A press is accepted only when:
+      - the query root is the display root, qchild is exactly chain[-2] (the
+        root's direct child on the chooser's actual chain), and no button is
+        held; a deeper chooser descendant or any other chain member such as
+        the chooser itself below an intermediate parent is refused;
+      - both the root-relative win position and the root position are exactly
+        expected_root + point (root-relative values cannot be chooser-local);
+      - every hop of the chooser's actual parent chain to the root matches the
+        verified chain, so the tree that gave qchild is not stale.
+    Any other root child (an overlay), a stale or ambiguous chain, a
+    window-relative value that is not the root point, or any malformed value
+    returns False. Nothing here emits input, reads Xlib or exposes a window or
+    coordinate.
+    """
+    if type(pointer_state) is not tuple or len(pointer_state) != 7:
+        return False
+    qroot, qchild, root_x, root_y, win_x, win_y, mask = pointer_state
+    if type(chain) is not list or len(chain) < 2 or \
+            type(chain[0]) is not int or chain[0] <= 0 or chain[-1] != root:
+        return False
+    for value in (qroot, qchild, root_x, root_y, win_x, win_y, mask):
+        if type(value) is not int or value < 0:
+            return False
+    if type(expected_root) is not tuple or len(expected_root) != 2 or \
+            type(expected_root[0]) is not int or type(expected_root[1]) is not int or \
+            expected_root[0] < 0 or expected_root[1] < 0:
+        return False
+    if type(geometry) is not tuple or len(geometry) != 2:
+        return False
+    point = folder_point(*geometry)
+    if point is None:
+        return False
+    expected_point = (expected_root[0] + point[0], expected_root[1] + point[1])
+    if qroot != root or qchild <= 0 or qchild == root:
+        return False
+    # Mask 0: no modifier (Shift/Ctrl/Alt/Meta) and no button held before the
+    # press, so the click cannot turn into a chord, drag or altered event.
+    if mask != 0:
+        return False
+    # A root-window query reports root-relative values in both the win and
+    # the root slots; a chooser-local win position is a mismatch, not a pass.
+    if (root_x, root_y) != expected_point or (win_x, win_y) != expected_point:
+        return False
+    # The verified chain must be a real path whose last hop is a child of the
+    # root, never longer than the bounded ancestry walk.
+    if len(chain) - 1 > POINTER_PATH_DEPTH:
+        return False
+    try:
+        # The actual tree must still give exactly this chain: chooser to root,
+        # no cycle, no extra or missing hop (a stale chain refuses).
+        node = chain[0]
+        for ancestor in chain[1:]:
+            if parent_of(node) != ancestor:
+                return False
+            node = ancestor
+        # qchild of a root query is the root's direct child containing the
+        # pointer, so it is exactly the verified chain's last hop below the
+        # root. The chooser itself only qualifies when its parent is the root;
+        # a deeper chooser XID or the chooser under an intermediate parent can
+        # only be reported for a query window inside the chooser, never root.
+        return qchild == chain[-2]
+    except Exception:
+        # Any refused or malformed XQueryTree hop is a failed proof.
+        return False
+
+
+def move_and_prove_pointer(io, parent_of, root, target, expected_root, geometry,
+                           require_motion=True):
+    """Motion to the derived point, then the owned-qchild proof; no button.
+
+    io is a fixed record of the caller's real Xlib/XTest functions:
+    flush(), sync(), queried() -> XQueryPointer(root) tuple, and
+    motion(root_x, root_y) -> truth value. `expected_root` is the chooser's
+    root origin; the point is derived from `geometry` and the only motion is
+    to expected_root + point.
+    After flush/sync the pointer must be at exactly that root point, its
+    XQueryPointer root child (qchild) must be on the chooser's actual
+    XQueryTree chain, and that chain must be unchanged. A refused
+    motion/flush/sync, any query exception or any non-true answer raises the
+    fixed folder-pointer message, so no button can be pressed; nothing here
+    is emitted or printed. A query that raises the pointer refusal (for
+    example XQueryPointer returning False) is not swallowed as input failure;
+    it keeps its own fixed reason. With require_motion False only the exact
+    position/path proof is run, for the re-proof immediately before the
+    button pair.
+    """
+    try:
+        point = folder_point(*geometry)
+        if point is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        if require_motion:
+            if not io.motion(expected_root[0] + point[0],
+                             expected_root[1] + point[1]):
+                raise RuntimeError("Chooser folder input failed")
+            io.flush()
+            io.sync()
+        chain = window_ancestry(parent_of, target, root)
+        if chain is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        state = io.queried()
+        if not pointer_containment(parent_of, root, state, chain, expected_root, geometry):
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        return chain
+    except RuntimeError:
+        raise
+    except Exception:
+        raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+
+
+def chooser_navigation(x, display, path):
+    """The only keyboard input of navigate, as a validated [(keys, kind)].
+
+    The plan is exactly one modifier chord keyed on Ctrl+L (keys holds
+    (Control_L, down), (l, down), (l, up), (Control_L, up): Control_L is held
+    while l is pressed and only released after), then each character of `path`.
+    It never ends with Return: the chooser is left with the path typed into its
+    location entry for the separate chooser_open action. The named keys are
+    resolved through XStringToKeysym; a path character is resolved through the
+    numeric ASCII keysym ord(char),
+    as the generic text driver does, because XStringToKeysym does not map
+    punctuation like '/' or '-'. A character is a plain key when its
+    first-level keysym is already that character and a Shift_L chord
+    otherwise; a keycode of 0 is a fixed mapping refusal. Every keycode is
+    validated before the caller emits anything. The plan is returned in
+    emission order and raises a fixed message instead; nothing is sent here.
+    `x` is the caller's loaded Xlib.
+    """
+    if ascii_path(path) is None:
+        raise RuntimeError("Chooser navigation path required")
+    code = lambda name: x.XKeysymToKeycode(display, x.XStringToKeysym(name.encode("ascii")))
+    shift = code("Shift_L")
+    if not shift:
+        raise RuntimeError("Chooser shortcut unavailable")
+    typed = []
+    for char in path:
+        # Path characters use the numeric ASCII keysym exactly as the generic
+        # text driver does: XStringToKeysym(char) does not resolve to the
+        # punctuation ('/' and '-') that XKeysymToKeycode(ord(char)) does.
+        keycode = x.XKeysymToKeycode(display, ord(char))
+        if not keycode:
+            raise RuntimeError("Acceptance keyboard mapping unavailable")
+        produces = x.XKeycodeToKeysym(display, keycode, 0) == ord(char)
+        typed.append(((keycode, None if produces else shift), "path"))
+    ctrl, letter = code("Control_L"), code("l")
+    if not (ctrl and letter):
+        raise RuntimeError("Chooser shortcut unavailable")
+    chord = ((ctrl, True), (letter, True), (letter, False), (ctrl, False))
+    return [(chord, "chord")] + typed
+
+
+def emit_chooser_plan(plan, emit, boundary):
+    """Emit a validated chooser_navigation plan with `emit(keycode, down)`.
+
+    The chord is one batch, Control_L held while l is pressed and released
+    only afterwards, never separate Control_L/l keystrokes. Every item is
+    validated before the first key, so a malformed plan emits nothing. The
+    path is one batch and `boundary(failure)` runs after the chord and after
+    the path text. Nothing follows the path: the plan never carries Return or
+    another key, so the separate Open action commits the chooser.
+    """
+    def keycode(value):
+        return type(value) is int and value > 0
+
+    def keypair(keys):
+        return (type(keys) is tuple and len(keys) == 2 and keycode(keys[0]) and
+                (keys[1] is None or keycode(keys[1])))
+
+    def valid_shape():
+        if type(plan) is not list or not plan:
+            return False
+        chord_keys, first = plan[0]
+        return (first == "chord" and type(chord_keys) is tuple and len(chord_keys) == 4 and
+                all(type(item) is tuple and keycode(item[0]) and item[1] in (True, False)
+                    for item in chord_keys) and
+                all(item[1] == "path" and keypair(item[0]) for item in plan[1:]))
+
+    try:
+        valid = valid_shape()
+    except (TypeError, IndexError):
+        valid = False
+    if not valid:
+        raise RuntimeError("Chooser shortcut unavailable")
+    for keycode_value, down in plan[0][0]:
+        emit(keycode_value, int(down))
+    boundary("Chooser shortcut input failed")
+    for keys, _kind in plan[1:]:
+        keycode_value, shift = keys
+        if shift is not None:
+            emit(shift, 1)
+        emit(keycode_value, 1)
+        emit(keycode_value, 0)
+        if shift is not None:
+            emit(shift, 0)
+    boundary("Chooser folder input failed")
+
+
+def x_property(x, display, candidate, atom, expected_type):
+    """One real XGetWindowProperty read with Xlib's own argument handling.
+
+    Returns ("ok", values) for an un-truncated 32-bit property of exactly
+    `expected_type` (the WINDOW or CARDINAL atom), ("missing", []) for an
+    absent property and ("malformed", []) for a wrong type, wrong format, a
+    truncated value or anything else. The data pointer is always released
+    through the loaded Xlib XFree.
+    """
+    if type(atom) is not int or atom <= 0 or type(expected_type) is not int or expected_type <= 0:
+        return "malformed", []
+    actual, count, remaining = C.c_ulong(), C.c_ulong(), C.c_ulong()
+    fmt, data = C.c_int(), C.c_void_p()
+    try:
+        status = x.XGetWindowProperty(display, candidate, atom, 0, PROPERTY_LIMIT, 0, 0,
+                                      C.byref(actual), C.byref(fmt), C.byref(count),
+                                      C.byref(remaining), C.byref(data))
+    except Exception:
+        return "malformed", []
+    if status != 0:
+        return "malformed", []
+    if not data.value:
+        return "missing", []
+    try:
+        # Xlib returns None for an absent type; only FORMAT 32, the exact
+        # requested actual type, an exact count and no trailing values count.
+        if fmt.value != 32 or remaining.value or count.value > 4:
+            return "malformed", []
+        if int(actual.value) != expected_type:
+            return "malformed", []
+        return "ok", [int(C.cast(data, C.POINTER(C.c_ulong))[index])
+                      for index in range(count.value)]
+    finally:
+        x.XFree(data)
+
+
+def property_record(x, display, candidate, name):
+    """One fixed property read as a status/values record, or malformed."""
+    actual = PROPERTY_TYPES.get(name)
+    if actual is None:
+        return {"status": "malformed"}
+    try:
+        atom = x.XInternAtom(display, name.encode("ascii"), 0)
+        expected = x.XInternAtom(display, actual.encode("ascii"), 0)
+    except Exception:
+        return {"status": "malformed"}
+    status, values = x_property(x, display, candidate, atom, expected)
+    return {"status": status, "values": values} if status == "ok" else {"status": status}
+
+
+def assert_chooser_text(text):
+    """The X key path is printable-ASCII only; refuse before any input."""
+    if type(text) is not str or any(ord(char) < 32 or ord(char) > 126 for char in text):
+        raise RuntimeError("Acceptance input must be ASCII")
+    return text
+
+
+def ascii_text(value):
+    """One non-empty printable-ASCII token without whitespace, or None."""
+    if type(value) is not str or not value:
+        return None
+    if any(ord(char) < 33 or ord(char) > 126 for char in value):
+        return None
+    return value
+
+
+def ascii_line(value):
+    """One non-empty printable-ASCII line (spaces allowed), or None."""
+    if type(value) is not str or not value:
+        return None
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        return None
+    return value
+
+
+def ascii_path(value):
+    """One absolute printable-ASCII path without trailing slash, or None."""
+    if ascii_line(value) is None or not value.startswith("/") or value == "/":
+        return None
+    if value.endswith("/") and len(value) > 1:
+        return None
+    return value
+
+
+def title_matches(title, prefix):
+    """Fixed, non-empty title prefix match; control/None input never matches."""
+    return (type(title) is str and title != "" and ascii_line(prefix) is not None
+            and not any(ord(char) < 32 for char in title)
+            and title.startswith(prefix))
+
+
+def query_children(x, display, parent):
+    """Actual Xlib XQueryTree of one window; every child in tree order.
+
+    XQueryTree returns Status and fills the child array, released through the
+    loaded XFree. A refused query stops the probe instead of being read as an
+    empty tree.
+    """
+    if type(parent) is not int or parent <= 0:
+        raise RuntimeError("X window query refused")
+    root_return, parent_return, count = C.c_ulong(), C.c_ulong(), C.c_uint()
+    result = C.POINTER(C.c_ulong)()
+    ok = x.XQueryTree(display, parent, C.byref(root_return), C.byref(parent_return),
+                      C.byref(result), C.byref(count))
+    if not ok:
+        raise RuntimeError("X window query refused")
+    try:
+        if count.value > TREE_BUDGET or (count.value and not result):
+            raise RuntimeError("X window query refused")
+        return [int(result[index]) for index in range(count.value)]
+    finally:
+        if result:
+            x.XFree(result)
+
+
+# The pre-click chooser re-discovery walks the whole real window tree, so it
+# has its own fixed total visited-window budget and depth, independent of the
+# per-query child count limit. The budget stays above the bounded accessible
+# window count the manager UI was inspected through, so the real manager
+# window can never be pushed out of the walk by its own popups.
+VIEWABLE_TREE_VISITS = 1024
+VIEWABLE_TREE_DEPTH = 12
+
+# A complete native-window discovery that observed only transient BadWindow
+# (code 3) errors on live, non-root XIDs is discarded and restarted from the
+# root, within the caller's unchanged deadline and this fixed retry bound.
+WINDOW_TREE_RESTARTS = 3
+# The only exception one whole-root discovery scan is ever retried for.
+WINDOW_QUERY_REFUSED = "X window query refused"
+
+
+def transient_window_race(observed, root):
+    """True only if `observed` proves a transient window-tree race.
+
+    `observed` holds the (code, resource) records of the errors that arrived
+    during one scan that really started at the root. At least one record must
+    exist and every record must be numeric BadWindow (code 3) on a positive
+    non-root resource: a child window destroyed while the tree was traversed.
+    No record, a malformed one, another code, a non-positive resource or the
+    root itself is never transient. Resource IDs are only compared here and
+    are never returned or formatted.
+    """
+    if type(observed) is not list or not observed:
+        return False
+    if type(root) is not int or root <= 0:
+        return False
+    for record in observed:
+        if type(record) is not tuple or len(record) != 2:
+            return False
+        code, resource = record
+        if type(code) is not int or type(resource) is not int:
+            return False
+        if code != 3 or resource <= 0 or resource == root:
+            return False
+    return True
+
+
+def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
+                        restarts=WINDOW_TREE_RESTARTS):
+    """The matches of one clean complete whole-root scan, or a fixed failure.
+
+    `scan()` runs one entire `find(root)` traversal and returns its matches or
+    raises. `errors` is the X error handler's live list of (code, resource)
+    records; `diagnostic_codes` is the live list of diagnostic codes that
+    handler appends the same errors to. The handler only ever appends, so a
+    record left by the previous scan is cleared before the restart it triggers
+    and everything observed afterwards belongs to the next scan. A record
+    already present on entry was not proven transient by this call, so if
+    either live list is non-empty the call fails closed with the fixed
+    `RuntimeError(WINDOW_QUERY_REFUSED)` and leaves both lists untouched,
+    before `scan()` is called at all. A restart is made only when the scan
+    raised the exact built-in `RuntimeError` type with exactly the
+    `(WINDOW_QUERY_REFUSED,)` arguments or completed, and the records it left
+    prove `transient_window_race()`; a `RuntimeError` subclass is re-raised
+    unchanged even with the same text and the same proof. Every one of its
+    results is then discarded, and only here and after the deadline and budget
+    are confirmed are its records and diagnostic codes cleared before the walk
+    restarts from the root. A clean, complete scan must leave both lists empty
+    and returns its full matches. Any other failure is re-raised unchanged; a
+    scan with errors that are not transient, or a completed scan with any
+    error at all, fails closed with the fixed
+    `RuntimeError(WINDOW_QUERY_REFUSED)`. Restarts are bounded by `restarts`,
+    which may only lower the fixed `WINDOW_TREE_RESTARTS`, and only ever read
+    the caller's unchanged `deadline`.
+    """
+    if not callable(scan) or type(errors) is not list or \
+            type(diagnostic_codes) is not list or type(root) is not int:
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    if type(restarts) is not int or restarts < 0 or \
+            restarts > WINDOW_TREE_RESTARTS:
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    if errors or diagnostic_codes:
+        # Preexisting asynchronous X errors: keep the evidence, never scan.
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    restarted = 0
+    while True:
+        try:
+            found = scan()
+        except RuntimeError as error:
+            # Only the exact built-in refusal is retryable; a subclass with
+            # the same arguments is never inspected or retried.
+            if type(error) is not RuntimeError or \
+                    error.args != (WINDOW_QUERY_REFUSED,):
+                raise
+            refused = True
+        else:
+            refused = False
+        if not errors and not diagnostic_codes:
+            # Only a completed scan may be accepted, and only while both
+            # lists still hold nothing.
+            if refused:
+                raise RuntimeError(WINDOW_QUERY_REFUSED)
+            return found
+        if not transient_window_race(errors, root):
+            raise RuntimeError(WINDOW_QUERY_REFUSED)
+        # Proven transient: discard this scan's partial or completed result
+        # and its raw records, including their diagnostic codes.
+        if restarted >= restarts or time.monotonic() >= deadline:
+            raise RuntimeError(WINDOW_QUERY_REFUSED)
+        del errors[:]
+        del diagnostic_codes[:]
+        restarted += 1
+
+
+def bounded_viewable_tree(children, viewable, root,
+                          budget=VIEWABLE_TREE_VISITS, depth=VIEWABLE_TREE_DEPTH):
+    """Bounded whole real tree walk: every viewable normal window, or None.
+
+    Unlike a title-prefix search this never stops early on a title, so a
+    viewable override-redirect/pop-up overlay stays discoverable as an extra
+    window and is never read as our chooser or ignored. `children(parent)`
+    returns the actual XQueryTree children of one window and `viewable(w)`
+    is the mapped, non-override-redirect test. Only windows strictly below
+    the root are accepted, at most `depth` levels below it. A refused child
+    query, a window reached again or one below the depth limit, or the total
+    visited-window budget exhausted returns None: the walk fails closed and
+    never searches outside this tree.
+    """
+    if type(root) is not int or root <= 0 or type(budget) is not int or budget <= 0 or \
+            type(depth) is not int or depth <= 0:
+        return None
+    found, seen = [], {root}
+    stack = [(root, 0)]
+    while stack:
+        parent, level = stack.pop()
+        try:
+            kids = children(parent)
+        except Exception:
+            return None
+        if type(kids) is not list:
+            return None
+        for candidate in kids:
+            if type(candidate) is not int or candidate <= 0 or candidate in seen:
+                return None
+            # A child too deep is refused before any query of its own; the
+            # budget counts every window strictly below the root.
+            if level + 1 > depth or len(seen) + 1 > budget:
+                return None
+            seen.add(candidate)
+            try:
+                if viewable(candidate):
+                    found.append(candidate)
+            except Exception:
+                return None
+            stack.append((candidate, level + 1))
+    return found
+
+
+def distinct_transients(x, display, candidate):
+    """Distinct WM_TRANSIENT_FOR parents of the candidate, or None if malformed."""
+    try:
+        atom = x.XInternAtom(display, b"WM_TRANSIENT_FOR", 0)
+        window_type = x.XInternAtom(display, b"WINDOW", 0)
+    except Exception:
+        return None
+    status, values = x_property(x, display, candidate, atom, window_type)
+    if status != "ok" or not 1 <= len(values) <= 4:
+        return None
+    return sorted(set(values))
+
+
+def parse_owner_request(request):
+    """Exact fixed attribution contract of the native chooser mode.
+
+    Two shapes exist. `ownership_probe: true` is the zero-action probe: the
+    driver derives the owner PID from the unique real owner window and returns
+    only the fixed ownership class. `owner: true` is the input shape: the
+    driver derives the owner PID from the same unique real owner window, then
+    checks the exact executable image, the single exact private
+    --user-data-dir switch and the chooser attribution before any input. An
+    optional caller PID is validated and must equal the derived PID exactly.
+    Only the chooser title, the title prefix of the real Edge manager window,
+    the requester's exact private --user-data-dir and the Edge executable are
+    accepted. None of these values is ever printed.
+    """
+    if type(request) is not dict:
+        return None
+    probe = request.get("ownership_probe")
+    input_mode = request.get("owner")
+    if probe is not None and probe is not True:
+        return None
+    if input_mode is not None and input_mode is not True:
+        return None
+    if (probe is True) == (input_mode is True):
+        return None
+    # The purpose-bound folder action has its own closed schema.
+    if "chooser_action" in request:
+        return None
+    if probe is True:
+        if set(request) - PROBE_KEYS:
+            return None
+        if request.get("actions") not in (None, []):
+            return None
+        if "owner_pid" in request:
+            return None
+        if request.get("preserve_focus", True) is not True:
+            return None
+        if not all(key in request for key in OWNER_FIELDS):
+            return None
+        normalized = {key: request[key] for key in OWNER_FIELDS}
+        normalized["probe"] = True
+    else:
+        if set(request) - INPUT_KEYS:
+            return None
+        if request.get("title_prefix") != request.get("title"):
+            return None
+        if ascii_line(request.get("title")) is None:
+            return None
+        if request.get("preserve_focus") is not True:
+            return None
+        # The owner PID is derived from the unique real manager window, exactly
+        # as in the zero-action probe. A caller-supplied PID is optional; when
+        # present it must be a well-formed value and equal the derived one.
+        validated_pid = None
+        if "owner_pid" in request:
+            supplied = request["owner_pid"]
+            if type(supplied) is not int or not 1 < supplied <= PID_LIMIT:
+                return None
+            validated_pid = supplied
+        actions = request.get("actions")
+        if type(actions) is not list or not actions:
+            return None
+        if not all(key in request for key in OWNER_FIELDS):
+            return None
+        for action in actions:
+            if type(action) is not dict:
+                return None
+            if "key" in action:
+                parts = action["key"].split("+") if type(action["key"]) is str else []
+                if not 1 <= len(parts) <= 2 or not all(ascii_text(part) for part in parts):
+                    return None
+            if set(action) - {"text", "key"} or not {"key", "text"} & set(action):
+                return None
+            if "text" in action:
+                try:
+                    assert_chooser_text(action["text"])
+                except RuntimeError:
+                    return None
+        normalized = {key: request[key] for key in OWNER_FIELDS}
+        normalized["caller_pid"] = validated_pid
+        normalized["probe"] = False
+    if ascii_line(normalized["owner_title_prefix"]) is None or \
+            ascii_line(normalized["chooser_title_prefix"]) is None:
+        return None
+    if ascii_path(normalized["user_data_dir"]) is None or \
+            ascii_path(normalized["executable"]) is None:
+        return None
+    return normalized
+
+
+def dispatch_owner_request(request):
+    """Select exactly one owner parser: (folder_mode, owner, error).
+
+    A request that contains `chooser_action` is routed only through
+    parse_folder_action_request; it is never offered to the generic owner
+    parser, whose generic branch would otherwise reject it when `owner` is
+    true. Every other request keeps the existing dispatch exactly: a truthy
+    `owner` or `ownership_probe` is parsed by parse_owner_request, and a
+    request carrying neither selects no owner. A malformed chooser shape
+    returns error "Chooser action request required" and a rejected generic
+    request returns "Chooser ownership request required"; either way owner is
+    None, so invalid shapes stay fail-closed.
+    """
+    if type(request) is not dict:
+        request = {}
+    if "chooser_action" in request:
+        owner = parse_folder_action_request(request)
+        return True, owner, None if owner is not None else \
+            "Chooser action request required"
+    if request.get("owner") or request.get("ownership_probe"):
+        owner = parse_owner_request(request)
+        return False, owner, None if owner is not None else \
+            "Chooser ownership request required"
+    return False, None, None
+
+
+def derived_owner_pid(owner, owner_pid):
+    """The unique manager window's own PID, bound again to an optional request.
+
+    `owner_pid` is the _NET_WM_PID of the single viewable manager window whose
+    title carries the owner prefix, exactly as the zero-action probe reads it.
+    An input request may also carry a caller PID; it must be a well-formed
+    value (parse_owner_request) and equal the derived PID. The derived value is
+    returned only when the binding holds, else None. Values are never printed.
+    """
+    if type(owner) is not dict or type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+        return None
+    caller = owner.get("caller_pid")
+    if owner.get("probe") is True:
+        return owner_pid
+    if owner.get("probe") is not False:
+        return None
+    if caller is not None and (type(caller) is not int or caller != owner_pid):
+        return None
+    return owner_pid
+
+
+def safe_owner_record(result):
+    """Only the fixed ownership class and relation type; never raw values."""
+    if type(result) is not dict:
+        return None
+    if result.get("owned") is False and result.get("relation") == "none":
+        return {"owned": False, "relation": "none"}
+    relation = result.get("relation")
+    if result.get("owned") is True and relation in ("transient-leader", "process-parent"):
+        return {"owned": True, "relation": relation}
+    return None
+
+
+def probe_output(record):
+    """Zero-action probe output: only the fixed ownership class, nothing else."""
+    safe = safe_owner_record(record)
+    return None if safe is None else {"ownership": safe}
+
+
+def window_chain_ok(owner, owners, transients):
+    """One owner X window with exactly one chooser WM_TRANSIENT_FOR target.
+
+    owner: (window, pid, pid_viewable) for the real manager window.
+    owners: every viewable window whose title starts with the owner prefix.
+    transients: every distinct WM_TRANSIENT_FOR parent of the chooser
+    candidate. A malformed, zero, duplicate or ambiguous value refuses. The
+    terminal may be the owner window itself: that is the normal parent link
+    and the detailed WM_TRANSIENT_FOR/WM_CLIENT_LEADER proof follows.
+    """
+    if type(owner) is not tuple or len(owner) != 3:
+        return False
+    window, pid, viewable = owner
+    if type(window) is not int or window <= 0 or not 1 < pid <= PID_LIMIT or viewable is not True:
+        return False
+    if type(owners) is not list or owners.count(window) != 1 or len(owners) != 1:
+        return False
+    if type(transients) is not list or len(transients) != 1 or \
+            type(transients[0]) is not int:
+        return False
+    # Exactly one terminal WM_TRANSIENT_FOR target; the caller proves it is
+    # the owner's own client window through the WM chain.
+    return transients[0] != 0
+
+
+def read_proc_link(pid, name):
+    """Read one /proc/<pid>/ link only; a missing or unreadable link is None."""
+    if type(pid) is not int or not 1 < pid <= PID_LIMIT:
+        return None
+    try:
+        value = os.readlink("/proc/" + str(pid) + "/" + name)
+    except OSError:
+        return None
+    return value if value and len(value) <= PROC_LINK_MAX else None
+
+
+def owner_process_matches(pid, owner):
+    """Exact requested executable image and exact requester profile switch.
+
+    /proc/<pid>/exe must resolve (realpath) to the requested executable image
+    and /proc/<pid>/cmdline must carry the exact --user-data-dir=<profile>
+    token exactly once. A truncated command line, a missing terminator or a
+    duplicate switch is refused. Values are compared, never returned.
+    """
+    if type(pid) is not int or not 1 < pid <= PID_LIMIT or type(owner) is not dict:
+        return None
+    executable = owner.get("executable")
+    profile = owner.get("user_data_dir")
+    if ascii_path(executable) is None or ascii_path(profile) is None:
+        return None
+    actual = read_proc_link(pid, "exe")
+    if actual is None:
+        return None
+    try:
+        if os.path.realpath(actual) != os.path.realpath(executable):
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        with open("/proc/" + str(pid) + "/cmdline", "rb") as cmdline:
+            data = cmdline.read(CMDLINE_MAX + 1)
+    except OSError:
+        return None
+    # /proc/<pid>/cmdline is NUL terminated. A full read, a missing final NUL
+    # or an empty command line means truncation or a race: refuse it.
+    if not data or len(data) > CMDLINE_MAX or not data.endswith(b"\0"):
+        return None
+    switch = b"--user-data-dir=" + os.fsencode(profile)
+    # Only the one exact requester switch counts; duplicate or truncated
+    # profile switches are refused.
+    return pid if data.split(b"\0").count(switch) == 1 else None
+
+
+def owner_process_verified(owner, owner_pid):
+    """Both owner-process proofs against one parsed request and owner PID.
+
+    `owner` is the parsed owner/folder request carrying `probe`, `caller_pid`,
+    `executable` and `user_data_dir`; it is never the fixed {owned, relation}
+    ownership record, which fails both checks and is proven only through
+    prove_chooser_ownership. True only when the request binds the derived
+    owner PID and the owner process is that exact executable image with
+    exactly one exact --user-data-dir switch.
+    """
+    if derived_owner_pid(owner, owner_pid) != owner_pid:
+        return False
+    return owner_process_matches(owner_pid, owner) == owner_pid
+
+
+def chooser_pid_relation(owner_pid, chooser_pid):
+    """Bounded, actual OS parent chain back to the exact verified Edge PID.
+
+    Only /proc/<pid>/stat parent ids are followed; the chain stops at the
+    owner. The exact owner PID itself is a direct match. It is never a
+    same-uid or executable-basename guess.
+    """
+    def parent(pid):
+        try:
+            with open("/proc/" + str(pid) + "/stat", "rb") as stat:
+                fields = stat.read(PROC_LINK_MAX).rsplit(b")", 1)
+        except UnicodeDecodeError:
+            return None
+        except Exception:
+            return None
+        if len(fields) != 2:
+            return None
+        parts = fields[1].split()
+        # After the command name: state ppid ...
+        if len(parts) < 2:
+            return None
+        return int(parts[1])
+
+    if type(owner_pid) is not int or type(chooser_pid) is not int:
+        return False
+    if not 1 < owner_pid <= PID_LIMIT or not 1 < chooser_pid <= PID_LIMIT:
+        return False
+    if chooser_pid == owner_pid:
+        return True
+    pid = chooser_pid
+    for _ in range(PARENT_DEPTH):
+        try:
+            pid = parent(pid)
+        except (OSError, IndexError, ValueError):
+            return False
+        if pid is None:
+            return False
+        if pid == owner_pid:
+            return True
+        if pid <= 1:
+            return False
+    return False
+
+
+def _single_int(values):
+    if type(values) is not list or len(values) != 1:
+        return None
+    value = values[0]
+    return value if type(value) is int and 0 <= value <= 0xFFFFFFFF else None
+
+
+def _unique(values):
+    if type(values) is not list or not values or any(type(value) is not int for value in values):
+        return False
+    return len(set(values)) == 1
+
+
+def _ok_values(record):
+    """Values of an actual, type-checked property record, else None."""
+    if type(record) is not dict or record.get("status") != "ok":
+        return None
+    return record.get("values")
+
+
+def property_single_int(record):
+    """One 32-bit value of a status/values record; never the record itself."""
+    return _single_int(_ok_values(record))
+
+
+def check_chooser_relations(prop, expected_client, owner_pid):
+    """Fail-closed ownership proof for the one chooser candidate.
+
+    prop(name, window) returns {"status": "ok", "values": [...]} from the
+    actual, type-checked XGetWindowProperty, {"status": "missing"} when the
+    property is absent or {"status": "malformed"} otherwise (including a
+    WINDOW property whose actual type is not WINDOW). The chooser is owned
+    only when it is a WM transient of the owner's sole viewable client window
+    and shares its WM_CLIENT_LEADER; both ends must carry the verified owner
+    _NET_WM_PID. Returns a fixed failure message or None when owned.
+    """
+    if type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+        return "Chooser owner window unavailable"
+    expected_client = expected_client if type(expected_client) is int else None
+    client_pid = property_single_int(prop("_NET_WM_PID", expected_client)) \
+        if expected_client else None
+    if expected_client is None or client_pid != owner_pid:
+        return "Chooser must belong to the owner browser process"
+    client_leader = property_single_int(prop("WM_CLIENT_LEADER", expected_client))
+    if not client_leader:
+        return "Chooser must share the owner client leader"
+    transient = prop("WM_TRANSIENT_FOR", None)
+    transient_values = _ok_values(transient)
+    if transient_values is None or not _unique(transient_values):
+        return "Chooser must be a WM transient of the owner"
+    if transient_values != [expected_client]:
+        return "Chooser must be a WM transient of the owner"
+    # Exactly the client's leader: one WINDOW value, equal, and non-zero.
+    leader_values = _ok_values(prop("WM_CLIENT_LEADER", None))
+    if _single_int(leader_values) != client_leader:
+        return "Chooser must share the owner client leader"
+    return None
+
+
+def prove_chooser_ownership(mode, prop, owner_pid, client, candidate_pid, parent_relation):
+    """Choose exactly one proof mode; no physical action happens here.
+
+    mode "wm": WM_TRANSIENT_FOR/WM_CLIENT_LEADER chain from the candidate to
+    the sole owner client window `client`, whose _NET_WM_PID must be
+    `owner_pid`. mode "process": actual bounded OS parent chain from the
+    candidate's _NET_WM_PID to the exact owner PID. The caller has already
+    verified the owner's executable and exact --user-data-dir. Returns a fixed
+    safe record, or a fixed failure message as the second element.
+    """
+    if mode == "wm":
+        if type(client) is not int or client <= 0:
+            return None, "Chooser client window of the owner is unavailable"
+        reason = check_chooser_relations(prop, client, owner_pid)
+        return (None, reason) if reason else ({"owned": True, "relation": "transient-leader"}, None)
+    if mode == "process":
+        if type(owner_pid) is not int or type(candidate_pid) is not int or candidate_pid <= 0:
+            return None, "Chooser must belong to the owner browser process"
+        record = prop("_NET_WM_PID", None)
+        pid = property_single_int(record)
+        if pid is None or pid != candidate_pid:
+            return None, "Chooser must belong to the owner browser process"
+        if parent_relation(owner_pid, pid) is not True:
+            return None, "Chooser must belong to the owner browser process"
+        return {"owned": True, "relation": "process-parent"}, None
+    return None, "Chooser ownership request required"
 
 
 class AccessibilityQueryUnavailable(RuntimeError):
@@ -450,15 +1576,22 @@ def main():
             return title
         return ""
 
+    def window_property(candidate, name):
+        """One real, actual-type-checked X property read as a record."""
+        return property_record(x, display, candidate, name)
+
+    def attributes_of(candidate):
+        attributes = Attributes()
+        if not x.XGetWindowAttributes(display, candidate, C.byref(attributes)):
+            return None
+        return attributes
+
+    def normal_viewable(window):
+        attributes = attributes_of(window)
+        return attributes is not None and attributes.map_state == 2 and not attributes.override_redirect
+
     def children(parent):
-        root_return, parent_return, count = window(), window(), C.c_uint()
-        result = C.POINTER(window)()
-        if not x.XQueryTree(display, parent, C.byref(root_return), C.byref(parent_return), C.byref(result), C.byref(count)):
-            return []
-        found = [result[i] for i in range(count.value)]
-        if result:
-            x.XFree(result)
-        return found
+        return query_children(x, display, parent)
 
     def find(parent, depth=0):
         if depth > 3:
@@ -470,6 +1603,30 @@ def main():
                 matches.append(candidate)
             matches.extend(find(candidate, depth+1))
         return matches
+
+    def collect_titles(prefix, parent=root, depth=0):
+        """Bounded title-prefix traversal with no executable filter.
+
+        Used only by the owner/probe contract so a GTK helper dialog is
+        discoverable before attribution; every candidate is still proven
+        through the real WM chain or the bounded /proc parent chain before
+        any input.
+        """
+        if depth > 3:
+            return []
+        found = []
+        for candidate in children(parent):
+            if title_matches(window_title(candidate), prefix):
+                found.append(candidate)
+            found.extend(collect_titles(prefix, candidate, depth + 1))
+        return found
+
+    # The folder action has its own closed request parser; it is never routed
+    # through the keyboard/coordinate owner input shape.
+    folder_mode, owner, owner_error = dispatch_owner_request(request)
+    if owner_error is not None or \
+            (owner is not None and (request.get("wait_absent") or request.get("inspect"))):
+        raise RuntimeError(owner_error or "Chooser ownership request required")
 
     if request.get("wait_absent"):
         if not request.get("title") or not request.get("executable") or request.get("actions"):
@@ -485,10 +1642,31 @@ def main():
             time.sleep(0.05)
         raise RuntimeError("Previous native acceptance window did not close")
 
+    def scan_root():
+        """One entire `find(root)` tree scan; an exact refusal still raises.
+
+        A scan that raises has no result, so a later restart traverses the
+        root again from scratch instead of reusing any partial matches.
+        """
+        return find(root)
+
     target = None
     discovery_deadline = time.monotonic()+5
     while time.monotonic() < discovery_deadline:
-        matches=find(root)
+        if owner is not None:
+            # Fixed chooser title prefix only; the exact Edge executable filter
+            # is deliberately not applied before the ownership proof.
+            matches = [candidate for candidate in collect_titles(owner["chooser_title_prefix"])
+                       if normal_viewable(candidate)]
+        else:
+            # Firefox may destroy a child between two queries of one pre-action
+            # discovery. Only a transient BadWindow race on non-root windows
+            # discards that whole scan's partial result and repeats it from the
+            # root, inside this discovery loop's one original deadline and the
+            # fixed restart bound. No physical input happens before a clean scan.
+            matches = recover_window_tree(
+                scan_root, errors, FAILURE_CONTEXT["x_codes"], root,
+                discovery_deadline)
         if len(matches)>1:
             raise RuntimeError("Native acceptance window must be unique")
         if matches:
@@ -498,6 +1676,329 @@ def main():
     if not target:
         raise RuntimeError("Native acceptance window unavailable")
 
+    ownership = None
+    if owner is not None:
+        # Fixed attribution only: one real manager window of this private
+        # profile, its exact verified process and the chooser ownership proof.
+        # Every request field, every owner fact and the chooser proof are
+        # checked before the first physical input; failures stay fixed classes.
+        prior_errors = list(errors)
+        errors.clear()
+        try:
+            if not title_matches(window_title(target), owner["chooser_title_prefix"]):
+                raise RuntimeError("Native acceptance window unavailable")
+            manager = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
+                       if normal_viewable(candidate)]
+            if len(manager) != 1:
+                raise RuntimeError("Chooser owner window must be unique" if manager
+                                   else "Chooser owner window unavailable")
+            owner_window = manager[0]
+            owner_pid = property_single_int(window_property(owner_window, "_NET_WM_PID"))
+            if type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+                raise RuntimeError("Chooser owner window unavailable")
+            # The owner PID is bound by the unique real manager window itself in
+            # both shapes. A caller-supplied input PID must equal it exactly;
+            # it is never trusted on its own.
+            # Exact real executable image and exactly one exact private profile
+            # switch; a duplicate profile switch is never a second match.
+            if not owner_process_verified(owner, owner_pid):
+                raise RuntimeError("Chooser owner window unavailable")
+            # None selects the chooser; the owner window is used for
+            # the owner-side _NET_WM_PID/WM_CLIENT_LEADER reads.
+            chooser_props = lambda name, candidate: window_property(
+                target if candidate is None else candidate, name)
+            chooser_parents = distinct_transients(x, display, target)
+            record, reason = None, None
+            # WM_TRANSIENT_FOR/WM_CLIENT_LEADER chain first; the unique owner
+            # window is the only valid transient terminal, so a separate helper
+            # cannot substitute itself. Then the bounded, actual /proc parent
+            # chain back to the exact verified PID. Edge may omit
+            # WM_CLIENT_LEADER on the owner window; the process proof then
+            # accepts the exact same PID or a real bounded parent chain.
+            if window_chain_ok((owner_window, owner_pid, True), manager, chooser_parents):
+                record, reason = prove_chooser_ownership(
+                    "wm", chooser_props, owner_pid, owner_window, window_pid(target), None)
+            if record is None:
+                record, reason = prove_chooser_ownership(
+                    "process", chooser_props, owner_pid, None, window_pid(target),
+                    chooser_pid_relation)
+            # Re-prove the owner process identity immediately before trusting
+            # the relation result.
+            if record is None or not owner_process_verified(owner, owner_pid):
+                raise RuntimeError(reason or "Chooser owner window unavailable")
+            ownership = safe_owner_record(record)
+            if ownership is None or any(code != 3 for code, _resource in errors) or \
+                    any(code != 3 for code, _resource in prior_errors):
+                raise RuntimeError("Native acceptance X query failed")
+            if owner["probe"]:
+                # Zero-action probe: only the fixed ownership class is ever
+                # emitted, and it returns before focus/geometry/XTest.
+                output = probe_output(record)
+                if output is None:
+                    raise RuntimeError("Chooser owner window unavailable")
+                print(json.dumps(output))
+                x.XCloseDisplay(display)
+                return
+        finally:
+            errors.clear()
+
+    def window_parent(candidate):
+        """The real XQueryTree parent of one window; a refused query raises."""
+        root_return, parent_return, count = window(), window(), C.c_uint()
+        result = C.POINTER(C.c_ulong)()
+        if not x.XQueryTree(display, candidate, C.byref(root_return),
+                            C.byref(parent_return), C.byref(result), C.byref(count)):
+            raise RuntimeError("X window query refused")
+        try:
+            if count.value > TREE_BUDGET or (count.value and not result):
+                raise RuntimeError("X window query refused")
+            return int(parent_return.value)
+        finally:
+            if result:
+                x.XFree(result)
+
+    def whole_viewable_tree():
+        """Every viewable non-override-redirect window in one bounded tree walk.
+
+        Unlike a title-prefix search this never stops early on a title, so a
+        viewable override-redirect/pop-up overlay stays an extra window of the
+        click path and is never read as our chooser or ignored. The fixed
+        total visited-window budget and depth fail closed as a refused query.
+        """
+        found = bounded_viewable_tree(children, normal_viewable, root)
+        if found is None:
+            raise RuntimeError("X window query refused")
+        return found
+
+    def find_chooser():
+        """The same unique chooser: exact title, whole real tree, geometry.
+
+        Returns its (width, height) only when exactly one viewable chooser
+        carries the fixed title, it is still `target`, mapped, not
+        override-redirect and exactly the measured client size.
+        """
+        same = [candidate for candidate in whole_viewable_tree()
+                if window_title(candidate) == EDGE_CHOOSER_TITLE]
+        if not same:
+            raise RuntimeError("Native acceptance window unavailable")
+        if same != [target]:
+            raise RuntimeError("Native acceptance window must be unique")
+        if window_title(target) != EDGE_CHOOSER_TITLE:
+            raise RuntimeError("Chooser must keep the requested title")
+        geometry = chooser_geometry(attributes_of(target))
+        if geometry is None or folder_point(*geometry) is None:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        return geometry
+
+    def prove_folder_owner():
+        """Owner window, title, PID, executable and profile, re-read before input.
+
+        The parsed folder request closed over from `main()` (already the
+        verified `owner`) is the only owner-process request; the fixed
+        {owned, relation} ownership record cannot satisfy it and stays the
+        separate argument of prove_chooser_owner().
+        """
+        current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
+                   if normal_viewable(candidate)]
+        if current != [owner_window]:
+            raise RuntimeError("Chooser owner window must be unique" if current
+                               else "Chooser owner window unavailable")
+        # The unique manager X window still carries exactly one of the verified
+        # native manager title literals. Prefixes are never used here, so an
+        # unrelated Edge window named "Ext..." can never stand in for it.
+        if not folder_manager_title_matches(window_title(owner_window)):
+            raise RuntimeError("Chooser owner window unavailable")
+        owner_now = property_single_int(window_property(owner_window, "_NET_WM_PID"))
+        if type(owner_now) is not int or owner_now != owner_pid:
+            raise RuntimeError("Chooser owner window unavailable")
+        if derived_owner_pid(owner, owner_now) != owner_now:
+            raise RuntimeError("Chooser owner window unavailable")
+        if owner_process_matches(owner_now, owner) != owner_now:
+            raise RuntimeError("Chooser owner window unavailable")
+        if window_pid(target) != owner_now:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+
+    def prove_chooser_owner(ownership_record):
+        """The fixed {owned, relation} record and its exact owner PID, re-read.
+
+        The record proven from the actual WM/proc chain must be the fixed
+        owned class, and the chooser must still carry the exact owner PID.
+        This fixed record is never the owner-process request shape.
+        """
+        if safe_owner_record(ownership_record) is None or \
+                safe_owner_record(ownership_record)["owned"] is not True:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+        if window_pid(target) != owner_pid:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+
+    def chooser_chain_now():
+        """The chooser's actual XQueryTree chain to root; ambiguity refuses."""
+        chain = window_ancestry(window_parent, target, root)
+        if chain is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        return chain
+
+    def folder_io():
+        class FolderIO:
+            def motion(self, root_x, root_y):
+                # XTest returns a Status; only a nonzero value is success.
+                return xt.XTestFakeMotionEvent(display, -1, root_x, root_y, 0) != 0
+
+            def flush(self):
+                x.XFlush(display)
+
+            def sync(self):
+                x.XSync(display, 0)
+
+            def queried(self):
+                qroot, qchild = window(), window()
+                rx, ry, wx, wy = C.c_int(), C.c_int(), C.c_int(), C.c_int()
+                mask = C.c_uint()
+                if not x.XQueryPointer(display, root, C.byref(qroot), C.byref(qchild),
+                                       C.byref(rx), C.byref(ry), C.byref(wx),
+                                       C.byref(wy), C.byref(mask)):
+                    raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+                # A missing query window slot is not a zero window: refuse.
+                if qroot.value is None or qchild.value is None:
+                    raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+                return (qroot.value, qchild.value, rx.value, ry.value,
+                        wx.value, wy.value, mask.value)
+
+        return FolderIO()
+
+    def translate_chooser():
+        """Root-relative origin of the chooser; a refused translate raises."""
+        px, py, child = C.c_int(), C.c_int(), window()
+        if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px),
+                                       C.byref(py), C.byref(child)):
+            raise RuntimeError("Chooser must keep the measured geometry")
+        return px.value, py.value
+
+    def read_only(step, failure="Chooser folder input failed"):
+        """One read-only Xlib step; a refused or erroring query refuses input."""
+        errors.clear()
+        try:
+            value = step()
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError(failure)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError(failure)
+        return value
+
+    def click_folder(ownership_record):
+        # 1. The first proof fixes the unique chooser identity, its owner and
+        # the measured geometry; no caller value is used.
+        geometry = read_only(find_chooser, "Native acceptance X query failed")
+        read_only(prove_folder_owner, "Native acceptance X query failed")
+        if read_only(find_chooser, "Native acceptance X query failed") != geometry:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        point_xy = folder_point(*geometry)
+        if point_xy is None:
+            raise RuntimeError("Chooser folder point is not inside the chooser")
+        # 2. Only the origin; the point (width-48,height-23), the measured
+        # real GTK Open button center, is re-derived from the measured
+        # geometry inside the proof, never passed by the caller.
+        origin = read_only(translate_chooser, "Native acceptance X query failed")
+        if origin[0] < 0 or origin[1] < 0 or \
+                origin[0] + point_xy[0] < 0 or origin[1] + point_xy[1] < 0:
+            raise RuntimeError("Chooser folder point is not inside the chooser")
+        chooser_chain = read_only(chooser_chain_now, "Native acceptance X query failed")
+        # 3./4. XTest motion to the derived root point, flush/sync, then the
+        # exact root-relative XQueryPointer(root) position and the qchild's
+        # actual tree path. An unrelated overlay or an ambiguous path refuses
+        # before the button pair.
+        read_only(lambda: move_and_prove_pointer(
+            folder_io(), window_parent, root, target, origin,
+            geometry), "Native acceptance X query failed")
+        # 5. All state that authorized the click must still be exact: the
+        # same chooser chain, the exact pointer point over the owned qchild,
+        # and the unique chooser identity/geometry, unchanged since step 1.
+        if read_only(chooser_chain_now, "Native acceptance X query failed") != chooser_chain:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        read_only(lambda: move_and_prove_pointer(
+            folder_io(), window_parent, root, target, origin,
+            geometry, require_motion=False), "Native acceptance X query failed")
+        if read_only(find_chooser, "Native acceptance X query failed") != geometry:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        # The owner is re-proven last: the unique owner window, its exact PID,
+        # executable image and private profile, and the chooser ownership
+        # record with its exact owner PID, all unchanged since the first proof.
+        read_only(prove_folder_owner, "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(ownership_record),
+                  "Native acceptance X query failed")
+        down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
+        up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
+        if not down or not up:
+            raise RuntimeError("Chooser folder input failed")
+        x.XFlush(display)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Chooser folder input failed")
+
+    def ui_boundary(failure):
+        """The generic driver's one bounded 150ms UI event-loop boundary."""
+        x.XFlush(display)
+        time.sleep(0.15)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError(failure)
+
+    def navigate(ownership_record):
+        # 1. The same unique chooser identity, owner, ownership record and the
+        # exact measured 1124x822 client geometry as the Open action; no value
+        # comes from the caller except the one package directory. The shortcut
+        # and every path character are mapped before any input.
+        geometry = read_only(find_chooser, "Native acceptance X query failed")
+        read_only(prove_folder_owner, "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(ownership_record),
+                  "Native acceptance X query failed")
+        if geometry != FOLDER_CHOOSER_SIZE:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        try:
+            plan = chooser_navigation(x, display, owner["navigate_path"])
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError("Chooser shortcut unavailable")
+        # 2. Focus and raise the exact owned chooser, then send exactly
+        # Ctrl+L and the one path; no Return or other key is ever emitted.
+        errors.clear()
+        x.XRaiseWindow(display, target)
+        x.XSetInputFocus(display, target, 1, 0)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Chooser focus failed")
+        FAILURE_CONTEXT["action"] = "chooser-navigate"
+        # 3. Emit exactly the plan, as the generic driver does: the Ctrl+L
+        # chord batch, the existing driver boundary so GTK can open the
+        # location entry, then every path character batch and the same
+        # boundary. The plan ends here: the path stays in the location entry
+        # and the separate chooser_open action commits it.
+        emit_chooser_plan(
+            plan,
+            lambda keycode, down: xt.XTestFakeKeyEvent(display, keycode, down, 0),
+            ui_boundary)
+
+    if folder_mode:
+        if owner is None:
+            raise RuntimeError("Chooser action request required")
+        errors.clear()
+        FAILURE_CONTEXT["index"] = 0
+        if owner["chooser"] == "open":
+            FAILURE_CONTEXT["action"] = "chooser-open"
+            click_folder(ownership)
+            x.XCloseDisplay(display)
+            print(json.dumps(folder_output("open", 1)))
+            return
+        FAILURE_CONTEXT["action"] = "chooser-navigate"
+        navigate(ownership)
+        x.XCloseDisplay(display)
+        print(json.dumps(folder_output("navigate", 0)))
+        return
+
     def selected_map_state():
         attributes = Attributes()
         if not x.XGetWindowAttributes(display,target,C.byref(attributes)):
@@ -505,6 +2006,34 @@ def main():
         return attributes.map_state
 
     wait_window_viewable(selected_map_state,discovery_deadline)
+    # Read-only inspection: exact title and executable, preserve_focus, inspect
+    # and no actions. Nothing is raised, focused or clicked. The window above
+    # must exist, be unique and be viewable; an unobservable tree fails instead
+    # of reporting a missing window or an absent control.
+    if (request.get("preserve_focus") is True and request.get("inspect") is True
+            and not request.get("actions")):
+        if not request.get("title") or not request.get("executable") or request.get("title_prefix"):
+            raise RuntimeError("Exact read-only native inspection required")
+        x.XSync(display, 0)
+        # Popup destruction during read-only traversal is normal. Other X
+        # errors, or destruction of our selected target, must still fail closed.
+        check_x_target_errors(errors,target)
+        FAILURE_CONTEXT["action"] = "snapshot"
+        snapshot = NativeControls(request["title"],window_pid(target)).snapshot()
+        inspected = set(CONTROL_LABELS)
+        inspected.update(label for label in snapshot if control_label_allowed(label))
+        result = {"window": target, "x": 0, "y": 0, "clicks": []}
+        result["controls"] = {
+            label: {
+                "present": len(snapshot.get(label, [])) == 1,
+                "enabled": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["enabled"],
+                "showing": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["showing"],
+            }
+            for label in inspected
+        }
+        print(json.dumps(result))
+        x.XCloseDisplay(display)
+        return
     # An extension popup owns keyboard focus through its own transient window.
     # Refocusing the browser's main X window closes that popup. The Firefox
     # adapter checks the actual focused input before requesting this mode.
@@ -548,7 +2077,16 @@ def main():
     native = None
     if request.get("inspect") or any("click_label" in a or "wait_label" in a for a in request.get("actions", [])):
         native = NativeControls(request["title"],window_pid(target) if request.get("executable") else None)
-    for index, action in enumerate(request.get("actions", [])):
+    actions = request.get("actions", [])
+    if type(actions) is not list or not all(type(action) is dict for action in actions):
+        raise RuntimeError("Native acceptance X query failed")
+    # Every typed value is validated before the first physical input, so a
+    # refused directory can never arrive after a shortcut was emitted.
+    for action in actions:
+        if "text" in action and (type(action["text"]) is not str or
+                                 any(ord(char) < 32 or ord(char) > 126 for char in action["text"])):
+            raise RuntimeError("Acceptance input must be ASCII")
+    for index, action in enumerate(actions):
         previous_clicks = len(clicks)
         FAILURE_CONTEXT["index"] = index
         FAILURE_CONTEXT["action"] = (
@@ -565,11 +2103,12 @@ def main():
             dx, dy = action["click"]
             click(px.value+dx,py.value+dy,"pointer")
         if "text" in action:
+            if type(action["text"]) is not str:
+                raise RuntimeError("Acceptance input must be ASCII")
+            assert_chooser_text(action["text"])
             shift = named("Shift_L")
             for char in action["text"]:
                 symbol = ord(char)
-                if symbol < 32 or symbol > 126:
-                    raise RuntimeError("Acceptance input must be ASCII")
                 code = x.XKeysymToKeycode(display, symbol)
                 if not code:
                     raise RuntimeError("Acceptance keyboard mapping unavailable")
@@ -589,14 +2128,14 @@ def main():
                 key(code, True)
             for code in reversed(codes):
                 key(code, False)
-        x.XFlush(display)
-        time.sleep(0.15)
-        x.XSync(display, 0)
-        if errors:
-            raise RuntimeError("Native acceptance X input failed")
+        ui_boundary("Native acceptance X input failed")
         for emitted in clicks[previous_clicks:]:
             emitted["after"] = input_state()
     result = {"window": target, "x": px.value, "y": py.value,"clicks":[safe_click_record(click) for click in clicks]}
+    if ownership is not None:
+        # Probe mode: only the fixed ownership class and relation type; no
+        # window, title, path, command line, PID or arbitrary property.
+        result = {"ownership": ownership, "clicks": len(clicks)}
     if request.get("inspect"):
         FAILURE_CONTEXT["action"] = "snapshot"
         snapshot = native.snapshot()

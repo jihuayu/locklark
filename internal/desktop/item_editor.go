@@ -563,6 +563,9 @@ func (a *App) newItem(category vault.ItemCategory) {
 		return
 	}
 	a.EnableV2()
+	if a.v2.nav == navWatchtower {
+		a.v2.nav = navAllItems
+	}
 	if category == "" {
 		category = a.v2.category
 	}
@@ -610,11 +613,9 @@ func (a *App) beginEdit() error {
 	}
 	s := a.session
 	generation := a.generation
-	var opErr error
 	a.run(func() outcome {
 		plain, err := s.GetItemDetail(detail.ID, detail.Revision, true)
 		if err != nil {
-			opErr = err
 			return outcome{err: err}
 		}
 		return outcome{apply: func() {
@@ -633,13 +634,27 @@ func (a *App) beginEdit() error {
 			a.status = "编辑条目：" + plain.Title
 		}}
 	})
-	return opErr
+	// The read is asynchronous; its failure is reported through a.status by the
+	// dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) EditSelected() error { return a.beginEdit() }
 func (a *App) OpenEditor() error   { return a.beginEdit() }
 
+// cancelEdit discards the draft and the plaintext detail beginEdit loaded.
+// The draft already owns private copies of every value it shows, so nothing
+// here may keep an unmasked detail without a reveal timer. Editor reveal state
+// is cleared with it; an open Large Type view keeps the plaintext until it is
+// closed, and releasePlainDetail drops it then. The generation bump makes any
+// beginEdit read still in flight drop its result instead of repopulating an
+// editor the user already left.
 func (a *App) cancelEdit() {
+	if !a.v2.editing {
+		return
+	}
+	hadPartialEdit := a.v2.draft != nil && a.v2.draft.ID == ""
+	a.generation++
 	if a.v2.draft != nil {
 		a.v2.draft.Password = ""
 		a.v2.draft.OTP = ""
@@ -656,6 +671,15 @@ func (a *App) cancelEdit() {
 	a.v2.draft = nil
 	a.v2.editing = false
 	a.v2.editorError = ""
+	a.v2.revealed = map[string]bool{}
+	a.v2.revealUntil = time.Time{}
+	a.releasePlainDetail()
+	// saveDraft derives its snapshot query from the current V2 filter. When a
+	// guarded newer query is pending, the common query sequence moves with it
+	// and the aborted save is ignored instead of failing.
+	if hadPartialEdit && a.v2.pendingReload {
+		a.v2.querySeq++
+	}
 	a.status = "已取消编辑；未保存"
 }
 
@@ -668,6 +692,15 @@ func (a *App) saveDraft() error {
 	if draft == nil || a.session == nil {
 		return personal.ErrMutationRefused
 	}
+	// Leave the editor exactly as cancelEdit does: the draft was the only
+	// consumer of the beginEdit plaintext, and a successful save replaces it
+	// with a masked read. The generation bump drops any in-flight beginEdit.
+	a.generation++
+	defer func() {
+		a.v2.revealed = map[string]bool{}
+		a.v2.revealUntil = time.Time{}
+		a.releasePlainDetail()
+	}()
 	if strings.TrimSpace(draft.Title) == "" {
 		a.v2.editorError = "标题不能为空"
 		return personal.ErrMutationRefused
@@ -680,7 +713,6 @@ func (a *App) saveDraft() error {
 	s := a.session
 	filter := a.currentFilter()
 	isNew := draft.ID == ""
-	var opErr error
 	var saved personal.ItemDetail
 	var hasSaved bool
 	var snap v2Snapshot
@@ -688,25 +720,21 @@ func (a *App) saveDraft() error {
 		if isNew {
 			id, revision, err := s.AddItem(item, g)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			item.ID = id
 			saved, err = s.GetItemDetail(id, revision, false)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			hasSaved = true
 		} else {
 			revision, err := s.EditItem(draft.ID, draft.Revision, item, g)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			saved, err = s.GetItemDetail(draft.ID, revision, false)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			hasSaved = true
@@ -727,12 +755,11 @@ func (a *App) saveDraft() error {
 		a.status = "条目已保存"
 	})
 	if !ok {
-		if opErr == nil {
-			opErr = personal.ErrMutationRefused
-		}
-		return opErr
+		return personal.ErrMutationRefused
 	}
-	return opErr
+	// The mutation is asynchronous; its failure is reported through a.status by
+	// the dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) SaveDraft() error { return a.saveDraft() }

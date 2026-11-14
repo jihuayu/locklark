@@ -32,6 +32,14 @@ var bucket = []byte("locklark.personal/v1")
 var slotKey = []byte("device-slot")
 var snapshotKey = []byte("snapshot")
 
+// encodedSnapshotLimit bounds the JSON-encoded snapshot value. It is the
+// stored-snapshot ceiling inflated by JSON/base64 overhead (binary fields grow
+// by 4/3), so it is evaluated from the vault ceiling instead of copied.
+// Deriving it at init time by calling into vault keeps this package free of
+// vault's (incompressible) embedded assets; VerifySnapshot re-checks every
+// field against the vault limits once the value is parsed.
+var encodedSnapshotLimit = vault.MaxStoredSnapshot() + vault.MaxStoredSnapshot()/2
+
 type identity struct {
 	Device                          string
 	Signing, Audit, AuditEncryption []byte
@@ -86,6 +94,12 @@ func seal(b *bolt.Bucket, i identity, epoch uint64, items []vault.Item) (vault.S
 	signer := ed25519.NewKeyFromSeed(i.Signing)
 	defer clear(signer)
 	s, e := vault.SealItems([]byte(schema), items, epoch, []*age.X25519Recipient{id.Recipient()}, signer)
+	if errors.Is(e, vault.ErrSnapshotCapacity) {
+		// The items validated but their encoded KDBX exceeds the stored bound.
+		// Return a stable user-facing capacity refusal instead of the generic
+		// invalid-snapshot text; the surrounding transaction rolls back.
+		return s, ErrSnapshotCapacity
+	}
 	if e != nil {
 		return s, e
 	}
@@ -277,6 +291,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 			clear(r.sshSeed)
 			clear(r.material)
 			clear(r.archive)
+			clear(r.attachmentBytes)
 			if r.otp != nil {
 				r.otp.Clear()
 			}
@@ -288,14 +303,20 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 }
 
 type authenticatedState struct {
-	slot      account.Slot
-	opened    []byte
-	identity  identity
-	snapshot  vault.Snapshot
-	tip       auditTip
-	rows      []Event
-	chains    []Chain
-	items     []vault.Item
+	slot     account.Slot
+	opened   []byte
+	identity identity
+	snapshot vault.Snapshot
+	tip      auditTip
+	rows     []Event
+	chains   []Chain
+	items    []vault.Item
+	// origin is a shallow copy of the decrypted items taken before any
+	// transactional mutation. Updates replace entries with CloneItem copies and
+	// drop purged entries, so origin is the lifetime root holding the
+	// byte-slice backing buffers (attachment bodies, import provenance, seeds
+	// and passkeys) reachable before the transaction began. clear() zeroes it.
+	origin    []vault.Item
 	revisions map[string]string
 	vaults    []vault.VaultMeta
 	// nextCache is a private, session-bound candidate built only after the
@@ -305,20 +326,135 @@ type authenticatedState struct {
 	nextCache *auditCache
 }
 
+// clearItemSensitiveBuffers zeroes decrypted attachment bodies and import
+// provenance in place. Slice lengths are retained so presence checks still
+// reflect the persisted item; Go strings and unrelated copies are out of scope.
+func clearItemSensitiveBuffers(item *vault.Item) {
+	clear(item.Attachment)
+	for n := range item.Attachments {
+		clear(item.Attachments[n].Content)
+	}
+	clear(item.ImportSource)
+}
+
+// clear zeroes both the origin items and the transaction's final items.
+// Entries shared by both views are zeroed twice, which is harmless; entries
+// replaced by CloneItem are only reachable through origin, and fresh buffers
+// belonging to the new persisted value were sealed before this runs.
 func (a *authenticatedState) clear() {
 	clear(a.opened)
 	a.identity.clear()
-	for n := range a.items {
-		clear(a.items[n].SSHSeed)
+	clearAuthenticatedItems(a.origin)
+	clearAuthenticatedItems(a.items)
+	a.origin = nil
+}
+
+func clearAuthenticatedItems(items []vault.Item) {
+	for n := range items {
+		clearItemSensitiveBuffers(&items[n])
+		clear(items[n].SSHSeed)
 		// Both passkey forms (legacy single record and versioned collection)
 		// must be zeroed here.
-		clearItemPasskeys(&a.items[n])
+		clearItemPasskeys(&items[n])
 	}
+}
+
+// ownedClones keeps the owned CloneItem temporaries of one transaction alive
+// until the transaction callback ends and zeroes their buffers there,
+// including transferred ones: the persisted value was sealed (or the response
+// copied) before the callback returns, so a transferred clone only needs to
+// stay byte-exact until then. Clearing a clone twice is harmless because items
+// and the clone share the same backing buffers. v2Edit replaces the clone's
+// stored buffers with the caller's, so the tracker — not the stored item —
+// is what keeps the caller's replaced copy zeroable.
+type ownedClones struct {
+	// v2Edit overwrites the next-field clone from the caller's input; keep the
+	// input clone's old bytes here so they are cleared with the rest.
+	inputs []vault.Item
+	clones []*vault.Item
+}
+
+// track returns an owned CloneItem of item. Call clear once the transaction
+// callback has sealed and copied everything it needs; nil is a no-op.
+func (t *ownedClones) track(item vault.Item) *vault.Item {
+	next := vault.CloneItem(item)
+	if t != nil {
+		t.clones = append(t.clones, &next)
+	}
+	return &next
+}
+
+// clear zeroes every tracked clone and input clone, transferred or not.
+func (t *ownedClones) clear() {
+	if t == nil {
+		return
+	}
+	for _, next := range t.clones {
+		clearCloneItem(next)
+	}
+	for n := range t.inputs {
+		clearCloneItem(&t.inputs[n])
+	}
+	t.clones, t.inputs = nil, nil
+}
+
+// clearCloneItem zeroes the buffers CloneItem allocated for an owned copy:
+// every byte slice clearAuthenticatedItems zeroes, plus ImportSource, which it
+// leaves alone because a stored item keeps it for provenance. Callers must not
+// hand it a stored item, whose ImportSource is shared rather than cloned.
+func clearCloneItem(item *vault.Item) {
+	if item == nil {
+		return
+	}
+	clearItemSensitiveBuffers(item)
+	clear(item.ImportSource)
+	clear(item.SSHSeed)
+	clearItemPasskeys(item)
+}
+
+// cloneStoredItem returns the owned, mutable clone of the stored items[idx].
+func cloneStoredItem(temporaries *ownedClones, items []vault.Item, idx int) *vault.Item {
+	return temporaries.track(items[idx])
+}
+
+// removeOwnedAttachment compacts the attachments of an owned clone (whose
+// contents CloneItem copied) by dropping the first entry with ID attID and
+// zeroing that clone's Content while its slot is still reachable: the compacted
+// slice can leave the removed element beyond the new length or overwrite it.
+// Kept entries and their contents are untouched, as are the stored item's
+// original slice and buffers. A nil result reports that attID was absent; the
+// compacted slice then holds the same elements as the input.
+func removeOwnedAttachment(attachments []vault.AttachmentMeta, attID string) []vault.AttachmentMeta {
+	found := false
+	kept := attachments[:0]
+	for _, att := range attachments {
+		if att.ID == attID && !found {
+			found = true
+			clear(att.Content)
+			continue
+		}
+		kept = append(kept, att)
+	}
+	if !found {
+		return nil
+	}
+	return kept
 }
 
 // Both write commands and native read-only revalidation use this complete
 // slot, signed snapshot, schema and full history authentication path.
-func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (out *authenticatedState, err error) {
+func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (*authenticatedState, error) {
+	return authenticateStateItems(tx, pw, key, action, unlocked, true)
+}
+
+// itemDecryptObserver is a test seam that counts full vault payload decryptions.
+// It is nil in production.
+var itemDecryptObserver func()
+
+// authenticateStateItems is authenticateState with an explicit choice about
+// decrypting item payloads. Audit-only phases pass false: they still verify the
+// snapshot, audit chain and revisions, but cannot observe plaintext items.
+func authenticateStateItems(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session, withItems bool) (out *authenticatedState, err error) {
 	var opened []byte
 	var i identity
 	var items []vault.Item
@@ -326,10 +462,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		if err != nil {
 			clear(opened)
 			i.clear()
-			for n := range items {
-				clear(items[n].SSHSeed)
-				clearItemPasskeys(&items[n])
-			}
+			clearAuthenticatedItems(items)
 		}
 	}()
 	b := tx.Bucket(bucket)
@@ -366,7 +499,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	}
 	var s vault.Snapshot
 	raw = b.Get(snapshotKey)
-	if len(raw) > 12<<20 || json.Unmarshal(raw, &s) != nil {
+	if len(raw) > encodedSnapshotLimit || json.Unmarshal(raw, &s) != nil {
 		return nil, invalid
 	}
 	signer := ed25519.NewKeyFromSeed(i.Signing)
@@ -442,14 +575,15 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if unlocked != nil {
 		nextCache = &auditCache{slotDigest: slotSum, auditPub: pubHash, count: tip.Count, last: tip.Last, origin: tip.Origin, prefix: full, revisions: cloneRevisions(revisions), archiveDigest: archiveSum, archiveValid: true, hashedBytes: hashed}
 	}
-	if action != "audit.list" {
+	if withItems {
+		if itemDecryptObserver != nil {
+			itemDecryptObserver()
+		}
 		var meta []byte
 		meta, items, e = vault.OpenItems(s, device, signer.Public().(ed25519.PublicKey), tip.Epoch)
 		if e != nil || items == nil || string(meta) != schema {
 			return nil, invalid
 		}
-	}
-	if action != "audit.list" {
 		if len(items) != len(revisions) {
 			return nil, invalid
 		}
@@ -464,7 +598,10 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if e != nil {
 		return nil, e
 	}
-	return &authenticatedState{slot: slot, opened: opened, identity: i, snapshot: s, tip: tip, rows: rows, chains: chains, items: items, revisions: revisions, vaults: vaults, nextCache: nextCache}, nil
+	// Shallow copy: it shares the decrypted structs (and their byte buffers)
+	// without preserving anything the transaction replaces into items.
+	origin := append([]vault.Item(nil), items...)
+	return &authenticatedState{slot: slot, opened: opened, identity: i, snapshot: s, tip: tip, rows: rows, chains: chains, items: items, origin: origin, revisions: revisions, vaults: vaults, nextCache: nextCache}, nil
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
@@ -571,13 +708,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	var out result
 	var refusal error
+	var capacity bool
 	var auditCandidate *auditCache
 	e := update(func(tx *bolt.Tx) (err error) {
-		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
+		// The pre-network HIBP intent commits only a linked audit event, so it
+		// must not decrypt the item payload just to discard it.
+		withItems := action != "audit.list" && !(action == hibpAction && option.hibp != nil && option.hibp.intent)
+		auth, e := authenticateStateItems(tx, pw, key, action, option.unlocked, withItems)
 		if e != nil {
 			return e
 		}
-		defer auth.clear()
 		b := tx.Bucket(bucket)
 		slot, opened, i, s := auth.slot, auth.opened, auth.identity, auth.snapshot
 		defer func() {
@@ -586,6 +726,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}()
 		tip, rows, chains, items, revisions, vaults := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions, auth.vaults
+		// Owned temporary clones live until the end of this callback: the seal,
+		// b.Put and response copies below run before the deferred cleanups, so
+		// every clone — including one handed to items — can be zeroed here.
+		temporaries := &ownedClones{}
+		// items is reassigned and appended below; some appends reallocate, so
+		// the cleanup must cover the final local slice (in addition to the
+		// origin root inside auth.clear) on every return path.
+		defer func() {
+			clearAuthenticatedItems(items)
+			temporaries.clear()
+			auth.clear()
+		}()
 		outcome := "succeeded"
 		var profile *password.Profile
 		if action == referenceDisclosureAction {
@@ -609,8 +761,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				outcome, refusal = "native-refused", ErrMutationRefused
 				break
 			}
-			items = append(items, add)
-			out.id = add.ID
+			// The add input is caller-owned; hand items an owned clone that the
+			// transaction-end clearAuthenticatedItems(items) zeroes after the seal.
+			owned := temporaries.track(add)
+			items = append(items, *owned)
+			out.id = owned.ID
 		case sshSignAction:
 			out.id = edit.ID
 			switch rev := revisions[edit.ID]; {
@@ -673,6 +828,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				} else {
 					candidate[index].Username = string(rq.username)
 					candidate[index].Password = string(rq.password)
+					candidate[index].History = autoHistory(items[index], candidate[index])
 				}
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					outcome, refusal = "browser-refused", ErrBrowserSaveRefused
@@ -736,6 +892,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		case importPlanAction, importAction:
 			mapped, err := option.migration.mapSource(i.AuditEncryption)
+			// The mapped logins own separate byte buffers and are only passed to
+			// seal; zero them on every path, including plans that persist nothing.
+			defer clearAuthenticatedItems(mapped.Items)
 			if err == nil {
 				for _, item := range mapped.Items {
 					if revisions[item.ID] != "" {
@@ -757,7 +916,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				return e
 			}
 			if action == importAction {
-				s, e = seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				sealed, sealErr := seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				if errors.Is(sealErr, ErrSnapshotCapacity) {
+					// The mapped items fit the plaintext schema but their
+					// snapshot does not fit; nothing was written. Keep the
+					// transaction going so the linked limit/refusal audit is
+					// recorded like every other import refusal.
+					outcome, refusal = "limit", ErrImportCapacity
+					break
+				}
+				s, e = sealed, sealErr
 				if e != nil {
 					return e
 				}
@@ -780,6 +948,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		case exportAction:
 			out.archive, e = vault.ExportKDBX(items, option.export.password)
+			if errors.Is(e, vault.ErrSnapshotCapacity) {
+				// The export shares the stored bound but encodes a wider
+				// artifact, so it can refuse a vault that fits. Keep the
+				// transaction going so the linked export intent is prepared,
+				// then return the capacity refusal from the Bolt update callback
+				// below: Bolt rolls back the transaction, including that
+				// prepared intent event, and no output file is published.
+				out.archive, e = nil, nil
+				capacity = true
+			}
 			if e != nil {
 				return e
 			}
@@ -965,6 +1143,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						if action == "item.regenerate.password" {
+							previous := items[i]
 							if option.nativeMutation != nil {
 								if _, err := password.Validate(option.generation.policy); err != nil {
 									outcome, refusal = "native-refused", ErrMutationRefused
@@ -982,6 +1161,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								return err
 							}
 							items[i].Password = secret.Value()
+							items[i].History = autoHistory(previous, items[i])
 							out.profile = secret.Profile()
 							profile = &out.profile
 							break
@@ -1014,6 +1194,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								break
 							}
 						}
+						previous := items[i]
 						switch edit.Field {
 						case "notes":
 							probe := append([]vault.Item(nil), items...)
@@ -1033,6 +1214,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							items[i].Password = edit.Value
 						case "otp":
 							items[i].OTP = edit.Value
+						}
+						if refusal == nil {
+							items[i].History = autoHistory(previous, items[i])
 						}
 						break
 					}
@@ -1082,8 +1266,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				out.profile = secret.Profile()
 				profile = &out.profile
 			}
-			items = append(items, add)
-			out.id = add.ID
+			// The add input is caller-owned; hand items an owned clone that the
+			// transaction-end clearAuthenticatedItems(items) zeroes after the seal.
+			owned := temporaries.track(add)
+			items = append(items, *owned)
+			out.id = owned.ID
 		case "item.list", "item.list.archived", "item.list.trashed", "item.list.all":
 			out.rows = make([]Row, 0, len(items))
 			for _, it := range items {
@@ -1153,25 +1340,28 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.v2 != nil {
 				return invalid
 			}
-			add = vault.CloneItem(add)
-			add.ID, e = randomID()
+			// The add input is caller-owned; work only on an owned clone. The
+			// transaction-end temporaries.clear zeroes it, after the seal.
+			owned := temporaries.track(add)
+			owned.ID, e = randomID()
 			if e != nil {
 				return e
 			}
 			now := time.Now().Unix()
-			add.CreatedAt, add.UpdatedAt = now, now
-			add, e = normalizeV2Item(add)
+			owned.CreatedAt, owned.UpdatedAt = now, now
+			normalized, e := normalizeV2Item(*owned)
 			if e != nil {
 				return e
 			}
-			if !vaultExists(vaults, add.VaultID) {
+			if !vaultExists(vaults, normalized.VaultID) {
 				return ErrMutationRefused
 			}
-			if vault.ValidateItems([]byte(schema), append(append([]vault.Item(nil), items...), add)) != nil {
+			if vault.ValidateItems([]byte(schema), append(append([]vault.Item(nil), items...), normalized)) != nil {
 				return ErrMutationRefused
 			}
-			items = append(items, add)
-			out.id = add.ID
+			*owned = normalized
+			items = append(items, *owned)
+			out.id = owned.ID
 		case v2EditAction:
 			if edit == nil || option.v2 == nil || option.v2.item == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
 				return invalid
@@ -1194,7 +1384,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					outcome, refusal = "trashed", ErrTrashed
 					break
 				}
-				next := vault.CloneItem(*option.v2.item)
+				// The v2 item is caller-owned; the clone below is adjusted to the
+				// stored item's state, so its own input bytes are replaced and
+				// tracked separately for the transaction-end cleanup.
+				owned := temporaries.track(*option.v2.item)
+				temporaries.inputs = append(temporaries.inputs, vault.CloneItem(*option.v2.item))
+				next := *owned
 				next.ID = items[idx].ID
 				next.State, next.PreviousState, next.TrashedAt = items[idx].State, items[idx].PreviousState, items[idx].TrashedAt
 				next.CreatedAt = items[idx].CreatedAt
@@ -1215,19 +1410,19 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 				next.History = autoHistory(items[idx], next)
 				next.UpdatedAt = time.Now().Unix()
-				next, e = normalizeV2Item(next)
-				if e != nil {
-					return e
+				normalized, err := normalizeV2Item(next)
+				if err != nil {
+					return err
 				}
-				if !vaultExists(vaults, next.VaultID) {
+				if !vaultExists(vaults, normalized.VaultID) {
 					return ErrMutationRefused
 				}
 				candidate := append([]vault.Item(nil), items...)
-				candidate[idx] = next
+				candidate[idx] = normalized
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					return ErrMutationRefused
 				}
-				items[idx] = next
+				items[idx] = normalized
 			}
 		case v2FavoriteAction, v2TagsAction:
 			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
@@ -1251,7 +1446,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					outcome, refusal = "trashed", ErrTrashed
 					break
 				}
-				next := vault.CloneItem(items[idx])
+				next := cloneStoredItem(temporaries, items, idx)
 				if action == v2FavoriteAction {
 					next.Favorite = option.v2.favorite
 				} else {
@@ -1262,11 +1457,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
-				candidate[idx] = next
+				candidate[idx] = *next
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					return ErrMutationRefused
 				}
-				items[idx] = next
+				items[idx] = *next
 			}
 		case v2HistoryRestoreAction:
 			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
@@ -1294,31 +1489,19 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				if option.v2.historyIndex < 0 || option.v2.historyIndex >= len(history) {
 					return ErrMutationRefused
 				}
-				next := vault.CloneItem(items[idx])
+				next := cloneStoredItem(temporaries, items, idx)
 				entry := history[option.v2.historyIndex]
-				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: vault.CloneSections(next.Sections)}
+				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: completeHistorySections(next.Sections)}
 				history = append(history[:option.v2.historyIndex], history[option.v2.historyIndex+1:]...)
-				next.Password = entry.Password
-				if entry.Title != "" {
-					next.Title = entry.Title
-				}
-				if entry.Username != "" {
-					next.Username = entry.Username
-				}
-				if entry.Notes != "" {
-					next.Notes = entry.Notes
-				}
-				if entry.Sections != nil {
-					next.Sections = vault.CloneSections(entry.Sections)
-				}
+				restoreHistoryEntry(next, entry)
 				next.History = appendHistory(history, snapshot)
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
-				candidate[idx] = next
+				candidate[idx] = *next
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					return ErrMutationRefused
 				}
-				items[idx] = next
+				items[idx] = *next
 			}
 		case v2PurgeAction:
 			if edit == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
@@ -1417,16 +1600,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					return err
 				}
 				att := vault.AttachmentMeta{ID: attID, FileName: option.v2.fileName, MIMEType: option.v2.mimeType, Size: int64(len(option.v2.content)), SHA256: vault.AttachmentSHA256(option.v2.content), Content: append([]byte(nil), option.v2.content...)}
-				next := vault.CloneItem(items[idx])
+				next := cloneStoredItem(temporaries, items, idx)
 				next.Attachments = append(next.Attachments, att)
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
-				candidate[idx] = next
+				candidate[idx] = *next
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					return ErrMutationRefused
 				}
-				items[idx] = next
+				items[idx] = *next
 				out.attachment = att
+				// The result carries metadata only; its Content alias keeps the
+				// new sealed attachment buffer reachable until auth.clear().
 				out.attachment.Content = nil
 			}
 		case v2AttachmentRemoveAct:
@@ -1451,27 +1636,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					outcome, refusal = "trashed", ErrTrashed
 					break
 				}
-				next := vault.CloneItem(items[idx])
-				found := false
-				kept := next.Attachments[:0]
-				for _, att := range next.Attachments {
-					if att.ID == option.v2.attID && !found {
-						found = true
-						continue
-					}
-					kept = append(kept, att)
-				}
-				if !found {
+				next := cloneStoredItem(temporaries, items, idx)
+				next.Attachments = removeOwnedAttachment(next.Attachments, option.v2.attID)
+				if next.Attachments == nil {
 					return ErrNotFound
 				}
-				next.Attachments = kept
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
-				candidate[idx] = next
+				candidate[idx] = *next
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					return ErrMutationRefused
 				}
-				items[idx] = next
+				items[idx] = *next
 			}
 		case v2ListVaultsAction:
 			out.vaults = listVaultsMeta(vaults)
@@ -1527,7 +1703,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				if !vaultExists(vaults, target) {
 					return ErrMutationRefused
 				}
-				next := vault.CloneItem(items[idx])
+				next := cloneStoredItem(temporaries, items, idx)
 				next.VaultID = target
 				next.UpdatedAt = time.Now().Unix()
 				if option.v2.copyItem {
@@ -1538,27 +1714,28 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					next.State, next.PreviousState, next.TrashedAt = "", "", nil
 					now := time.Now().Unix()
 					next.CreatedAt, next.UpdatedAt = now, now
-					next, e = normalizeV2Item(next)
-					if e != nil {
-						return e
+					normalized, err := normalizeV2Item(*next)
+					if err != nil {
+						return err
 					}
-					candidate := append(append([]vault.Item(nil), items...), next)
+					candidate := append(append([]vault.Item(nil), items...), normalized)
 					if vault.ValidateItems([]byte(schema), candidate) != nil {
 						return ErrMutationRefused
 					}
-					items = append(items, next)
+					*next = normalized
+					items = append(items, *next)
 					out.id = next.ID
 				} else {
-					next, e = normalizeV2Item(next)
-					if e != nil {
-						return e
+					normalized, err := normalizeV2Item(*next)
+					if err != nil {
+						return err
 					}
 					candidate := append([]vault.Item(nil), items...)
-					candidate[idx] = next
+					candidate[idx] = normalized
 					if vault.ValidateItems([]byte(schema), candidate) != nil {
 						return ErrMutationRefused
 					}
-					items[idx] = next
+					items[idx] = normalized
 				}
 			}
 		case runBundleAction:
@@ -1696,7 +1873,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			auditPriv := ed25519.NewKeyFromSeed(i.Audit)
 			defer clear(auditPriv)
 			chains = append(chains, Chain{auditPriv.Public().(ed25519.PublicKey), append(rows, ev)})
-			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains}
+			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains, Vaults: vaults, Attachments: collectBackupAttachments(items)}
 			out.archive, e = encodeArchive(p, pw, key, slot.Account, option.backup, auditPriv)
 			return e
 		}
@@ -1704,6 +1881,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.events = append(rows, ev)
 		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == v2AddAction || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
 			out.revision = ev.hash()
+		}
+		if capacity {
+			return ErrSnapshotCapacity
 		}
 		return nil
 	})
@@ -1715,6 +1895,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		clear(out.value)
 		clearBundleValues(out.values)
 		clear(out.sshSeed)
+		clear(out.attachmentBytes)
 		if out.otp != nil {
 			out.otp.Clear()
 		}

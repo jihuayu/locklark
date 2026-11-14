@@ -5,7 +5,10 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
+	"fmt"
 	"io"
+	"math"
 )
 
 // Header to be put before xml content in kdbx file
@@ -21,8 +24,103 @@ func NewEncoder(w io.Writer) *Encoder {
 	return &Encoder{w: w}
 }
 
+// ErrEncodeLimitExceeded is returned by EncodeWithLimits when the serialized
+// plaintext content exceeds the EncodeLimits budget. The error never embeds
+// database content.
+var ErrEncodeLimitExceeded = errors.New("gokeepasslib: database exceeds encode limits")
+
+// EncodeLimits bounds the plaintext a bounded encode may serialize.
+type EncodeLimits struct {
+	// MaxPlaintextBytes bounds the plaintext content: the InnerHeader
+	// followed by the XML document, exactly as it is serialized, before it
+	// is compressed, padded or encrypted. It is enforced on every write of
+	// the plaintext collector, the InnerHeader's and the streaming XML
+	// document's alike, so a write that would cross it is rejected before a
+	// byte beyond it is retained.
+	//
+	// The encoder always appends 1..16 repeated-count padding bytes before
+	// encryption, for every cipher and also with NoCompressionFlag, and
+	// keeps the encoded bytes unchanged. The budget is chosen so that the
+	// same value also bounds what Decoder.DecodeWithLimits opens under it:
+	//
+	//   - an AES or gzip content is measured as it is; a gzip content's
+	//     binding budget is its expansion, and the trailing block padding is
+	//     not part of that expansion. With NoCompressionFlag an AES content
+	//     of exactly MaxPlaintextBytes still opens under the same budget,
+	//     because the decoder removes the PKCS#7 suffix before it applies
+	//     the budget;
+	//   - a KDBX4 NoCompressionFlag ChaCha20 or Twofish content additionally
+	//     reserves the writer's actual 1..16 padding bytes, because the
+	//     decoder retains and counts every non-AES decrypted byte. The
+	//     encoder pads to the next 16-byte boundary, and by a whole block
+	//     when the content already ends on one, so a budget M admits a
+	//     serialized body of at most floor(M/16)*16-1 bytes. A budget below
+	//     16 therefore admits no content and is reported as
+	//     ErrEncodeLimitExceeded.
+	MaxPlaintextBytes int64
+}
+
+func (l EncodeLimits) validate() error {
+	if l.MaxPlaintextBytes <= 0 || l.MaxPlaintextBytes == math.MaxInt64 {
+		return fmt.Errorf("%w: every limit must be positive and below MaxInt64", ErrEncodeLimitExceeded)
+	}
+	return nil
+}
+
 // Encode writes db to e's internal writer
 func (e *Encoder) Encode(db *Database) error {
+	return e.encode(db, 0)
+}
+
+// EncodeWithLimits writes db to e's internal writer exactly like Encode, and
+// additionally rejects plaintext content (the InnerHeader followed by the XML
+// document) larger than limits.MaxPlaintextBytes with ErrEncodeLimitExceeded.
+// The content is measured after the same normalization as Encode (binary
+// cleanup, format version, protected entry unlock and relock order, header
+// and hash updates) and before it is compressed, padded or encrypted. The
+// encoded bytes are exactly those of Encode; only the budget differs by
+// cipher. The budget bounds the serialized body except for a KDBX4
+// NoCompressionFlag ChaCha20 or Twofish content, where it also reserves the
+// writer's actual 1..16 padding bytes: the decoder retains and counts every
+// non-AES decrypted byte, so the output still opens under DecodeWithLimits
+// with the same budget. See EncodeLimits.MaxPlaintextBytes.
+//
+// The content is serialized exactly as Encode serializes it, and its budget
+// is enforced on the plaintext collector's writes before a byte beyond the
+// budget is retained, so an over-budget content is rejected without one extra
+// byte. The encoder keeps Encode's write order, so the KDBX header and hashes
+// have been written to e's writer before the content is serialized: a
+// database rejected here has already had them written, and its content is
+// never compressed, padded, encrypted or written.
+//
+// EncodeLimits with a non-positive or MaxInt64 limit is reported as
+// ErrEncodeLimitExceeded before db is modified. Errors never embed database
+// content.
+func (e *Encoder) EncodeWithLimits(db *Database, limits EncodeLimits) error {
+	if err := limits.validate(); err != nil {
+		return err
+	}
+	return e.encode(db, limits.MaxPlaintextBytes)
+}
+
+// hasLegacyWriterPaddingBudget reports whether encodeRawContent's 1..16
+// repeated-count padding of this database reaches DecodeWithLimits' plaintext
+// budget. That holds for a KDBX4 NoCompressionFlag ChaCha20 or Twofish
+// content: the decoder retains and counts every decrypted byte of non-AES
+// content. For AES content the decoder removes a valid PKCS#7 suffix instead,
+// and a gzip content is budgeted by its expansion.
+func hasLegacyWriterPaddingBudget(db *Database) bool {
+	if !db.Header.IsKdbx4() || db.Header.FileHeaders.CompressionFlags == GzipCompressionFlag {
+		return false
+	}
+	cipherID := db.Header.FileHeaders.CipherID
+	return bytes.Equal(cipherID, CipherChaCha20) || bytes.Equal(cipherID, CipherTwoFish)
+}
+
+// encode is the ordered encode pipeline shared by Encode and EncodeWithLimits.
+// A zero maxPlaintext is an unbounded Encode; a positive one bounds the
+// plaintext content.
+func (e *Encoder) encode(db *Database, maxPlaintext int64) error {
 	db.cleanupBinaries()
 
 	// Unlock protected entries ensuring that we have them prepared in the order that is matching
@@ -85,24 +183,30 @@ func (e *Encoder) Encode(db *Database) error {
 		db.Content.Meta.HeaderHash = base64.StdEncoding.EncodeToString(hash[:])
 	}
 
-	// Encode xml and append header to the top
-	rawContent, err := db.marshalXMLContent()
+	// Serialize the InnerHeader (Kdbx v4) and then the XML document, each
+	// once, through the plaintext collector: a bounded encode charges both
+	// against one plaintext budget before the content is compressed.
+	if maxPlaintext > 0 && hasLegacyWriterPaddingBudget(db) {
+		// The decoder retains and counts this non-AES content's 1..16 writer
+		// padding bytes, so reserve them: the collector admits a body of at
+		// most this size, whose padding brings it to at most
+		// maxPlaintext.
+		maxPlaintext = maxPlaintext/16*16 - 1
+		if maxPlaintext <= 0 {
+			return fmt.Errorf("%w: plaintext budget below 16 bytes cannot hold any padded content",
+				ErrEncodeLimitExceeded)
+		}
+	}
+	plaintext, err := newPlaintextContent(db.Content.InnerHeader, db.Header.IsKdbx4(), maxPlaintext)
 	if err != nil {
 		return err
 	}
-
-	// Write InnerHeader (Kdbx v4)
-	if db.Header.IsKdbx4() {
-		var ih bytes.Buffer
-		if err = db.Content.InnerHeader.writeTo(&ih); err != nil {
-			return err
-		}
-
-		rawContent = append(ih.Bytes(), rawContent...)
+	if err = plaintext.writeDocument(db.Content); err != nil {
+		return err
 	}
 
 	// Encode raw content
-	encodedContent, err := encodeRawContent(db, rawContent, transformedKey)
+	encodedContent, err := encodeRawContent(db, plaintext.reader(), transformedKey)
 	if err != nil {
 		return err
 	}
@@ -112,32 +216,108 @@ func (e *Encoder) Encode(db *Database) error {
 	return err
 }
 
-// marshalXMLContent marshals the content of the database into the XML document
-// which is stored in a KDBX file
-func (db *Database) marshalXMLContent() ([]byte, error) {
-	rawContent, err := xml.MarshalIndent(db.Content, "", "\t")
-	if err != nil {
-		return nil, err
-	}
-
-	content := make([]byte, 0, len(xmlHeader)+len(rawContent))
-	content = append(content, xmlHeader...)
-	content = append(content, rawContent...)
-
-	return content, nil
+// plaintextContent is the plaintext of one encode: the KDBX4 InnerHeader
+// followed by the XML document, each collected once. A positive max is a
+// plaintext budget, enforced on every write of either before a byte beyond it
+// is retained.
+type plaintextContent struct {
+	headers  bytes.Buffer
+	document bytes.Buffer
+	written  int64
+	max      int64
 }
 
+// newPlaintextContent creates the collector of one encode and writes the
+// InnerHeader into it, before the document is serialized, so a budget smaller
+// than the InnerHeader is reported without serializing the document.
+func newPlaintextContent(innerHeader *InnerHeader, isKdbx4 bool, max int64) (*plaintextContent, error) {
+	c := &plaintextContent{max: max}
+	if !isKdbx4 || innerHeader == nil {
+		return c, nil
+	}
+	// The InnerHeader's bytes go straight into the destination buffer, which
+	// receives them within the same budget as the document.
+	size := innerHeader.encodedSize()
+	if err := innerHeader.writeToBounded(&c.headers, size, max); err != nil {
+		return nil, err
+	}
+	if int64(c.headers.Len()) != size {
+		return nil, fmt.Errorf("gokeepasslib: inner header of %d bytes, want %d", c.headers.Len(), size)
+	}
+	c.written = size
+	return c, nil
+}
+
+// writeDocument writes the XML header and then the document with one
+// streaming xml.Encoder into the collector. The encoder is configured exactly
+// as xml.MarshalIndent(content, "", "\t") configures it, so the bytes are the
+// same, but they reach the collector as they are produced: the collector
+// rejects a write that would cross the budget before retaining any of it, and
+// the encoder stops at that write, so nothing beyond the budget is written.
+func (c *plaintextContent) writeDocument(content *DBContent) error {
+	dst := &limitedWriter{w: &c.document, max: c.max, written: &c.written}
+	if _, err := dst.Write(xmlHeader); err != nil {
+		return err
+	}
+	enc := xml.NewEncoder(dst)
+	enc.Indent("", "\t")
+	// Encode flushes the encoder before it returns, and Close flushes it
+	// again and reports a write error, exactly as MarshalIndent does.
+	if err := enc.Encode(content); err != nil {
+		return err
+	}
+	return enc.Close()
+}
+
+// reader returns the InnerHeader followed by the document as one stream, over
+// the two collected buffers: neither is copied or concatenated with the
+// other. The gzip path streams that reader, and the no-compression path makes
+// the single full plaintext allocation its encryptor needs.
+func (c *plaintextContent) reader() io.Reader {
+	return io.MultiReader(&c.headers, &c.document)
+}
+
+// limitedWriter appends writes to w within a positive max, counting every
+// collected byte in written. A write that would bring the collected length
+// above max fails before any of its bytes are written, so neither the
+// collector nor its budget ever holds a byte beyond max.
+type limitedWriter struct {
+	w       io.Writer
+	max     int64
+	written *int64
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.max > 0 && *l.written+int64(len(p)) > l.max {
+		return 0, errPlaintextBudget()
+	}
+	n, err := l.w.Write(p)
+	*l.written += int64(n)
+	if err == nil && n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, err
+}
+
+func errPlaintextBudget() error {
+	return fmt.Errorf("%w: plaintext budget exceeded", ErrEncodeLimitExceeded)
+}
+
+// encodeRawContent compresses, pads and encrypts the plaintext content read
+// from raw.
 func encodeRawContent(
 	db *Database,
-	content []byte,
+	raw io.Reader,
 	transformedKey []byte,
 ) ([]byte, error) {
+	var content []byte
 	// Compress if the header compression flag is 1 (gzip)
 	if db.Header.FileHeaders.CompressionFlags == GzipCompressionFlag {
 		b := new(bytes.Buffer)
 		w := gzip.NewWriter(b)
 
-		if _, err := w.Write(content); err != nil {
+		if _, err := io.Copy(w, raw); err != nil {
+			w.Close()
 			return nil, err
 		}
 
@@ -149,6 +329,11 @@ func encodeRawContent(
 		}
 
 		content = b.Bytes()
+	} else {
+		var err error
+		if content, err = io.ReadAll(raw); err != nil {
+			return nil, err
+		}
 	}
 
 	// Compose blocks (Kdbx v3.1)
@@ -160,7 +345,12 @@ func encodeRawContent(
 		content = append(db.Header.FileHeaders.StreamStartBytes, blocks.Bytes()...)
 	}
 
-	// Always add padding, so that decoders that check for the last bytes can work correctly
+	// Always add padding, so that decoders that check for the last bytes can work correctly.
+	// The legacy writer appends the same 1..16 repeated-count bytes before
+	// encryption for every cipher; the bounded decoder removes a valid
+	// suffix for AES only, and retains and counts every non-AES decrypted
+	// byte, including these, which is why EncodeWithLimits reserves them for
+	// a NoCompressionFlag ChaCha20 or Twofish content.
 	padding := make([]byte, 16-(len(content)%16))
 	for i := range len(padding) {
 		padding[i] = byte(len(padding))

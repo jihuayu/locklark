@@ -6,7 +6,8 @@
 // Archive SHA-256: 0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04
 // Set LOCKLARK_BROWSER_HOST and LOCKLARK_BROWSER_REGISTER to built Firefox/helper
 // binaries. Optional: LOCKLARK_FIREFOX (otherwise installed Playwright Firefox),
-// LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO.
+// LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO,
+// LOCKLARK_BROWSER_FIXTURE (prebuilt browser_acceptance_fixture; otherwise built).
 // For an intentional privacy-check failure after real pairing, set the tool-only
 // LOCKLARK_TEST_FAILURE_STAGE=after-pair. It must exit 1 without echoing factors.
 // page-arguments exercises a real driver failure carrying synthetic parameters.
@@ -30,11 +31,16 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  requirePrebuiltExtension,
+  validateNativeRegister,
+} from "./browser_extension_prebuilt.mjs";
+import {
   acceptBrowserSave,
   captureControllerOutput,
   browserScreenshotsAllowed,
   assertPrivateText,
   assertPrivateArtifacts,
+  browserFixtureExecutable,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
@@ -94,7 +100,8 @@ const firefox =
   ).firefox.executablePath();
 const geckodriver = process.env.LOCKLARK_GECKODRIVER || "geckodriver";
 const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
-const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
+const rawRegister = process.env.LOCKLARK_BROWSER_REGISTER;
+const register = rawRegister ? resolve(rawRegister) : "";
 const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 const sharedClipboard = process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1";
@@ -294,6 +301,7 @@ function input(actions, native = true, options = {}) {
           "Secret Key",
           "解锁",
           "确认连接此扩展",
+          "连接并启用快捷填充",
           "拒绝连接",
           "批准本次填充",
           "拒绝本次填充",
@@ -307,6 +315,8 @@ function input(actions, native = true, options = {}) {
           "拒绝更新登录",
           "验证主密码",
           "验证 Secret Key",
+          "批准删除 Passkey",
+          "拒绝删除 Passkey",
         ];
         const controls = Object.fromEntries(
           labels.map((label) => {
@@ -736,7 +746,11 @@ for (const event of ["uncaughtException", "unhandledRejection"]) {
   });
 }
 try {
-  for (const path of [firefox, host, register])
+  const prebuilt = requirePrebuiltExtension(root, "firefox");
+  const nativeRegister = prebuilt
+    ? validateNativeRegister(process.env)
+    : register;
+  for (const path of [firefox, host, nativeRegister])
     assert(existsSync(path), "Missing required test input: " + path);
   const driverVersion = execFileSync(geckodriver, ["--version"], { env })
     .toString()
@@ -745,11 +759,17 @@ try {
     driverVersion.startsWith("geckodriver 0.36.0 "),
     "Use the pinned and verified geckodriver 0.36.0",
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
-    cwd: root,
-  });
+  let extension;
+  if (prebuilt) {
+    extension = prebuilt.extension;
+  } else {
+    execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
+      cwd: root,
+    });
+    extension = join(root, "browser-extension/dist/firefox");
+  }
   const manifest = JSON.parse(
-    readFileSync(join(root, "browser-extension/dist/firefox/manifest.json")),
+    readFileSync(join(extension, "manifest.json")),
   );
   assert(
     manifest.browser_specific_settings?.gecko?.id === "browser@locklark.local",
@@ -869,7 +889,7 @@ try {
   execFileSync("python3", [
     "-c",
     'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as archive:\n for path in root.rglob("*"):\n  if path.is_file(): archive.write(path,path.relative_to(root))',
-    join(root, "browser-extension/dist/firefox"),
+    extension,
     extensionZip,
   ]);
   const html =
@@ -891,11 +911,15 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = "https://login.locklark.test:" + server.address().port;
   progress("create private synthetic fixture");
+  // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture instead of building.
   execFileSync(
-    process.env.LOCKLARK_GO || "go",
+    browserFixtureExecutable({
+      go: process.env.LOCKLARK_GO || "go",
+      root,
+      env,
+      state,
+    }),
     [
-      "run",
-      "./scripts/browser_acceptance_fixture",
       "-out",
       join(state, "vault"),
       "-origin",
@@ -906,7 +930,7 @@ try {
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
   observedFixture = fixture;
   execFileSync(
-    register,
+    nativeRegister,
     [
       "--browser",
       "firefox",
@@ -1416,6 +1440,29 @@ try {
         progress("native-pair");
         input([{ click_label: "确认连接此扩展" }]);
       },
+      // Explicit quick pairing for non-destructive Passkey metadata: disconnect
+      // the current session, wait for the old native host window to disappear,
+      // reopen the popup, unlock and physically choose the real quick-fill
+      // pairing control. Nothing is approved implicitly.
+      reconnectQuickFill: async () => {
+        await openPopup();
+        await popupClick("#disconnect");
+        input([], true, { wait_absent: true });
+        await openPopup();
+        await popupClick("#connect");
+        progress("native-unlock");
+        input([
+          { click_label: "金库文件" },
+          { text: fixture.Path },
+          { click_label: "主密码" },
+          { text: fixture.Password },
+          { click_label: "Secret Key" },
+          { text: fixture.Secret },
+          { click_label: "解锁" },
+        ]);
+        progress("native-quick-pair");
+        input([{ click_label: "连接并启用快捷填充" }]);
+      },
       root,
       state,
       env,
@@ -1464,6 +1511,7 @@ try {
         viewportOrigin: pageViewportOrigin,
         dismissPopup: () => input([{ key: "Escape" }], false),
         reconnect: passkeyOnly ? passkeyPair : acceptanceDriver.reconnect,
+        reconnectQuickFill: acceptanceDriver.reconnectQuickFill,
         openPopup: acceptanceDriver.openPopup,
         observe: acceptanceDriver.observe,
         navigate: acceptanceDriver.navigate,

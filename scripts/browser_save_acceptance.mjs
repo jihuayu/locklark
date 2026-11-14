@@ -3,8 +3,14 @@
 import assert from "node:assert/strict";
 import { format } from "node:util";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { join, sep } from "node:path";
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 
 const CANARY_KEYS = [
   "Password",
@@ -49,7 +55,7 @@ function classifyFixtureCanaries(fixture) {
       SHORT_NUMERIC_CARD_KEYS.includes(key) &&
       SHORT_NUMERIC_CARD_VALUE.test(value)
     ) {
-      shortNumeric.push(value);
+      shortNumeric.push({ field: key, value });
     } else {
       exact.push(value);
     }
@@ -119,13 +125,42 @@ export function captureControllerOutput() {
   return (fixture) => assertPrivateText(lines.join("\n"), fixture);
 }
 
+// Browser LevelDB detection is anchored to the fixed `profile/Default` prefix
+// only; anything else keeps a non-browser category.
+const BROWSER_PROFILE_COMPONENTS = ["profile", "Default"];
+
+// Failure context only: this looks at relative path components that the walk
+// has already decided to scan, so it never changes which files or bytes are
+// read. It returns one fixed category and never a path, filename or content.
+function classifyArtifactPath(state, directory, name) {
+  const components = directory
+    .slice(state.length)
+    .split(sep)
+    .filter((part) => part.length > 0);
+  if (
+    components.length >= BROWSER_PROFILE_COMPONENTS.length &&
+    BROWSER_PROFILE_COMPONENTS.every(
+      (part, depth) => components[depth] === part,
+    )
+  ) {
+    // Chromium keeps LevelDB logs in per-store directories such as
+    // Local Storage/leveldb or shared_proto_db.
+    if (name === "LOG" || name === "LOG.old" || /^[0-9]{6}\.log$/.test(name))
+      return "browser-leveldb-log";
+  }
+  if (components.length === 0 && /^controller\.[A-Za-z0-9]+$/.test(name))
+    return "controller-diagnostic";
+  if (/\.(?:json|jsonl)$/i.test(name)) return "json-diagnostic";
+  return "other";
+}
+
 export function assertPrivateText(text, fixture) {
   const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
   assert(
     !exact.some((value) => text.includes(value)),
     "Synthetic factor or field leaked in output",
   );
-  for (const value of shortNumeric) {
+  for (const { value } of shortNumeric) {
     assert(
       !containsShortNumericToken(text, value),
       "Synthetic card verification or PIN token leaked in output",
@@ -192,10 +227,14 @@ export function assertPrivateArtifacts(state, fixture) {
         !patterns.some((value) => bytes.includes(value)),
         "Synthetic factor or field value persisted in diagnostics",
       );
-      for (const value of shortNumeric) {
+      for (const { field, value } of shortNumeric) {
         assert(
           !containsShortNumericBytes(bytes, value),
-          "Synthetic card verification or PIN token persisted in diagnostics",
+          "Synthetic card verification or PIN token persisted in diagnostics" +
+            " field=" +
+            field +
+            " category=" +
+            classifyArtifactPath(state, directory, entry.name),
         );
       }
       assertPrivateText(bytes.toString("utf8"), fixture);
@@ -207,13 +246,36 @@ export function assertPrivateArtifacts(state, fixture) {
   return scanned;
 }
 
-export function vaultObserver({ go, root, env, state }) {
+// A caller-supplied LOCKLARK_BROWSER_FIXTURE is reused as-is and must already
+// be executable; without it the historical per-call go build is kept.
+export function browserFixtureExecutable({ go, root, env, state }) {
+  const prebuilt = process.env.LOCKLARK_BROWSER_FIXTURE;
+  if (prebuilt) {
+    let usable = false;
+    try {
+      accessSync(prebuilt, fsConstants.X_OK);
+      usable = lstatSync(prebuilt).isFile();
+    } catch {
+      usable = false;
+    }
+    if (!usable) {
+      throw new Error(
+        "LOCKLARK_BROWSER_FIXTURE must name an executable built fixture",
+      );
+    }
+    return prebuilt;
+  }
   const executable = join(state, "fixture-observer");
   execFileSync(
     go,
     ["build", "-o", executable, "./scripts/browser_acceptance_fixture"],
     { cwd: root, env, stdio: ["ignore", "ignore", "pipe"] },
   );
+  return executable;
+}
+
+export function vaultObserver({ go, root, env, state }) {
+  const executable = browserFixtureExecutable({ go, root, env, state });
   return () => {
     const view = JSON.parse(
       execFileSync(

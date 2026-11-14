@@ -13,11 +13,14 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "skip: macOS/Xcode is required for the Safari Swift tests" >&2
   exit 0
 fi
-swift test --package-path "$ROOT/safari"
+SCRATCH="${LOCKLARK_SWIFT_SCRATCH:-$ROOT/safari/.build}"
+mkdir -p "$SCRATCH"
+SCRATCH="$(cd "$SCRATCH" && pwd)"
+swift test --package-path "$ROOT/safari" --scratch-path "$SCRATCH"
 
 # Standalone native probe (its own process, SIGPIPE at SIG_DFL): a closed-peer
 # socket write and a closed-pipe write must return the fixed failure instead of
 # terminating the process, and the caller thread mask must be restored.
-swift build --package-path "$ROOT/safari" --product LocklarkSafariSIGPipeProbe
-BIN_DIR="$(swift build --package-path "$ROOT/safari" --show-bin-path)"
+swift build --package-path "$ROOT/safari" --scratch-path "$SCRATCH" --product LocklarkSafariSIGPipeProbe
+BIN_DIR="$(swift build --package-path "$ROOT/safari" --scratch-path "$SCRATCH" --show-bin-path)"
 "$BIN_DIR/LocklarkSafariSIGPipeProbe"

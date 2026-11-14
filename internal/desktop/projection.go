@@ -7,7 +7,7 @@ import "github.com/jihuayu/locklark/internal/personal"
 func loginProjection(rows []personal.Row) []personal.Row {
 	filtered := make([]personal.Row, 0, len(rows))
 	for _, row := range rows {
-		if row.Kind != "ssh-key" {
+		if row.Kind == "login" {
 			filtered = append(filtered, row)
 		}
 	}

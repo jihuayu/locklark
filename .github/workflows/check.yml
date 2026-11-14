@@ -5,8 +5,77 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  # A new push to the same PR supersedes its previous run. Main pushes keep
+  # their own ref-scoped group and are not cancelled mid-flight.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build CLI and primary artifacts once
+        timeout-minutes: 10
+        run: |
+          bin="$RUNNER_TEMP/locklark-bin"
+          mkdir -p "$bin"
+          go build -trimpath -o "$bin/locklark" ./cmd/locklark
+          python3 scripts/cli_smoke.py --cli "$bin/locklark"
+          go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
+          go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
+          go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
+          go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
+          go build -trimpath -o "$bin/locklark-team-sync" ./cmd/locklark-team-sync
+          go build -trimpath -o "$bin/desktop-acceptance-fixture" ./scripts/desktop_acceptance_fixture
+          go build -trimpath -o "$bin/browser-acceptance-fixture" ./scripts/browser_acceptance_fixture
+      - name: Test smoke failure paths
+        run: python3 -m unittest discover -s scripts -p test_cli_smoke.py
+      - name: Preserve Linux primary binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin/
+          if-no-files-found: error
+          retention-days: 14
+  # Cheap contracts gate every expensive platform/build job below. This job
+  # only consumes the same-run Linux artifact; it must not rebuild the CLI.
+  contracts:
+    needs: [linux-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - name: Smoke test downloaded CLI before contracts
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Test pure-Python cheap contracts
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
+          python3 -m unittest scripts.test_ci_extension_producer
+          # Discover every mobile contract so the emulator gate/category
+          # regressions run with the other cheap checks, not after a build.
+          python3 -m unittest discover -s mobile/android/scripts -p 'test_*.py'
+          python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
+          python3 -m unittest discover -s scripts -p 'test_*native*.py'
   go:
+    needs: [linux-build, contracts]
+    # Keep failure reporting, but never start this expensive layer when the
+    # cheap contracts job failed or was skipped.
+    if: ${{ !cancelled() && needs.contracts.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +89,38 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
+      - name: Download Linux primary binaries
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        if: runner.os == 'Linux'
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - name: Build CLI and primary artifacts once
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:RUNNER_TEMP 'locklark-bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          foreach ($target in @(
+            @('locklark.exe', './cmd/locklark'),
+            @('locklark-desktop.exe', './cmd/locklark-desktop'),
+            @('locklark-browser-chromium.exe', './cmd/locklark-browser-chromium'),
+            @('locklark-browser-firefox.exe', './cmd/locklark-browser-firefox'),
+            @('locklark-browser-register.exe', './cmd/locklark-browser-register')
+          )) {
+            go build -trimpath -o (Join-Path $bin $target[0]) $target[1]
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Smoke test downloaded CLI before acceptance
+        if: runner.os == 'Linux'
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Smoke test real CLI before acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/cli_smoke.py --cli (Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark.exe')
       - run: bun test ./plugins/github-pull-reader
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
       - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
@@ -37,9 +138,6 @@ jobs:
           path: ${{ runner.temp }}/locklark-govulncheck.json
           if-no-files-found: error
           retention-days: 14
-      - run: go build ./cmd/locklark-desktop
-      - name: Build native browser hosts
-        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
       - name: Test native Windows clipboard ownership
         if: runner.os == 'Windows'
         timeout-minutes: 3
@@ -69,76 +167,81 @@ jobs:
           & $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
-          go test -count=1 ./...
+          if ($IsWindows) {
+            python scripts/personal_test_partition.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            go test -count=1 ./...
+          }
       - if: runner.os == 'Linux'
+        env:
+          LOCKLARK_CLI: ${{ runner.temp }}/locklark-bin/locklark
         run: |
           python3 scripts/team_sync_acceptance.py --go "$(command -v go)"
-          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
-          python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/disclosure_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/generation_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/otp_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/references_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/matching_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/archive_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/health_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/search_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/mcp_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/personal_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/disclosure_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/generation_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/otp_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/references_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/matching_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/archive_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/health_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/search_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/run_env_acceptance.py "$LOCKLARK_CLI"
           python3 -m unittest discover -s scripts -p test_run_cli_acceptance.py
           /usr/bin/gh --version
-          python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
-          python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/trash_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/import_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/export_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/plugin_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/run_cli_acceptance.py --cli "$LOCKLARK_CLI" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
+          python3 scripts/injection_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/live_pull_acceptance.py "$LOCKLARK_CLI"
+          python3 scripts/inspection_acceptance.py "$LOCKLARK_CLI"
+          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/trash_acceptance.py "$LOCKLARK_CLI"
+          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/import_acceptance.py "$LOCKLARK_CLI"
+          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/export_acceptance.py "$LOCKLARK_CLI"
+          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/plugin_acceptance.py "$LOCKLARK_CLI"
       - if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          LOCKLARK_CLI: ${{ runner.temp }}/locklark-bin/locklark.exe
         run: |
-          ./scripts/acceptance.ps1
+          ./scripts/acceptance.ps1 -Cli $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
           & $python -m pip install 'pywinpty==3.1.2'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
-          go build -o $binary ./cmd/locklark
+          & $python scripts/personal_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/personal_acceptance.py $binary
+          & $python scripts/disclosure_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/disclosure_acceptance.py $binary
+          & $python scripts/generation_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/generation_acceptance.py $binary
+          & $python scripts/otp_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/otp_acceptance.py $binary
+          & $python scripts/references_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/references_acceptance.py $binary
+          & $python scripts/inspection_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/inspection_acceptance.py $binary
+          & $python scripts/matching_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/matching_acceptance.py $binary
+          & $python scripts/archive_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/archive_acceptance.py $binary
+          & $python scripts/health_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/health_acceptance.py $binary
+          & $python scripts/search_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/search_acceptance.py $binary
+          & $python scripts/run_env_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/run_env_acceptance.py $binary
+          & $python scripts/injection_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/injection_acceptance.py $binary
+          & $python scripts/live_pull_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/live_pull_acceptance.py $binary
+          & $python scripts/trash_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/trash_acceptance.py $binary
+          & $python scripts/import_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/import_acceptance.py $binary
+          & $python scripts/export_acceptance.py $env:LOCKLARK_CLI
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/export_acceptance.py $binary
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python scripts/plugin_acceptance.py $binary
+          & $python scripts/plugin_acceptance.py $env:LOCKLARK_CLI
       - name: Benchmark authenticated audit history verification
         if: runner.os == 'Linux'
         timeout-minutes: 5
@@ -150,7 +253,7 @@ jobs:
         run: |
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
           $python = Join-Path $peerEnv 'Scripts/python.exe'
-          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
+          $binary = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark.exe'
           $fixture = Join-Path $env:RUNNER_TEMP 'run-cli-windows-fixture.exe'
           if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
             python -m venv $peerEnv
@@ -158,26 +261,56 @@ jobs:
           }
           & $python -m pip install 'pywinpty==3.1.2'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
-            go build -o $binary ./cmd/locklark
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Prebuilt CLI missing' }
           go build -o $fixture ./scripts/run_cli_windows_fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   desktop-macos:
+    needs: [contracts, extension-producer]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
-      - run: go build ./cmd/locklark-desktop
-      - name: Build native browser hosts
-        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
+          {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
+          } >> "$GITHUB_ENV"
+      - name: Build primary artifacts once
+        run: |
+          bin="$RUNNER_TEMP/locklark-bin"
+          mkdir -p "$bin"
+          go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
+          go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
+          go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
+          go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
       - name: Test Safari transport policy and compile the macOS app
         timeout-minutes: 15
+        env:
+          LOCKLARK_SWIFT_SCRATCH: ${{ runner.temp }}/locklark-safari-swift
         run: |
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
@@ -208,10 +341,77 @@ jobs:
           test -x "$LOCKLARK_TEST_OPENSSH_BIN"
           go test ./internal/sshagent ./internal/localpath -count=1
           go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
-  web:
+  extension-producer:
+    needs: [contracts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Install pinned release verifier dependencies
+        run: python3 -m pip install -r scripts/browserrelease/requirements.txt
+      - name: Prepare Chromium once and strict smoke
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          install -d -m 0700 "$out/prepared/v2pairs"
+          export PYTHONPATH=scripts
+          python3 -m browserrelease --product chromium --output "$out/prepared/v2pairs"
+          python3 -m browserrelease.prebuilt --product chromium \
+            --prepared-dir "$out/prepared/v2pairs" --dist browser-extension/dist/chromium
+      - name: Run original release and legacy unit tests
+        timeout-minutes: 5
+        run: |
+          PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
+          python3 scripts/test_package_browser_extension.py
+          node --test scripts/test_browser_edge_install.mjs
+          node --test scripts/test_browser_extension_prebuilt.mjs
+          python3 -m unittest scripts.test_safari_prebuilt_builder
+      - name: Prepare Firefox and Safari once with strict smoke
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          export PYTHONPATH=scripts
+          for product in firefox safari; do
+            python3 -m browserrelease --product "$product" --output "$out/prepared/v2pairs"
+            python3 -m browserrelease.prebuilt --product "$product" \
+              --prepared-dir "$out/prepared/v2pairs" --dist "browser-extension/dist/$product"
+          done
+      - name: Stage unpacked products and consume legacy pairs
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          umask 077
+          out="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            install -d -m 0700 "$out/unpacked/$product"
+            cp -a "browser-extension/dist/$product/." "$out/unpacked/$product/"
+          done
+          install -d -m 0700 "$out/legacy/v1pairs"
+          for product in chromium firefox; do
+            python3 scripts/package_browser_extension.py --product "$product" \
+              --output "$out/legacy/v1pairs" \
+              --prepared-dir "$out/prepared/v2pairs" --dist "$out/unpacked/$product"
+          done
+      - name: Preserve single extension producer artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer/
+          if-no-files-found: error
+          retention-days: 14
+  web-core:
+    needs: [linux-build, contracts, extension-producer]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
+      LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -222,33 +422,43 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
+          {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
+          } >> "$GITHUB_ENV"
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - name: Smoke test downloaded CLI before acceptance
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs
-      - name: Prepare reproducible unsigned extension packages
-        timeout-minutes: 5
-        run: |
-          python3 -m pip install -r scripts/browserrelease/requirements.txt
-          PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
-          python3 scripts/test_package_browser_extension.py
-          python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
-          python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
-          for product in chromium firefox safari; do
-            PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
-            PYTHONPATH=scripts python3 -m browserrelease --verify --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
-          done
-      - name: Preserve unsigned extension preparation artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: locklark-extension-unsigned-preparation
-          path: |
-            ${{ runner.temp }}/locklark-extension-unsigned/
-            ${{ runner.temp }}/locklark-extension-verified/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Test native acceptance readiness and reference cleanup
-        timeout-minutes: 1
-        run: python3 -m unittest discover -s scripts -p 'test_*native*.py'
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -281,29 +491,15 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
           sudo install -d -o root -g root -m 0755 /run/sshd
-      - name: Install pinned geckodriver
-        timeout-minutes: 10
-        run: |
-          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/geckodriver.tar.gz" https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
-          printf '%s  %s\n' '0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04' "$RUNNER_TEMP/geckodriver.tar.gz" | sha256sum --check --status
-          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP" geckodriver
-      - name: Build native hosts for browser acceptance
-        timeout-minutes: 10
-        run: |
-          go build -o "$RUNNER_TEMP/locklark-browser-chromium" ./cmd/locklark-browser-chromium
-          go build -o "$RUNNER_TEMP/locklark-browser-firefox" ./cmd/locklark-browser-firefox
-          go build -o "$RUNNER_TEMP/locklark-browser-register" ./cmd/locklark-browser-register
-          go build -o "$RUNNER_TEMP/locklark-desktop" ./cmd/locklark-desktop
-          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
       - name: Test reconciled E2E gates and component contracts
         timeout-minutes: 10
         run: |
-          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
-          python3 -m unittest discover -s scripts -p test_browser_firefox_native_passkey.py
-          python3 -m unittest scripts/test_native_acceptance_contract.py scripts/test_native_acceptance_platforms.py scripts/test_safari_package.py
+          python3 -m unittest scripts/test_safari_package.py
           # GUI probes create their own D-Bus/Xvfb session; avoid inherited
           # runner displays or buses from earlier browser steps.
-          env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py --feature all --json-out "$RUNNER_TEMP/locklark-e2e-report.json"
+          env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py \
+            --feature all --skip-build --bin-dir "$RUNNER_TEMP/locklark-bin" \
+            --json-out "$RUNNER_TEMP/locklark-e2e-report.json"
       - name: Preserve E2E report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -317,13 +513,15 @@ jobs:
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
         env:
           LOCKLARK_GO: go
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
       - name: Test native desktop global quick search
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_quick_search_acceptance.py
         env:
           LOCKLARK_GO: go
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
       - name: Install independent notes KDBX reader
         timeout-minutes: 3
         run: |
@@ -336,15 +534,16 @@ jobs:
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/login_notes_privacy_acceptance.py
         env:
           LOCKLARK_GO: go
-          LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark-bin/locklark
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
           LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
       - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
         timeout-minutes: 10
         run: |
           python3 -m unittest discover -s scripts -p test_ssh_agent_acceptance.py
           dbus-run-session -- xvfb-run -a -s '-screen 0 1920x2160x24 -nolisten tcp' python3 scripts/ssh_agent_acceptance.py \
-            --host "$RUNNER_TEMP/locklark-desktop" --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" \
+            --host "$RUNNER_TEMP/locklark-bin/locklark-desktop" --cli "$RUNNER_TEMP/locklark-bin/locklark" --go "$(command -v go)" \
             --peer "$RUNNER_TEMP/locklark-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
             --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
       - name: Test browser extension DOM
@@ -373,33 +572,137 @@ jobs:
           path: ${{ runner.temp }}/locklark-ui-acceptance/
           if-no-files-found: error
           retention-days: 14
+  web-browsers:
+    needs: [linux-build, contracts, extension-producer]
+    runs-on: ubuntu-latest
+    env:
+      LOCKLARK_DESKTOP_LAYOUT: classic
+      LOCKLARK_BROWSER_REQUIRE_PREBUILT: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Download extension producer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-extension-producer
+          path: ${{ runner.temp }}/locklark-extension-producer
+      - name: Verify and stage extension producer
+        run: |
+          set -euo pipefail
+          src="$RUNNER_TEMP/locklark-extension-producer"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease.prebuilt \
+              --product "$product" --prepared-dir "$src/prepared/v2pairs" \
+              --dist "$src/unpacked/$product"
+          done
+          for product in chromium firefox safari; do
+            mkdir -p "browser-extension/dist/$product"
+            cp -a "$src/unpacked/$product/." "browser-extension/dist/$product/"
+          done
+          {
+            echo "LOCKLARK_BROWSER_REQUIRE_PREBUILT=1"
+            echo "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR=$src/prepared/v2pairs"
+            echo "LOCKLARK_BROWSER_EXTENSION_CHROMIUM=$GITHUB_WORKSPACE/browser-extension/dist/chromium"
+            echo "LOCKLARK_BROWSER_EXTENSION_FIREFOX=$GITHUB_WORKSPACE/browser-extension/dist/firefox"
+            echo "LOCKLARK_BROWSER_EXTENSION_SAFARI=$GITHUB_WORKSPACE/browser-extension/dist/safari"
+          } >> "$GITHUB_ENV"
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - run: npm ci
+        working-directory: web
+      - name: Configure Ubuntu package downloads
+        run: |
+          # GitHub's mirror lists can prefer the slow Azure HTTP mirror.
+          sources=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt)
+          for source in "${sources[@]}"; do
+            if [[ -f "$source" ]]; then
+              sudo sed -i -E 's@http://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://archive.ubuntu.com/ubuntu\1@g' "$source"
+            fi
+          done
+          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' |
+            sudo tee /etc/apt/apt.conf.d/99locklark-playwright-network >/dev/null
+      - name: Install Playwright browser and dependencies
+        timeout-minutes: 10
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+        working-directory: web
+      - name: Install native GUI acceptance tools
+        timeout-minutes: 10
+        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb dbus-x11 xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools
+      - name: Install pinned geckodriver
+        if: ${{ matrix.browser == 'firefox' }}
+        timeout-minutes: 10
+        run: |
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/geckodriver.tar.gz" https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
+          printf '%s  %s\n' '0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04' "$RUNNER_TEMP/geckodriver.tar.gz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP" geckodriver
       - name: Install independent WebAuthn verifier
         timeout-minutes: 3
         run: npm install --prefix "$RUNNER_TEMP/locklark-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3
       - name: Test native browser approval, popup editing, fill, save and OTP
-        timeout-minutes: 10
+        if: ${{ matrix.browser == 'chromium' }}
+        timeout-minutes: 15
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py chromium
+          # The route checkpoint is a separate mode that refuses the step-level
+          # popup-vault override, so clear only that override for this run.
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' env -u LOCKLARK_TEST_POPUP_VAULT LOCKLARK_TEST_ROUTE_DETAIL_READ=1 LOCKLARK_TEST_ROUTE_IDLE_TTL=1 node scripts/browser_native_acceptance.mjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
+          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_TEST_POPUP_VAULT: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_OTHER_PROVIDER: "1"
           LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
-      - name: Test checkout iframe approvals and stale-context refusals
-        timeout-minutes: 10
-        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+      - name: Test normal-runner checkout acceptance on Chromium
+        if: ${{ matrix.browser == 'chromium' }}
+        # The native journey enforces a 900s budget and wraps itself in
+        # dbus-run-session/xvfb-run, so only the runner gets an outer timeout.
+        timeout-minutes: 20
+        run: |
+          python3 scripts/e2e_runner.py --id T2_F11_06 --skip-build --strict \
+            --bin-dir "$RUNNER_TEMP/locklark-bin" \
+            --json-out "$RUNNER_TEMP/locklark-checkout-e2e-report.json"
+          test -s "$RUNNER_TEMP/locklark-checkout-e2e-report.json"
+          test -s "$RUNNER_TEMP/locklark-checkout-evidence.json"
         env:
+          LOCKLARK_E2E_CHECKOUT_NATIVE: '1'
+          LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT: ${{ runner.temp }}/locklark-checkout-evidence.json
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
-          LOCKLARK_TEST_CHECKOUT_FRAMES: "1"
+      - name: Preserve checkout acceptance report and evidence
+        if: ${{ always() && matrix.browser == 'chromium' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-checkout-acceptance
+          path: |
+            ${{ runner.temp }}/locklark-checkout-e2e-report.json
+            ${{ runner.temp }}/locklark-checkout-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Test Firefox native approval, fill, save, OTP and Passkey
+        if: ${{ matrix.browser == 'firefox' }}
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
@@ -407,10 +710,170 @@ jobs:
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-firefox
-          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-browser-register
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
+          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
           LOCKLARK_TEST_FIREFOX_PASSKEY: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+      - name: Test shared desktop clipboard lease
+        timeout-minutes: 15
+        run: |
+          if [ "${{ matrix.browser }}" = firefox ]; then
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
+          else
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+          fi
+        env:
+          LOCKLARK_TEST_SHARED_CLIPBOARD: "1"
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          LOCKLARK_GO: go
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
+          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
+          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+  web:
+    name: web
+    needs: [extension-producer, web-core, web-browsers]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Web check to succeed
+        env:
+          EXTENSION_PRODUCER_RESULT: ${{ needs.extension-producer.result }}
+          WEB_CORE_RESULT: ${{ needs.web-core.result }}
+          WEB_BROWSERS_RESULT: ${{ needs.web-browsers.result }}
+        run: |
+          if [ "$EXTENSION_PRODUCER_RESULT" != success ] || [ "$WEB_CORE_RESULT" != success ] || [ "$WEB_BROWSERS_RESULT" != success ]; then
+            echo "extension-producer=$EXTENSION_PRODUCER_RESULT web-core=$WEB_CORE_RESULT web-browsers=$WEB_BROWSERS_RESULT"
+            exit 1
+          fi
+  # Required check: a skipped, cancelled, or failed job is never a pass.
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+    - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version-file: go.mod
+    - name: Download Linux primary binaries
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: locklark-linux-bin
+        path: ${{ runner.temp }}/locklark-bin
+    - name: Make Linux binaries executable
+      run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+    - name: Smoke test downloaded CLI before acceptance
+      run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+    - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+      with:
+        distribution: temurin
+        java-version: '21'
+    - name: Install fixed Android build components
+      run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"'
+    - name: Bind the real Go vault and build Android applications
+      run: 'export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+
+        mobile/core/scripts/bind-android.sh
+
+        mobile/android/scripts/build.sh
+
+        install -m 0755 "$RUNNER_TEMP/locklark-bin/locklark" "$RUNNER_TEMP/locklark-mobile-peer"
+
+        python3 -m venv "$RUNNER_TEMP/mobile-kdbx-peer"
+
+        "$RUNNER_TEMP/mobile-kdbx-peer/bin/python" -m pip install ''pykeepass==4.2.0''
+
+        '
+      # Receipt before any runtime step so it can only describe the APKs.
+    - name: Record built APK receipt for reproduction
+      run: "set -euo pipefail\nreceipt_dir=\"$RUNNER_TEMP/mobile-apk-receipt\"\ninstall -d -m 700 \"$receipt_dir\"\ncp mobile/android/app/build/outputs/apk/debug/app-debug.apk \"$receipt_dir/app-debug.apk\"\nandroid_test_apk=\"$(find mobile/android/app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*-androidTest.apk')\"\ntest -n \"$android_test_apk\"\ntest \"$(printf '%s\\n' \"$android_test_apk\" | wc -l)\" -eq 1\ncp \"$android_test_apk\" \"$receipt_dir/app-debug-androidTest.apk\"\nhead_sha=\"$(git rev-parse --verify 'HEAD^{commit}')\"\n# A failed git status must fail this step, never report a clean tree.\nstatus_output=\"$(git status --porcelain --untracked-files=no)\"\nif [ -z \"$status_output\" ]; then\n  tracked_modified=false\nelse\n  tracked_modified=true\nfi\n{\n  printf '{\"checkout_sha\":\"%s\",' \"$head_sha\"\n  printf '\"pull_request_head_sha\":\"%s\",' \"${PR_HEAD_SHA:-}\"\n  printf '\"tracked_worktree_modified\":%s,' \"$tracked_modified\"\n  printf '\"app_debug_apk_sha256\":\"%s\",' \"$(sha256sum \"$receipt_dir/app-debug.apk\" | cut -d ' ' -f 1)\"\n  printf '\"app_debug_android_test_apk_sha256\":\"%s\"}\\n' \"$(sha256sum \"$receipt_dir/app-debug-androidTest.apk\" | cut -d ' ' -f 1)\"\n} > \"$receipt_dir/apk-receipt.json\"\n"
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    - name: Preserve built APKs and receipt
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: locklark-mobile-apk-${{ github.event.pull_request.head.sha || github.sha }}-attempt-${{ github.run_attempt }}
+        path: '${{ runner.temp }}/mobile-apk-receipt/app-debug.apk
+
+          ${{ runner.temp }}/mobile-apk-receipt/app-debug-androidTest.apk
+
+          ${{ runner.temp }}/mobile-apk-receipt/apk-receipt.json
+
+          '
+        if-no-files-found: error
+        retention-days: 14
+        overwrite: false
+    - name: Enable emulator acceleration
+      run: sudo chmod a+rw /dev/kvm
+    - name: Run native Android application acceptance
+      uses: ReactiveCircus/android-emulator-runner@4c44018e59b437e86cdfc41da381398f93ed8808 # v2
+      with:
+        api-level: 35
+        # ATD deliberately removes android.software.secure_lock_screen.
+        # Real Keystore credential authentication requires the full image.
+        target: google_apis
+        arch: x86_64
+        disable-animations: true
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+        script: bash .github/scripts/mobile-android-runtime.sh
+    needs:
+    - linux-build
+    - contracts
+  ios:
+    needs: [contracts]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build native iOS application and run simulator acceptance
+        run: mobile/ios/scripts/ci.sh
+  # Review rule: when any job is added to this workflow, add it to `needs`
+  # and its <JOB>_RESULT env below in the same change, so this set stays equal
+  # to every other CI job. This is a manual review obligation; no check or
+  # command enforces it.
+  ci-required:
+    name: ci-required
+    needs: [linux-build, contracts, extension-producer, go, desktop-macos, web-core, web-browsers, web, android, ios]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every required job to succeed
+        env:
+          LINUX_BUILD_RESULT: ${{ needs.linux-build.result }}
+          CONTRACTS_RESULT: ${{ needs.contracts.result }}
+          EXTENSION_PRODUCER_RESULT: ${{ needs.extension-producer.result }}
+          GO_RESULT: ${{ needs.go.result }}
+          DESKTOP_MACOS_RESULT: ${{ needs.desktop-macos.result }}
+          WEB_CORE_RESULT: ${{ needs.web-core.result }}
+          WEB_BROWSERS_RESULT: ${{ needs.web-browsers.result }}
+          WEB_RESULT: ${{ needs.web.result }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          required='linux-build contracts extension-producer go desktop-macos web-core web-browsers web android ios'
+          failed=0
+          summary=''
+          for job in $required; do
+            var="$(printf '%s' "$job" | tr 'a-z-' 'A-Z_')_RESULT"
+            value="$(printf '%s' "${!var}" | tr 'A-Z' 'a-z')"
+            if [ "$value" != 'success' ]; then
+              echo "$job=${value:-empty}" >&2
+              failed=1
+            fi
+            summary="$summary $job=$value"
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Required jobs failed:$summary" >&2
+            exit 1
+          fi
+          echo "All required jobs succeeded:$summary"
