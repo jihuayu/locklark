@@ -66,16 +66,24 @@ export function sanitizeNativeSnapshot(snapshot) {
   let enabled = 0;
   let showing = 0;
   const snapshotControls =
-    snapshot.controls && typeof snapshot.controls === "object"
+    snapshot.controls &&
+    typeof snapshot.controls === "object" &&
+    !Array.isArray(snapshot.controls)
       ? snapshot.controls
       : {};
-  for (const entries of Object.values(snapshotControls)) {
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      controls++;
-      if (entry && entry.enabled === true) enabled++;
-      if (entry && entry.showing === true) showing++;
+  for (const state of Object.values(snapshotControls)) {
+    if (
+      !state ||
+      typeof state !== "object" ||
+      Array.isArray(state) ||
+      typeof state.present !== "boolean" ||
+      state.present !== true
+    ) {
+      continue;
     }
+    controls++;
+    if (state.enabled === true) enabled++;
+    if (state.showing === true) showing++;
   }
   return {
     available: true,

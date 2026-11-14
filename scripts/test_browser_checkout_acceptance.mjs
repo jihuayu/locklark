@@ -384,19 +384,67 @@ test("dual failure public output has no raw native data or path", () => {
     y: 19,
     clicks: [{ x: 1, y: 2, actor: "synthetic-actor" }],
     controls: {
-      "批准本次填充": [
-        { enabled: true, showing: true, x: 3, y: 4, width: 5, height: 6 },
-      ],
+      "批准本次填充": {
+        present: true,
+        enabled: true,
+        showing: true,
+        x: 3,
+        y: 4,
+        width: 5,
+        height: 6,
+      },
+      "取消本次填充": {
+        present: false,
+        enabled: false,
+        showing: false,
+      },
+      "备注正文": {
+        present: true,
+        enabled: false,
+        showing: true,
+        x: 7,
+        y: 8,
+        width: 9,
+        height: 10,
+      },
     },
   };
   const safeNative = sanitizeNativeSnapshot(rawNative);
   assert.deepEqual(safeNative, {
     available: true,
     clicks: 1,
-    controls: 1,
+    controls: 2,
     enabled: 1,
-    showing: 1,
+    showing: 2,
   });
+  assert.deepEqual(
+    sanitizeNativeSnapshot({
+      available: true,
+      clicks: [],
+      controls: [{ present: true, enabled: true, showing: true }],
+    }),
+    {
+      available: true,
+      clicks: 0,
+      controls: 0,
+      enabled: 0,
+      showing: 0,
+    },
+  );
+  assert.deepEqual(
+    sanitizeNativeSnapshot({
+      available: true,
+      clicks: [],
+      controls: { malformed: { enabled: true, showing: true } },
+    }),
+    {
+      available: true,
+      clicks: 0,
+      controls: 0,
+      enabled: 0,
+      showing: 0,
+    },
+  );
   const rawReport = {
     reason: "Synthetic checkout failure",
     stage: "checkout-stale:old-approval",
@@ -426,9 +474,9 @@ test("dual failure public output has no raw native data or path", () => {
     native: {
       available: true,
       clicks: 1,
-      controls: 1,
+      controls: 2,
       enabled: 1,
-      showing: 1,
+      showing: 2,
     },
   });
   assert.deepEqual(
@@ -452,7 +500,7 @@ test("dual failure public output has no raw native data or path", () => {
   assert.match(output, /Synthetic checkout failure/);
   assert.doesNotMatch(
     output,
-    /\/tmp|locklark-private|424242|"window"|"x"|"y"|actor|\.png|731|4826|654321|synthetic-private-password/,
+    /\/tmp|locklark-private|424242|"window"|"x"|"y"|actor|\.png|731|4826|654321|synthetic-private-password|批准本次填充|取消本次填充|备注正文|"width"|"height"/,
   );
 });
 
