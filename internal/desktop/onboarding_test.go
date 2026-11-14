@@ -310,6 +310,8 @@ func TestForgetDeviceRequiresMasterPasswordAndKeepsVaultFile(t *testing.T) {
 	a, password, secret := createDeviceSecretTestVault(t)
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	a.deviceSecrets = newFakeDeviceSecretStore()
+	system := newFakeSystemUnlockStore()
+	a.systemStore = system
 	if err := a.storeDeviceSecret(a.path, secret); err != nil {
 		t.Fatal(err)
 	}
@@ -329,6 +331,9 @@ func TestForgetDeviceRequiresMasterPasswordAndKeepsVaultFile(t *testing.T) {
 	if a.settingsSnapshot().VaultPath != vaultPath {
 		t.Fatalf("VaultPath cleared despite wrong password: %q", a.settingsSnapshot().VaultPath)
 	}
+	if system.deleteCalls != 0 {
+		t.Fatalf("system unlock deleted despite wrong password: %d", system.deleteCalls)
+	}
 
 	a.forgetPassword = password
 	a.forgetDeviceWithPassword()
@@ -337,6 +342,9 @@ func TestForgetDeviceRequiresMasterPasswordAndKeepsVaultFile(t *testing.T) {
 	}
 	if a.settingsSnapshot().VaultPath != "" {
 		t.Fatalf("VaultPath was not cleared after forget device: %q", a.settingsSnapshot().VaultPath)
+	}
+	if system.deleteCalls != 1 {
+		t.Fatalf("system unlock cleanup calls = %d, want 1", system.deleteCalls)
 	}
 	if _, err := a.loadDeviceSecret(vaultPath); err == nil {
 		t.Fatal("device secret remained after forget device")
