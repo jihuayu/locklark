@@ -1321,9 +1321,10 @@ test("pair/disconnect uses the exact physical popup and native X11 controls", ()
     Secret: "fixture-secret",
   });
   assert.deepEqual(
-    native.map((action) => action.click_label ?? action.text),
+    native.map((action) => action.click_label ?? action.key ?? action.text),
     [
       "金库文件",
+      "Control_L+a",
       "fixture-path",
       "主密码",
       "fixture-password",
@@ -1333,6 +1334,13 @@ test("pair/disconnect uses the exact physical popup and native X11 controls", ()
       "解锁",
     ],
   );
+  // The path replacement must select the non-empty product-default text first,
+  // not insert the fixture path into the existing value.
+  assert.deepEqual(native.slice(0, 3), [
+    { click_label: "金库文件" },
+    { key: "Control_L+a" },
+    { text: "fixture-path" },
+  ]);
   assert.doesNotMatch(PAIR_FUNCTION, /click_label:\s*"Secret Key"/);
   // A retry whose error fallback is already expanded must not click the absent
   // opt-in control.

@@ -11,6 +11,9 @@ export const EMERGENCY_INPUT_LABEL = "使用应急资料…";
 export function nativeUnlockActions(fixture, { fallbackExpanded = false } = {}) {
   return [
     { click_label: "金库文件" },
+    // App.New prefixes DefaultVaultPath, and a pointer click does not select
+    // the existing text. Select all before replacing it with the fixture path.
+    { key: "Control_L+a" },
     { text: fixture.Path },
     { click_label: "主密码" },
     { text: fixture.Password },
