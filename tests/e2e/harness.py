@@ -54,6 +54,7 @@ ISSUED_TOKEN_RE = re.compile(
 # The native messaging limit in internal/browserhost/protocol.go.
 _MAX_NATIVE_FRAME = 256 << 10
 _E2E_BIN_NAME = "e2e-bin"
+PREBUILT_EXTENSION_ERROR = "prebuilt browser extension input rejected"
 
 
 class FeatureNotImplementedError(Exception):
@@ -1190,7 +1191,28 @@ class E2EContext:
             timeout=timeout,
         )
 
+    def _prebuilt_extension_paths(self) -> tuple[Path, Path] | None:
+        if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") != "1":
+            return None
+        prepared = os.environ.get("LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR", "")
+        chromium = os.environ.get("LOCKLARK_BROWSER_EXTENSION_CHROMIUM", "")
+        firefox = os.environ.get("LOCKLARK_BROWSER_EXTENSION_FIREFOX", "")
+        if not prepared or not chromium or not firefox:
+            raise AssertionError(PREBUILT_EXTENSION_ERROR)
+        try:
+            from browserrelease import prebuilt
+            for product, dist in (("chromium", chromium), ("firefox", firefox)):
+                prebuilt.verify_prebuilt(
+                    product, Path(prepared), Path(dist), self.repo_root
+                )
+        except Exception:
+            raise AssertionError(PREBUILT_EXTENSION_ERROR) from None
+        return Path(chromium), Path(firefox)
+
     def ensure_extension_built(self) -> tuple[Path, Path]:
+        strict = self._prebuilt_extension_paths()
+        if strict is not None:
+            return strict
         repo_key = str(self.repo_root.resolve())
         cached = _EXTENSION_BUILD_CACHE.get(repo_key)
         chromium = self.repo_root / "browser-extension" / "dist" / "chromium"

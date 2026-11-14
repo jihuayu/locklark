@@ -3653,6 +3653,8 @@ def _checkout_run(
         raise _checkout_pending(
             "native checkout prerequisites are absent: node runtime"
         )
+    if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") == "1":
+        ctx.ensure_extension_built()
     private = Path(tempfile.mkdtemp(prefix="lk-", dir="/tmp"))
     try:
         os.chmod(private, 0o700)

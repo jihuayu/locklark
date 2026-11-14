@@ -33,6 +33,9 @@ import {
   recordNativeFailure,
 } from "./browser_native_failure_report.mjs";
 import {
+  requirePrebuiltExtension,
+} from "./browser_extension_prebuilt.mjs";
+import {
   EDGE_BACKGROUND_URL,
   EDGE_EXTENSION_ID,
   EDGE_INSTALL_PASS,
@@ -1607,6 +1610,9 @@ async function acceptEdgePairDisconnect(driver) {
   );
   mark("edge-pair-complete");
 }
+const prebuiltChromium = edgeManagerInstall
+  ? null
+  : requirePrebuiltExtension(root, "chromium");
 if (edgeManagerInstall) phase("fixture");
 startupMarkup(4);
 try {
@@ -1642,10 +1648,15 @@ try {
     register ? registerArgs : ["run", "./cmd/locklark-browser-register", ...registerArgs],
     { cwd: root, env, stdio: "inherit" },
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "chromium"], {
-    cwd: root,
-  });
-  const extension = join(root, "browser-extension/dist/chromium");
+  let extension;
+  if (prebuiltChromium) {
+    extension = prebuiltChromium.extension;
+  } else {
+    execFileSync(process.execPath, ["browser-extension/build.js", "chromium"], {
+      cwd: root,
+    });
+    extension = join(root, "browser-extension/dist/chromium");
+  }
   // Edge ignores the deprecated extension switches: both managed-install modes
   // never pass them and load the package only through the visible manager UI.
   if (edgeManagerInstall)

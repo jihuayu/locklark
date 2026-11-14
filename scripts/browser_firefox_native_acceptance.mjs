@@ -30,6 +30,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { requirePrebuiltExtension } from "./browser_extension_prebuilt.mjs";
 import {
   acceptBrowserSave,
   captureControllerOutput,
@@ -750,11 +751,18 @@ try {
     driverVersion.startsWith("geckodriver 0.36.0 "),
     "Use the pinned and verified geckodriver 0.36.0",
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
-    cwd: root,
-  });
+  const prebuilt = requirePrebuiltExtension(root, "firefox");
+  let extension;
+  if (prebuilt) {
+    extension = prebuilt.extension;
+  } else {
+    execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
+      cwd: root,
+    });
+    extension = join(root, "browser-extension/dist/firefox");
+  }
   const manifest = JSON.parse(
-    readFileSync(join(root, "browser-extension/dist/firefox/manifest.json")),
+    readFileSync(join(extension, "manifest.json")),
   );
   assert(
     manifest.browser_specific_settings?.gecko?.id === "browser@locklark.local",
@@ -874,7 +882,7 @@ try {
   execFileSync("python3", [
     "-c",
     'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as archive:\n for path in root.rglob("*"):\n  if path.is_file(): archive.write(path,path.relative_to(root))',
-    join(root, "browser-extension/dist/firefox"),
+    extension,
     extensionZip,
   ]);
   const html =

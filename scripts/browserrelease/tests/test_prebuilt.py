@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -188,6 +190,42 @@ class PrebuiltTests(unittest.TestCase):
                     prebuilt.verify_prebuilt(product, prepared, dist, root)
                 self.assertEqual(str(raised.exception), prebuilt.ERROR)
                 self.assertNotIn(str(self.base), str(raised.exception))
+
+
+    def test_cli_source_drift_has_fixed_stderr_without_paths(self):
+        prepared, dist = self.copy_pair("cli-drift")
+        static = dist / "core.js"
+        static.write_bytes(static.read_bytes() + b"\n// artifact drift\n")
+        version = "0.1.0"
+        files = bundle.read_bundle(dist, "chromium", version)
+        zip_bytes = zipbuild.build_zip(
+            allowlist.entries_for("chromium"), files
+        )
+        zip_name, receipt_name = receipt_module.artifact_names("chromium")
+        (prepared / zip_name).write_bytes(zip_bytes)
+        document = json.loads(
+            (prepared / receipt_name).read_text(encoding="utf-8")
+        )
+        for entry in document["entries"]:
+            if entry["name"] == "core.js":
+                entry["size"] = len(files["core.js"])
+                entry["sha256"] = hashlib.sha256(files["core.js"]).hexdigest()
+        document["artifact"]["size"] = len(zip_bytes)
+        document["artifact"]["sha256"] = hashlib.sha256(zip_bytes).hexdigest()
+        (prepared / receipt_name).write_bytes(receipt_module.receipt_bytes(document))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = prebuilt.main([
+                "--product", "chromium",
+                "--prepared-dir", str(prepared),
+                "--dist", str(dist),
+                "--root", str(self.root),
+            ])
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            err.getvalue(), "FAIL: " + prebuilt.ERROR + "\n"
+        )
+        self.assertNotIn(str(self.base), err.getvalue())
 
     def test_cli_uses_fixed_refusal(self):
         self.assertEqual(
