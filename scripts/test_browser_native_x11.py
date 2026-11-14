@@ -229,6 +229,17 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertFalse(native.control_label_allowed(label))
 
+    def test_explicit_emergency_input_label_is_exact_literal(self):
+        label = "使用应急资料…"
+        self.assertIn(label, native.CONTROL_LABELS)
+        self.assertTrue(native.control_label_allowed(label))
+        for variant in (
+            "使用应急资料", "使用应急资料...", "使用应急资料… ", " 使用应急资料…",
+            "使用应急资料。", "使用应急资料…！", "使用应急资料…\n", "",
+        ):
+            with self.subTest(label=variant):
+                self.assertFalse(native.control_label_allowed(variant))
+
     def test_field_disclosure_labels_are_exact_literals(self):
         for label in ("批准本次字段披露", "拒绝本次字段披露"):
             self.assertIn(label, native.CONTROL_LABELS)

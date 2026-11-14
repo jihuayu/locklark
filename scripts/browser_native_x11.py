@@ -34,7 +34,7 @@ CONTROL_LABELS = (
     "登录：login.locklark.test · signal-one · signal-one",
     "登录：login.locklark.test · signal-two · signal-two",
     "确认应用这些更新", "取消（不做任何更改）", "取消尚未提交的更新",
-    "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
+    "金库文件", "主密码", "使用应急资料…", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
     "批准本次附件操作",
     "批准本次操作", "拒绝本次操作",

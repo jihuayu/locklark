@@ -44,6 +44,7 @@ import {
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
+import { nativeUnlockActions } from "./browser_unlock_sequence.mjs";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -298,6 +299,7 @@ function input(actions, native = true, options = {}) {
         const labels = [
           "金库文件",
           "主密码",
+          "使用应急资料…",
           "Secret Key",
           "解锁",
           "确认连接此扩展",
@@ -1189,15 +1191,7 @@ try {
     progress("native-connect");
     await popupClick("#connect");
     progress("native-unlock");
-    input([
-      { click_label: "金库文件" },
-      { text: fixture.Path },
-      { click_label: "主密码" },
-      { text: fixture.Password },
-      { click_label: "Secret Key" },
-      { text: fixture.Secret },
-      { click_label: "解锁" },
-    ]);
+    input(nativeUnlockActions(fixture));
     progress("native-pair");
     input([{ click_label: "确认连接此扩展" }]);
     await blank();
@@ -1428,15 +1422,7 @@ try {
         await openPopup();
         await popupClick("#connect");
         progress("native-unlock");
-        input([
-          { click_label: "金库文件" },
-          { text: fixture.Path },
-          { click_label: "主密码" },
-          { text: fixture.Password },
-          { click_label: "Secret Key" },
-          { text: fixture.Secret },
-          { click_label: "解锁" },
-        ]);
+        input(nativeUnlockActions(fixture));
         progress("native-pair");
         input([{ click_label: "确认连接此扩展" }]);
       },
@@ -1451,15 +1437,7 @@ try {
         await openPopup();
         await popupClick("#connect");
         progress("native-unlock");
-        input([
-          { click_label: "金库文件" },
-          { text: fixture.Path },
-          { click_label: "主密码" },
-          { text: fixture.Password },
-          { click_label: "Secret Key" },
-          { text: fixture.Secret },
-          { click_label: "解锁" },
-        ]);
+        input(nativeUnlockActions(fixture));
         progress("native-quick-pair");
         input([{ click_label: "连接并启用快捷填充" }]);
       },
@@ -1484,15 +1462,7 @@ try {
       await openPopup();
       await popupClick("#connect");
       progress("native-unlock");
-      input([
-        { click_label: "金库文件" },
-        { text: fixture.Path },
-        { click_label: "主密码" },
-        { text: fixture.Password },
-        { click_label: "Secret Key" },
-        { text: fixture.Secret },
-        { click_label: "解锁" },
-      ]);
+      input(nativeUnlockActions(fixture));
       progress("native-pair");
       input([{ click_label: "确认连接此扩展" }]);
     }

@@ -6,6 +6,7 @@ import { acceptPasskeyManagement, passkeyChoiceLabel } from "./browser_passkey_m
 import { acceptConditionalPasskey, acceptConditionalSibling } from "./browser_conditional_passkey_acceptance.mjs";
 import { acceptOtherProvider } from "./browser_other_provider_acceptance.mjs";
 import { acceptPasskeySignals } from "./browser_passkey_signal_acceptance.mjs";
+import { nativeUnlockActions } from "./browser_unlock_sequence.mjs";
 export async function acceptBrowserPasskey({
   page,
   browser,
@@ -25,15 +26,7 @@ export async function acceptBrowserPasskey({
   input([], true, { wait_absent: true });
   popup = await openPopup();
   await popup.click("#connect");
-  input([
-    { click_label: "金库文件" },
-    { text: fixture.Path },
-    { click_label: "主密码" },
-    { text: fixture.Password },
-    { click_label: "Secret Key" },
-    { text: fixture.Secret },
-    { click_label: "解锁" },
-  ]);
+  input(nativeUnlockActions(fixture));
   input([{ click_label: "连接并启用快捷填充" }]);
   popup = await openPopup();
   if (await popup.count(".site-preferences:not([open]) > summary"))
