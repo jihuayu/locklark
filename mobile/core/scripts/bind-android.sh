@@ -9,10 +9,11 @@ export PATH="$(dirname "$(command -v "$go_bin")"):$mobile_tools/bin:$PATH"
 : "${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK root}"
 : "${JAVA_HOME:?Set JAVA_HOME to JDK 21 or newer}"
 export PATH="$JAVA_HOME/bin:$PATH"
-mobile_version="$("$go_bin" list -m -f '{{.Version}}' golang.org/x/mobile)"
 mkdir -p "$mobile_tools/bin" mobile/core/build
-GOBIN="$mobile_tools/bin" "$go_bin" install "golang.org/x/mobile/cmd/gobind@$mobile_version"
-GOBIN="$mobile_tools/bin" "$go_bin" install "golang.org/x/mobile/cmd/gomobile@$mobile_version"
+for tool in gobind gomobile; do
+  # go.mod tool directive: builds the exact golang.org/x/mobile require version.
+  GOBIN="$mobile_tools/bin" "$go_bin" install "golang.org/x/mobile/cmd/$tool"
+done
 "$mobile_tools/bin/gomobile" init
 GO_BIN="$go_bin" python3 mobile/core/scripts/source-manifest.py --prepare
 "$mobile_tools/bin/gomobile" bind -target=android/arm64,android/amd64 -androidapi 30 \
