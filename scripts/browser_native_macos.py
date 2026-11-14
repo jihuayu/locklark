@@ -139,7 +139,11 @@ def _frame_relation(frame, bounds):
 
 
 class BSDInfo(ctypes.Structure):
-    """Complete struct proc_bsdinfo: pbi_uid is the real process UID."""
+    """Complete struct proc_bsdinfo.
+
+    ``pbi_uid`` is the effective process UID (euid); the real UID is
+    ``pbi_ruid``. Generation matching intentionally uses the effective UID.
+    """
 
     _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
                 ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
@@ -257,6 +261,22 @@ def _ax_status(ax):
 def _exact_status(code):
     """True only for an exact built-in ``int`` status (never ``bool``/subclass)."""
     return type(code) is int
+
+
+def _generation_shape(value, pid):
+    """True only for the complete five-field generation of exactly ``pid``.
+
+    Plain built-in types are mandatory: a ``bool`` or an ``int`` subclass is
+    not an identity value. The range checks match libproc's own answer, so a
+    malformed descriptor is refused before any capability or AX call.
+    """
+    return (type(value) is dict and set(value) == contract.GENERATION_KEYS
+            and type(value.get("pid")) is int and value["pid"] == pid
+            and type(value.get("executable")) is str and bool(value["executable"])
+            and type(value.get("euid")) is int and value["euid"] >= 0
+            and type(value.get("start_sec")) is int and value["start_sec"] > 0
+            and type(value.get("start_usec")) is int
+            and 0 <= value["start_usec"] < 1000000)
 
 
 def _application_pid(application):
@@ -658,6 +678,14 @@ class QuartzApi:
         return list(value) if value else []
 
     def owned_windows(self, pid):
+        """Guard the exact owned generation before and after the AX read."""
+        self._check_owned_generation()
+        try:
+            return self._owned_windows_unchecked(pid)
+        finally:
+            self._check_owned_generation()
+
+    def _owned_windows_unchecked(self, pid):
         """The opaque AX window handles of exactly this explicit owned PID.
 
         AXWindows is obtained ONLY from
@@ -768,6 +796,7 @@ class QuartzApi:
             raise _a11y_query()
         self._owned_scope_pid = pid
         self._owned_scope_title = None
+        self._owned_scope_generation = None
         # Strong, bounded, per-instance list (not a set: a native AXUIElement
         # need not be hashable, weak-referenceable or stable under Python
         # ``id``). Membership is CFEqual only, never hash/identity.
@@ -776,12 +805,89 @@ class QuartzApi:
     def unscope_owned_pid(self):
         """Drop the scope AND every retained handle; the CG path applies again."""
         self._owned_scope_pid, self._owned_scope_title = None, None
+        self._owned_scope_generation = None
         self._owned_handles = None
 
     def owned_pid_scope(self):
         """The validated scoped PID, or None for the unscoped CG path."""
         pid = getattr(self, "_owned_scope_pid", None)
         return pid if _exact_status(pid) and pid > 0 else None
+
+    def process_generation(self, pid):
+        """Full live libproc identity for the scoped PID, or None.
+
+        The executable path, effective UID (``pbi_uid``) and the ``pbi_start``
+        second/microsecond pair are read together and must all belong to the
+        exact PID; a missing field, a malformed answer or any raised value -
+        including ``BaseException`` - is None. The executable file's owner is
+        never used as a process-identity guess.
+        """
+        if not _exact_status(pid) or pid <= 0:
+            return None
+        info = BSDInfo()
+        try:
+            size = ctypes.sizeof(info)
+            if self.libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+                                         ctypes.byref(info), size) != size:
+                return None
+            if int(info.pbi_pid) != int(pid):
+                return None
+            buffer = ctypes.create_string_buffer(4096)
+            if self.libproc.proc_pidpath(pid, buffer, 4096) <= 0:
+                return None
+            raw_path = buffer.value.decode("utf-8", "strict")
+            if not raw_path:
+                return None
+            path = os.path.realpath(raw_path)
+            euid = int(info.pbi_uid)
+            start_sec = int(info.pbi_start_tvsec)
+            start_usec = int(info.pbi_start_tvusec)
+        except BaseException:
+            return None
+        if euid < 0 or start_sec <= 0 or not 0 <= start_usec < 1000000:
+            return None
+        return {"pid": int(pid), "executable": path, "euid": euid,
+                "start_sec": start_sec, "start_usec": start_usec}
+
+    def set_owned_generation(self, generation):
+        """Bind and PROVE the exact live generation before capability/AX.
+
+        The request value is never trusted on its own: the complete shape is
+        validated and then compared with a fresh libproc read. A malformed,
+        stale or wrong-effective-UID value clears any prior binding and
+        refuses ``process-untrusted`` without touching AX.
+        """
+        pid = self.owned_pid_scope()
+        if pid is None or not _generation_shape(generation, pid):
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
+        expected = {field: generation[field] for field in contract.GENERATION_FIELDS}
+        try:
+            actual = self.process_generation(pid)
+        except BaseException:
+            actual = None
+        if actual is None or actual != expected:
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
+        self._owned_scope_generation = expected
+
+    def _owned_generation_ok(self):
+        """True while the bound generation still matches the live process."""
+        generation = getattr(self, "_owned_scope_generation", None)
+        if generation is None:
+            return True
+        try:
+            pid = self.owned_pid_scope()
+            if pid is None or generation.get("pid") != pid:
+                return False
+            actual = self.process_generation(pid)
+            return actual is not None and actual == generation
+        except BaseException:
+            return False
+
+    def _check_owned_generation(self):
+        if not self._owned_generation_ok():
+            raise contract.ContractError("process-untrusted")
 
     def owned_discovery(self, title):
         """``([], False)`` while absent, ``([window], True)`` once unique.
@@ -1407,7 +1513,7 @@ class QuartzApi:
 
     # -- process identity ---------------------------------------------------
     def process_uid(self, pid):
-        """True process uid from proc_pidinfo(PROC_PIDTBSDINFO), else None."""
+        """Effective process uid (pbi_uid) from proc_pidinfo, else None."""
         info = BSDInfo()
         try:
             size = self.libproc.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0,
@@ -1421,11 +1527,11 @@ class QuartzApi:
         return int(info.pbi_uid)
 
     def process(self, pid):
-        """Read-only pid -> path plus SAME PROCESS uid; unknown uid is untrusted.
+        """Read-only pid -> path plus SAME PROCESS effective uid.
 
         The executable file owner is never used as a process-identity guess:
-        when proc_pidinfo cannot prove the process uid, the window is untrusted
-        and every request against it is refused.
+        when proc_pidinfo cannot prove the process effective uid, the window
+        is untrusted and every request against it is refused.
         """
         buffer = ctypes.create_string_buffer(4096)
         try:
@@ -1436,7 +1542,7 @@ class QuartzApi:
             return "", False
         path = buffer.value.decode("utf-8", "replace")
         uid = self.process_uid(pid)
-        if uid is None or uid != os.getuid():
+        if uid is None or uid != os.geteuid():
             return path, False
         return path, True
 
@@ -1760,14 +1866,14 @@ class QuartzApi:
         return bool(running.activateWithOptions_(
             self.appkit.NSApplicationActivateIgnoringOtherApps))
 
-    def _activation_identity(self, pid, executable):
-        """Re-read ONE pid's live path/uid and prove it is the exact request.
+    def _activation_identity(self, pid, executable, generation=None):
+        """Re-read ONE pid's live path/uid and optional exact generation.
 
-        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) is read. A
-        dead or unreadable process refuses ``activation-failed``; a path that
-        is not the exact requested canonical executable, or a uid that is not
-        provably ours, refuses ``process-untrusted``. Both are final: the
-        caller never waits or retries after them.
+        The legacy path/effective-UID proof is retained. When the CLI supplies
+        a generation, its complete five-field libproc identity is checked
+        before and after the single activation; a malformed, stale or
+        wrong-effective-UID value refuses without activating. Both checks are
+        final: the caller never waits or retries after them.
         """
         path, trusted = self.process(pid)
         if not path:
@@ -1776,6 +1882,17 @@ class QuartzApi:
             raise contract.ContractError("process-untrusted")
         if trusted is not True:
             raise contract.ContractError("process-untrusted")
+        if generation is not None:
+            if not _generation_shape(generation, pid):
+                raise contract.ContractError("process-untrusted")
+            try:
+                actual = self.process_generation(pid)
+            except BaseException:
+                actual = None
+            if actual is None:
+                raise contract.ContractError("activation-failed")
+            if actual != generation:
+                raise contract.ContractError("process-untrusted")
 
     def activation_ready(self, pid):
         """Read-only readiness of THIS pid's NSRunningApplication, or raise.
@@ -1814,14 +1931,15 @@ class QuartzApi:
             return False
         raise contract.ContractError("activation-failed")
 
-    def activate_process(self, pid, executable):
+    def activate_process(self, pid, executable, generation=None):
         """Identity-proofed, bounded-readiness, once-only activation of ONE known pid.
 
-        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) and this
-        pid's own ``NSRunningApplication`` registration/isFinishedLaunching are
-        read: no window is listed, no AX element is created and no title,
-        control or foreground content is queried. The identity (exact
-        executable, our uid, live process) must hold BEFORE the readiness wait
+        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid), the
+        optional generation read and this pid's own ``NSRunningApplication``
+        registration/isFinishedLaunching are read: no window is listed, no AX
+        element is created and no title, control or foreground content is
+        queried. The identity (exact executable, our effective uid, live
+        process, optional exact generation) must hold BEFORE the readiness wait
         (re-read on every poll, so a process that dies or is replaced while
         waiting refuses) and is re-read once more after readiness and BEFORE
         the single activation. An absent or not-yet-finished application may
@@ -1835,7 +1953,7 @@ class QuartzApi:
             raise contract.ContractError("activation-invalid")
         deadline = time.monotonic() + ACTIVATE_READY_TIMEOUT
         while True:
-            self._activation_identity(pid, executable)
+            self._activation_identity(pid, executable, generation)
             ready = self.activation_ready(pid)
             if ready is True:
                 break
@@ -1846,8 +1964,11 @@ class QuartzApi:
                 time.sleep(max(0.0, min(ACTIVATE_READY_POLL, deadline - time.monotonic())))
                 continue
             raise contract.ContractError("activation-failed")
-        self._activation_identity(pid, executable)
-        return self.activate(pid)
+        self._activation_identity(pid, executable, generation)
+        verdict = self.activate(pid)
+        if generation is not None:
+            self._activation_identity(pid, executable, generation)
+        return verdict
 
     def _post(self, events):
         """Post an already complete, already validated event list exactly once.
@@ -2001,6 +2122,23 @@ class MacAdapter:
             raise contract.ContractError("a11y-query")
         setter(pid)
         return clearer
+
+    def set_owned_generation(self, generation):
+        """Pass the CLI's exact Popen generation to the scoped API.
+
+        A missing hook is a refusal, never a reason to proceed with the weaker
+        PID-only scope. Any unexpected backend failure, ``BaseException``
+        included, is converted to the same fixed refusal.
+        """
+        setter = getattr(self.api, "set_owned_generation", None)
+        if not callable(setter):
+            raise contract.ContractError("process-untrusted")
+        try:
+            setter(generation)
+        except contract.ContractError:
+            raise
+        except BaseException:
+            raise contract.ContractError("process-untrusted")
 
     def identity_equal(self, first, second):
         """Trusted opaque handle equality for the contract (native CFEqual)."""
@@ -2244,9 +2382,23 @@ class MacAdapter:
         if not self.api.activate(window["pid"]):
             raise contract.ContractError("focus-lost")
 
-    def activate_process(self, pid, executable):
-        """Activation-only mode: strict literal True, never a truthy value."""
-        if self.api.activate_process(pid, executable) is not True:
+    def activate_process(self, pid, executable, generation=None):
+        """Activation-only mode: strict literal True, never a truthy value.
+
+        When a generation was supplied it is handed to the API's three-field
+        proof; an API that cannot accept it fails closed rather than dropping
+        the stronger identity.
+        """
+        try:
+            if generation is None:
+                verdict = self.api.activate_process(pid, executable)
+            else:
+                verdict = self.api.activate_process(pid, executable, generation)
+        except contract.ContractError:
+            raise
+        except BaseException:
+            raise contract.ContractError("activation-failed")
+        if verdict is not True:
             raise contract.ContractError("activation-failed")
         return True
 

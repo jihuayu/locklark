@@ -1572,10 +1572,20 @@ class MacProcessIdentityTests(unittest.TestCase):
 
     def test_same_process_uid_is_trusted_without_any_stat(self):
         api = self.api()
-        api.process_uid = lambda pid: os.getuid()
+        api.process_uid = lambda pid: os.geteuid()
         with patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
             path, trusted = api.process(4242)
         self.assertTrue(trusted)
+
+    def test_process_trust_requires_effective_uid_not_real_uid(self):
+        api = self.api()
+        real, effective = 1000, 501
+        with patch.object(macos.os, "getuid", return_value=real), \
+                patch.object(macos.os, "geteuid", return_value=effective):
+            api.process_uid = lambda pid: real
+            self.assertFalse(api.process(4242)[1])
+            api.process_uid = lambda pid: effective
+            self.assertTrue(api.process(4242)[1])
 
 
 class MacAxWalkTests(unittest.TestCase):

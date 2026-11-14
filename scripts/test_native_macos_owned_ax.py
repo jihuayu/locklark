@@ -284,25 +284,46 @@ class _Front:
 
 
 class _Libproc:
+    """Controllable libproc answers; no process or kernel call is made."""
+
+    def __init__(self, path=EXE, uid=None, start_sec=1700000000,
+                 start_usec=123, pid=None, path_result=None, info_size=None,
+                 error=None):
+        self.path = path
+        self.uid = os.geteuid() if uid is None else uid
+        self.start_sec = start_sec
+        self.start_usec = start_usec
+        self.pid = pid
+        self.path_result = path_result
+        self.info_size = info_size
+        self.error = error
+
     def proc_pidpath(self, pid, buffer, size):
-        buffer.value = EXE.encode()
-        return len(EXE)
+        if self.error is not None:
+            raise self.error
+        if self.path_result is not None:
+            return self.path_result
+        buffer.value = self.path.encode()
+        return len(self.path)
 
     def proc_pidinfo(self, pid, flavor, arg, info, size):
+        if self.error is not None:
+            raise self.error
         buffer = ctypes.cast(info, ctypes.POINTER(ctypes.c_char * size)).contents
         bsd = macos.BSDInfo.from_buffer(buffer)
-        bsd.pbi_pid, bsd.pbi_uid = pid, os.getuid()
-        return size
+        bsd.pbi_pid, bsd.pbi_uid = pid if self.pid is None else self.pid, self.uid
+        bsd.pbi_start_tvsec, bsd.pbi_start_tvusec = self.start_sec, self.start_usec
+        return size if self.info_size is None else self.info_size
 
 
 
 
-def api_for(frameworks):
+def api_for(frameworks, libproc=None):
     api = macos.QuartzApi.__new__(macos.QuartzApi)
     api.ax = frameworks
     api.quartz = frameworks
     api.appkit = frameworks
-    api.libproc = _Libproc()
+    api.libproc = _Libproc() if libproc is None else libproc
     return api
 
 
@@ -1242,6 +1263,105 @@ class UnscopedPathTests(unittest.TestCase):
         # Poisoned CG inventory proves the unscoped path is the CG one.
         with self.assertRaises(AssertionError):
             adapter.list_windows()
+
+
+class OwnedGenerationTests(unittest.TestCase):
+    """Real process_generation over a fake libproc; no adapter stand-in."""
+
+    class Fatal(BaseException):
+        pass
+
+    def generation(self, **overrides):
+        value = {"pid": OWNED_PID, "executable": EXE, "euid": os.geteuid(),
+                 "start_sec": 1700000000, "start_usec": 123}
+        value.update(overrides)
+        return value
+
+    def api(self, windows=None, **libproc):
+        frameworks = FakeFrameworks([] if windows is None else windows)
+        api = api_for(frameworks, libproc=_Libproc(**libproc))
+        api.scope_to_owned_pid(OWNED_PID)
+        return api, frameworks
+
+    def test_process_generation_reads_the_actual_libproc_identity(self):
+        api, _ = self.api()
+        self.assertEqual(api.process_generation(OWNED_PID), self.generation())
+
+    def test_process_generation_is_none_for_malformed_or_raising_libproc(self):
+        for libproc in ({"info_size": 0}, {"pid": OTHER_PID},
+                        {"path_result": 0}, {"path": "", "path_result": 1},
+                        {"start_sec": 0},
+                        {"start_usec": 1000000}, {"error": self.Fatal()}):
+            with self.subTest(libproc=libproc):
+                api, _ = self.api(**libproc)
+                self.assertIsNone(api.process_generation(OWNED_PID))
+
+    def test_malformed_stale_and_wrong_euid_are_refused_before_any_ax(self):
+        window, _ = owned_window()
+        for altered in ({"start_usec": 124}, {"euid": os.geteuid() + 1}):
+            with self.subTest(altered=altered):
+                api, frameworks = self.api([window])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.set_owned_generation(self.generation(**altered))
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.requests, [])
+        malformed = (None, {}, {**self.generation(), "extra": 1},
+                     {**self.generation(), "pid": OTHER_PID},
+                     {**self.generation(), "euid": True},
+                     {**self.generation(), "start_sec": 0},
+                     {**self.generation(), "start_usec": 1000000},
+                     {**self.generation(), "executable": "relative"})
+        for value in malformed:
+            with self.subTest(value=value):
+                api, frameworks = self.api([window])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.set_owned_generation(value)
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.requests, [])
+
+    def test_bound_generation_is_rechecked_before_owned_ax(self):
+        window, _ = owned_window()
+        api, frameworks = self.api([window])
+        api.set_owned_generation(self.generation())
+        self.assertTrue(api._owned_generation_ok())
+        api.libproc.start_usec += 1
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_windows(OWNED_PID)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+
+    def test_owned_windows_accepts_the_bound_live_generation(self):
+        window, _ = owned_window()
+        api, _ = self.api([window])
+        api.set_owned_generation(self.generation())
+        self.assertEqual(api.owned_windows(OWNED_PID), [window])
+
+    def test_activation_generation_is_proved_before_the_single_activation(self):
+        api, frameworks = self.api([owned_window()[0]])
+        self.assertIs(api.activate_process(OWNED_PID, EXE, self.generation()), True)
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_stale_wrong_euid_and_malformed_activation_never_activates(self):
+        for value in (self.generation(start_usec=124),
+                      self.generation(euid=os.geteuid() + 1),
+                      {}, {**self.generation(), "pid": OTHER_PID},
+                      {**self.generation(), "euid": True}):
+            with self.subTest(value=value):
+                api, frameworks = self.api([owned_window()[0]])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.activate_process(OWNED_PID, EXE, value)
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.activations, [])
+
+    def test_process_trust_uses_the_effective_uid_not_the_real_uid(self):
+        api, _ = self.api()
+        real, effective = 1000, 501
+        with unittest.mock.patch.object(macos.os, "getuid", return_value=real), \
+                unittest.mock.patch.object(macos.os, "geteuid", return_value=effective):
+            api.process_uid = lambda pid: real
+            self.assertFalse(api.process(OWNED_PID)[1])
+            api.process_uid = lambda pid: effective
+            self.assertTrue(api.process(OWNED_PID)[1])
 
 
 if __name__ == "__main__":
