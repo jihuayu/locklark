@@ -14,6 +14,7 @@ Requires the test-only PyYAML==6.0.3 pin in scripts/requirements-test.txt.
 
 from __future__ import annotations
 
+import copy
 import re
 import unittest
 from pathlib import Path
@@ -25,6 +26,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "desktop-release.yml"
 OLD_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
+MACOS_SCRIPT = ROOT / "scripts" / "macos_release.sh"
 CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 SETUP_GO = "actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff"
 SETUP_BUN = "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
@@ -46,6 +48,63 @@ def run_text(job: dict[str, Any]) -> str:
     return "\n".join(str(step.get("run", "")) for step in steps(job))
 
 
+MYGO_BUILD_RE = re.compile(
+    r'go\s+run\s+"?github\.com/egoist/mygo/cmd/mygo@[^\s"]+"?\s+build\b'
+)
+WINDOWS_PLATFORM_RE = re.compile(r'-platform\s+"?windows/amd64"?')
+MACOS_RELEASE_RE = re.compile(r'(?<![\w./-])\./scripts/macos_release\.sh\b')
+
+
+def primary_build_errors(
+    workflow: dict[str, Any], macos_script: str
+) -> list[str]:
+    """Return violations of the single-primary-builder contract."""
+
+    jobs = workflow.get("jobs", {})
+    errors: list[str] = []
+
+    platform_jobs = {
+        name
+        for name in jobs
+        if any(token in name.lower() for token in ("windows", "macos", "darwin"))
+    }
+    if platform_jobs != {"windows", "macos"}:
+        errors.append(f"platform job names are {sorted(platform_jobs)}")
+    if any("matrix" in job for job in jobs.values()):
+        errors.append("platform jobs must not use a build matrix")
+
+    windows_run = run_text(jobs.get("windows", {}))
+    if len(MYGO_BUILD_RE.findall(windows_run)) != 1:
+        errors.append("windows job must contain exactly one MyGo build")
+    if len(WINDOWS_PLATFORM_RE.findall(windows_run)) != 1:
+        errors.append("windows job must contain exactly one windows/amd64 build")
+    if MACOS_RELEASE_RE.search(windows_run):
+        errors.append("windows job must not invoke the macOS release script")
+
+    macos_run = run_text(jobs.get("macos", {}))
+    if len(MACOS_RELEASE_RE.findall(macos_run)) != 1:
+        errors.append("macos job must invoke macos_release.sh exactly once")
+    if MYGO_BUILD_RE.search(macos_run):
+        errors.append("macos job must delegate its MyGo build to macos_release.sh")
+    if WINDOWS_PLATFORM_RE.search(macos_run):
+        errors.append("macos job must not build a Windows platform")
+
+    if len(MYGO_BUILD_RE.findall(macos_script)) != 1:
+        errors.append("macos_release.sh must contain exactly one MyGo build")
+    if macos_script.count("darwin/universal") != 1:
+        errors.append("macos_release.sh must build darwin/universal exactly once")
+
+    for forbidden in ("authorize", "draft-release", "verify-release"):
+        forbidden_run = run_text(jobs.get(forbidden, {}))
+        if (
+            MYGO_BUILD_RE.search(forbidden_run)
+            or WINDOWS_PLATFORM_RE.search(forbidden_run)
+            or MACOS_RELEASE_RE.search(forbidden_run)
+        ):
+            errors.append(f"{forbidden} must not invoke a primary builder")
+    return errors
+
+
 def checkouts(job: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         step
@@ -61,6 +120,7 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
         cls.workflow = yaml.safe_load(cls.text)
         cls.jobs = cls.workflow["jobs"]
+        cls.macos_script = MACOS_SCRIPT.read_text(encoding="utf-8")
 
     def test_only_repository_dispatch_trigger_and_no_legacy_workflow(self) -> None:
         self.assertFalse(OLD_WORKFLOW.exists())
@@ -238,12 +298,38 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
                 self.assertEqual(permissions["contents"], "read")
                 self.assertEqual(permissions["actions"], "read")
 
-    def test_exactly_one_primary_build_per_platform(self) -> None:
+    def test_primary_build_guard_accepts_current_single_builders(self) -> None:
         self.assertEqual(
-            sum(1 for name in self.jobs if name == "windows"), 1
+            primary_build_errors(self.workflow, self.macos_script),
+            [],
         )
-        self.assertEqual(sum(1 for name in self.jobs if name == "macos"), 1)
-        self.assertFalse(any("matrix" in job for job in self.jobs.values()))
+
+    def test_primary_build_guard_rejects_duplicate_build_fixtures(self) -> None:
+        duplicate_draft = copy.deepcopy(self.workflow)
+        duplicate_draft["jobs"]["draft-release"]["steps"].append(
+            {
+                "name": "Duplicate primary build",
+                "run": (
+                    'go run "github.com/egoist/mygo/cmd/mygo@'
+                    '$env:MYGO_VERSION" build -platform "windows/amd64"'
+                ),
+            }
+        )
+        errors = primary_build_errors(duplicate_draft, self.macos_script)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("draft-release" in error for error in errors), errors
+        )
+
+        duplicate_platform = copy.deepcopy(self.workflow)
+        duplicate_platform["jobs"]["windows-secondary"] = copy.deepcopy(
+            duplicate_platform["jobs"]["windows"]
+        )
+        errors = primary_build_errors(duplicate_platform, self.macos_script)
+        self.assertTrue(errors)
+        self.assertTrue(
+            any("platform job names" in error for error in errors), errors
+        )
 
 
 if __name__ == "__main__":
