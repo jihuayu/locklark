@@ -1750,26 +1750,40 @@
     }
     return null;
   }
-  async function otpOffer(anchor, raw, parsed) {
-    if (host) return;
+  function otpContextActive(generation, anchor, panelHost = null) {
+    if (generation !== otpGeneration) return false;
+    if (siteSettings.otpCapture === false) return false;
+    if (document.visibilityState !== "visible") return false;
+    if (!anchor?.isConnected) return false;
+    return panelHost ? host === panelHost : !host;
+  }
+  async function otpOffer(anchor, raw, parsed, generation) {
+    if (!otpContextActive(generation, anchor)) return;
     let reply;
     try {
       reply = await send({ type: "inline-otp-capture", otpauth: raw });
     } catch {
       return;
     }
+    // A sent capture request cannot be recalled. It is never treated as
+    // approval; a late response after stop/hide/disable only loses the right to
+    // open or update UI.
+    if (!otpContextActive(generation, anchor)) return;
     if (!reply?.ok) {
-      if (reply?.reason === "no-item")
+      if (otpContextActive(generation, anchor) && reply?.reason === "no-item")
         showToast("未找到此网站的登录，请先保存登录再添加两步验证");
       return;
     }
-    if (host || !anchor.isConnected) return;
+    if (!otpContextActive(generation, anchor)) return;
     const box = panel(anchor, "保存两步验证");
+    const panelHost = host;
     note(box, "检测到此页面的两步验证二维码：" + (reply.label || parsed.label));
     const status = note(box, "", "status");
     const items = Array.isArray(reply.items) ? reply.items.slice(0, 10) : [];
     for (const item of items) {
+      if (!otpContextActive(generation, anchor, panelHost)) return;
       button(box, "保存到 " + (item.title || "未命名登录"), async () => {
+        if (!otpContextActive(generation, anchor, panelHost)) return;
         status.textContent = "正在保存…";
         let result;
         try {
@@ -1781,6 +1795,9 @@
         } catch {
           result = { ok: false };
         }
+        // The save request may already be in flight, but a late response must
+        // not dismiss, toast, or update a panel from a canceled generation.
+        if (!otpContextActive(generation, anchor, panelHost)) return;
         if (result?.ok) {
           dismiss();
           showToast("已保存两步验证");
@@ -1843,7 +1860,7 @@
         const finalBudgetDecode = otpScans >= OTP_SCAN_LIMIT;
         if (finalBudgetDecode) stopOTPCapture(false);
         const found = await otpDecode(node);
-        if (generation !== otpGeneration) return;
+        if (!otpContextActive(generation, node)) return;
         if (!found) {
           if (finalBudgetDecode) break;
           continue;
@@ -1854,8 +1871,8 @@
           continue;
         }
         otpPrompted.add(key);
-        if (generation !== otpGeneration) return;
-        await otpOffer(node, found.raw, found.parsed);
+        if (!otpContextActive(generation, node)) return;
+        await otpOffer(node, found.raw, found.parsed, generation);
         break;
       }
     } finally {
@@ -1893,6 +1910,7 @@
     scheduleOTPScan(2000);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") scheduleOTPScan(1200);
+      else stopOTPCapture(true);
     });
     if (typeof MutationObserver === "function") {
       try {

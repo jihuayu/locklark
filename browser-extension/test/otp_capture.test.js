@@ -215,6 +215,8 @@ function makeHarness(options = {}) {
   const mutationObservers = [];
   const detections = { count: 0 };
   const pendingDetections = [];
+  const pendingCaptures = [];
+  const pendingSaves = [];
   let timerSerial = 0;
 
   const body = new Element("body");
@@ -298,6 +300,8 @@ function makeHarness(options = {}) {
         sent.push(JSON.parse(JSON.stringify(message)));
         switch (message.type) {
           case "inline-otp-capture":
+            if (options.deferCapture)
+              return new Promise((resolve) => pendingCaptures.push(resolve));
             return Promise.resolve(
               options.captureReply || {
                 ok: true,
@@ -319,6 +323,8 @@ function makeHarness(options = {}) {
               options.commitReply || { saved: false, status: "保存失败" },
             );
           case "inline-otp-save":
+            if (options.deferSave)
+              return new Promise((resolve) => pendingSaves.push(resolve));
             return Promise.resolve(
               options.saveReply || { ok: true, revision: "c".repeat(64) },
             );
@@ -434,6 +440,31 @@ function makeHarness(options = {}) {
     sent,
     detections: () => detections.count,
     pendingDecodes: () => pendingDetections.length,
+    pendingCaptures: () => pendingCaptures.length,
+    pendingSaves: () => pendingSaves.length,
+    resolveCapture(reply) {
+      const resolve = pendingCaptures.shift();
+      if (!resolve) return false;
+      resolve(
+        reply || {
+          ok: true,
+          captureId: "a".repeat(32),
+          label: "ACME Co · john@example.com",
+          items: [{ id: "b".repeat(32), title: "Example login" }],
+        },
+      );
+      return true;
+    },
+    resolveSave(reply) {
+      const resolve = pendingSaves.shift();
+      if (!resolve) return false;
+      resolve(reply || { ok: true, revision: "c".repeat(64) });
+      return true;
+    },
+    hide() {
+      document.visibilityState = "hidden";
+      document.dispatchEvent({ type: "visibilitychange" });
+    },
     resolveDetection(index = 0) {
       const pending = pendingDetections.splice(index, 1)[0];
       if (!pending) return false;
@@ -880,6 +911,54 @@ test("the 24th valid candidate is offered inside the budget", async () => {
     "the 24th in-budget result is still offered",
   );
   assert.equal(h.otpObserver()?.disconnected, true);
+});
+
+test("a hide or stop during a pending capture never opens the save panel", async () => {
+  const h = makeHarness({ deferCapture: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingCaptures(), 1);
+
+  h.hide();
+  h.pagehide();
+  assert.equal(h.resolveCapture(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(h.panel(), null);
+});
+
+test("hiding during a pending decode cancels its offer", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.hide();
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+  assert.equal(h.panel(), null);
+});
+
+test("a late save response cannot close or update a hidden panel", async () => {
+  const h = makeHarness({ deferSave: true });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel());
+  await h.click("保存到 Example login");
+  assert.equal(h.pendingSaves(), 1);
+
+  h.hide();
+  assert.equal(h.resolveSave(), true);
+  await h.flush();
+  await h.flush();
+  assert.ok(h.panel(), "the late save response must not close the panel");
+  assert.match(h.panelText(), /正在保存/);
+  assert.doesNotMatch(h.panelText(), /已保存/);
 });
 
 test("a stop while decode is pending never offers the late result", async () => {
