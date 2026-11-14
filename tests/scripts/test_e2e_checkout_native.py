@@ -1531,58 +1531,82 @@ RUNNER_GLUE_SOURCES = (
 def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
     """Resolve the package-local AST import closure of one Python module.
 
-    Only ``from .`` / ``from .module`` imports are considered. A relative
-    module that cannot be found, or a parent-relative import that escapes the
-    package, fails instead of being silently omitted. No imported module is
-    executed.
+    Only ``from .`` / ``from .module`` imports are considered. Every enqueued
+    file is a non-symlink regular file inside the fixed package root before it
+    is read or parsed; ancestors are not exempt. A missing target or an import
+    that escapes the package fails instead of being silently omitted. No
+    imported module is executed.
     """
 
-    entry = Path(entry).resolve()
-    base = (Path(base) if base is not None else entry.parent).resolve()
-    try:
-        entry.relative_to(base)
-    except ValueError:
-        raise AssertionError("runtime closure entry escapes its package") from None
-    seen: set[Path] = {entry}
-    init = base / "__init__.py"
-    if init.is_file():
-        seen.add(init.resolve())
-    pending = list(seen)
+    base = (Path(base) if base is not None else Path(entry).parent).resolve()
+    seen: set[Path] = set()
+    pending: list[Path] = []
+
+    def trusted(path: Path) -> Path:
+        try:
+            info = path.lstat()
+        except OSError:
+            raise AssertionError("runtime import is unresolved") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise AssertionError("runtime import is a symlink")
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            raise AssertionError("runtime import escapes its package") from None
+        if not resolved.is_file():
+            raise AssertionError("runtime import is unresolved")
+        return resolved
+
+    def enqueue(path: Path) -> None:
+        resolved = trusted(path)
+        if resolved not in seen:
+            seen.add(resolved)
+            pending.append(resolved)
+
+    def enqueue_optional_init(directory: Path) -> None:
+        init = directory / "__init__.py"
+        try:
+            info = init.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise AssertionError("runtime import is unresolved") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise AssertionError("runtime import is a symlink")
+        enqueue(init)
 
     def resolve(parts: list[str], package_dir: Path) -> Path:
         target = package_dir.joinpath(*parts)
         for candidate in (target.with_suffix(".py"), target / "__init__.py"):
             try:
-                resolved = candidate.resolve()
-                resolved.relative_to(package_dir)
-            except ValueError:
-                raise AssertionError("runtime import escapes its package") from None
-            if resolved.is_file():
-                return resolved
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise AssertionError("runtime import is unresolved") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise AssertionError("runtime import is a symlink")
+            if info.st_mode and candidate.is_file():
+                return trusted(candidate)
         raise AssertionError("runtime import is unresolved")
 
     def add_module(target: Path) -> None:
-        target = target.resolve()
-        try:
-            target.relative_to(base)
-        except ValueError:
-            raise AssertionError("runtime import escapes its package") from None
+        target = trusted(target)
         directory = target.parent
         while True:
             try:
                 directory.relative_to(base)
             except ValueError:
                 raise AssertionError("runtime import escapes its package") from None
-            init = directory / "__init__.py"
-            if init.is_file() and init.resolve() not in seen:
-                seen.add(init.resolve())
-                pending.append(init.resolve())
+            enqueue_optional_init(directory)
             if directory == base:
                 break
             directory = directory.parent
-        if target not in seen:
-            seen.add(target)
-            pending.append(target)
+        enqueue(target)
+
+    enqueue(Path(entry))
+    enqueue_optional_init(base)
 
     while pending:
         module = pending.pop()
@@ -1596,8 +1620,6 @@ def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
             if node.module:
                 target = resolve(node.module.split("."), module.parent)
                 targets.append(target)
-                # ``from .package import child`` may bind a real child module
-                # even when package __init__ does not import it.
                 if target.name == "__init__.py":
                     for alias in node.names:
                         child = target.parent / alias.name
@@ -1605,8 +1627,16 @@ def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
                             child.with_suffix(".py"), child / "__init__.py"
                         )
                         for candidate in candidates:
+                            try:
+                                info = candidate.lstat()
+                            except FileNotFoundError:
+                                continue
+                            except OSError:
+                                raise AssertionError("runtime import is unresolved") from None
+                            if stat.S_ISLNK(info.st_mode):
+                                raise AssertionError("runtime import is a symlink")
                             if candidate.is_file():
-                                targets.append(candidate.resolve())
+                                targets.append(trusted(candidate))
                                 break
             else:
                 for alias in node.names:
@@ -1734,6 +1764,30 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             if unbound:
                 raise AssertionError("runtime dependency is not bound")
+
+    def test_ancestor_symlink_is_rejected_before_read(self):
+        base = (self.temp / "synthetic" / "symlink").resolve()
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from .sub.leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub").mkdir()
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        outside = (self.temp / "outside-init.py").resolve()
+        outside.write_text("outside\n", encoding="utf-8")
+        (base / "sub" / "__init__.py").symlink_to(outside)
+        reads = []
+        original = Path.read_text
+
+        def spy(path, *args, **kwargs):
+            reads.append(path.resolve())
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=spy):
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                _local_python_closure(base / "entry.py", base)
+        self.assertNotIn(outside, reads)
 
     def test_python_closure_rejects_unresolved_and_parent_escape(self):
         base = self.temp / "synthetic" / "broken"
