@@ -416,6 +416,32 @@ _SCHEMA_KEYS = {
 }
 
 
+def _settings_struct_body(source: str) -> str:
+    """Return only the top-level Settings declaration body.
+
+    The persisted schema is owned by this one struct. A broad scan of every
+    production JSON tag would also pick up unrelated persisted records (CLI
+    activity, versioned logs, and their slot/outcome fields) and falsely
+    compare them with settings keys. The declaration is gofmt-formatted, so its
+    closing brace is the first column-zero ``}`` after the opening line.
+    """
+
+    match = re.search(r"(?m)^type Settings struct \{\n", source)
+    if match is None:
+        raise AssertionError("the Settings declaration moved")
+    start = match.end()
+    end = source.find("\n}\n", start)
+    if end < 0:
+        raise AssertionError("the Settings declaration is unterminated")
+    return source[start:end]
+
+
+def _settings_schema_keys(source: str) -> set[str]:
+    declared = set(re.findall(r'json:"([^",]+)"', _settings_struct_body(source)))
+    declared.discard("-")
+    return declared
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1334,10 +1360,43 @@ class ProductContractTests(unittest.TestCase):
         self.assertEqual(source.count('"--settings"'), 1, "the desktop grew a second option spelling")
         self.assertNotRegex(source, r'args\[0\]\s*==\s*"--file"|"--file"\s*,')
         # The settings schema has no vault/login path, so settings cannot
-        # select or unlock one: these keys are introspected by the product
-        # tests run with the same CI artifact, not rebuilt here.
-        declared = set(re.findall(r'json:"([^",]+)"', source)) - {"-"}
-        self.assertEqual(declared, _SCHEMA_KEYS)
+        # select or unlock one. Introspect only the actual Settings declaration
+        # in settings.go; unrelated persisted structs (CLI activity entries,
+        # version/id/utc/slot/outcome fields) are not settings keys.
+        settings_source = (ROOT / "internal" / "desktop" / "settings.go").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_settings_schema_keys(settings_source), _SCHEMA_KEYS)
+
+    def test_settings_schema_introspection_ignores_unrelated_json_structs(self):
+        unrelated = """
+type Settings struct {
+    Theme string `json:"appearance.theme"`
+    Hidden string `json:"-"`
+}
+
+type CLIActivityEntry struct {
+    Version int `json:"version"`
+    ID string `json:"id"`
+    UTC string `json:"utc"`
+    Slot string `json:"slot"`
+    Outcome string `json:"outcome"`
+}
+"""
+        self.assertEqual(_settings_schema_keys(unrelated), {"appearance.theme"})
+
+        settings_source = (ROOT / "internal" / "desktop" / "settings.go").read_text(
+            encoding="utf-8"
+        )
+        unknown = settings_source.replace(
+            "type Settings struct {\n",
+            'type Settings struct {\n\tUnknown string `json:"settings.unknown"`\n',
+            1,
+        )
+        self.assertEqual(
+            _settings_schema_keys(unknown), _SCHEMA_KEYS | {"settings.unknown"}
+        )
+        self.assertNotEqual(_settings_schema_keys(unknown), _SCHEMA_KEYS)
 
     def test_tier1_smoke_calls_keep_the_locked_startup_scope(self):
         regression = (ROOT / "tests" / "e2e" / "tier1_f01_f08.py").read_text(encoding="utf-8")
