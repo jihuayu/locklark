@@ -427,9 +427,9 @@ function makeHarness(options = {}) {
         this.bubbles = Boolean(init.bubbles);
       }
     },
-    setTimeout: (fn) => {
+    setTimeout: (fn, delay = 0) => {
       const id = ++timerSerial;
-      timers.push({ id, fn });
+      timers.push({ id, fn, delay });
       return id;
     },
     clearTimeout: (id) => {
@@ -543,6 +543,14 @@ function makeHarness(options = {}) {
         timer.fn();
         await flush(4);
       }
+    },
+    async runTimerByDelay(delay) {
+      const index = timers.findIndex((timer) => timer.delay === delay);
+      if (index < 0) return false;
+      const [timer] = timers.splice(index, 1);
+      timer.fn();
+      await flush(4);
+      return true;
     },
     async click(label) {
       const node = harness
@@ -1075,6 +1083,56 @@ test("a late initial settings read cannot overwrite a runtime disable", async ()
     h.sent.some((message) => message.type === "inline-otp-capture"),
     false,
   );
+});
+
+test("disable then enable rearms once after a busy old decode", async () => {
+  const h = makeHarness({ deferDecode: true });
+  h.image(OTPAUTH);
+  await h.flush();
+  assert.equal(await h.runTimerByDelay(2000), true);
+  assert.equal(h.pendingDecodes(), 1);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  h.changeOtpSetting(true);
+  assert.equal(await h.runTimerByDelay(1200), true);
+  assert.equal(h.pendingDecodes(), 1, "the busy timer did not start decode");
+
+  h.image(OTPAUTH);
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  assert.equal(await h.runTimerByDelay(1200), true);
+  assert.equal(h.pendingDecodes(), 1, "one fresh decode was scheduled");
+  assert.equal(h.resolveDetection(), true);
+  await h.flush();
+  await h.flush();
+  assert.equal(
+    h.sent.filter((message) => message.type === "inline-otp-capture").length,
+    1,
+    "duplicate state changes must not schedule duplicate scans",
+  );
+});
+
+test("a budget-exhausted observer is not rearmed", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 24; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24);
+  assert.equal(h.otpObserver()?.disconnected, true);
+
+  h.changeOtpSetting(false);
+  h.changeOtpSetting(true);
+  h.hide();
+  h.show();
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), 24, "the 24 budget is never reset");
+  assert.equal(h.otpObserver()?.disconnected, true);
 });
 
 test("a stop while decode is pending never offers the late result", async () => {

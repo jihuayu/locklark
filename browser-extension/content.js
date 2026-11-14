@@ -1661,7 +1661,8 @@
     otpScans = 0,
     otpGeneration = 0,
     otpInstalling = false,
-    otpVisibilityListener = false;
+    otpVisibilityListener = false,
+    otpRearmPending = false;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
   function otpHash(text) {
@@ -1842,11 +1843,19 @@
     // A budget stop retires scheduling but still permits the in-flight 24th
     // decode to offer its result. An explicit stop invalidates that generation
     // so a late decode can never offer.
-    if (cancel) otpGeneration++;
+    if (cancel) {
+      otpGeneration++;
+      otpRearmPending = false;
+    }
   }
   async function otpScan() {
+    if (otpScanning) {
+      // A rearm/visibility/settings request arrived while the old scan still
+      // owns the single scan slot. Let its finally schedule one fresh scan.
+      otpRearmPending = true;
+      return;
+    }
     if (
-      otpScanning ||
       !otpDetector ||
       siteSettings.otpCapture === false ||
       document.visibilityState !== "visible" ||
@@ -1897,6 +1906,18 @@
       }
     } finally {
       otpScanning = false;
+      if (
+        otpRearmPending &&
+        siteSettings.otpCapture !== false &&
+        document.visibilityState === "visible" &&
+        otpScans < OTP_SCAN_LIMIT &&
+        !host
+      ) {
+        otpRearmPending = false;
+        scheduleOTPScan(1200);
+      } else if (otpRearmPending) {
+        otpRearmPending = false;
+      }
     }
   }
   function scheduleOTPScan(delay = 1500) {
@@ -1916,6 +1937,7 @@
     }, delay);
   }
   function startOTPObserver() {
+    if (otpScans >= OTP_SCAN_LIMIT) return;
     if (otpObserver || typeof MutationObserver !== "function") return;
     try {
       otpObserver = new MutationObserver(() => scheduleOTPScan());
