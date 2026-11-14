@@ -538,10 +538,9 @@ async function openCardDetail(popup, fixture, eventually) {
 
 // The popup's bounded public status lines that only a card form picker can
 // set: the list was offered, the native host refused or does not support the
-// picker, or the one-time gesture was not accepted for this document. Each
-// line maps to one fixed enum copied into the failure diagnostic.
+// picker. "不会自动选择" is deliberately absent: prose is not gesture evidence.
+// Each remaining line maps to one fixed enum copied into the failure diagnostic.
 const CHECKOUT_PICKER_STATUS = [
-  ["不会自动选择", "no-gesture"],
   ["不支持选择结账表单", "unsupported"],
   ["无法列出当前页面的结账表单", "list-failed"],
   ["已选择结账表单", "selected"],
@@ -559,6 +558,60 @@ export const CHECKOUT_PICKER_STATUSES = Object.freeze([
   "other",
 ]);
 
+export const DETAIL_FILL_DIAGNOSTIC_PHASES = Object.freeze([
+  "handler-entry",
+  "early-guard",
+  "gesture-refused",
+  "request-sent",
+  "reply-null",
+  "reply-present",
+  "adopt-refused",
+  "adopted",
+]);
+
+// The harness reads only this fixed test-only record. Entry carries the two
+// booleans; every async record carries only its phase. Unknown keys, phases or
+// types are discarded rather than echoed.
+export function sanitizeDetailFillDiagnostic(value) {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const phases = new Set(DETAIL_FILL_DIAGNOSTIC_PHASES);
+  const seen = new Set();
+  const result = [];
+  for (let index = 0; index < value.length; index++) {
+    const record = value[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      return null;
+    }
+    if (!phases.has(record.phase) || seen.has(record.phase)) return null;
+    if (index === 0 && record.phase !== "handler-entry") return null;
+    seen.add(record.phase);
+    const keys = Object.keys(record);
+    if (index === 0) {
+      if (
+        keys.sort().join(",") !== "isTrusted,phase,userActivation" ||
+        typeof record.isTrusted !== "boolean" ||
+        typeof record.userActivation !== "boolean"
+      ) {
+        return null;
+      }
+      result.push({
+        phase: record.phase,
+        isTrusted: record.isTrusted,
+        userActivation: record.userActivation,
+      });
+    } else {
+      if (keys.length !== 1 || keys[0] !== "phase") return null;
+      result.push({ phase: record.phase });
+    }
+  }
+  return result;
+}
+
+const DETAIL_FILL_DIAGNOSTIC_ENABLE =
+  "(() => { globalThis.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true; return true; })()";
+const DETAIL_FILL_DIAGNOSTIC_READ =
+  "(() => globalThis.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__ ?? null)()";
+
 // Requests the metadata frame picker with one explicit trusted pointer click
 // on the real "#detail-fill" control. The popup only enumerates frames from a
 // trusted gesture with an active user activation, so this control must not be
@@ -568,6 +621,9 @@ export const CHECKOUT_PICKER_STATUSES = Object.freeze([
 // to the same "Checkout origin picker missing" reason as the fixed
 // `pickerStatus` enum, so the stage stays diagnosable.
 export async function openCheckoutPicker(popup, eventually) {
+  if (typeof popup.evaluate === "function") {
+    await popup.evaluate(DETAIL_FILL_DIAGNOSTIC_ENABLE);
+  }
   await popup.click("#detail-fill");
   let shown = false;
   const pickerMissing = "Checkout origin picker missing";
@@ -591,6 +647,14 @@ export async function openCheckoutPicker(popup, eventually) {
     const pickerStatus = !readable || status === ""
       ? "unavailable"
       : known || "other";
+    let pickerDiagnostic = null;
+    try {
+      if (typeof popup.evaluate === "function") {
+        pickerDiagnostic = sanitizeDetailFillDiagnostic(
+          await popup.evaluate(DETAIL_FILL_DIAGNOSTIC_READ),
+        );
+      }
+    } catch {}
     assert(!shown, pickerMissing);
     throw Object.assign(
       Error(status
@@ -599,7 +663,7 @@ export async function openCheckoutPicker(popup, eventually) {
             ? `${known} (${match[0]})`
             : "other (unrecognised public status)")
         : pickerMissing + ": popup status unavailable"),
-      { pickerStatus },
+      { pickerStatus, pickerDiagnostic },
     );
   }
 }

@@ -83,6 +83,57 @@
       return null;
     }
   }
+  const DETAIL_FILL_DIAGNOSTIC_FLAG =
+    "__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__";
+  const DETAIL_FILL_DIAGNOSTIC_LOG =
+    "__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__";
+  const DETAIL_FILL_DIAGNOSTIC_PHASES = new Set([
+    "handler-entry",
+    "early-guard",
+    "gesture-refused",
+    "request-sent",
+    "reply-null",
+    "reply-present",
+    "adopt-refused",
+    "adopted",
+  ]);
+  function detailFillDiagnosticEnabled() {
+    try {
+      return (
+        typeof globalThis !== "undefined" &&
+        globalThis[DETAIL_FILL_DIAGNOSTIC_FLAG] === true
+      );
+    } catch {
+      return false;
+    }
+  }
+  function beginDetailFillDiagnostic(event) {
+    if (!detailFillDiagnosticEnabled()) return null;
+    let userActivation = false;
+    try {
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      userActivation = activation != null && activation.isActive === true;
+    } catch {}
+    const log = [
+      {
+        phase: "handler-entry",
+        isTrusted: event?.isTrusted === true,
+        userActivation,
+      },
+    ];
+    try {
+      globalThis[DETAIL_FILL_DIAGNOSTIC_LOG] = log;
+    } catch {
+      return null;
+    }
+    return log;
+  }
+  function markDetailFillDiagnostic(log, phase) {
+    if (!log || !DETAIL_FILL_DIAGNOSTIC_PHASES.has(phase)) return;
+    if (log.some((record) => record.phase === phase)) return;
+    log.push({ phase });
+  }
   // Only an explicit generate reply may repopulate the preview while a
   // lock/hide-time wipe is still unconfirmed; generic state polls may not.
   const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
@@ -2327,12 +2378,19 @@
       .then(() => api.runtime.sendMessage({ type: "checkout-cancel", nonce }))
       .catch(() => {});
   }
-  async function startCheckoutPicker(detail, event) {
-    if (!detail || !lastState?.connected || popupInactive || busy) return;
+  async function startCheckoutPicker(detail, event, diagnostic) {
+    if (!detail || !lastState?.connected || popupInactive || busy) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
     // Only a real user gesture may enumerate checkout frames.
     const userGesture = cardGesture(event);
-    if (!userGesture) return;
+    if (!userGesture) {
+      markDetailFillDiagnostic(diagnostic, "gesture-refused");
+      return;
+    }
     if (!checkoutChoicesSupported(detail)) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
       toast("当前原生宿主或浏览器不支持选择结账表单");
       return;
     }
@@ -2340,6 +2398,7 @@
     clearCheckoutPickerView({ keepChoice: true });
     const generation = ++actionGeneration;
     busy = true;
+    markDetailFillDiagnostic(diagnostic, "request-sent");
     const state = await send(
       {
         type: "checkout-frames",
@@ -2349,14 +2408,22 @@
       },
       generation,
     );
-    if (generation !== actionGeneration || popupInactive) return;
+    if (generation !== actionGeneration || popupInactive) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
     busy = false;
     if (lastDetail) renderDetail(lastDetail);
+    markDetailFillDiagnostic(
+      diagnostic,
+      state ? "reply-present" : "reply-null",
+    );
     const view =
       state && detail === lastDetail
         ? adoptCheckoutPickerView(state.checkoutPicker, detail)
         : null;
     if (!view) {
+      markDetailFillDiagnostic(diagnostic, "adopt-refused");
       toast(state?.status || "无法列出当前页面的结账表单");
       return;
     }
@@ -2369,6 +2436,7 @@
       if (lastDetail) renderDetail(lastDetail);
     }, view.expiresAt - Date.now());
     renderCheckoutPicker();
+    markDetailFillDiagnostic(diagnostic, "adopted");
   }
   async function chooseCheckoutFrame(picker, choice, event) {
     // An explicit gesture for this exact opaque key; nothing is preselected.
@@ -4449,12 +4517,17 @@
       if (lastDetail) openEditor("edit", lastDetail);
     });
     els.detailFill.addEventListener("click", (event) => {
-      if (!lastDetail) return;
-      // A card whose form may live in a frame is chosen explicitly first.
-      if (checkoutChoicesSupported(lastDetail)) {
-        void startCheckoutPicker(lastDetail, event);
+      const detailFillDiagnostic = beginDetailFillDiagnostic(event);
+      if (!lastDetail) {
+        markDetailFillDiagnostic(detailFillDiagnostic, "early-guard");
         return;
       }
+      // A card whose form may live in a frame is chosen explicitly first.
+      if (checkoutChoicesSupported(lastDetail)) {
+        void startCheckoutPicker(lastDetail, event, detailFillDiagnostic);
+        return;
+      }
+      markDetailFillDiagnostic(detailFillDiagnostic, "early-guard");
       const userGesture = checkoutIsCard(lastDetail)
         ? cardGesture(event)
         : null;

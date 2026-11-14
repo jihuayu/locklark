@@ -18,12 +18,18 @@ import {
   chooseChildOrigin,
   openCheckoutPicker,
   CHECKOUT_PICKER_STATUSES,
+  DETAIL_FILL_DIAGNOSTIC_PHASES,
+  sanitizeDetailFillDiagnostic,
   assertProgrammaticClickRefused,
   acceptCheckoutFrames,
   runLockDuringReviewJourney,
   runCrossSiteJourney,
   CHECKOUT_LOCKED,
 } from "./browser_checkout_acceptance.mjs";
+import {
+  pickerReportFields,
+  recordNativeFailure,
+} from "./browser_native_failure_report.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
 const CARD_ORIGIN = TOP_ORIGIN;
@@ -222,7 +228,15 @@ function pickerPopup(labels, options = {}) {
         : 0;
   return {
     clicked: [],
+    evaluated: [],
     canceled: 0,
+    async evaluate(expression) {
+      this.evaluated.push(expression);
+      if (expression.includes("__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__")) {
+        return options.diagnosticLog ?? null;
+      }
+      return true;
+    },
     async click(selector) {
       this.clicked.push(selector);
       if (selector === "#checkout-cancel") {
@@ -384,7 +398,7 @@ test("a picker that never appears is never reported as cancelled", async () => {
   // its fixed enum, so the red stage stays diagnosable while an unrecognised
   // status is never echoed. An empty line is the picker's absent status.
   for (const [line, shown] of [
-    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture (不会自动选择)"],
+    ["请选择要填充的结账表单来源；不会自动选择", "other (unrecognised public status)"],
     ["当前原生宿主或浏览器不支持选择结账表单", "unsupported (不支持选择结账表单)"],
     ["无法列出当前页面的结账表单", "list-failed (无法列出当前页面的结账表单)"],
     ["本次请求被拒绝", "other (unrecognised public status)"],
@@ -428,7 +442,7 @@ test("a picker that never appears is never reported as cancelled", async () => {
 
 test("a missing picker carries only the fixed status enum", async () => {
   const cases = [
-    ["请选择要填充的结账表单来源；不会自动选择", "no-gesture"],
+    ["请选择要填充的结账表单来源；不会自动选择", "other"],
     ["当前原生宿主或浏览器不支持选择结账表单", "unsupported"],
     ["无法列出当前页面的结账表单", "list-failed"],
     ["已选择结账表单", "selected"],
@@ -2888,4 +2902,178 @@ test("route revocation reattaches a fresh client after the positive cleanup and 
     /\bgoto\b|sendMessage|relayMessage|postMessage|addInitScript|routeStatusTraceProbe|\binput\(|click_label|wait_label/,
   );
   assert.match(checkpoint, /^\s+let revoked = null;$/m);
+});
+
+
+test("detail-fill diagnostic contract rejects unknown fields and phases", () => {
+  assert.deepEqual([...DETAIL_FILL_DIAGNOSTIC_PHASES], [
+    "handler-entry",
+    "early-guard",
+    "gesture-refused",
+    "request-sent",
+    "reply-null",
+    "reply-present",
+    "adopt-refused",
+    "adopted",
+  ]);
+  const valid = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "request-sent" },
+    { phase: "reply-present" },
+    { phase: "adopted" },
+  ];
+  assert.deepEqual(sanitizeDetailFillDiagnostic(valid), valid);
+  for (const invalid of [
+    null,
+    [],
+    [{ phase: "early-guard", isTrusted: true, userActivation: false }],
+    [{ phase: "handler-entry", isTrusted: true }],
+    [{ phase: "handler-entry", isTrusted: 1, userActivation: false }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false, origin: "x" }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "unknown" }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "request-sent", extra: true }],
+    [{ phase: "handler-entry", isTrusted: true, userActivation: false }, { phase: "request-sent" }, { phase: "request-sent" }],
+  ]) {
+    assert.equal(sanitizeDetailFillDiagnostic(invalid), null);
+  }
+});
+
+test("picker failure reads only sanitized diagnostic records", async () => {
+  const valid = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "gesture-refused" },
+  ];
+  const popup = pickerPopup([TOP_LABEL], {
+    noPicker: true,
+    diagnosticLog: valid,
+  });
+  await assert.rejects(
+    () => openCheckoutPicker(popup, eventually),
+    (error) => {
+      assert.deepEqual(error.pickerDiagnostic, valid);
+      assert.equal(error.pickerStatus, "other");
+      return true;
+    },
+  );
+  assert.equal(popup.evaluated.length, 2);
+  assert.match(popup.evaluated[0], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__/);
+  assert.match(popup.evaluated[1], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__/);
+  assert.deepEqual(popup.clicked, ["#detail-fill"]);
+
+  const bad = pickerPopup([TOP_LABEL], {
+    noPicker: true,
+    diagnosticLog: [
+      { phase: "handler-entry", isTrusted: true, userActivation: false, origin: "x" },
+    ],
+  });
+  await assert.rejects(
+    () => openCheckoutPicker(bad, eventually),
+    (error) => error.pickerDiagnostic === null,
+  );
+});
+
+
+test("picker report projection re-cleans and never copies poison fields", () => {
+  const records = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "early-guard" },
+  ];
+  const poison = {
+    label: "raw-label",
+    origin: "https://raw.example",
+    id: "raw-id",
+    value: "raw-value",
+    path: "/tmp/raw-path",
+    error: "raw-error",
+  };
+  const error = {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+    ...poison,
+  };
+  const fields = pickerReportFields(error, true);
+  assert.deepEqual(fields, {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+  });
+  assert.deepEqual(pickerReportFields(error, false), {});
+  assert.equal(
+    pickerReportFields({ ...error, pickerDiagnostic: undefined }, true)
+      .pickerDiagnostic,
+    "unknown",
+  );
+  assert.equal(
+    pickerReportFields(
+      { ...error, pickerDiagnostic: [{ phase: "unknown" }] },
+      true,
+    ).pickerDiagnostic,
+    "unknown",
+  );
+  const rendered = JSON.stringify(fields);
+  for (const value of Object.values(poison)) {
+    assert.equal(rendered.includes(value), false);
+  }
+});
+
+test("native failure emission contains fixed picker records and survives disk failure", () => {
+  const records = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "request-sent" },
+    { phase: "reply-present" },
+    { phase: "adopted" },
+  ];
+  const error = {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+    label: "raw-label",
+    origin: "https://raw.example",
+    id: "raw-id",
+    value: "raw-value",
+    path: "/tmp/raw-path",
+    error: "raw-error",
+  };
+  const report = {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-picker-cancel:picker",
+    ...pickerReportFields(error, true),
+  };
+  const written = [];
+  const lines = [];
+  const originalError = console.error;
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    const json = recordNativeFailure(
+      (path, data, options) => written.push({ path, data, options }),
+      report,
+      "/tmp/synthetic-diagnostics",
+    );
+    assert.equal(written.length, 1);
+    assert.match(written[0].path, /failure\.json$/);
+    assert.equal(written[0].data, json);
+    assert.deepEqual(JSON.parse(json).pickerDiagnostic, records);
+    assert.equal(lines.some((line) => line.includes("pickerDiagnostic")), true);
+    assert.equal(recordNativeFailure(() => {
+      throw Error("disk");
+    }, report, "/tmp/synthetic-diagnostics").includes("pickerDiagnostic"), true);
+    const unknownReport = {
+      reason: "Synthetic checkout failure",
+      stage: "checkout-picker-cancel:picker",
+      ...pickerReportFields({ pickerStatus: "other" }, true),
+    };
+    const unknownJson = recordNativeFailure(
+      (path, data, options) => written.push({ path, data, options }),
+      unknownReport,
+      "/tmp/synthetic-diagnostics",
+    );
+    assert.equal(JSON.parse(unknownJson).pickerDiagnostic, "unknown");
+    assert.equal(lines.length >= 6, true);
+  } finally {
+    console.error = originalError;
+  }
+  const rendered = JSON.stringify(report);
+  for (const value of ["raw-label", "https://raw.example", "raw-id", "raw-value", "/tmp/raw-path", "raw-error"]) {
+    assert.equal(rendered.includes(value), false);
+    assert.equal(lines.join("\n").includes(value), false);
+  }
+  assert.deepEqual(error.pickerDiagnostic, records);
 });

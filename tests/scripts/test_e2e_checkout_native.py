@@ -954,6 +954,105 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertEqual(alone["pickerStatus"], "other")
         self.assertEqual(alone["kind"], "acceptance-failure")
 
+    def _node_failure_report(self, *, error=None, report=None):
+        helper = (ROOT / "scripts" / "browser_native_failure_report.mjs").as_uri()
+        if error is not None:
+            script = (
+                "import { pickerReportFields, recordNativeFailure } from "
+                + json.dumps(helper)
+                + "; const error = "
+                + json.dumps(error)
+                + "; const report = {reason: 'Synthetic checkout failure', "
+                + "stage: 'checkout-picker-cancel:picker', "
+                + "...pickerReportFields(error, true)}; "
+                + "recordNativeFailure((path, data) => {}, report, "
+                + "'/tmp/synthetic-diagnostics');"
+            )
+        else:
+            script = (
+                "import { recordNativeFailure } from "
+                + json.dumps(helper)
+                + "; recordNativeFailure((path, data) => {}, "
+                + json.dumps(report)
+                + ", '/tmp/synthetic-diagnostics');"
+            )
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout, completed.stderr
+
+    def test_picker_diagnostic_flows_through_real_sender_to_evidence(self):
+        picker = "checkout-picker-cancel:picker"
+        records = [
+            {"phase": "handler-entry", "isTrusted": True, "userActivation": False},
+            {"phase": "request-sent"},
+            {"phase": "reply-present"},
+            {"phase": "adopted"},
+        ]
+        error = {
+            "pickerStatus": "other",
+            "pickerDiagnostic": records,
+            "label": "CANARY-9f3a1c",
+            "origin": "https://leak.example",
+            "id": "raw-id",
+            "value": "raw-value",
+            "path": "/home/runner/x",
+            "error": "raw-error",
+        }
+        stdout, stderr = self._node_failure_report(error=error)
+        record, message = self._nonzero(stderr, stdout)
+        self._assert_no_canary(record, message)
+        self.assertEqual(record["pickerStatus"], "other")
+        self.assertEqual(record["pickerDiagnostic"], records)
+        rendered = json.dumps(record)
+        for value in (
+            "CANARY-9f3a1c", "https://leak.example", "raw-id",
+            "raw-value", "/home/runner/x", "raw-error",
+        ):
+            self.assertNotIn(value, rendered)
+
+        # A malformed sender record is reduced to the fixed unknown, never raw.
+        malformed = {
+            "reason": "Synthetic checkout failure",
+            "stage": picker,
+            "pickerStatus": "other",
+            "pickerDiagnostic": [
+                {"phase": "unknown", "label": "CANARY-9f3a1c"},
+            ],
+        }
+        stdout, stderr = self._node_failure_report(report=malformed)
+        record, message = self._nonzero(stderr, stdout)
+        self._assert_no_canary(record, message)
+        self.assertEqual(record["pickerDiagnostic"], "unknown")
+        self.assertEqual(record["pickerStatus"], "other")
+
+        # An older sender without the field remains compatible.
+        legacy = {
+            "reason": "Synthetic checkout failure",
+            "stage": picker,
+            "pickerStatus": "other",
+        }
+        stdout, stderr = self._node_failure_report(report=legacy)
+        record, message = self._nonzero(stderr, stdout)
+        self._assert_no_canary(record, message)
+        self.assertEqual(record["pickerStatus"], "other")
+        self.assertNotIn("pickerDiagnostic", record)
+
+        # Missing both optional fields stays the existing base record.
+        missing = {"reason": "Synthetic checkout failure", "stage": picker}
+        stdout, stderr = self._node_failure_report(report=missing)
+        record, message = self._nonzero(stderr, stdout)
+        self._assert_no_canary(record, message)
+        self.assertNotIn("pickerStatus", record)
+        self.assertNotIn("pickerDiagnostic", record)
+        self.assertEqual(record["kind"], "acceptance-failure")
+
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX
         diag = support._CHECKOUT_DIAGNOSTIC_PREFIX
@@ -1570,21 +1669,18 @@ class CheckoutFailureEvidenceEmissionTests(unittest.TestCase):
     """The captured failure lines survive a failure.json write error."""
 
     def _run(self, write: str) -> dict:
-        """Execute the real emitter with an injected writeFile; no UI or app."""
+        """Execute the real emitter module with an injected writeFile; no UI."""
 
-        source = (ROOT / "scripts" / "browser_native_acceptance.mjs").read_text(
+        helper = (ROOT / "scripts" / "browser_native_failure_report.mjs").as_uri()
+        source = (ROOT / "scripts" / "browser_native_failure_report.mjs").read_text(
             encoding="utf-8"
         )
-        start = source.index("function recordNativeFailure(")
-        end = source.index("\n}\n", start) + 3
-        # The writer is injected, so no real file, raw error text or canary
-        # escapes; stderr is ignored and only the fixed stdout is read.
+        self.assertIn("writeFile(join(diagnostics,", source)
         script = "\n".join((
-            'const { join } = require("node:path");',
+            f"import {{ recordNativeFailure }} from {json.dumps(helper)};",
             "const writes = new Map();",
             "const lines = [];",
             "console.error = (line) => lines.push(String(line));",
-            source[start:end],
             f"const report = {json.dumps(REPORT)};",
             f"const directory = {json.dumps(PRIVATE_DIRECTORY)};",
             "let thrown = null;",
@@ -1599,15 +1695,13 @@ class CheckoutFailureEvidenceEmissionTests(unittest.TestCase):
             "{lines, writes: [...writes.values()], thrown}));",
         ))
         result = subprocess.run(
-            ["node", "--input-type=commonjs", "-e", script],
+            ["node", "--input-type=module", "-e", script],
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr[-500:])
-        # Harness self-check: both cases run the extraction the test assumes.
-        self.assertIn("writeFile(join(diagnostics,", script)
         return json.loads(result.stdout)
 
     def test_one_report_and_private_write_are_emitted_on_success(self):

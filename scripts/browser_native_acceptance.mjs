@@ -29,6 +29,10 @@ import {
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase, CHECKOUT_PICKER_STATUSES } from "./browser_checkout_acceptance.mjs";
 import {
+  pickerReportFields,
+  recordNativeFailure,
+} from "./browser_native_failure_report.mjs";
+import {
   EDGE_BACKGROUND_URL,
   EDGE_EXTENSION_ID,
   EDGE_INSTALL_PASS,
@@ -37,19 +41,6 @@ import {
   installEdgeExtensionThroughManager,
   manifestExtensionId,
 } from "./browser_edge_install.mjs";
-
-// One failure record end to end: emit both fixed lines, then write
-// failure.json privately. A disk write error is swallowed here so it can never
-// replace the emitted report or the original failure the caller throws.
-function recordNativeFailure(writeFile, report, diagnostics) {
-  const json = JSON.stringify(report, null, 2) + "\n";
-  console.error("Native browser diagnostic: " + JSON.stringify(report));
-  console.error("Synthetic diagnostic directory: " + diagnostics);
-  try {
-    writeFile(join(diagnostics, "failure.json"), json, { mode: 0o600 });
-  } catch {}
-  return json;
-}
 
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
@@ -3496,6 +3487,11 @@ try {
       "Edge pair status not disconnected",
       "Edge pair refresh remained enabled after disconnect",
     ];
+    const pickerStatusEligible =
+      CHECKOUT_PICKER_STATUSES.includes(error?.pickerStatus) &&
+      !nativeHelperError &&
+      !edgeInstallOnly &&
+      !edgePairDisconnect;
     const report = {
       reason: safeReasons.includes(error?.message)
         ? error.message
@@ -3505,16 +3501,9 @@ try {
           ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
           : [],
       stage,
-      // The picker's own fixed status enum, present only when the trusted
-      // fill click never opened the picker, and never beside a native helper
-      // error or an Edge classification (the helper call is the original
-      // failure); never raw text.
-      ...(CHECKOUT_PICKER_STATUSES.includes(error?.pickerStatus) &&
-      !nativeHelperError &&
-      !edgeInstallOnly &&
-      !edgePairDisconnect
-        ? { pickerStatus: error.pickerStatus }
-        : {}),
+      // The picker's own fixed status enum plus its re-cleaned finite phase
+      // records. Missing or malformed records stay "unknown"; no raw text.
+      ...pickerReportFields(error, pickerStatusEligible),
       // Only the last helper call's fixed contract fields, never raw stderr.
       ...(nativeHelperError ? { nativeError: nativeHelperError } : {}),
       // Latest fixed-enum route-page observation from the bounded native-label
