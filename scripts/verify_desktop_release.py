@@ -5,7 +5,8 @@ The release workflow runs this after the Windows and macOS jobs upload to
 the same draft. It checks that each MyGo update manifest names the exact
 archive for its platform and version, verifies the manifest's Ed25519
 signature, inspects the signed archive's Windows PE and macOS universal
-Mach-O metadata, rejects unexpected assets, and writes a complete SHA256SUMS.
+Mach-O metadata, checks each signed delta index against that platform's
+archive, rejects unexpected assets, and writes a complete SHA256SUMS.
 """
 
 from __future__ import annotations
@@ -128,20 +129,33 @@ def identity_helper() -> Path:
     return helper
 
 
-def verify_archive_identity(
-    path: Path, platform: str, version: str, label: str
+def verify_release_identity(
+    assets: Path,
+    version: str,
+    full_archives: dict[str, str],
+    deltas: list[dict[str, str]],
 ) -> None:
+    """Verify both full archives and all deltas in one helper invocation."""
     helper = identity_helper()
+    plan = {
+        "version": version,
+        "full": {
+            platform: str(assets / name)
+            for platform, name in full_archives.items()
+        },
+        "deltas": [
+            {
+                "platform": delta["platform"],
+                "from": delta["from"],
+                "path": str(assets / delta["name"]),
+            }
+            for delta in deltas
+        ],
+    }
     try:
         result = subprocess.run(
-            [
-                str(helper),
-                "--platform",
-                platform,
-                "--version",
-                version,
-                str(path),
-            ],
+            [str(helper), "--plan"],
+            input=json.dumps(plan),
             capture_output=True,
             text=True,
         )
@@ -149,9 +163,9 @@ def verify_archive_identity(
         fail(f"cannot run the archive identity helper: {exc}")
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
-        fail(f"{label} content identity does not verify: {detail}")
+        fail(f"content identity does not verify: {detail}")
     if result.stdout.strip() != "archive identity ok":
-        fail(f"{label} content identity helper returned an unexpected result")
+        fail("content identity helper returned an unexpected result")
 
 
 def sha256(path: Path) -> bytes:
@@ -253,6 +267,8 @@ def main() -> None:
 
     expected: set[str] = set()
     signed_assets: set[str] = set()
+    full_archives: dict[str, str] = {}
+    delta_identities: list[dict[str, str]] = []
     for platform in PLATFORMS:
         manifest_name = f"update-{platform}.json"
         manifest_path = assets / manifest_name
@@ -276,9 +292,7 @@ def main() -> None:
             signature=manifest.get("signature"),
             expected_name=expected_archive_name(args.version, platform),
         )
-        verify_archive_identity(
-            assets / archive, platform, args.version, f"{platform} archive"
-        )
+        full_archives[platform] = archive
         signed_assets.add(archive)
         deltas = manifest.get("deltas", [])
         if not isinstance(deltas, list):
@@ -290,19 +304,25 @@ def main() -> None:
                 or not delta["from"]
             ):
                 fail(f"{manifest_name} delta {index} is invalid")
-            signed_assets.add(
-                validate_signed_asset(
-                    assets,
-                    public_key,
-                    label=f"{platform} delta from {delta['from']}",
-                    url=delta.get("url"),
-                    size=delta.get("size"),
-                    signature=delta.get("signature"),
-                    expected_name=expected_delta_name(
-                        args.version, platform, delta["from"]
-                    ),
-                )
+            name = validate_signed_asset(
+                assets,
+                public_key,
+                label=f"{platform} delta from {delta['from']}",
+                url=delta.get("url"),
+                size=delta.get("size"),
+                signature=delta.get("signature"),
+                expected_name=expected_delta_name(
+                    args.version, platform, delta["from"]
+                ),
             )
+            delta_identities.append(
+                {
+                    "platform": platform,
+                    "from": delta["from"],
+                    "name": name,
+                }
+            )
+            signed_assets.add(name)
         expected.add(manifest_name)
 
     version = args.version
@@ -323,6 +343,8 @@ def main() -> None:
     unexpected = sorted(actual - expected - {CHECKSUMS})
     if unexpected:
         fail("unexpected release assets: " + ", ".join(unexpected))
+
+    verify_release_identity(assets, version, full_archives, delta_identities)
 
     checksummed = sorted(signed_assets | required)
     lines = [f"{sha256(assets / name).hex()}  {name}\n" for name in checksummed]

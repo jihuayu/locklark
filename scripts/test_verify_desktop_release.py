@@ -2,10 +2,10 @@
 """Focused contracts for verify_desktop_release.py.
 
 The archives hold minimal real Go PE/Mach-O fixtures signed by a temporary
-Ed25519 key. They exercise the verifier's real digest, size, OpenSSL, PE,
-Mach-O, Go build-info and tar checks; they do not build, sign, or publish a
-real Locklark release, and they are not evidence that production artifacts
-have the identity checked here.
+Ed25519 key; deltas use the real MyGo raw-DEFLATE index format. They exercise
+the verifier's real digest, size, OpenSSL, PE, Mach-O, Go build-info, tar and
+delta-index checks; they do not build, sign, or publish a real Locklark
+release, apply a delta, or prove production release acceptance.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 
@@ -32,8 +33,10 @@ VERSION = "1.2.3"
 OLD_VERSION = "1.0.0"
 IDENTIFIER = "app.locklark.desktop"
 WINDOWS_EXECUTABLE = "Locklark.exe"
-DARWIN_EXECUTABLE = "Locklark.app/Contents/MacOS/Locklark"
-DARWIN_INFO_PLIST = "Locklark.app/Contents/Info.plist"
+DARWIN_BUNDLE = "Locklark.app"
+DARWIN_EXECUTABLE = DARWIN_BUNDLE + "/Contents/MacOS/Locklark"
+DARWIN_INFO_PLIST = DARWIN_BUNDLE + "/Contents/Info.plist"
+DELTA_MAGIC = b"mygo delta 1\n"
 PLATFORM_ARCHIVE = {
     "windows-amd64": f"locklark-{VERSION}-windows-amd64.tar.gz",
     "darwin-universal": f"locklark-{VERSION}-darwin-universal.tar.gz",
@@ -129,6 +132,23 @@ class SyntheticRelease:
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
         )
         return manifest
+
+    def write_delta(
+        self,
+        assets: Path,
+        platform: str,
+        from_version: str,
+        payload: bytes,
+        version: str = VERSION,
+    ) -> tuple[str, dict]:
+        name = f"locklark-{from_version}-to-{version}-{platform}.delta"
+        self.add_asset(assets, name, payload)
+        return name, {
+            "from": from_version,
+            "url": f"https://example.invalid/releases/download/v{version}/{name}",
+            "size": len(payload),
+            "signature": self.sign(payload),
+        }
 
     def add_installer_assets(self, assets: Path, version: str = VERSION) -> None:
         self.add_asset(assets, f"locklark-setup-{version}-amd64.exe", b"setup")
@@ -306,6 +326,11 @@ func main() {
             for entry in entries:
                 info = tarfile.TarInfo(entry["name"])
                 info.mode = entry.get("mode", 0o644)
+                if entry.get("type") == "dir":
+                    info.type = tarfile.DIRTYPE
+                    info.mode = entry.get("mode", 0o755)
+                    archive.addfile(info)
+                    continue
                 if entry.get("type") == "symlink":
                     info.type = tarfile.SYMTYPE
                     info.linkname = entry["linkname"]
@@ -327,6 +352,96 @@ func main() {
             compressed.write(b"\0" * 1024)
         return buffer.getvalue()
 
+    @staticmethod
+    def deflate(data: bytes) -> bytes:
+        compressor = zlib.compressobj(level=9, wbits=-15)
+        return compressor.compress(data) + compressor.flush()
+
+    @staticmethod
+    def uvarint(value: int) -> bytes:
+        out = bytearray()
+        while value >= 0x80:
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        out.append(value)
+        return bytes(out)
+
+    def delta_parts(
+        self,
+        archive: bytes,
+        platform: str,
+        from_version: str,
+        to_version: str = VERSION,
+    ) -> tuple[dict, list[bytes]]:
+        entries: list[dict] = []
+        blobs: list[bytes] = []
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
+            for info in source.getmembers():
+                path = info.name
+                if platform == "darwin-universal":
+                    if path == DARWIN_BUNDLE:
+                        if not info.isdir():
+                            raise AssertionError("bundle root is not a directory")
+                        continue
+                    prefix = DARWIN_BUNDLE + "/"
+                    if not path.startswith(prefix):
+                        raise AssertionError(f"entry outside bundle: {path}")
+                    path = path[len(prefix) :]
+                if info.isdir():
+                    entries.append({"path": path, "dir": True})
+                elif info.issym():
+                    entries.append({"path": path, "link": info.linkname})
+                elif info.isfile():
+                    data = source.extractfile(info).read()
+                    blob = self.deflate(data)
+                    entries.append(
+                        {
+                            "path": path,
+                            "mode": info.mode & 0o777,
+                            "size": len(data),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                            "data": len(blob),
+                        }
+                    )
+                    blobs.append(blob)
+                else:
+                    raise AssertionError(f"unsupported fixture entry: {path}")
+        return {
+            "from": from_version,
+            "version": to_version,
+            "entries": entries,
+        }, blobs
+
+    def build_delta(
+        self,
+        index: dict,
+        blobs: list[bytes],
+        *,
+        compressed_index: bytes | None = None,
+        header: bytes | None = None,
+        trailing: bytes = b"",
+    ) -> bytes:
+        if compressed_index is None:
+            raw = json.dumps(
+                index, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+            compressed_index = self.deflate(raw)
+        if header is None:
+            header = DELTA_MAGIC + self.uvarint(len(compressed_index))
+        return header + compressed_index + b"".join(blobs) + trailing
+
+    def delta(
+        self,
+        archive: bytes,
+        platform: str,
+        from_version: str,
+        to_version: str = VERSION,
+    ) -> bytes:
+        index, blobs = self.delta_parts(
+            archive, platform, from_version, to_version
+        )
+        return self.build_delta(index, blobs)
+
     def windows_archive(
         self,
         version: str = VERSION,
@@ -338,7 +453,13 @@ func main() {
         if entries is None:
             executable = executable or self.windows(version, identifier)
             entries = [
-                {"name": WINDOWS_EXECUTABLE, "data": executable, "mode": 0o755}
+                {"name": WINDOWS_EXECUTABLE, "data": executable, "mode": 0o755},
+                {"name": "resources", "type": "dir", "mode": 0o755},
+                {
+                    "name": "resources/readme.txt",
+                    "data": b"resources\n",
+                    "mode": 0o644,
+                },
             ]
         return self.tar_gz(entries)
 
@@ -354,12 +475,29 @@ func main() {
             executable = executable or self.universal(version)
             plist = plist if plist is not None else self.plist(version)
             entries = [
+                {"name": DARWIN_BUNDLE, "type": "dir", "mode": 0o755},
+                {"name": DARWIN_BUNDLE + "/Contents", "type": "dir", "mode": 0o755},
+                {
+                    "name": DARWIN_BUNDLE + "/Contents/MacOS",
+                    "type": "dir",
+                    "mode": 0o755,
+                },
+                {
+                    "name": DARWIN_BUNDLE + "/Contents/Resources",
+                    "type": "dir",
+                    "mode": 0o755,
+                },
                 {"name": DARWIN_EXECUTABLE, "data": executable, "mode": 0o755},
                 {"name": DARWIN_INFO_PLIST, "data": plist, "mode": 0o644},
                 {
-                    "name": "Locklark.app/Contents/PkgInfo",
+                    "name": DARWIN_BUNDLE + "/Contents/PkgInfo",
                     "data": b"APPL????",
                     "mode": 0o644,
+                },
+                {
+                    "name": DARWIN_BUNDLE + "/Contents/Resources/current",
+                    "type": "symlink",
+                    "linkname": "../MacOS",
                 },
             ]
         return self.tar_gz(entries)
@@ -406,6 +544,29 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
         self.assertFalse((assets / "SHA256SUMS").exists())
 
+    def write_release(
+        self,
+        assets: Path,
+        windows: bytes,
+        darwin: bytes,
+        *,
+        windows_deltas: list[dict] | None = None,
+        darwin_deltas: list[dict] | None = None,
+    ) -> None:
+        self.release.add_asset(
+            assets, PLATFORM_ARCHIVE["windows-amd64"], windows
+        )
+        self.release.add_asset(
+            assets, PLATFORM_ARCHIVE["darwin-universal"], darwin
+        )
+        self.release.add_installer_assets(assets)
+        self.release.write_manifest(
+            assets, "windows-amd64", windows, deltas=windows_deltas
+        )
+        self.release.write_manifest(
+            assets, "darwin-universal", darwin, deltas=darwin_deltas
+        )
+
     def test_00_signed_digest_smoke(self) -> None:
         payload = b"synthetic signed bytes for the verifier smoke"
         signature = base64.b64decode(self.release.sign(payload))
@@ -451,6 +612,321 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
             )
             self.assertNotEqual(tampered.returncode, 0)
 
+    def test_01_real_signed_delta_smoke(self) -> None:
+        assets = self.release.assets()
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        win_payload = self.go.delta(windows, "windows-amd64", OLD_VERSION)
+        dar_payload = self.go.delta(darwin, "darwin-universal", OLD_VERSION)
+        win_name, win_delta = self.release.write_delta(
+            assets, "windows-amd64", OLD_VERSION, win_payload
+        )
+        dar_name, dar_delta = self.release.write_delta(
+            assets, "darwin-universal", OLD_VERSION, dar_payload
+        )
+        self.write_release(
+            assets,
+            windows,
+            darwin,
+            windows_deltas=[win_delta],
+            darwin_deltas=[dar_delta],
+        )
+
+        result = self.release.run(assets)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checksums = parse_checksums(assets / "SHA256SUMS")
+        self.assertIn(win_name, checksums)
+        self.assertIn(dar_name, checksums)
+        self.assertEqual(
+            checksums[win_name], hashlib.sha256(win_payload).hexdigest()
+        )
+        self.assertEqual(
+            checksums[dar_name], hashlib.sha256(dar_payload).hexdigest()
+        )
+
+    def test_02_cross_platform_delta_target_tree_is_rejected(self) -> None:
+        assets = self.release.assets()
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        payload = self.go.delta(windows, "windows-amd64", "1.1.0")
+        _, delta = self.release.write_delta(
+            assets, "darwin-universal", "1.1.0", payload
+        )
+        self.write_release(
+            assets, windows, darwin, darwin_deltas=[delta]
+        )
+
+        result = self.release.run(assets)
+        self.assert_rejected(result, assets)
+        self.assertIn("darwin-universal delta from 1.1.0", result.stderr)
+        self.assertIn("full archive", result.stderr)
+
+    def test_03_old_version_delta_index_is_rejected(self) -> None:
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        index, blobs = self.go.delta_parts(
+            windows, "windows-amd64", "1.1.0"
+        )
+        index["from"] = OLD_VERSION
+        cases = {
+            "to-old": self.go.delta(
+                windows, "windows-amd64", "1.1.0", OLD_VERSION
+            ),
+            "from-mismatch": self.go.build_delta(index, blobs),
+        }
+        for name, payload in cases.items():
+            with self.subTest(case=name):
+                assets = self.release.assets()
+                _, delta = self.release.write_delta(
+                    assets, "windows-amd64", "1.1.0", payload
+                )
+                self.write_release(
+                    assets, windows, darwin, windows_deltas=[delta]
+                )
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn(
+                    "windows-amd64 delta from 1.1.0", result.stderr
+                )
+                self.assertIn("index updates", result.stderr)
+
+    def test_04_old_target_delta_renamed_current_is_rejected(self) -> None:
+        assets = self.release.assets()
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        payload = self.go.delta(
+            self.old_windows_archive, "windows-amd64", "1.1.0"
+        )
+        _, delta = self.release.write_delta(
+            assets, "windows-amd64", "1.1.0", payload
+        )
+        self.write_release(
+            assets, windows, darwin, windows_deltas=[delta]
+        )
+
+        result = self.release.run(assets)
+        self.assert_rejected(result, assets)
+        self.assertIn("windows-amd64 delta from 1.1.0", result.stderr)
+        self.assertIn("full archive", result.stderr)
+
+    def test_05_delta_entry_tree_mismatch_is_rejected(self) -> None:
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        win_index, win_blobs = self.go.delta_parts(
+            windows, "windows-amd64", "1.1.0"
+        )
+        dar_index, dar_blobs = self.go.delta_parts(
+            darwin, "darwin-universal", "1.1.0"
+        )
+
+        def clone(index: dict) -> dict:
+            return json.loads(json.dumps(index))
+
+        def file_entry(index: dict) -> dict:
+            return next(
+                entry
+                for entry in index["entries"]
+                if "sha256" in entry
+            )
+
+        def dir_entry(index: dict) -> dict:
+            return next(
+                entry
+                for entry in index["entries"]
+                if entry.get("dir")
+            )
+
+        def link_entry(index: dict) -> dict:
+            return next(
+                entry
+                for entry in index["entries"]
+                if entry.get("link")
+            )
+
+        cases: dict[str, tuple[str, bytes, str]] = {}
+        index = clone(win_index)
+        file_entry(index)["sha256"] = "0" * 64
+        cases["file-sha"] = (
+            "windows-amd64",
+            self.go.build_delta(index, win_blobs),
+            "full archive",
+        )
+        index = clone(win_index)
+        file_entry(index)["mode"] = (file_entry(index)["mode"] + 1) & 0o777
+        cases["file-mode"] = (
+            "windows-amd64",
+            self.go.build_delta(index, win_blobs),
+            "full archive",
+        )
+        index = clone(win_index)
+        index["entries"].append({"path": "extra", "dir": True})
+        cases["extra-dir"] = (
+            "windows-amd64",
+            self.go.build_delta(index, win_blobs),
+            "not in the full archive",
+        )
+        index = clone(win_index)
+        index["entries"].remove(dir_entry(index))
+        cases["missing-dir"] = (
+            "windows-amd64",
+            self.go.build_delta(index, win_blobs),
+            "missing full archive entry",
+        )
+        index = clone(dar_index)
+        link_entry(index)["link"] = "../Elsewhere"
+        cases["link-target"] = (
+            "darwin-universal",
+            self.go.build_delta(index, dar_blobs),
+            "delta link",
+        )
+
+        for name, (platform, payload, detail) in cases.items():
+            with self.subTest(case=name):
+                assets = self.release.assets()
+                _, delta = self.release.write_delta(
+                    assets, platform, "1.1.0", payload
+                )
+                if platform == "windows-amd64":
+                    self.write_release(
+                        assets, windows, darwin, windows_deltas=[delta]
+                    )
+                else:
+                    self.write_release(
+                        assets, windows, darwin, darwin_deltas=[delta]
+                    )
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn(f"{platform} delta from 1.1.0", result.stderr)
+                self.assertIn(detail, result.stderr)
+
+    def test_06_malformed_delta_is_rejected(self) -> None:
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        index, blobs = self.go.delta_parts(
+            windows, "windows-amd64", "1.1.0"
+        )
+        good = self.go.build_delta(index, blobs)
+        compressed_index = self.go.deflate(
+            json.dumps(index, separators=(",", ":")).encode()
+        )
+
+        def clone(value: dict) -> dict:
+            return json.loads(json.dumps(value))
+
+        cases: dict[str, tuple[bytes, str]] = {
+            "index-trailing": (
+                self.go.build_delta(
+                    index,
+                    blobs,
+                    compressed_index=compressed_index + b"x",
+                ),
+                "trailing data after the delta index",
+            ),
+            "bad-json": (
+                self.go.build_delta(
+                    index,
+                    blobs,
+                    compressed_index=self.go.deflate(b"not json"),
+                ),
+                "invalid delta index",
+            ),
+            "duplicate-json-key": (
+                self.go.build_delta(
+                    index,
+                    blobs,
+                    compressed_index=self.go.deflate(
+                        json.dumps(index, separators=(",", ":"))
+                        .replace(
+                            '"version":"1.2.3"',
+                            '"version":"1.2.3","version":"1.2.3"',
+                            1,
+                        )
+                        .encode()
+                    ),
+                ),
+                "duplicate JSON key",
+            ),
+            "truncated": (good[:-1], "data"),
+            "extra": (good + b"x", "data"),
+            "bad-magic": (
+                b"X" * len(DELTA_MAGIC) + good[len(DELTA_MAGIC) :],
+                "not a mygo delta",
+            ),
+            "bad-deflate": (
+                self.go.build_delta(
+                    index, blobs, compressed_index=b"\xff"
+                ),
+                "inflate",
+            ),
+            "non-canonical": (
+                self.go.build_delta(
+                    index,
+                    blobs,
+                    compressed_index=compressed_index,
+                    header=DELTA_MAGIC + b"\x80\x00",
+                ),
+                "non-canonical",
+            ),
+        }
+        mutated = clone(index)
+        mutated["entries"].append({"path": "resources", "dir": True})
+        cases["duplicate"] = (
+            self.go.build_delta(mutated, blobs),
+            "duplicate delta entry",
+        )
+        mutated = clone(index)
+        next(
+            entry for entry in mutated["entries"] if entry.get("dir")
+        )["path"] = "../resources"
+        cases["traversal"] = (
+            self.go.build_delta(mutated, blobs),
+            "canonical",
+        )
+        mutated = clone(index)
+        next(
+            entry for entry in mutated["entries"] if entry.get("dir")
+        )["path"] += "/"
+        cases["trailing-slash"] = (
+            self.go.build_delta(mutated, blobs),
+            "trailing slash",
+        )
+        mutated = clone(index)
+        mutated["unknown"] = True
+        cases["unknown-field"] = (
+            self.go.build_delta(mutated, blobs),
+            "invalid delta index",
+        )
+        mutated = clone(index)
+        next(
+            entry for entry in mutated["entries"] if "sha256" in entry
+        )["data"] += 1
+        cases["data-offset"] = (
+            self.go.build_delta(mutated, blobs),
+            "data",
+        )
+        mutated = clone(index)
+        next(
+            entry for entry in mutated["entries"] if "sha256" in entry
+        )["mode"] = 0o1000
+        cases["bad-mode"] = (
+            self.go.build_delta(mutated, blobs),
+            "invalid metadata",
+        )
+
+        for name, (payload, detail) in cases.items():
+            with self.subTest(case=name):
+                assets = self.release.assets()
+                _, delta = self.release.write_delta(
+                    assets, "windows-amd64", "1.1.0", payload
+                )
+                self.write_release(
+                    assets, windows, darwin, windows_deltas=[delta]
+                )
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn("windows-amd64 delta from 1.1.0", result.stderr)
+                self.assertIn(detail, result.stderr)
+
     def test_valid_release_binds_both_platform_archives(self) -> None:
         assets = self.release.assets()
         windows = self.windows_archive
@@ -494,8 +970,8 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
 
         result = self.release.run(assets)
         self.assert_rejected(result, assets)
-        self.assertIn("darwin-universal archive content identity", result.stderr)
-        self.assertIn(DARWIN_EXECUTABLE, result.stderr)
+        self.assertIn("darwin-universal archive", result.stderr)
+        self.assertIn("archive is missing", result.stderr)
 
     def test_cross_platform_executables_inside_archives_are_rejected(self) -> None:
         cases = {
@@ -848,7 +1324,38 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
 
                 result = self.release.run(assets)
                 self.assert_rejected(result, assets)
-                self.assertIn("windows-amd64 archive content identity", result.stderr)
+                self.assertIn("windows-amd64 archive", result.stderr)
+
+    def test_07_delta_signature_and_size_stay_failclosed(self) -> None:
+        windows = self.windows_archive
+        darwin = self.darwin_archive
+        for name in ("size", "signature"):
+            with self.subTest(case=name):
+                assets = self.release.assets()
+                payload = self.go.delta(
+                    windows, "windows-amd64", "1.1.0"
+                )
+                delta_name, delta = self.release.write_delta(
+                    assets, "windows-amd64", "1.1.0", payload
+                )
+                if name == "size":
+                    (assets / delta_name).write_bytes(payload[:-1])
+                else:
+                    delta["signature"] = base64.b64encode(b"short").decode(
+                        "ascii"
+                    )
+                self.write_release(
+                    assets, windows, darwin, windows_deltas=[delta]
+                )
+
+                result = self.release.run(assets)
+                self.assert_rejected(result, assets)
+                self.assertIn(
+                    "windows-amd64 delta from 1.1.0", result.stderr
+                )
+                self.assertIn(
+                    "bytes" if name == "size" else "signature", result.stderr
+                )
 
     def test_actual_bytes_size_and_signature_stay_failclosed(self) -> None:
         def tampered_payload(assets: Path, manifest: dict) -> None:

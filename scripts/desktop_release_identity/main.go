@@ -8,19 +8,28 @@
 // must carry the requested MyGo package version and the Locklark identifier,
 // and the macOS Info.plist must name the same bundle and version.
 //
-// The helper is built once by scripts/verify_desktop_release.py and reused
-// for both platform archives.
+// In plan mode it also checks each signed "mygo delta 1" index: the raw
+// DEFLATE JSON index must name the exact from/to versions and its entry tree
+// must match the already-read full archive of the same platform. Delta data
+// is bounded by offsets but is not decompressed or applied.
+//
+// The helper is built once by scripts/verify_desktop_release.py and handles
+// both platform archives and all deltas in one invocation.
 package main
 
 import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
+	"crypto/sha256"
 	"debug/buildinfo"
 	"debug/macho"
 	"debug/pe"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -51,13 +60,73 @@ const (
 	maxEntries        = 200000
 	maxPathLength     = 4096
 	maxLinkLength     = 4096
+
+	deltaMagic              = "mygo delta 1\n"
+	maxDeltaSize            = int64(1 << 30)
+	maxDeltaIndex           = 16 << 20
+	maxDeltaIndexCompressed = 16 << 20
+	maxDeltaEntries         = 200000
+	maxPlanSize             = 1 << 20
 )
 
+type archiveEntry struct {
+	kind   byte
+	mode   uint32
+	size   int64
+	sha256 string
+	link   string
+}
+
+type archiveContents struct {
+	files map[string][]byte
+	tree  map[string]archiveEntry
+}
+
+type plan struct {
+	Version string            `json:"version"`
+	Full    map[string]string `json:"full"`
+	Deltas  []planDelta       `json:"deltas"`
+}
+
+type planDelta struct {
+	Platform string `json:"platform"`
+	From     string `json:"from"`
+	Path     string `json:"path"`
+}
+
+type deltaIndex struct {
+	From    string       `json:"from"`
+	Version string       `json:"version"`
+	Entries []deltaEntry `json:"entries"`
+}
+
+type deltaEntry struct {
+	Path   string `json:"path"`
+	Dir    bool   `json:"dir,omitempty"`
+	Link   string `json:"link,omitempty"`
+	Mode   uint32 `json:"mode,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	From   string `json:"from,omitempty"`
+	Data   int64  `json:"data,omitempty"`
+}
+
 func main() {
+	planMode := flag.Bool("plan", false, "read a JSON verification plan from stdin")
 	platform := flag.String("platform", "", "archive target: windows-amd64 or darwin-universal")
 	version := flag.String("version", "", "expected MyGo package version")
 	flag.Parse()
-	if err := run(*platform, *version, flag.Args()); err != nil {
+	var err error
+	if *planMode {
+		if len(flag.Args()) != 0 {
+			err = errors.New("plan mode takes no positional arguments")
+		} else {
+			err = runPlan()
+		}
+	} else {
+		err = run(*platform, *version, flag.Args())
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "release archive identity failed:", err)
 		os.Exit(1)
 	}
@@ -71,21 +140,432 @@ func run(platform, version string, args []string) error {
 	if len(args) != 1 {
 		return errors.New("want exactly one archive path")
 	}
+	_, err := loadFull(platform, version, args[0])
+	return err
+}
+
+func loadFull(platform, version, filename string) (*archiveContents, error) {
+	if version == "" {
+		return nil, errors.New("missing expected version")
+	}
 	switch platform {
 	case windowsTarget, darwinTarget:
 	default:
-		return fmt.Errorf("unsupported platform %q", platform)
+		return nil, fmt.Errorf("unsupported platform %q", platform)
 	}
-	files, err := readArchive(platform, args[0])
+	contents, err := readArchive(platform, filename)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("%s archive: %w", platform, err)
 	}
 	switch platform {
 	case windowsTarget:
-		return verifyWindows(files[windowsExecutable], version)
+		err = verifyWindows(contents.files[windowsExecutable], version)
 	case darwinTarget:
-		if err := verifyDarwin(files[darwinExecutable], files[darwinInfoPlist], version); err != nil {
+		err = verifyDarwin(contents.files[darwinExecutable], contents.files[darwinInfoPlist], version)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s archive: %w", platform, err)
+	}
+	return contents, nil
+}
+
+func readPlan() (*plan, error) {
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxPlanSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the plan: %w", err)
+	}
+	if len(data) > maxPlanSize {
+		return nil, errors.New("plan is too large")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var p plan
+	if err := dec.Decode(&p); err != nil {
+		return nil, fmt.Errorf("invalid plan: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("invalid plan: trailing data")
+	}
+	if p.Version == "" {
+		return nil, errors.New("plan has no version")
+	}
+	if len(p.Full) != 2 {
+		return nil, errors.New("plan must name both platform archives")
+	}
+	for _, platform := range []string{windowsTarget, darwinTarget} {
+		if p.Full[platform] == "" {
+			return nil, fmt.Errorf("plan has no %s archive", platform)
+		}
+	}
+	for platform := range p.Full {
+		if platform != windowsTarget && platform != darwinTarget {
+			return nil, fmt.Errorf("plan has unsupported platform %q", platform)
+		}
+	}
+	for index, delta := range p.Deltas {
+		if delta.Platform != windowsTarget && delta.Platform != darwinTarget {
+			return nil, fmt.Errorf("plan delta %d has unsupported platform %q", index, delta.Platform)
+		}
+		if delta.From == "" || delta.Path == "" {
+			return nil, fmt.Errorf("plan delta %d is incomplete", index)
+		}
+	}
+	return &p, nil
+}
+
+func runPlan() error {
+	p, err := readPlan()
+	if err != nil {
+		return err
+	}
+	trees := map[string]map[string]archiveEntry{}
+	for _, platform := range []string{windowsTarget, darwinTarget} {
+		contents, err := loadFull(platform, p.Version, p.Full[platform])
+		if err != nil {
 			return err
+		}
+		tree, err := deltaTargetTree(platform, contents.tree)
+		if err != nil {
+			return fmt.Errorf("%s archive: %w", platform, err)
+		}
+		trees[platform] = tree
+	}
+	for index, delta := range p.Deltas {
+		tree, ok := trees[delta.Platform]
+		if !ok {
+			return fmt.Errorf("plan delta %d has no %s archive", index, delta.Platform)
+		}
+		if err := verifyDelta(delta.Path, delta.Platform, delta.From, p.Version, tree); err != nil {
+			return fmt.Errorf("%s delta from %s: %w", delta.Platform, delta.From, err)
+		}
+	}
+	return nil
+}
+
+func deltaTargetTree(platform string, tree map[string]archiveEntry) (map[string]archiveEntry, error) {
+	if platform == windowsTarget {
+		return tree, nil
+	}
+	if platform != darwinTarget {
+		return nil, fmt.Errorf("unsupported platform %q", platform)
+	}
+	prefix := darwinBundle + "/"
+	out := map[string]archiveEntry{}
+	for name, entry := range tree {
+		if name == darwinBundle {
+			if entry.kind != 'd' {
+				return nil, fmt.Errorf("%s is not a directory", darwinBundle)
+			}
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			return nil, fmt.Errorf("entry %q is outside %s", name, darwinBundle)
+		}
+		rel := strings.TrimPrefix(name, prefix)
+		if rel == "" || rel == "." || !fs.ValidPath(rel) {
+			return nil, fmt.Errorf("entry %q has an invalid bundle-relative path", name)
+		}
+		out[rel] = entry
+	}
+	return out, nil
+}
+
+func verifyDelta(filename, platform, from, to string, target map[string]archiveEntry) error {
+	info, err := os.Lstat(filename)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("delta is not a regular file")
+	}
+	size := info.Size()
+	if size <= 0 || size > maxDeltaSize {
+		return fmt.Errorf("delta size %d is outside the allowed range", size)
+	}
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	headLen := len(deltaMagic) + binary.MaxVarintLen64
+	head := make([]byte, headLen)
+	n, err := f.ReadAt(head, 0)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	if n < len(deltaMagic) || !bytes.HasPrefix(head[:n], []byte(deltaMagic)) {
+		return errors.New("not a mygo delta 1 file")
+	}
+	varint := head[len(deltaMagic):n]
+	indexLen, k := binary.Uvarint(varint)
+	if k <= 0 {
+		return errors.New("invalid delta index length")
+	}
+	if !canonicalUvarint(indexLen, varint[:k]) {
+		return errors.New("non-canonical delta index length")
+	}
+	if indexLen == 0 || indexLen > maxDeltaIndexCompressed {
+		return fmt.Errorf("delta index length %d is outside the allowed range", indexLen)
+	}
+	start := int64(len(deltaMagic) + k)
+	if start > size || indexLen > uint64(size-start) {
+		return errors.New("truncated delta index")
+	}
+	compressed := make([]byte, int(indexLen))
+	if n, err := f.ReadAt(compressed, start); err != nil || n != len(compressed) {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return fmt.Errorf("cannot read the delta index: %w", err)
+	}
+	indexBytes, err := inflateDeltaIndex(compressed)
+	if err != nil {
+		return err
+	}
+	index, err := parseDeltaIndex(indexBytes)
+	if err != nil {
+		return err
+	}
+	if index.From != from || index.Version != to {
+		return fmt.Errorf(
+			"index updates %q to %q, want %q to %q",
+			index.From, index.Version, from, to,
+		)
+	}
+	tree, err := deltaTree(index, start+int64(indexLen), size)
+	if err != nil {
+		return err
+	}
+	return compareDeltaTree(tree, target)
+}
+
+func canonicalUvarint(value uint64, encoded []byte) bool {
+	canonical := binary.AppendUvarint(nil, value)
+	return bytes.Equal(canonical, encoded)
+}
+
+type oneByteReader struct {
+	reader *bytes.Reader
+}
+
+func (r oneByteReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return r.reader.Read(p[:1])
+}
+
+func (r oneByteReader) ReadByte() (byte, error) {
+	return r.reader.ReadByte()
+}
+
+func inflateDeltaIndex(compressed []byte) ([]byte, error) {
+	reader := &bytes.Reader{}
+	reader.Reset(compressed)
+	source := oneByteReader{reader: reader}
+	flateReader := flate.NewReader(source)
+	defer flateReader.Close()
+	data, err := io.ReadAll(io.LimitReader(flateReader, maxDeltaIndex+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot inflate delta index: %w", err)
+	}
+	if len(data) > maxDeltaIndex {
+		return nil, fmt.Errorf("delta index expands beyond %d bytes", maxDeltaIndex)
+	}
+	if reader.Len() != 0 {
+		return nil, errors.New("trailing data after the delta index")
+	}
+	return data, nil
+}
+
+func parseDeltaIndex(data []byte) (*deltaIndex, error) {
+	if err := checkJSONNoDuplicates(data); err != nil {
+		return nil, fmt.Errorf("invalid delta index: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var index deltaIndex
+	if err := dec.Decode(&index); err != nil {
+		return nil, fmt.Errorf("invalid delta index: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("invalid delta index: trailing data")
+	}
+	return &index, nil
+}
+
+func checkJSONNoDuplicates(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if err := checkJSONValue(dec, 0); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("trailing JSON")
+	}
+	return nil
+}
+
+func checkJSONValue(dec *json.Decoder, depth int) error {
+	if depth > 100 {
+		return errors.New("JSON nested too deeply")
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]bool{}
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("object key is not a string")
+			}
+			if seen[key] {
+				return fmt.Errorf("duplicate JSON key %q", key)
+			}
+			seen[key] = true
+			if err := checkJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		for dec.More() {
+			if err := checkJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return errors.New("unexpected JSON delimiter")
+	}
+	return nil
+}
+
+func isHexSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, c := range value {
+		if c < '0' || (c > '9' && c < 'a') || c > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
+func deltaTree(index *deltaIndex, dataStart, size int64) (map[string]archiveEntry, error) {
+	if len(index.Entries) > maxDeltaEntries {
+		return nil, fmt.Errorf("delta has more than %d entries", maxDeltaEntries)
+	}
+	tree := map[string]archiveEntry{}
+	seen := map[string]bool{}
+	offset := dataStart
+	if offset < 0 || offset > size {
+		return nil, errors.New("delta data offset is outside the file")
+	}
+	for entryIndex, entry := range index.Entries {
+		name, err := deltaPath(entry.Path)
+		if err != nil {
+			return nil, fmt.Errorf("delta entry %d: %w", entryIndex, err)
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate delta entry %q", name)
+		}
+		seen[key] = true
+		if entry.Dir {
+			if entry.Link != "" || entry.Mode != 0 || entry.Size != 0 ||
+				entry.SHA256 != "" || entry.From != "" || entry.Data != 0 {
+				return nil, fmt.Errorf("delta directory %q has file or link fields", name)
+			}
+			tree[name] = archiveEntry{kind: 'd'}
+			continue
+		}
+		if entry.Link != "" {
+			if entry.Mode != 0 || entry.Size != 0 || entry.SHA256 != "" ||
+				entry.From != "" || entry.Data != 0 {
+				return nil, fmt.Errorf("delta link %q has file fields", name)
+			}
+			if err := checkLink(name, entry.Link); err != nil {
+				return nil, err
+			}
+			tree[name] = archiveEntry{kind: 'l', link: entry.Link}
+			continue
+		}
+		if entry.Mode > 0o777 || !isHexSHA256(entry.SHA256) || entry.Size < 0 || entry.Data < 0 {
+			return nil, fmt.Errorf("delta file %q has invalid metadata", name)
+		}
+		if entry.From == "" && entry.Data == 0 {
+			return nil, fmt.Errorf("delta file %q has neither data nor a source", name)
+		}
+		if entry.From != "" {
+			if _, err := deltaPath(entry.From); err != nil {
+				return nil, fmt.Errorf("delta file %q has an invalid source: %w", name, err)
+			}
+		}
+		if entry.Data > size-offset {
+			return nil, fmt.Errorf("delta file %q has data beyond the file", name)
+		}
+		offset += entry.Data
+		tree[name] = archiveEntry{
+			kind:   'f',
+			mode:   entry.Mode,
+			size:   entry.Size,
+			sha256: entry.SHA256,
+		}
+	}
+	if offset != size {
+		return nil, fmt.Errorf("delta data ends at %d bytes, want %d", offset, size)
+	}
+	return tree, nil
+}
+
+func compareDeltaTree(got, want map[string]archiveEntry) error {
+	for name, entry := range got {
+		target, ok := want[name]
+		if !ok {
+			return fmt.Errorf("delta entry %q is not in the full archive", name)
+		}
+		if entry.kind != target.kind {
+			return fmt.Errorf("delta entry %q has the wrong kind", name)
+		}
+		switch entry.kind {
+		case 'l':
+			if entry.link != target.link {
+				return fmt.Errorf("delta link %q has target %q, want %q", name, entry.link, target.link)
+			}
+		case 'f':
+			if entry.mode != target.mode || entry.size != target.size || entry.sha256 != target.sha256 {
+				return fmt.Errorf("delta file %q does not match the full archive", name)
+			}
+		}
+	}
+	for name := range want {
+		if _, ok := got[name]; !ok {
+			return fmt.Errorf("delta is missing full archive entry %q", name)
 		}
 	}
 	return nil
@@ -94,7 +574,7 @@ func run(platform, version string, args []string) error {
 // readArchive reads the required files of a tar.gz archive in place. Every
 // entry is checked for canonical paths, duplicates, link targets and bounds;
 // no entry is extracted.
-func readArchive(platform, filename string) (map[string][]byte, error) {
+func readArchive(platform, filename string) (*archiveContents, error) {
 	targets := map[string]int64{}
 	switch platform {
 	case windowsTarget:
@@ -130,6 +610,7 @@ func readArchive(platform, filename string) (map[string][]byte, error) {
 	tr := tar.NewReader(gz)
 
 	files := map[string][]byte{}
+	tree := map[string]archiveEntry{}
 	kinds := map[string]byte{}    // canonical lower-case path -> 'd', 'f' or 'l'
 	children := map[string]bool{} // lower-case paths that have at least one entry below them
 	var total int64
@@ -194,21 +675,41 @@ func readArchive(platform, filename string) (map[string][]byte, error) {
 		}
 		kinds[key] = kind
 
-		limit, wanted := targets[name]
-		if !wanted {
-			continue
+		entry := archiveEntry{kind: kind}
+		switch kind {
+		case 'd':
+			// The delta index carries no directory mode.
+		case 'l':
+			entry.link = hdr.Linkname
+		case 'f':
+			entry.mode = uint32(fs.FileMode(hdr.Mode).Perm())
+			entry.size = hdr.Size
+			hash := sha256.New()
+			if limit, wanted := targets[name]; wanted {
+				if hdr.Size > limit {
+					return nil, fmt.Errorf("required file %q exceeds %d bytes", name, limit)
+				}
+				data := make([]byte, hdr.Size)
+				if _, err := io.ReadFull(tr, data); err != nil {
+					return nil, fmt.Errorf("cannot read %q: %w", name, err)
+				}
+				hash.Write(data)
+				files[name] = data
+			} else {
+				n, err := io.Copy(hash, tr)
+				if err != nil {
+					return nil, fmt.Errorf("cannot read %q: %w", name, err)
+				}
+				if n != hdr.Size {
+					return nil, fmt.Errorf("short read of %q", name)
+				}
+			}
+			entry.sha256 = hex.EncodeToString(hash.Sum(nil))
 		}
-		if kind != 'f' {
+		if _, wanted := targets[name]; wanted && kind != 'f' {
 			return nil, fmt.Errorf("required file %q is not a regular file", name)
 		}
-		if hdr.Size > limit {
-			return nil, fmt.Errorf("required file %q exceeds %d bytes", name, limit)
-		}
-		data := make([]byte, hdr.Size)
-		if _, err := io.ReadFull(tr, data); err != nil {
-			return nil, fmt.Errorf("cannot read %q: %w", name, err)
-		}
-		files[name] = data
+		tree[name] = entry
 	}
 
 	// archive/tar stops at its end-of-archive blocks, while tar writers pad
@@ -231,7 +732,7 @@ func readArchive(platform, filename string) (map[string][]byte, error) {
 			return nil, fmt.Errorf("archive is missing %q", name)
 		}
 	}
-	return files, nil
+	return &archiveContents{files: files, tree: tree}, nil
 }
 
 func archivePath(raw string) (string, error) {
@@ -255,6 +756,13 @@ func archivePath(raw string) (string, error) {
 		return "", fmt.Errorf("archive entry %q is not a canonical relative path", raw)
 	}
 	return clean, nil
+}
+
+func deltaPath(raw string) (string, error) {
+	if strings.HasSuffix(raw, "/") {
+		return "", fmt.Errorf("delta entry %q has a trailing slash", raw)
+	}
+	return archivePath(raw)
 }
 
 func checkLink(name, target string) error {
