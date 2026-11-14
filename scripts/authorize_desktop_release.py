@@ -367,6 +367,35 @@ def _paginated_list_key(path: str) -> str | None:
     raise UnsafeEndpoint("API endpoint does not support paginated list reads")
 
 
+def _reject_duplicate_page_identities(items: Sequence[object], key: str | None) -> None:
+    """Reject duplicate endpoint-specific identities without echoing values."""
+
+    if key == "secrets":
+        field = "name"
+        label = "secret names"
+    elif key == "branch_policies":
+        field = "id"
+        label = "branch policy ids"
+    else:
+        field = "id"
+        label = "ruleset ids"
+    seen: set[object] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(field)
+        if field == "id":
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                continue
+        elif not isinstance(value, str) or not value:
+            continue
+        if value in seen:
+            raise ApiTransportError(
+                None, f"trusted gh api pagination contains duplicate {label}"
+            )
+        seen.add(value)
+
+
 def _merge_slurped_pages(payload: object, key: str | None) -> list[object]:
     """Flatten real slurped pages after validating their endpoint schema."""
 
@@ -380,6 +409,7 @@ def _merge_slurped_pages(payload: object, key: str | None) -> list[object]:
                     None, "trusted gh api pagination page is invalid"
                 )
             merged.extend(page)
+        _reject_duplicate_page_identities(merged, key)
         return merged
 
     reported_total: int | None = None
@@ -409,6 +439,7 @@ def _merge_slurped_pages(payload: object, key: str | None) -> list[object]:
         merged.extend(items)
     if reported_total is None or len(merged) != reported_total:
         raise ApiTransportError(None, "trusted gh api pagination count is incomplete")
+    _reject_duplicate_page_identities(merged, key)
     return merged
 
 
@@ -1352,6 +1383,7 @@ def _check_tag_rules(transport: ReadOnlyTransport, repository: str) -> None:
         _refuse(Refusal.TAG_RULES_ABSENT, "repository has no tag rulesets")
     saw_tag_ruleset = False
     applicable_rules: set[str] = set()
+    ruleset_ids: set[int] = set()
     for raw_summary in summaries:
         summary = _mapping(
             raw_summary,
@@ -1363,6 +1395,12 @@ def _check_tag_rules(transport: ReadOnlyTransport, repository: str) -> None:
             Refusal.TAG_RULES_UNKNOWN,
             "ruleset id is malformed",
         )
+        if ruleset_id in ruleset_ids:
+            _refuse(
+                Refusal.TAG_RULES_UNKNOWN,
+                "ruleset list contains duplicate ids",
+            )
+        ruleset_ids.add(ruleset_id)
         detail_payload = _api_call(
             transport,
             ruleset_api(repository, ruleset_id),
@@ -1500,12 +1538,24 @@ def _check_environment(
         detail="deployment branch policy metadata is malformed",
     )
     names: list[str] = []
+    policy_ids: set[int] = set()
     for item in policies:
         if not isinstance(item, dict):
             _refuse(
                 Refusal.BRANCH_POLICIES_UNKNOWN,
                 "deployment branch policy entry is malformed",
             )
+        policy_id = _positive_int(
+            item.get("id"),
+            Refusal.BRANCH_POLICIES_UNKNOWN,
+            "deployment branch policy id is malformed",
+        )
+        if policy_id in policy_ids:
+            _refuse(
+                Refusal.BRANCH_POLICIES_UNKNOWN,
+                "deployment branch policy list contains duplicate ids",
+            )
+        policy_ids.add(policy_id)
         name = item.get("name")
         policy_type = item.get("type")
         if (

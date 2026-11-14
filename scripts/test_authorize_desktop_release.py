@@ -364,7 +364,7 @@ class AuthorizationTests(unittest.TestCase):
             },
             trust.environment_branch_policies_api(REPOSITORY): {
                 "total_count": 1,
-                "branch_policies": [{"name": "main", "type": "branch"}],
+                "branch_policies": [{"id": 1, "name": "main", "type": "branch"}],
             },
             trust.environment_secrets_api(REPOSITORY): {
                 "total_count": len(trust.REQUIRED_ENVIRONMENT_SECRETS),
@@ -1111,6 +1111,15 @@ class AuthorizationTests(unittest.TestCase):
                 },
                 trust.Refusal.TAG_RULES_BYPASS_UNTRUSTED,
             ),
+            (
+                "duplicate ruleset ids",
+                [
+                    {"id": 7, "target": "tag", "enforcement": "active"},
+                    {"id": 7, "target": "tag", "enforcement": "active"},
+                ],
+                detail,
+                trust.Refusal.TAG_RULES_UNKNOWN,
+            ),
         ]
         for label, summaries, ruleset_detail, expected in cases:
             with self.subTest(case=label):
@@ -1142,13 +1151,13 @@ class AuthorizationTests(unittest.TestCase):
             (
                 "absent",
                 trust.ApiResponse(404, None),
-                {"branch_policies": [{"name": "main", "type": "branch"}]},
+                {"branch_policies": [{"id": 1, "name": "main", "type": "branch"}]},
                 trust.Refusal.ENVIRONMENT_ABSENT,
             ),
             (
                 "no policy",
                 {"name": "production", "deployment_branch_policy": None},
-                {"branch_policies": [{"name": "main", "type": "branch"}]},
+                {"branch_policies": [{"id": 1, "name": "main", "type": "branch"}]},
                 trust.Refusal.ENVIRONMENT_INSUFFICIENT,
             ),
             (
@@ -1160,7 +1169,7 @@ class AuthorizationTests(unittest.TestCase):
                         "custom_branch_policies": False,
                     },
                 },
-                {"branch_policies": [{"name": "main", "type": "branch"}]},
+                {"branch_policies": [{"id": 1, "name": "main", "type": "branch"}]},
                 trust.Refusal.ENVIRONMENT_INSUFFICIENT,
             ),
             (
@@ -1174,8 +1183,8 @@ class AuthorizationTests(unittest.TestCase):
                 },
                 {
                     "branch_policies": [
-                        {"name": "main", "type": "branch"},
-                        {"name": "release", "type": "branch"},
+                        {"id": 1, "name": "main", "type": "branch"},
+                        {"id": 2, "name": "release", "type": "branch"},
                     ]
                 },
                 trust.Refusal.BRANCH_POLICIES_INSUFFICIENT,
@@ -1189,7 +1198,7 @@ class AuthorizationTests(unittest.TestCase):
                         "custom_branch_policies": True,
                     },
                 },
-                {"branch_policies": [{"name": "*", "type": "branch"}]},
+                {"branch_policies": [{"id": 2, "name": "*", "type": "branch"}]},
                 trust.Refusal.BRANCH_POLICIES_INSUFFICIENT,
             ),
             (
@@ -1201,7 +1210,7 @@ class AuthorizationTests(unittest.TestCase):
                         "custom_branch_policies": True,
                     },
                 },
-                {"branch_policies": [{"name": "main", "type": "tag"}]},
+                {"branch_policies": [{"id": 2, "name": "main", "type": "tag"}]},
                 trust.Refusal.BRANCH_POLICIES_INSUFFICIENT,
             ),
             (
@@ -1215,8 +1224,38 @@ class AuthorizationTests(unittest.TestCase):
                 },
                 {
                     "total_count": 2,
-                    "branch_policies": [{"name": "main", "type": "branch"}],
+                    "branch_policies": [{"id": 1, "name": "main", "type": "branch"}],
                 },
+                trust.Refusal.BRANCH_POLICIES_UNKNOWN,
+            ),
+            (
+                "duplicate policy ids",
+                {
+                    "name": "production",
+                    "deployment_branch_policy": {
+                        "protected_branches": False,
+                        "custom_branch_policies": True,
+                    },
+                },
+                {
+                    "total_count": 2,
+                    "branch_policies": [
+                        {"id": 1, "name": "main", "type": "branch"},
+                        {"id": 1, "name": "release", "type": "branch"},
+                    ],
+                },
+                trust.Refusal.BRANCH_POLICIES_UNKNOWN,
+            ),
+            (
+                "missing policy id",
+                {
+                    "name": "production",
+                    "deployment_branch_policy": {
+                        "protected_branches": False,
+                        "custom_branch_policies": True,
+                    },
+                },
+                {"branch_policies": [{"name": "main", "type": "branch"}]},
                 trust.Refusal.BRANCH_POLICIES_UNKNOWN,
             ),
         ]
@@ -1299,6 +1338,20 @@ class AuthorizationTests(unittest.TestCase):
                         {"name": name}
                         for name in sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)
                     ],
+                },
+                False,
+                trust.Refusal.SECRETS_ENVIRONMENT_UNKNOWN,
+            ),
+            (
+                "duplicate environment secret name",
+                trust.environment_secrets_api(REPOSITORY),
+                {
+                    "total_count": len(trust.REQUIRED_ENVIRONMENT_SECRETS) + 1,
+                    "secrets": [
+                        {"name": name}
+                        for name in sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)
+                    ]
+                    + [{"name": sorted(trust.REQUIRED_ENVIRONMENT_SECRETS)[0]}],
                 },
                 False,
                 trust.Refusal.SECRETS_ENVIRONMENT_UNKNOWN,
@@ -1591,6 +1644,175 @@ class AuthorizationTests(unittest.TestCase):
         )
         decision, _ = self.authorize_via_gh(stdout)
         self.assert_refused(decision, trust.Refusal.TAG_RULES_UNKNOWN)
+
+    def test_gh_pagination_accepts_distinct_multi_page_ruleset_ids(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        rulesets_path = trust.rulesets_api(REPOSITORY)
+        branch_summaries = [
+            {"id": 1000 + index, "target": "branch", "enforcement": "active"}
+            for index in range(100)
+        ]
+        stdout = self.gh_fixture_stdout()
+        stdout[rulesets_path] = json.dumps(
+            [
+                branch_summaries,
+                [{"id": 7, "target": "tag", "enforcement": "active"}],
+            ]
+        )
+        for summary in branch_summaries:
+            stdout[trust.ruleset_api(REPOSITORY, summary["id"])] = json.dumps(
+                {
+                    "id": summary["id"],
+                    "target": "branch",
+                    "enforcement": "active",
+                }
+            )
+
+        decision, _ = self.authorize_via_gh(stdout)
+
+        self.assertTrue(decision.authorized, decision.detail)
+
+    def test_gh_pagination_rejects_duplicate_ruleset_pages(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        rulesets_path = trust.rulesets_api(REPOSITORY)
+        duplicate_id = 987654
+        cases = [
+            (
+                "duplicate across pages",
+                [
+                    [{"id": duplicate_id, "target": "tag", "enforcement": "active"}],
+                    [{"id": duplicate_id, "target": "tag", "enforcement": "active"}],
+                ],
+            ),
+            (
+                "duplicate in one page",
+                [
+                    [
+                        {
+                            "id": duplicate_id,
+                            "target": "tag",
+                            "enforcement": "active",
+                        },
+                        {
+                            "id": duplicate_id,
+                            "target": "branch",
+                            "enforcement": "active",
+                        },
+                    ]
+                ],
+            ),
+        ]
+        for label, pages in cases:
+            with self.subTest(case=label):
+                stdout = self.gh_fixture_stdout()
+                stdout[rulesets_path] = json.dumps(pages)
+                decision, _ = self.authorize_via_gh(stdout)
+                self.assert_refused(decision, trust.Refusal.TAG_RULES_UNKNOWN)
+                self.assertNotIn(
+                    str(duplicate_id), json.dumps(decision.as_json())
+                )
+
+    def test_gh_pagination_rejects_duplicate_wrapped_rows(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+
+        secret_name = "PRIVATE_DUPLICATE_SECRET_NAME"
+        repository_path = trust.repository_secrets_api(REPOSITORY)
+        stdout = self.gh_fixture_stdout()
+        stdout[repository_path] = json.dumps(
+            [
+                {
+                    "total_count": 2,
+                    "secrets": [{"name": secret_name}],
+                },
+                {
+                    "total_count": 2,
+                    "secrets": [{"name": secret_name}],
+                },
+            ]
+        )
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(decision, trust.Refusal.SECRETS_REPOSITORY_UNKNOWN)
+        self.assertNotIn(secret_name, json.dumps(decision.as_json()))
+
+        duplicate_policy_id = 987655
+        branch_path = trust.environment_branch_policies_api(REPOSITORY)
+        stdout = self.gh_fixture_stdout()
+        stdout[branch_path] = json.dumps(
+            [
+                {
+                    "total_count": 2,
+                    "branch_policies": [
+                        {
+                            "id": duplicate_policy_id,
+                            "name": "main",
+                            "type": "branch",
+                        },
+                        {
+                            "id": duplicate_policy_id,
+                            "name": "release",
+                            "type": "branch",
+                        },
+                    ],
+                }
+            ]
+        )
+        decision, _ = self.authorize_via_gh(stdout)
+        self.assert_refused(decision, trust.Refusal.BRANCH_POLICIES_UNKNOWN)
+        self.assertNotIn(str(duplicate_policy_id), json.dumps(decision.as_json()))
+
+    def test_production_transport_rejects_duplicate_paginated_identities(self) -> None:
+        duplicate_id = 987656
+        secret_name = "PRIVATE_DUPLICATE_SECRET_NAME"
+        cases = [
+            (
+                trust.rulesets_api(REPOSITORY),
+                [
+                    [{"id": duplicate_id}],
+                    [{"id": duplicate_id}],
+                ],
+                str(duplicate_id),
+            ),
+            (
+                trust.environment_branch_policies_api(REPOSITORY),
+                [
+                    {
+                        "total_count": 2,
+                        "branch_policies": [
+                            {"id": duplicate_id, "name": "main", "type": "branch"},
+                            {"id": duplicate_id, "name": "main", "type": "branch"},
+                        ],
+                    }
+                ],
+                str(duplicate_id),
+            ),
+            (
+                trust.repository_secrets_api(REPOSITORY),
+                [
+                    {
+                        "total_count": 2,
+                        "secrets": [
+                            {"name": secret_name},
+                            {"name": secret_name},
+                        ],
+                    }
+                ],
+                secret_name,
+            ),
+        ]
+        for path, pages, private_value in cases:
+            with self.subTest(path=path):
+                completed = subprocess.CompletedProcess(
+                    args=["gh"],
+                    returncode=0,
+                    stdout=json.dumps(pages),
+                    stderr="",
+                )
+                with mock.patch.object(
+                    trust.subprocess, "run", return_value=completed
+                ):
+                    with self.assertRaises(trust.ApiTransportError) as caught:
+                        trust.GhApiTransport().get_list(path)
+                self.assertNotIn(private_value, caught.exception.detail)
 
     def test_production_transport_issues_only_allowlisted_get_commands(self) -> None:
         completed = subprocess.CompletedProcess(
