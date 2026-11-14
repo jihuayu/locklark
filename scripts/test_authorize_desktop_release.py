@@ -734,6 +734,27 @@ class AuthorizationTests(unittest.TestCase):
                 decision = self.dispatch_decision(run=run)
                 self.assertTrue(decision.authorized, decision.detail)
 
+    def test_dispatch_requires_explicit_main_branch(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+
+        valid = self.dispatch_decision(
+            event=self.dispatch_event(branch="main")
+        )
+        self.assertTrue(valid.authorized, valid.detail)
+        missing_branch = self.dispatch_event()
+        missing_branch.pop("branch")
+        self.assert_refused(
+            self.dispatch_decision(event=missing_branch),
+            trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
+        )
+
+        null_branch = self.dispatch_event()
+        null_branch["branch"] = None
+        self.assert_refused(
+            self.dispatch_decision(event=null_branch),
+            trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
+        )
+
     def test_dispatch_rejects_event_run_and_identity_mismatches(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
         cases: list[

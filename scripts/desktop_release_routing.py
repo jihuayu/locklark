@@ -191,12 +191,11 @@ def _parse_dispatch_event(event: object) -> tuple[str, int, str, int]:
             "repository_dispatch sender is not a personal user",
         )
     branch = event.get("branch")
-    if branch is not None:
-        if not isinstance(branch, str) or branch != trust.DEFAULT_BRANCH:
-            _refuse(
-                trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
-                "repository_dispatch did not target the default branch",
-            )
+    if not isinstance(branch, str) or branch != trust.DEFAULT_BRANCH:
+        _refuse(
+            trust.Refusal.DEFAULT_BRANCH_UNTRUSTED,
+            "repository_dispatch did not explicitly target the default branch",
+        )
     return tag, repository_id, repository_full_name, sender_id
 
 
