@@ -32,6 +32,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .harness import (
     CLIResult,
     E2EContext,
+    prebuilt_env_configured,
     FeatureNotImplementedError,
     PTYResult,
     owned_gui_command,
@@ -2848,6 +2849,21 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_popup_completion_acceptance.mjs",
     "scripts/browser_shared_clipboard_acceptance.mjs",
     "scripts/browser_edge_install.mjs",
+    "scripts/browser_extension_prebuilt.mjs",
+    # The strict Node helper executes this Python runtime closure.
+    "scripts/browserrelease/__init__.py",
+    "scripts/browserrelease/prebuilt.py",
+    "scripts/browserrelease/allowlist.py",
+    "scripts/browserrelease/bundle.py",
+    "scripts/browserrelease/errors.py",
+    "scripts/browserrelease/manifestcheck.py",
+    "scripts/browserrelease/policy.py",
+    "scripts/browserrelease/receipt.py",
+    "scripts/browserrelease/receiptcheck.py",
+    "scripts/browserrelease/source.py",
+    "scripts/browserrelease/version.py",
+    "scripts/browserrelease/zipbuild.py",
+    "scripts/browserrelease/zipverify.py",
     "scripts/e2e_runner.py",
     "tests/e2e/harness.py",
     "tests/e2e/support.py",
@@ -3653,6 +3669,8 @@ def _checkout_run(
         raise _checkout_pending(
             "native checkout prerequisites are absent: node runtime"
         )
+    if prebuilt_env_configured():
+        ctx.ensure_extension_built()
     private = Path(tempfile.mkdtemp(prefix="lk-", dir="/tmp"))
     try:
         os.chmod(private, 0o700)

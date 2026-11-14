@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import re
@@ -1526,6 +1528,124 @@ RUNNER_GLUE_SOURCES = (
 )
 
 
+def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
+    """Resolve the package-local AST import closure of one Python module.
+
+    Only ``from .`` / ``from .module`` imports are considered. Every enqueued
+    file is a non-symlink regular file inside the fixed package root before it
+    is read or parsed; ancestors are not exempt. A missing target or an import
+    that escapes the package fails instead of being silently omitted. No
+    imported module is executed.
+    """
+
+    base = (Path(base) if base is not None else Path(entry).parent).resolve()
+    seen: set[Path] = set()
+    pending: list[Path] = []
+
+    def trusted(path: Path) -> Path:
+        try:
+            info = path.lstat()
+        except OSError:
+            raise AssertionError("runtime import is unresolved") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise AssertionError("runtime import is a symlink")
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            raise AssertionError("runtime import escapes its package") from None
+        if not resolved.is_file():
+            raise AssertionError("runtime import is unresolved")
+        return resolved
+
+    def enqueue(path: Path) -> None:
+        resolved = trusted(path)
+        if resolved not in seen:
+            seen.add(resolved)
+            pending.append(resolved)
+
+    def enqueue_optional_init(directory: Path) -> None:
+        init = directory / "__init__.py"
+        try:
+            info = init.lstat()
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise AssertionError("runtime import is unresolved") from None
+        if stat.S_ISLNK(info.st_mode):
+            raise AssertionError("runtime import is a symlink")
+        enqueue(init)
+
+    def resolve(parts: list[str], package_dir: Path) -> Path:
+        target = package_dir.joinpath(*parts)
+        for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise AssertionError("runtime import is unresolved") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise AssertionError("runtime import is a symlink")
+            if info.st_mode and candidate.is_file():
+                return trusted(candidate)
+        raise AssertionError("runtime import is unresolved")
+
+    def add_module(target: Path) -> None:
+        target = trusted(target)
+        directory = target.parent
+        while True:
+            try:
+                directory.relative_to(base)
+            except ValueError:
+                raise AssertionError("runtime import escapes its package") from None
+            enqueue_optional_init(directory)
+            if directory == base:
+                break
+            directory = directory.parent
+        enqueue(target)
+
+    enqueue(Path(entry))
+    enqueue_optional_init(base)
+
+    while pending:
+        module = pending.pop()
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.level:
+                continue
+            if node.level != 1:
+                raise AssertionError("runtime import escapes its package")
+            targets: list[Path] = []
+            if node.module:
+                target = resolve(node.module.split("."), module.parent)
+                targets.append(target)
+                if target.name == "__init__.py":
+                    for alias in node.names:
+                        child = target.parent / alias.name
+                        candidates = (
+                            child.with_suffix(".py"), child / "__init__.py"
+                        )
+                        for candidate in candidates:
+                            try:
+                                info = candidate.lstat()
+                            except FileNotFoundError:
+                                continue
+                            except OSError:
+                                raise AssertionError("runtime import is unresolved") from None
+                            if stat.S_ISLNK(info.st_mode):
+                                raise AssertionError("runtime import is a symlink")
+                            if candidate.is_file():
+                                targets.append(trusted(candidate))
+                                break
+            else:
+                for alias in node.names:
+                    targets.append(resolve([alias.name], module.parent))
+            for target in targets:
+                add_module(target)
+    return seen
+
+
 def _local_module_graph(entry: Path) -> set[str]:
     """Relative-to-ROOT local module specifiers reachable from ``entry``."""
 
@@ -1572,6 +1692,134 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
                 "browser-extension/build.js",
             ),
         )
+
+    def test_python_closure_expands_plain_from_import_and_subpackages(self):
+        base = self.temp / "synthetic" / "pkg"
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from . import newmodule as alias\n"
+            "from .sub import leaf\n",
+            encoding="utf-8",
+        )
+        (base / "newmodule.py").write_text("", encoding="utf-8")
+        (base / "sub").mkdir()
+        (base / "sub" / "__init__.py").write_text(
+            "from . import leaf\n", encoding="utf-8"
+        )
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        base = base.resolve()
+        closure = _local_python_closure(base / "entry.py", base)
+        names = {
+            "scripts/browserrelease/" + str(path.relative_to(base))
+            for path in closure
+        }
+        self.assertIn("scripts/browserrelease/newmodule.py", names)
+        self.assertIn("scripts/browserrelease/sub/__init__.py", names)
+        self.assertIn("scripts/browserrelease/sub/leaf.py", names)
+        unbound = names - set(support.CHECKOUT_SOURCE_FILES)
+        self.assertIn("scripts/browserrelease/newmodule.py", unbound)
+        self.assertIn("scripts/browserrelease/sub/leaf.py", unbound)
+        with self.assertRaises(AssertionError):
+            if unbound:
+                raise AssertionError("runtime dependency is not bound")
+
+    def test_nested_import_binds_ancestor_init_and_changes_digest(self):
+        base = (self.temp / "synthetic" / "nested").resolve()
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from .sub.leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub").mkdir()
+        (base / "sub" / "__init__.py").write_text(
+            "from .leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        closure = _local_python_closure(base / "entry.py", base)
+        names = {
+            "scripts/browserrelease/" + str(path.relative_to(base))
+            for path in closure
+        }
+        ancestor = "scripts/browserrelease/sub/__init__.py"
+        self.assertIn(ancestor, names)
+
+        def digest():
+            value = hashlib.sha256()
+            for path in sorted(closure):
+                value.update(str(path.relative_to(base)).encode("utf-8"))
+                value.update(b"\0")
+                value.update(hashlib.sha256(path.read_bytes()).digest())
+            return value.hexdigest()
+
+        before = digest()
+        init = base / "sub" / "__init__.py"
+        original = init.read_bytes()
+        init.write_bytes(original + b"\n# ancestor drift\n")
+        self.assertNotEqual(digest(), before)
+        init.write_bytes(original)
+        self.assertEqual(digest(), before)
+        unbound = names - set(support.CHECKOUT_SOURCE_FILES)
+        self.assertIn(ancestor, unbound)
+        with self.assertRaises(AssertionError):
+            if unbound:
+                raise AssertionError("runtime dependency is not bound")
+
+    def test_ancestor_symlink_is_rejected_before_read(self):
+        base = (self.temp / "synthetic" / "symlink").resolve()
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from .sub.leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub").mkdir()
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        outside = (self.temp / "outside-init.py").resolve()
+        outside.write_text("outside\n", encoding="utf-8")
+        (base / "sub" / "__init__.py").symlink_to(outside)
+        reads = []
+        original = Path.read_text
+
+        def spy(path, *args, **kwargs):
+            reads.append(path.resolve())
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", new=spy):
+            with self.assertRaisesRegex(AssertionError, "symlink"):
+                _local_python_closure(base / "entry.py", base)
+        self.assertNotIn(outside, reads)
+
+    def test_python_closure_rejects_unresolved_and_parent_escape(self):
+        base = self.temp / "synthetic" / "broken"
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        entry = base / "entry.py"
+        entry.write_text("from . import missing\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "unresolved"):
+            _local_python_closure(entry, base)
+        entry.write_text("from .missing import value\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "unresolved"):
+            _local_python_closure(entry, base)
+        entry.write_text("from ..outside import value\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "escapes"):
+            _local_python_closure(entry, base)
+
+    def test_prebuilt_python_runtime_closure_is_bound(self):
+        closure = _local_python_closure(
+            ROOT / "scripts" / "browserrelease" / "prebuilt.py"
+        )
+        relatives = {str(path.relative_to(ROOT)) for path in closure}
+        self.assertIn("scripts/browserrelease/__init__.py", relatives)
+        self.assertIn("scripts/browserrelease/prebuilt.py", relatives)
+        for relative in relatives:
+            with self.subTest(source=relative):
+                self.assertIn(relative, support.CHECKOUT_SOURCE_FILES)
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n# dirty runtime closure\n")
+                self.assertNotEqual(self._identity(), self._baseline)
+                path.write_bytes(original)
+                self.assertEqual(self._identity(), self._baseline)
 
     def test_changing_each_runner_glue_source_changes_identity(self):
         baseline = self._identity()

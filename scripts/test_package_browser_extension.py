@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -21,17 +22,36 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import package_browser_extension as packaging  # noqa: E402
+from browserrelease import package as browserrelease_package  # noqa: E402
+from browserrelease.tests import support as browserrelease_support  # noqa: E402
 
 
 class PreparationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-package-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)
+        os.chmod(cls.root, 0o700)
+        real_extension = HERE.parent / "browser-extension"
+        cls.fixture_root = cls.root / "fixture"
+        cls.fixture_root.mkdir(mode=0o700)
+        cls.extension = cls.fixture_root / "browser-extension"
+        cls.extension.mkdir(mode=0o700)
+        for name in ("build.js", "release-version.json", *packaging.PRODUCT_FILES):
+            shutil.copyfile(real_extension / name, cls.extension / name)
+        for attribute, value in (
+            ("ROOT", cls.fixture_root),
+            ("EXTENSION_DIR", cls.extension),
+            ("BUILD_SCRIPT", cls.extension / "build.js"),
+        ):
+            patcher = mock.patch.object(packaging, attribute, value)
+            patcher.start()
+            cls.addClassCleanup(patcher.stop)
         cls.chromium_out = cls.root / "chromium-out"
         cls.firefox_out = cls.root / "firefox-out"
-        cls.chromium_out.mkdir()
-        cls.firefox_out.mkdir()
+        cls.chromium_out.mkdir(mode=0o700)
+        cls.firefox_out.mkdir(mode=0o700)
         for product, output in (
             ("chromium", cls.chromium_out),
             ("firefox", cls.firefox_out),
@@ -39,10 +59,6 @@ class PreparationTests(unittest.TestCase):
             code = cls._run_main(product, output)
             if code != 0:
                 raise AssertionError(f"initial {product} preparation failed")
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temporary.cleanup()
 
     @staticmethod
     def _run_main(product, output):
@@ -392,6 +408,173 @@ class PreparationTests(unittest.TestCase):
                 "locklark-browser-extension-chromium-unsigned.zip",
                 "locklark-browser-extension-chromium-unsigned.receipt.json",
             },
+        )
+
+
+class PrebuiltConsumptionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(
+            prefix="locklark-prebuilt-package-test-"
+        )
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.base = Path(cls.temporary.name)
+        os.chmod(cls.base, 0o700)
+        cls.root = browserrelease_support.make_root(cls.base)
+        cls.extension = cls.root / "browser-extension"
+        for attribute, value in (
+            ("ROOT", cls.root),
+            ("EXTENSION_DIR", cls.extension),
+            ("BUILD_SCRIPT", cls.extension / "build.js"),
+        ):
+            patcher = mock.patch.object(packaging, attribute, value)
+            patcher.start()
+            cls.addClassCleanup(patcher.stop)
+
+        # The original legal builder produces the comparison bytes once.
+        cls.legacy_out = cls.base / "legacy-out"
+        cls.legacy_out.mkdir(mode=0o700)
+        packaging.package("chromium", str(cls.legacy_out))
+        cls.legacy_zip = (
+            cls.legacy_out
+            / "locklark-browser-extension-chromium-unsigned.zip"
+        ).read_bytes()
+        cls.legacy_receipt = (
+            cls.legacy_out
+            / "locklark-browser-extension-chromium-unsigned.receipt.json"
+        ).read_bytes()
+
+        cls.prepared = cls.base / "prepared"
+        browserrelease_package.prepare(
+            "chromium", str(cls.prepared), root=cls.root
+        )
+        cls.dist = cls.extension / "dist" / "chromium"
+
+    def _existing_output(self, name):
+        output = self.base / name
+        output.mkdir(mode=0o700)
+        sentinel = output / "keep.txt"
+        sentinel.write_bytes(b"existing output must stay")
+        return output, sentinel
+
+    def _assert_rejected(self, prepared, dist, name):
+        output, sentinel = self._existing_output(name)
+        before = sentinel.read_bytes()
+        with mock.patch.object(
+            packaging, "_run_build", side_effect=AssertionError("build called")
+        ) as build:
+            with self.assertRaisesRegex(
+                packaging.PackagingError,
+                "^prebuilt browser extension input rejected$",
+            ) as raised:
+                packaging.package(
+                    "chromium", str(output), str(prepared), str(dist)
+                )
+            self.assertFalse(build.called)
+        self.assertNotIn(str(self.base), str(raised.exception))
+        self.assertEqual(sentinel.read_bytes(), before)
+        self.assertEqual(
+            {entry.name for entry in output.iterdir()}, {"keep.txt"}
+        )
+
+    def test_valid_prebuilt_matches_legacy_and_never_builds(self):
+        output = self.base / "prebuilt-out"
+        output.mkdir(mode=0o700)
+        with mock.patch.object(
+            packaging, "_run_build", side_effect=AssertionError("build called")
+        ) as build:
+            summary = packaging.package(
+                "chromium", str(output), str(self.prepared), str(self.dist)
+            )
+            self.assertFalse(build.called)
+        self.assertEqual(
+            (
+                output
+                / "locklark-browser-extension-chromium-unsigned.zip"
+            ).read_bytes(),
+            self.legacy_zip,
+        )
+        self.assertEqual(
+            (
+                output
+                / "locklark-browser-extension-chromium-unsigned.receipt.json"
+            ).read_bytes(),
+            self.legacy_receipt,
+        )
+        self.assertEqual(
+            summary["sha256"], hashlib.sha256(self.legacy_zip).hexdigest()
+        )
+
+        cli_out = self.base / "prebuilt-cli-out"
+        cli_out.mkdir(mode=0o700)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            packaging, "_run_build", side_effect=AssertionError("build called")
+        ) as build, redirect_stdout(stdout), redirect_stderr(stderr):
+            code = packaging.main([
+                "--product", "chromium",
+                "--output", str(cli_out),
+                "--prepared-dir", str(self.prepared),
+                "--dist", str(self.dist),
+            ])
+            self.assertFalse(build.called)
+        self.assertEqual(code, 0, stderr.getvalue())
+        self.assertEqual(
+            (
+                cli_out
+                / "locklark-browser-extension-chromium-unsigned.zip"
+            ).read_bytes(),
+            self.legacy_zip,
+        )
+
+    def test_missing_and_partial_prebuilt_are_rejected_before_output(self):
+        missing = self.base / "missing-prepared"
+        missing.mkdir(mode=0o700)
+        self._assert_rejected(missing, self.dist, "missing-out")
+
+        partial = self.base / "partial-prepared"
+        shutil.copytree(self.prepared, partial)
+        (
+            partial
+            / "locklark-browser-extension-chromium-unsigned.zip"
+        ).unlink()
+        self._assert_rejected(partial, self.dist, "partial-out")
+
+    def test_source_drift_is_rejected_before_output(self):
+        drift_base = self.base / "drift"
+        drift_root = browserrelease_support.make_root(drift_base)
+        drift_prepared = self.base / "drift-prepared"
+        browserrelease_package.prepare(
+            "chromium", str(drift_prepared), root=drift_root
+        )
+        drift_extension = drift_root / "browser-extension"
+        (drift_extension / "core.js").write_bytes(
+            (drift_extension / "core.js").read_bytes() + b"\n// drift\n"
+        )
+        browserrelease_support.commit(drift_root, "source drift")
+        with mock.patch.object(packaging, "ROOT", drift_root), mock.patch.object(
+            packaging, "EXTENSION_DIR", drift_extension
+        ), mock.patch.object(
+            packaging, "BUILD_SCRIPT", drift_extension / "build.js"
+        ):
+            self._assert_rejected(
+                drift_prepared,
+                drift_extension / "dist" / "chromium",
+                "drift-out",
+            )
+
+    def test_prepared_and_dist_must_be_given_together(self):
+        output, sentinel = self._existing_output("pair-out")
+        with self.assertRaisesRegex(
+            packaging.PackagingError,
+            "^--prepared-dir and --dist must be provided together$",
+        ):
+            packaging.package(
+                "chromium", str(output), str(self.prepared), None
+            )
+        self.assertEqual(sentinel.read_bytes(), b"existing output must stay")
+        self.assertEqual(
+            {entry.name for entry in output.iterdir()}, {"keep.txt"}
         )
 
 

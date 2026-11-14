@@ -31,6 +31,10 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  requirePrebuiltExtension,
+  validateNativeRegister,
+} from "./browser_extension_prebuilt.mjs";
+import {
   acceptBrowserSave,
   captureControllerOutput,
   browserScreenshotsAllowed,
@@ -96,7 +100,8 @@ const firefox =
   ).firefox.executablePath();
 const geckodriver = process.env.LOCKLARK_GECKODRIVER || "geckodriver";
 const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
-const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
+const rawRegister = process.env.LOCKLARK_BROWSER_REGISTER;
+const register = rawRegister ? resolve(rawRegister) : "";
 const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 const sharedClipboard = process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1";
@@ -741,7 +746,11 @@ for (const event of ["uncaughtException", "unhandledRejection"]) {
   });
 }
 try {
-  for (const path of [firefox, host, register])
+  const prebuilt = requirePrebuiltExtension(root, "firefox");
+  const nativeRegister = prebuilt
+    ? validateNativeRegister(process.env)
+    : register;
+  for (const path of [firefox, host, nativeRegister])
     assert(existsSync(path), "Missing required test input: " + path);
   const driverVersion = execFileSync(geckodriver, ["--version"], { env })
     .toString()
@@ -750,11 +759,17 @@ try {
     driverVersion.startsWith("geckodriver 0.36.0 "),
     "Use the pinned and verified geckodriver 0.36.0",
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
-    cwd: root,
-  });
+  let extension;
+  if (prebuilt) {
+    extension = prebuilt.extension;
+  } else {
+    execFileSync(process.execPath, ["browser-extension/build.js", "firefox"], {
+      cwd: root,
+    });
+    extension = join(root, "browser-extension/dist/firefox");
+  }
   const manifest = JSON.parse(
-    readFileSync(join(root, "browser-extension/dist/firefox/manifest.json")),
+    readFileSync(join(extension, "manifest.json")),
   );
   assert(
     manifest.browser_specific_settings?.gecko?.id === "browser@locklark.local",
@@ -874,7 +889,7 @@ try {
   execFileSync("python3", [
     "-c",
     'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as archive:\n for path in root.rglob("*"):\n  if path.is_file(): archive.write(path,path.relative_to(root))',
-    join(root, "browser-extension/dist/firefox"),
+    extension,
     extensionZip,
   ]);
   const html =
@@ -915,7 +930,7 @@ try {
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
   observedFixture = fixture;
   execFileSync(
-    register,
+    nativeRegister,
     [
       "--browser",
       "firefox",

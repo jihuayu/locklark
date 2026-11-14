@@ -16,12 +16,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXTENSION = ROOT / "browser-extension"
 DIST = EXTENSION / "dist"
+REAL_DIST = DIST
 SAFARI = ROOT / "safari"
 
 EXPECTED_FILES = {
@@ -96,8 +98,10 @@ def assert_safe_resource_name(name: str) -> None:
         raise AssertionError(f"unsafe/resource traversal name: {name!r}")
 
 
-def verify_safari_dist() -> None:
-    safari_dir = DIST / "safari"
+def verify_safari_dist(dist: Path | None = None) -> None:
+    if dist is None:
+        dist = DIST
+    safari_dir = dist / "safari"
     if not safari_dir.is_dir():
         raise AssertionError("dist/safari missing; run node build.js safari")
     names = {entry.name for entry in safari_dir.iterdir() if entry.is_file()}
@@ -164,7 +168,7 @@ def verify_safari_dist() -> None:
         if not (safari_dir / reference).is_file():
             raise AssertionError(f"manifest references missing resource: {reference}")
 
-    baseline = DIST / "chromium" / "manifest.json"
+    baseline = dist / "chromium" / "manifest.json"
     if not baseline.is_file():
         raise AssertionError(
             "dist/chromium/manifest.json missing; build the default baseline "
@@ -194,11 +198,43 @@ class SafariPackagingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         if not shutil.which("node"):
             raise unittest.SkipTest("node unavailable")
-        shutil.rmtree(DIST, ignore_errors=True)
+        cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-safari-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        fixture_root = Path(cls.temporary.name)
+        os.chmod(fixture_root, 0o700)
+        fixture_extension = fixture_root / "browser-extension"
+        fixture_extension.mkdir(mode=0o700)
+        real_extension = EXTENSION
+        for name in (
+            "build.js",
+            "release-version.json",
+            "core.js",
+            "content.js",
+            "webauthn.js",
+            "background.js",
+            "safari-native-port.js",
+            "popup.html",
+            "popup.css",
+            "popup.js",
+            "options.html",
+            "options.css",
+            "options.js",
+        ):
+            shutil.copyfile(real_extension / name, fixture_extension / name)
+        cls.original_extension = EXTENSION
+        cls.original_dist = DIST
+        globals()["EXTENSION"] = fixture_extension
+        globals()["DIST"] = fixture_extension / "dist"
+        cls.addClassCleanup(cls._restore_globals)
         run([])
         if (DIST / "safari").exists():
             raise AssertionError("Safari must not be part of the default build")
         run(["safari"])
+
+    @classmethod
+    def _restore_globals(cls) -> None:
+        globals()["EXTENSION"] = cls.original_extension
+        globals()["DIST"] = cls.original_dist
 
     def test_safari_resource_whitelist_and_manifest(self) -> None:
         verify_safari_dist()
@@ -221,13 +257,52 @@ class SafariPackagingTests(unittest.TestCase):
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
             self.assertEqual(after[mode]["manifest.json"], expected)
 
-    def test_build_script_builds_default_baseline_before_safari(self) -> None:
+    def test_swift_scratch_path_is_shared_and_ci_external(self) -> None:
+        script = (SAFARI / "scripts/test_safari_swift.sh").read_text("utf-8")
+        self.assertIn(
+            'SCRATCH="${LOCKLARK_SWIFT_SCRATCH:-$ROOT/safari/.build}"',
+            script,
+        )
+        commands = re.findall(r"swift (?:test|build)\b[^\n]*", script)
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertIn('--scratch-path "$SCRATCH"', command)
+        workflow = (ROOT / ".github/workflows/check.yml").read_text("utf-8")
+        start = workflow.index(
+            "- name: Test Safari transport policy and compile the macOS app"
+        )
+        end = workflow.index("- run: go test", start)
+        step = workflow[start:end]
+        self.assertIn(
+            "LOCKLARK_SWIFT_SCRATCH: ${{ runner.temp }}/locklark-safari-swift",
+            step,
+        )
+        self.assertNotIn("${{ github.workspace }}", step.split("run: |", 1)[0])
+
+    def test_build_script_default_order_and_strict_prebuilt_branch(self) -> None:
         script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
-        baseline = script.index('node "$ROOT/browser-extension/build.js"')
-        safari = script.index('node "$ROOT/browser-extension/build.js" safari')
+        strict_start = script.index('if [ "$REQUIRE_PREBUILT" = "1" ]; then')
+        elif_marker = script.index('\nelif [ "$PREBUILT_INPUTS"', strict_start)
+        strict = script[strict_start:elif_marker]
+        default = script[script.index("\nelse\n", elif_marker):]
+        baseline = default.index('node "$ROOT/browser-extension/build.js"')
+        safari = default.index('node "$ROOT/browser-extension/build.js" safari')
         verify = script.index("--verify-dist")
-        self.assertLess(baseline, safari, "default baseline must be built first")
-        self.assertLess(safari, verify, "Safari must be built before verification")
+        self.assertLess(baseline, safari, "default baseline must still be built first")
+        self.assertLess(safari, verify, "default Safari must still precede verification")
+        self.assertIn("browserrelease.prebuilt", strict)
+        self.assertNotIn('node "$ROOT/browser-extension/build.js"', strict)
+        for token in (
+            "LOCKLARK_BROWSER_REQUIRE_PREBUILT",
+            "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR",
+            "LOCKLARK_BROWSER_EXTENSION_CHROMIUM",
+            "LOCKLARK_BROWSER_EXTENSION_FIREFOX",
+            "LOCKLARK_BROWSER_EXTENSION_SAFARI",
+        ):
+            self.assertIn(token, script)
+        self.assertIn("REQUIRE_PREBUILT", strict)
+        self.assertIn("PREPARED_DIR", strict)
+        self.assertNotIn("${product^^}", script)
 
     def test_existing_chrome_and_firefox_manifests_are_byte_identical(self) -> None:
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
@@ -416,7 +491,7 @@ class SafariPackagingTests(unittest.TestCase):
 def main() -> int:
     if "--verify-dist" in sys.argv:
         try:
-            verify_safari_dist()
+            verify_safari_dist(REAL_DIST)
         except AssertionError as error:
             print(f"Safari dist verification failed: {error}", file=sys.stderr)
             return 1
