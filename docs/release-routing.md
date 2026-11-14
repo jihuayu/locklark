@@ -77,3 +77,18 @@ command to add is:
 ```sh
 python3 -m unittest scripts/test_desktop_release_workflow.py
 ```
+
+### Local workflow-contract tests
+
+The workflow contracts use the test-only PyYAML dependency pinned in
+`scripts/requirements-test.txt`; it is not a runtime/product dependency. Use an
+isolated virtual environment outside the checkout and do not install into the
+global interpreter:
+
+```sh
+python3 -m venv /tmp/locklark-release-workflow-venv
+/tmp/locklark-release-workflow-venv/bin/pip install \
+  -r scripts/requirements-test.txt
+/tmp/locklark-release-workflow-venv/bin/python -m unittest \
+  scripts/test_desktop_release_workflow.py
+```

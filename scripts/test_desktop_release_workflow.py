@@ -8,6 +8,8 @@ artifact, or prove external policy acceptance.
 
 Future CI hook (not added to check.yml in this checkpoint):
     python3 -m unittest scripts/test_desktop_release_workflow.py
+
+Requires the test-only PyYAML==6.0.3 pin in scripts/requirements-test.txt.
 """
 
 from __future__ import annotations
