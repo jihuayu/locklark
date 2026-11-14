@@ -26,6 +26,10 @@ import {
   runCrossSiteJourney,
   CHECKOUT_LOCKED,
 } from "./browser_checkout_acceptance.mjs";
+import {
+  pickerReportFields,
+  recordNativeFailure,
+} from "./browser_native_failure_report.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
 const CARD_ORIGIN = TOP_ORIGIN;
@@ -2966,4 +2970,110 @@ test("picker failure reads only sanitized diagnostic records", async () => {
     () => openCheckoutPicker(bad, eventually),
     (error) => error.pickerDiagnostic === null,
   );
+});
+
+
+test("picker report projection re-cleans and never copies poison fields", () => {
+  const records = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "early-guard" },
+  ];
+  const poison = {
+    label: "raw-label",
+    origin: "https://raw.example",
+    id: "raw-id",
+    value: "raw-value",
+    path: "/tmp/raw-path",
+    error: "raw-error",
+  };
+  const error = {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+    ...poison,
+  };
+  const fields = pickerReportFields(error, true);
+  assert.deepEqual(fields, {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+  });
+  assert.deepEqual(pickerReportFields(error, false), {});
+  assert.equal(
+    pickerReportFields({ ...error, pickerDiagnostic: undefined }, true)
+      .pickerDiagnostic,
+    "unknown",
+  );
+  assert.equal(
+    pickerReportFields(
+      { ...error, pickerDiagnostic: [{ phase: "unknown" }] },
+      true,
+    ).pickerDiagnostic,
+    "unknown",
+  );
+  const rendered = JSON.stringify(fields);
+  for (const value of Object.values(poison)) {
+    assert.equal(rendered.includes(value), false);
+  }
+});
+
+test("native failure emission contains fixed picker records and survives disk failure", () => {
+  const records = [
+    { phase: "handler-entry", isTrusted: true, userActivation: false },
+    { phase: "request-sent" },
+    { phase: "reply-present" },
+    { phase: "adopted" },
+  ];
+  const error = {
+    pickerStatus: "other",
+    pickerDiagnostic: records,
+    label: "raw-label",
+    origin: "https://raw.example",
+    id: "raw-id",
+    value: "raw-value",
+    path: "/tmp/raw-path",
+    error: "raw-error",
+  };
+  const report = {
+    reason: "Synthetic checkout failure",
+    stage: "checkout-picker-cancel:picker",
+    ...pickerReportFields(error, true),
+  };
+  const written = [];
+  const lines = [];
+  const originalError = console.error;
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    const json = recordNativeFailure(
+      (path, data, options) => written.push({ path, data, options }),
+      report,
+      "/tmp/synthetic-diagnostics",
+    );
+    assert.equal(written.length, 1);
+    assert.match(written[0].path, /failure\.json$/);
+    assert.equal(written[0].data, json);
+    assert.deepEqual(JSON.parse(json).pickerDiagnostic, records);
+    assert.equal(lines.some((line) => line.includes("pickerDiagnostic")), true);
+    assert.equal(recordNativeFailure(() => {
+      throw Error("disk");
+    }, report, "/tmp/synthetic-diagnostics").includes("pickerDiagnostic"), true);
+    const unknownReport = {
+      reason: "Synthetic checkout failure",
+      stage: "checkout-picker-cancel:picker",
+      ...pickerReportFields({ pickerStatus: "other" }, true),
+    };
+    const unknownJson = recordNativeFailure(
+      (path, data, options) => written.push({ path, data, options }),
+      unknownReport,
+      "/tmp/synthetic-diagnostics",
+    );
+    assert.equal(JSON.parse(unknownJson).pickerDiagnostic, "unknown");
+    assert.equal(lines.length >= 6, true);
+  } finally {
+    console.error = originalError;
+  }
+  const rendered = JSON.stringify(report);
+  for (const value of ["raw-label", "https://raw.example", "raw-id", "raw-value", "/tmp/raw-path", "raw-error"]) {
+    assert.equal(rendered.includes(value), false);
+    assert.equal(lines.join("\n").includes(value), false);
+  }
+  assert.deepEqual(error.pickerDiagnostic, records);
 });
