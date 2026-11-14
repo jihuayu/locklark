@@ -96,7 +96,7 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
 	var preEOFOK, preEOFContextDone, challengePairOK, challengeFailureOK, entropyRawOK atomic.Bool
-	var acceptedObserved, wrongChallengeOK, duplicateOK, phaseCancelOK, noEOFOK atomic.Bool
+	var acceptedObserved, wrongChallengeOK, duplicateOK, phaseCancelOK, noEOFOK, expiredOK atomic.Bool
 	var count atomic.Int32
 	var failChallenge atomic.Bool
 	var controlFrames atomic.Int32
@@ -298,6 +298,8 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	phaseCancelOK.Store(phaseCancelEvent == 'Z' && phaseCancelClosed)
 	noEOFEvent, _, _, noEOFClosed := runEvent("control-no-eof", strings.Repeat("d6", 32), false)
 	noEOFOK.Store(noEOFEvent == 'N' && noEOFClosed)
+	expiredEvent, _, _, expiredClosed := runEvent("control-expired", strings.Repeat("e7", 32), false)
+	expiredOK.Store(expiredEvent == 'Y' && expiredClosed)
 	runPair(strings.Repeat("a2", 32), strings.Repeat("b3", 32))
 	failChallenge.Store(true)
 	run("challenge-refused", strings.Repeat("c4", 32))
@@ -381,6 +383,10 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		stage = "S-assert-no-eof"
 		fail()
 	}
+	if !expiredOK.Load() {
+		stage = "S-assert-expired"
+		fail()
+	}
 	if !acceptedObserved.Load() {
 		stage = "S-assert-accepted"
 		fail()
@@ -420,6 +426,9 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 	}
 	if mode == "control-deadline" {
 		timeout = 4 * time.Second
+	}
+	if mode == "control-expired" {
+		timeout = 1500 * time.Millisecond
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -549,6 +558,25 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		signal('N')
+		_ = control.Close()
+	case "control-expired":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		<-ctx.Done()
+		if err := control.Commit(); !errors.Is(err, errCLIRunControl) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		control.mu.Lock()
+		closed := control.state == cliRunControlHandleClosed && control.challenge == ""
+		control.mu.Unlock()
+		if !closed {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		signal('Y')
 		_ = control.Close()
 	case "control-refused":
 		_, control, err := RequestCLIRunControl(ctx, req)

@@ -2,6 +2,7 @@ package browserhost
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"net"
@@ -159,11 +160,25 @@ type controlCloseWriteConn struct{ net.Conn }
 
 func (controlCloseWriteConn) CloseWrite() error { return nil }
 
+func liveControlContext(t *testing.T) (context.Context, time.Time) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(cancel)
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("test context has no deadline")
+	}
+	return ctx, deadline
+}
+
 func TestCLIRunControlCommitAcceptsExactAck(t *testing.T) {
 	challenge := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, cliRunControlChallengeBytes))
+	ctx, deadline := liveControlContext(t)
 	server, client := net.Pipe()
 	control := &CLIRunControl{
 		conn:      controlCloseWriteConn{Conn: client},
+		ctx:       ctx,
+		deadline:  deadline,
 		challenge: challenge,
 		state:     cliRunControlHandlePending,
 	}
@@ -239,9 +254,12 @@ func TestCLIRunControlCommitRejectsAck(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx, deadline := liveControlContext(t)
 			server, client := net.Pipe()
 			control := &CLIRunControl{
 				conn:      controlCloseWriteConn{Conn: client},
+				ctx:       ctx,
+				deadline:  deadline,
 				challenge: challengeA,
 				state:     cliRunControlHandlePending,
 			}
@@ -281,6 +299,108 @@ func TestCLIRunControlCommitRejectsAck(t *testing.T) {
 				t.Fatal("invalid acknowledgement left the handle open")
 			}
 		})
+	}
+}
+
+func TestCLIRunControlCommitRequiresLiveCaller(t *testing.T) {
+	challenge := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{10}, cliRunControlChallengeBytes))
+	expiredCtx, expiredCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expiredCancel()
+	expiredDeadline, _ := expiredCtx.Deadline()
+	canceledCtx, canceledCancel := context.WithTimeout(context.Background(), time.Minute)
+	canceledDeadline, _ := canceledCtx.Deadline()
+	canceledCancel()
+	cases := []struct {
+		name     string
+		ctx      context.Context
+		deadline time.Time
+	}{
+		{name: "expired", ctx: expiredCtx, deadline: expiredDeadline},
+		{name: "canceled", ctx: canceledCtx, deadline: canceledDeadline},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			control := &CLIRunControl{
+				conn:      controlCloseWriteConn{Conn: client},
+				ctx:       tc.ctx,
+				deadline:  tc.deadline,
+				challenge: challenge,
+				state:     cliRunControlHandlePending,
+			}
+			sawFrame := make(chan bool, 1)
+			go func() {
+				defer server.Close()
+				raw, err := readFrame(server, MaxOutput)
+				clear(raw)
+				sawFrame <- err == nil
+			}()
+			if err := control.Commit(); !errors.Is(err, errCLIRunControl) {
+				t.Fatal("expired or canceled commit did not fail with a fixed error")
+			}
+			if <-sawFrame {
+				t.Fatal("expired or canceled commit wrote a phase frame")
+			}
+			control.mu.Lock()
+			closed := control.state == cliRunControlHandleClosed && control.challenge == ""
+			control.mu.Unlock()
+			if !closed {
+				t.Fatal("expired or canceled commit left the handle open")
+			}
+		})
+	}
+}
+
+func TestCLIRunControlCommitRejectsLateAck(t *testing.T) {
+	challenge := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{11}, cliRunControlChallengeBytes))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	server, client := net.Pipe()
+	control := &CLIRunControl{
+		conn:      controlCloseWriteConn{Conn: client},
+		ctx:       ctx,
+		deadline:  deadline,
+		challenge: challenge,
+		state:     cliRunControlHandlePending,
+	}
+	handled := make(chan bool, 1)
+	go func() {
+		defer server.Close()
+		raw, err := readFrame(server, MaxOutput)
+		if err != nil {
+			handled <- false
+			return
+		}
+		phase, err := DecodeControlClientPhase(raw)
+		clear(raw)
+		if err != nil || phase.Op != ControlPhaseCommit || phase.Challenge != challenge {
+			handled <- false
+			return
+		}
+		// The client has no async close attached in this unit seam. Sleep past
+		// its original deadline, then return an otherwise exact ack.
+		time.Sleep(600 * time.Millisecond)
+		ackRaw, err := MarshalControlServerAck(ControlServerAck{V: 1, Op: ControlPhaseCommit, Challenge: challenge, Ack: true})
+		if err != nil {
+			handled <- false
+			return
+		}
+		writeErr := writeFrame(server, ackRaw)
+		clear(ackRaw)
+		handled <- writeErr == nil
+	}()
+	if err := control.Commit(); !errors.Is(err, errCLIRunControl) {
+		t.Fatal("late acknowledgement did not fail with a fixed error")
+	}
+	if !<-handled {
+		t.Fatal("unit peer did not deliver the late acknowledgement")
+	}
+	control.mu.Lock()
+	closed := control.state == cliRunControlHandleClosed && control.challenge == ""
+	control.mu.Unlock()
+	if !closed {
+		t.Fatal("late acknowledgement did not close the handle")
 	}
 }
 

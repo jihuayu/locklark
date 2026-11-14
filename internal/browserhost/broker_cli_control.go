@@ -56,11 +56,15 @@ const (
 // Close ends the retained authenticated socket, and Commit only proves that
 // this connection completed one strict phase round-trip. The server still owns
 // proof, nonce, scope, approval, secrets, and any future lease lifecycle.
+// ctx and deadline are the original caller's; Commit checks them synchronously
+// at each checkpoint and never renews or derives a new clock authority.
 type CLIRunControl struct {
 	once      sync.Once
 	mu        sync.Mutex
 	conn      net.Conn
 	stop      func() bool
+	ctx       context.Context
+	deadline  time.Time
 	challenge string
 	state     cliRunControlHandleState
 }
@@ -86,10 +90,24 @@ func (c *CLIRunControl) Close() error {
 	return nil
 }
 
+func (c *CLIRunControl) liveLocked() bool {
+	return c.ctx != nil && !c.deadline.IsZero() && c.ctx.Err() == nil && time.Now().Before(c.deadline)
+}
+
+func (c *CLIRunControl) committingLocked() bool {
+	return c.state == cliRunControlHandleCommitting && c.liveLocked()
+}
+
+func (c *CLIRunControl) committingLive() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.committingLocked()
+}
+
 func (c *CLIRunControl) beginCommit() (net.Conn, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.state != cliRunControlHandlePending || c.conn == nil || !validCLIRunControlChallenge(c.challenge) {
+	if c.state != cliRunControlHandlePending || c.conn == nil || !validCLIRunControlChallenge(c.challenge) || !c.liveLocked() {
 		return nil, "", errCLIRunControl
 	}
 	c.state = cliRunControlHandleCommitting
@@ -99,10 +117,12 @@ func (c *CLIRunControl) beginCommit() (net.Conn, string, error) {
 // Commit sends exactly one commit phase, half-closes the client write side, and
 // returns only after the broker's canonical ack preserves this connection's
 // exact challenge and operation. The one-time accepted state is recorded only
-// after that ack; it is transport-only and activates no lease, discloses no
-// secret, and enters no native approval or secret callback. Every write, read,
-// decode, and mismatch failure, as well as any concurrent Close or original
-// context deadline, closes the handle without accepting.
+// after that ack and only while the original caller context is still live and
+// before its original deadline. The checkpoint is synchronous, so an async
+// AfterFunc close that has not run yet cannot let an expired commit through.
+// It is transport-only and activates no lease, discloses no secret, and enters
+// no native approval or secret callback. Every write, read, decode, mismatch,
+// cancellation, and expiry failure closes the handle without accepting.
 func (c *CLIRunControl) Commit() error {
 	if c == nil {
 		return errCLIRunControl
@@ -118,6 +138,11 @@ func (c *CLIRunControl) Commit() error {
 		_ = c.Close()
 		return errControlPhase
 	}
+	if !c.committingLive() {
+		clear(raw)
+		_ = c.Close()
+		return errCLIRunControl
+	}
 	writeErr := writeFrame(conn, raw)
 	clear(raw)
 	if writeErr != nil {
@@ -128,19 +153,30 @@ func (c *CLIRunControl) Commit() error {
 		_ = c.Close()
 		return errCLIRunControl
 	}
+	if !c.committingLive() {
+		_ = c.Close()
+		return errCLIRunControl
+	}
 	ackRaw, err := readFrame(conn, MaxOutput)
 	if err != nil {
 		_ = c.Close()
 		return errCLIRunControl
 	}
 	defer clear(ackRaw)
+	// The read may have completed with a valid ack after the original absolute
+	// deadline or after cancellation. Reject before decoding or recording
+	// Accepted; the async AfterFunc is not the gate.
+	if !c.committingLive() {
+		_ = c.Close()
+		return errCLIRunControl
+	}
 	ack, err := DecodeControlServerAck(ackRaw)
 	if err != nil || ack.Op != ControlPhaseCommit || !sameCLIRunControlChallenge(ack.Challenge, challenge) || !ack.Ack {
 		_ = c.Close()
 		return errCLIRunControl
 	}
 	c.mu.Lock()
-	if c.state != cliRunControlHandleCommitting {
+	if !c.committingLocked() {
 		c.mu.Unlock()
 		_ = c.Close()
 		return errCLIRunControl
@@ -241,14 +277,16 @@ func readCLIRunControlReady(conn net.Conn) (string, error) {
 // delivery_control=true and returns a handle only after the broker writes the
 // exact post-response control-ready frame. An older broker refuses the unknown
 // field; a broker that does not retain the socket cannot produce the frame.
-// The handle can then round-trip one strict commit phase, closes the same
-// authenticated connection on Close or on the original context
+// The handle can then round-trip one strict commit phase. It retains the
+// original caller context and deadline, checks both synchronously on Commit,
+// closes the same authenticated connection on Close or on the original context
 // deadline/cancellation, and does not activate a lease.
 func RequestCLIRunControl(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, *CLIRunControl, error) {
 	if ctx == nil {
 		return CLIRunBrokerResponse{}, nil, errCLIRunInvalid
 	}
-	if _, ok := ctx.Deadline(); !ok {
+	deadline, ok := ctx.Deadline()
+	if !ok {
 		return CLIRunBrokerResponse{}, nil, errCLIRunControlDeadline
 	}
 	if !validCLIRunRequest(req.V, req.VaultPath, req.Scope, req.Targets) {
@@ -307,7 +345,13 @@ func RequestCLIRunControl(ctx context.Context, req CLIRunBrokerRequest) (CLIRunB
 		_ = conn.Close()
 		return CLIRunBrokerResponse{}, nil, cliRunContextError(ce)
 	}
-	control := &CLIRunControl{conn: conn, challenge: challenge, state: cliRunControlHandlePending}
+	control := &CLIRunControl{
+		conn:      conn,
+		ctx:       ctx,
+		deadline:  deadline,
+		challenge: challenge,
+		state:     cliRunControlHandlePending,
+	}
 	control.stop = context.AfterFunc(ctx, func() { _ = control.Close() })
 	return resp, control, nil
 }
