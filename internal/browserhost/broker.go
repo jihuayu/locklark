@@ -129,6 +129,9 @@ const (
 type cliRunControlReadObservation struct {
 	Outcome cliRunControlReadOutcome
 	Length  int
+	// Accepted reports the one-time inactive pending-to-accepted transition.
+	// It carries no lease, secret, or approval result.
+	Accepted bool
 }
 
 type Broker struct {
@@ -138,8 +141,9 @@ type Broker struct {
 	// lifetime; it is a per-broker test seam, never a production extension.
 	cliRunControlLifetime time.Duration
 	// cliRunControlObserve is a nil-by-default, per-broker test observation of
-	// the unique post-ready reader's fixed outcome and frame length. It never
-	// receives raw bytes, a connection, proof material, or authority.
+	// the unique post-ready reader's fixed outcome, frame length, and inactive
+	// transition flag. It never receives raw bytes, a connection, proof
+	// material, or authority.
 	cliRunControlObserve func(cliRunControlReadObservation)
 	// cliRunControlChallenge is a nil-by-default per-broker entropy seam for
 	// tests; production uses crypto/rand. It cannot grant authority.
@@ -573,12 +577,14 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var controlTimer *time.Timer
+	var controlDeadline time.Time
 	if req.DeliveryControl {
 		lifetime := cliRunControlMaxLifetime
 		if b.cliRunControlLifetime > 0 && b.cliRunControlLifetime < lifetime {
 			lifetime = b.cliRunControlLifetime
 		}
-		remaining := lifetime - time.Since(controlStarted)
+		controlDeadline = controlStarted.Add(lifetime)
+		remaining := time.Until(controlDeadline)
 		if remaining <= 0 {
 			cancel()
 			_ = conn.Close()
@@ -700,23 +706,91 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 			_ = conn.Close()
 			return errCLIRunControl
 		}
+		// Bind the inactive state to the exact challenge this connection is
+		// about to receive. No callback, approval, secret, or lease is
+		// reachable after this point.
+		pending, pendingErr := newCLIRunControlPending(controlChallenge, controlDeadline)
+		if pendingErr != nil {
+			_ = conn.Close()
+			return pendingErr
+		}
+		defer pending.clear()
+		if e := conn.SetWriteDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
 		if e := writeCLIRunControlReady(conn, controlChallenge); e != nil {
 			_ = conn.Close()
 			return e
 		}
-		raw, readErr := readFrame(conn, MaxOutput)
-		if b.cliRunControlObserve != nil {
-			observation := cliRunControlReadObservation{Outcome: cliRunControlReadError}
-			switch {
-			case readErr == nil:
-				observation.Outcome = cliRunControlReadFrame
-				observation.Length = len(raw)
-			case errors.Is(readErr, io.EOF):
-				observation.Outcome = cliRunControlReadEOF
-			}
-			b.cliRunControlObserve(observation)
+		if e := conn.SetReadDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
 		}
+		raw, readErr := readFrame(conn, MaxOutput)
+		observation := cliRunControlReadObservation{Outcome: cliRunControlReadError}
+		switch {
+		case readErr == nil:
+			observation.Outcome = cliRunControlReadFrame
+			observation.Length = len(raw)
+		case errors.Is(readErr, io.EOF):
+			observation.Outcome = cliRunControlReadEOF
+		}
+		observe := func() {
+			if b.cliRunControlObserve != nil {
+				b.cliRunControlObserve(observation)
+			}
+		}
+		if readErr != nil {
+			observe()
+			clear(raw)
+			_ = conn.Close()
+			return nil
+		}
+		phase, decodeErr := DecodeControlClientPhase(raw)
 		clear(raw)
+		if decodeErr != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		// A parseable commit is not a transition. The exact operation,
+		// challenge, connection state, and original absolute deadline must all
+		// match before the strict single-frame EOF proof is even attempted.
+		if !pending.matches(phase, time.Now()) {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		if e := requireCLIRunControlEOF(conn, controlDeadline); e != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		// Only the one-time pending-to-accepted transition may produce the
+		// acknowledgement. The accepted state remains inactive.
+		ack, acceptErr := pending.accept(phase, time.Now())
+		if acceptErr != nil {
+			observe()
+			_ = conn.Close()
+			return nil
+		}
+		observation.Accepted = true
+		observe()
+		ackRaw, marshalErr := MarshalControlServerAck(ack)
+		if marshalErr != nil {
+			_ = conn.Close()
+			return marshalErr
+		}
+		defer clear(ackRaw)
+		if e := conn.SetWriteDeadline(controlDeadline); e != nil {
+			_ = conn.Close()
+			return errCLIRunControl
+		}
+		if e := writeFrame(conn, ackRaw); e != nil {
+			_ = conn.Close()
+			return e
+		}
 		_ = conn.Close()
 		return nil
 	}

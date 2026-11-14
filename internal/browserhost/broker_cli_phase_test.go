@@ -3,7 +3,10 @@ package browserhost
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"net"
 	"testing"
+	"time"
 )
 
 func TestControlPhaseCodec(t *testing.T) {
@@ -100,6 +103,184 @@ func TestControlPhaseCodec(t *testing.T) {
 		if _, err := MarshalControlServerAck(invalid); err == nil {
 			t.Fatalf("server encoder accepted %#v", invalid)
 		}
+	}
+}
+
+func TestControlPendingTransition(t *testing.T) {
+	challengeA := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{5}, cliRunControlChallengeBytes))
+	challengeB := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{6}, cliRunControlChallengeBytes))
+	now := time.Unix(1000, 0)
+	deadline := now.Add(time.Minute)
+	commitA := ControlClientPhase{V: 1, Op: ControlPhaseCommit, Challenge: challengeA}
+
+	pending, err := newCLIRunControlPending(challengeA, deadline)
+	if err != nil {
+		t.Fatal("pending state construction failed")
+	}
+	if !pending.matches(commitA, now) {
+		t.Fatal("pending state did not match the exact commit phase")
+	}
+	if _, err := pending.accept(ControlClientPhase{V: 1, Op: ControlPhaseCancel, Challenge: challengeA}, now); err == nil {
+		t.Fatal("cancel phase transitioned the pending state")
+	}
+	if pending.state != cliRunControlPhasePending {
+		t.Fatal("cancel phase changed the pending state")
+	}
+	if _, err := pending.accept(ControlClientPhase{V: 1, Op: ControlPhaseCommit, Challenge: challengeB}, now); err == nil {
+		t.Fatal("wrong challenge transitioned the pending state")
+	}
+	if _, err := pending.accept(commitA, deadline); err == nil {
+		t.Fatal("deadline transitioned the pending state")
+	}
+	ack, err := pending.accept(commitA, now)
+	if err != nil {
+		t.Fatal("exact commit did not transition the pending state")
+	}
+	if ack.Op != ControlPhaseCommit || ack.Challenge != challengeA || !ack.Ack {
+		t.Fatal("transition produced a non-exact acknowledgement")
+	}
+	if pending.state != cliRunControlPhaseAccepted || pending.challenge != "" {
+		t.Fatal("transition did not clear the pending challenge")
+	}
+	if _, err := pending.accept(commitA, now); err == nil {
+		t.Fatal("duplicate commit reused the accepted state")
+	}
+	if _, err := newCLIRunControlPending(challengeA, time.Time{}); err == nil {
+		t.Fatal("pending state accepted no absolute deadline")
+	}
+	if _, err := newCLIRunControlPending("", deadline); err == nil {
+		t.Fatal("pending state accepted an invalid challenge")
+	}
+}
+
+// controlCloseWriteConn supplies the unit-only half-close seam for net.Pipe.
+// It never authorizes anything; the real transport positive is Unix-only.
+type controlCloseWriteConn struct{ net.Conn }
+
+func (controlCloseWriteConn) CloseWrite() error { return nil }
+
+func TestCLIRunControlCommitAcceptsExactAck(t *testing.T) {
+	challenge := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, cliRunControlChallengeBytes))
+	server, client := net.Pipe()
+	control := &CLIRunControl{
+		conn:      controlCloseWriteConn{Conn: client},
+		challenge: challenge,
+		state:     cliRunControlHandlePending,
+	}
+	handled := make(chan bool, 1)
+	go func() {
+		defer server.Close()
+		raw, err := readFrame(server, MaxOutput)
+		if err != nil {
+			handled <- false
+			return
+		}
+		phase, err := DecodeControlClientPhase(raw)
+		clear(raw)
+		if err != nil || phase.Op != ControlPhaseCommit || phase.Challenge != challenge {
+			handled <- false
+			return
+		}
+		ackRaw, err := MarshalControlServerAck(ControlServerAck{V: 1, Op: ControlPhaseCommit, Challenge: challenge, Ack: true})
+		if err != nil {
+			handled <- false
+			return
+		}
+		writeErr := writeFrame(server, ackRaw)
+		clear(ackRaw)
+		handled <- writeErr == nil
+	}()
+	if err := control.Commit(); err != nil {
+		t.Fatal("exact acknowledgement did not commit the handle")
+	}
+	if !<-handled {
+		t.Fatal("unit peer did not deliver the selected acknowledgement")
+	}
+	control.mu.Lock()
+	accepted := control.state == cliRunControlHandleAccepted && control.challenge == ""
+	control.mu.Unlock()
+	if !accepted {
+		t.Fatal("commit did not record the inactive accepted state")
+	}
+	if err := control.Commit(); !errors.Is(err, errCLIRunControl) {
+		t.Fatal("duplicate commit did not close the handle with a fixed error")
+	}
+	_ = control.Close()
+}
+
+func TestCLIRunControlCommitRejectsAck(t *testing.T) {
+	challengeA := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, cliRunControlChallengeBytes))
+	challengeB := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, cliRunControlChallengeBytes))
+	ackFalse := `{"v":1,"op":"commit","challenge":"` + challengeA + `","ack":false}`
+	cases := []struct {
+		name    string
+		missing bool
+		ack     func() []byte
+	}{
+		{
+			name: "wrong-challenge",
+			ack: func() []byte {
+				raw, _ := MarshalControlServerAck(ControlServerAck{V: 1, Op: ControlPhaseCommit, Challenge: challengeB, Ack: true})
+				return raw
+			},
+		},
+		{
+			name: "wrong-operation",
+			ack: func() []byte {
+				raw, _ := MarshalControlServerAck(ControlServerAck{V: 1, Op: ControlPhaseCancel, Challenge: challengeA, Ack: true})
+				return raw
+			},
+		},
+		{
+			name: "ack-false",
+			ack:  func() []byte { return []byte(ackFalse) },
+		},
+		{name: "missing-ack", missing: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, client := net.Pipe()
+			control := &CLIRunControl{
+				conn:      controlCloseWriteConn{Conn: client},
+				challenge: challengeA,
+				state:     cliRunControlHandlePending,
+			}
+			handled := make(chan bool, 1)
+			go func() {
+				defer server.Close()
+				raw, err := readFrame(server, MaxOutput)
+				if err != nil {
+					handled <- false
+					return
+				}
+				phase, err := DecodeControlClientPhase(raw)
+				clear(raw)
+				if err != nil || phase.Op != ControlPhaseCommit || phase.Challenge != challengeA {
+					handled <- false
+					return
+				}
+				if tc.missing {
+					handled <- true
+					return
+				}
+				ackRaw := tc.ack()
+				writeErr := writeFrame(server, ackRaw)
+				clear(ackRaw)
+				handled <- writeErr == nil
+			}()
+			if err := control.Commit(); !errors.Is(err, errCLIRunControl) {
+				t.Fatal("invalid acknowledgement did not close with a fixed error")
+			}
+			if !<-handled {
+				t.Fatal("unit peer did not deliver the selected acknowledgement")
+			}
+			control.mu.Lock()
+			closed := control.state == cliRunControlHandleClosed && control.challenge == ""
+			control.mu.Unlock()
+			if !closed {
+				t.Fatal("invalid acknowledgement left the handle open")
+			}
+		})
 	}
 }
 

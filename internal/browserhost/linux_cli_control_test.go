@@ -96,10 +96,11 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	var seenControl, seenDefault, hardCapOK, deadlineOK atomic.Bool
 	var closeOK, cancelOK, eofOK, defaultEOFOK, sentinelOK, preByteOK atomic.Bool
 	var preEOFOK, preEOFContextDone, challengePairOK, challengeFailureOK, entropyRawOK atomic.Bool
+	var acceptedObserved, wrongChallengeOK, duplicateOK, phaseCancelOK, noEOFOK atomic.Bool
 	var count atomic.Int32
 	var failChallenge atomic.Bool
 	var controlFrames atomic.Int32
-	var controlFrame atomic.Value
+	var sentinelObserved atomic.Bool
 	b := NewBroker(BrokerCallbacks{
 		HandleCLIRun: func(ctx context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
 			n := count.Add(1)
@@ -128,9 +129,14 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		return newCLIRunControlChallenge()
 	}
 	b.cliRunControlObserve = func(observation cliRunControlReadObservation) {
+		if observation.Accepted {
+			acceptedObserved.Store(true)
+		}
 		if observation.Outcome == cliRunControlReadFrame {
 			controlFrames.Add(1)
-			controlFrame.Store(observation)
+			if observation.Length == 3 {
+				sentinelObserved.Store(true)
+			}
 		}
 	}
 	stage = "S-listen"
@@ -284,6 +290,14 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 	preByteOK.Store(preByteEvent == 'P' && preByteClosed)
 	preEOFEvent, _, _, preEOFClosed := runEvent("pre-eof", strings.Repeat("f2", 32), false)
 	preEOFOK.Store(preEOFEvent == 'Q' && preEOFClosed && preEOFContextDone.Load())
+	wrongChallengeEvent, _, _, wrongChallengeClosed := runEvent("control-wrong-challenge", strings.Repeat("a3", 32), false)
+	wrongChallengeOK.Store(wrongChallengeEvent == 'W' && wrongChallengeClosed)
+	duplicateEvent, _, _, duplicateClosed := runEvent("control-duplicate", strings.Repeat("b4", 32), false)
+	duplicateOK.Store(duplicateEvent == 'U' && duplicateClosed)
+	phaseCancelEvent, _, _, phaseCancelClosed := runEvent("control-phase-cancel", strings.Repeat("c5", 32), false)
+	phaseCancelOK.Store(phaseCancelEvent == 'Z' && phaseCancelClosed)
+	noEOFEvent, _, _, noEOFClosed := runEvent("control-no-eof", strings.Repeat("d6", 32), false)
+	noEOFOK.Store(noEOFEvent == 'N' && noEOFClosed)
 	runPair(strings.Repeat("a2", 32), strings.Repeat("b3", 32))
 	failChallenge.Store(true)
 	run("challenge-refused", strings.Repeat("c4", 32))
@@ -351,13 +365,32 @@ func TestLinuxCLIRunControlBrokerHelper(t *testing.T) {
 		stage = "S-assert-entropy-raw"
 		fail()
 	}
-	if controlFrames.Load() != 1 {
+	if !wrongChallengeOK.Load() {
+		stage = "S-assert-wrong-challenge"
+		fail()
+	}
+	if !duplicateOK.Load() {
+		stage = "S-assert-duplicate"
+		fail()
+	}
+	if !phaseCancelOK.Load() {
+		stage = "S-assert-phase-cancel"
+		fail()
+	}
+	if !noEOFOK.Load() {
+		stage = "S-assert-no-eof"
+		fail()
+	}
+	if !acceptedObserved.Load() {
+		stage = "S-assert-accepted"
+		fail()
+	}
+	if controlFrames.Load() != 6 {
 		stage = "S-assert-observe-count"
 		fail()
 	}
-	observation, _ := controlFrame.Load().(cliRunControlReadObservation)
-	if observation.Outcome != cliRunControlReadFrame || observation.Length != 3 {
-		stage = "S-assert-observe-frame"
+	if !sentinelObserved.Load() {
+		stage = "S-assert-sentinel-frame"
 		fail()
 	}
 	if _, err := result.WriteString(linuxCLIControlOK); err != nil {
@@ -391,6 +424,33 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	signal := func(b byte) { _, _ = os.Stdout.Write([]byte{b}) }
+	writePhase := func(control *CLIRunControl, phase ControlClientPhase) bool {
+		if control == nil || control.conn == nil {
+			return false
+		}
+		raw, err := MarshalControlClientPhase(phase)
+		if err != nil {
+			return false
+		}
+		err = writeFrame(control.conn, raw)
+		clear(raw)
+		return err == nil
+	}
+	closeWrite := func(control *CLIRunControl) bool {
+		if control == nil {
+			return false
+		}
+		conn, ok := control.conn.(*net.UnixConn)
+		return ok && conn.CloseWrite() == nil
+	}
+	ackMustFail := func(control *CLIRunControl) bool {
+		if control == nil || control.conn == nil {
+			return false
+		}
+		raw, err := readFrame(control.conn, MaxOutput)
+		clear(raw)
+		return err != nil
+	}
 	switch mode {
 	case "default":
 		resp, err := RequestCLIRun(ctx, req)
@@ -402,11 +462,94 @@ func TestLinuxCLIRunControlClientHelper(t *testing.T) {
 		if err != nil || control == nil || len(resp.PreparedValues) == 0 || !validCLIRunControlChallenge(control.challenge) {
 			os.Exit(2)
 		}
+		if err := control.Commit(); err != nil {
+			os.Exit(2)
+		}
+		control.mu.Lock()
+		accepted := control.state == cliRunControlHandleAccepted && control.challenge == ""
+		control.mu.Unlock()
+		if !accepted {
+			os.Exit(2)
+		}
 		_ = control.Close()
-		if control.challenge != "" {
+		control.mu.Lock()
+		cleared := control.challenge == ""
+		control.mu.Unlock()
+		if !cleared {
 			os.Exit(2)
 		}
 		signal('R')
+	case "control-wrong-challenge":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		wrong := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x7e}, cliRunControlChallengeBytes))
+		if !writePhase(control, ControlClientPhase{V: 1, Op: ControlPhaseCommit, Challenge: wrong}) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = closeWrite(control)
+		if !ackMustFail(control) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = control.Close()
+		signal('W')
+	case "control-duplicate":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		phase := ControlClientPhase{V: 1, Op: ControlPhaseCommit, Challenge: control.challenge}
+		if !writePhase(control, phase) || !writePhase(control, phase) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = closeWrite(control)
+		if !ackMustFail(control) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = control.Close()
+		signal('U')
+	case "control-phase-cancel":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		if !writePhase(control, ControlClientPhase{V: 1, Op: ControlPhaseCancel, Challenge: control.challenge}) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = closeWrite(control)
+		if !ackMustFail(control) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		_ = control.Close()
+		signal('Z')
+	case "control-no-eof":
+		_, control, err := RequestCLIRunControl(ctx, req)
+		if err != nil || control == nil {
+			os.Exit(2)
+		}
+		if !writePhase(control, ControlClientPhase{V: 1, Op: ControlPhaseCommit, Challenge: control.challenge}) {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		if control.conn.SetReadDeadline(time.Now().Add(750*time.Millisecond)) != nil {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		raw, err := readFrame(control.conn, MaxOutput)
+		clear(raw)
+		if err == nil {
+			_ = control.Close()
+			os.Exit(2)
+		}
+		signal('N')
+		_ = control.Close()
 	case "control-refused":
 		_, control, err := RequestCLIRunControl(ctx, req)
 		if !errors.Is(err, ErrCLIRunRefused) || control != nil {
