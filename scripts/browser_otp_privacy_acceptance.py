@@ -59,12 +59,26 @@ def main():
     text = raw.decode("utf-8", errors="replace")
     if process.returncode != 1 or "otp-6:positive:driver-arguments-failure" not in text:
         raise ValueError("privacy-failure-stage")
-    marker = (r"Synthetic diagnostic directory: (/tmp/locklark-browser-acceptance-[A-Za-z0-9]+)/(diagnostics-[A-Za-z0-9]+)"
-              if args.engine == "chromium" else r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)")
-    match = re.search(marker, text)
-    if not match:
-        raise ValueError("privacy-state")
-    private = Path(match.group(1))
+    if args.engine == "chromium":
+        # The public failure console intentionally no longer prints the private
+        # diagnostics path. This test owns the just-started process, so it can
+        # locate the unique state directory it created without reading values.
+        candidates = []
+        for candidate in Path("/tmp").glob("locklark-browser-acceptance-*"):
+            try:
+                if (candidate / "vault/fixture.json").is_file() and candidate.stat().st_mtime >= first - 1:
+                    candidates.append(candidate)
+            except OSError:
+                continue
+        if len(candidates) != 1:
+            raise ValueError("privacy-state")
+        private = candidates[0]
+    else:
+        marker = r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)"
+        match = re.search(marker, text)
+        if not match:
+            raise ValueError("privacy-state")
+        private = Path(match.group(1))
     fixture = json.loads((private / "vault/fixture.json").read_text())
     check_output(raw, fixture, first, last)
     diagnostics = list(private.glob("diagnostics-*"))

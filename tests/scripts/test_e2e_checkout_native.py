@@ -1957,9 +1957,10 @@ class CheckoutFailureEvidenceEmissionTests(unittest.TestCase):
         self.assertEqual(result["lines"], [
             "Native browser diagnostic: "
             + json.dumps(REPORT, separators=(",", ":")),
-            "Synthetic diagnostic directory: " + PRIVATE_DIRECTORY,
+            "Synthetic diagnostic directory: [private]",
         ])
         self.assertIsNone(result["thrown"])
+        self.assertNotIn(PRIVATE_DIRECTORY, "\n".join(result["lines"]))
         self.assertEqual(result["writes"], [[
             PRIVATE_DIRECTORY + "/failure.json",
             json.dumps(REPORT, indent=2) + "\n",
@@ -1971,7 +1972,7 @@ class CheckoutFailureEvidenceEmissionTests(unittest.TestCase):
         self.assertEqual(result["lines"], [
             "Native browser diagnostic: "
             + json.dumps(REPORT, separators=(",", ":")),
-            "Synthetic diagnostic directory: " + PRIVATE_DIRECTORY,
+            "Synthetic diagnostic directory: [private]",
         ])
         # The disk write was attempted once and its error never escapes the
         # emitter as a different failure.
