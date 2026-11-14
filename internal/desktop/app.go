@@ -80,10 +80,11 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
-	// approvalWinPending is the pending id the approval window currently
-	// renders. Close and cleanup paths compare it under brokerMu so an action
-	// queued for an old request cannot decide or hide a replacement.
+	// approvalWinPending is the pending id the current approval popup renders.
+	// approvalPopup is that popup's immutable close binding; both are guarded
+	// by brokerMu so a stale action can be limited to its own window.
 	approvalWinPending string
+	approvalPopup      *cliApprovalPopup
 	cliActivity        cliActivityState
 	cliSettings        cliIntegrationState
 
@@ -418,9 +419,7 @@ func (a *App) Lock() {
 	a.confirmForgetDevice = false
 	a.forgetPassword = ""
 	a.reexportPassword = ""
-	if a.approvalWin != nil {
-		a.approvalWin.Hide()
-	}
+	a.hideApprovalWindow()
 	a.value = ""
 	a.username = ""
 	a.title = ""
@@ -1504,9 +1503,7 @@ func Run() error {
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
 			a.quitting = true
-			if a.approvalWin != nil {
-				a.approvalWin.Close()
-			}
+			a.hideApprovalWindow()
 		})
 		mygo.App.OnQuit(a.Lock)
 		a.startBrowserBroker()
@@ -1522,9 +1519,7 @@ func Run() error {
 		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.winHidden = false; a.win.Show(); a.win.Focus() }}, updater.MenuItem(), {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.quitting = true
 			a.Lock()
-			if a.approvalWin != nil {
-				a.approvalWin.Close()
-			}
+			a.hideApprovalWindow()
 			mygo.App.Quit()
 		}}})})
 	})

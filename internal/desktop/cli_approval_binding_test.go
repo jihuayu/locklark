@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -95,56 +96,96 @@ func TestStaleCLIApprovalRenderCannotDecideReplacement(t *testing.T) {
 	}
 }
 
-// Cleanup and window-close actions captured for p1 must not reject or hide p2
-// once the replacement is current.
-func TestStaleCLIApprovalCloseAndCleanupCannotTouchReplacement(t *testing.T) {
+// Cleanup and a delayed p1 window-close event must not reject, retire, or hide
+// the rendered p2 popup. A genuine p2 close refuses exactly once.
+func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
 	a := New()
 	p1 := cliPendingBindingFixture("pending-1")
 	p2 := cliPendingBindingFixture("pending-2")
-
-	// p1's cleanup runs after p2 is rendered: it may hide only its own window.
-	setCLIPending(a, p2, p2.id)
-	if a.hideApprovalWindowFor(p1.id) {
-		t.Fatal("stale cleanup hid the replacement window")
+	popup1 := &cliApprovalPopup{id: p1.id}
+	popup2 := &cliApprovalPopup{id: p2.id}
+	install := func(p *cliRunPending, popup *cliApprovalPopup) {
+		a.brokerMu.Lock()
+		a.cliPending = p
+		p.popup = popup
+		a.approvalPopup = popup
+		a.approvalWinPending = popup.id
+		a.approvalWin = nil
+		a.brokerMu.Unlock()
 	}
+	install(p1, popup1)
+	// Capture p1's permanent close closure before p2 replaces both the pending
+	// request and the rendered popup.
+	close1 := a.cliRunCloseHandler(popup1)
+	install(p2, popup2)
+
+	// A stale queued show must not replace p2's rendered popup either.
+	a.showApprovalWindow(p1.id)
+	// The delayed p1 close runs first, then stale cleanup runs while p2 is
+	// current. Neither may reject, retire, or hide p2's popup.
+	close1(&mygo.CloseEvent{})
+	if a.hideApprovalWindowFor(p1.id) {
+		t.Fatal("stale cleanup retired p2's popup")
+	}
+	a.retireCLIRunPendingWindow(p1)
+	close1(&mygo.CloseEvent{})
+
 	a.brokerMu.Lock()
 	current, rendered := a.cliPending, a.approvalWinPending
+	currentPopup, p2Popup := a.approvalPopup, p2.popup
+	p1Retired, p2Retired := popup1.retired, popup2.retired
 	a.brokerMu.Unlock()
-	if current != p2 || rendered != p2.id {
-		t.Fatal("stale cleanup changed the replacement binding")
+	if current != p2 || rendered != p2.id || currentPopup != popup2 || p2Popup != popup2 {
+		t.Fatal("stale p1 action changed p2's rendered popup binding")
 	}
-
-	// A close callback for a p1 window queued before p2 is shown must not
-	// reject p2. The stale owner is cleared, then p2 can bind and be refused.
-	setCLIPending(a, p2, p1.id)
-	a.rejectRenderedCLIRun()
+	if !p1Retired || p2Retired {
+		t.Fatalf("popup retirement p1=%v p2=%v, want p1 retired and p2 live", p1Retired, p2Retired)
+	}
 	if p1.decided || p2.decided {
-		t.Fatal("stale close decided a request")
+		t.Fatal("stale p1 close decided a request")
+	}
+	if _, ok := cliPendingDecision(p1); ok {
+		t.Fatal("stale p1 close decided p1")
 	}
 	if _, ok := cliPendingDecision(p2); ok {
-		t.Fatal("stale close rejected replacement p2")
-	}
-	a.brokerMu.Lock()
-	current = a.cliPending
-	rendered = a.approvalWinPending
-	a.brokerMu.Unlock()
-	if current != p2 || rendered != "" {
-		t.Fatal("stale close did not retire only its own window binding")
+		t.Fatal("stale p1 close rejected replacement p2")
 	}
 
-	setCLIPending(a, p2, p2.id)
-	a.rejectRenderedCLIRun()
+	// A different retired pending's own cleanup also retires only its popup.
+	p1b := cliPendingBindingFixture("pending-1b")
+	popup1b := &cliApprovalPopup{id: p1b.id}
+	a.brokerMu.Lock()
+	p1b.popup = popup1b
+	a.brokerMu.Unlock()
+	a.retireCLIRunPendingWindow(p1b)
+	a.brokerMu.Lock()
+	p1bRetired := popup1b.retired
+	currentPopup = a.approvalPopup
+	p2Live := !popup2.retired
+	a.brokerMu.Unlock()
+	if !p1bRetired || !p2Live || currentPopup != popup2 {
+		t.Fatalf("stale pending cleanup p1b=%v p2=%v current=%v", p1bRetired, p2Live, currentPopup)
+	}
+
+	// The genuine p2 close closure still decides p2 exactly once.
+	close2 := a.cliRunCloseHandler(popup2)
+	close2(&mygo.CloseEvent{})
+	close2(&mygo.CloseEvent{})
 	if value, ok := cliPendingDecision(p2); !ok || value {
 		t.Fatalf("current p2 close refusal = %v, %v", value, ok)
 	}
-	if !p2.decided {
-		t.Fatal("current close did not mark p2 decided")
+	if _, ok := cliPendingDecision(p2); ok {
+		t.Fatal("p2 close decided more than once")
 	}
 	a.brokerMu.Lock()
-	rendered = a.approvalWinPending
+	rendered, currentPopup = a.approvalWinPending, a.approvalPopup
+	p2Retired = popup2.retired
 	a.brokerMu.Unlock()
-	if rendered != "" {
-		t.Fatal("current close left the window binding installed")
+	if !p2.decided || !p2Retired || rendered != "" || currentPopup != nil {
+		t.Fatalf("p2 close state decided=%v retired=%v rendered=%q popup=%v", p2.decided, p2Retired, rendered, currentPopup)
+	}
+	if _, ok := cliPendingDecision(p1); ok {
+		t.Fatal("p2 close decided p1")
 	}
 }
 

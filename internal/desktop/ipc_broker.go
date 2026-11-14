@@ -20,6 +20,15 @@ import (
 
 var errCLIRunRefused = errors.New("refused")
 
+// cliApprovalPopup is one immutable rendered approval window for exactly one
+// pending id. retired is guarded by App.brokerMu; the window itself is
+// destroyed without firing OnClose so retiring a stale popup cannot recurse.
+type cliApprovalPopup struct {
+	id      string
+	win     *mygo.Window
+	retired bool
+}
+
 type cliRunPending struct {
 	id       string
 	peer     browserhost.Peer
@@ -27,6 +36,9 @@ type cliRunPending struct {
 	decision chan bool
 	once     sync.Once
 	decided  bool
+	// popup is the exact window created for this pending id. Guarded by
+	// App.brokerMu.
+	popup *cliApprovalPopup
 }
 
 func (p *cliRunPending) choose(approved bool) {
@@ -121,13 +133,20 @@ func (a *App) cancelPendingCLIRun() {
 	if p != nil {
 		p.decided = true
 	}
-	renderedID := a.approvalWinPending
+	popup := a.approvalPopup
+	win := a.approvalWin
+	if p != nil && p.popup != nil {
+		popup = p.popup
+	}
 	a.brokerMu.Unlock()
 	if p != nil {
 		p.choose(false)
-		renderedID = p.id
 	}
-	a.hideApprovalWindowFor(renderedID)
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
 }
 
 func (a *App) notifyBrowserBrokerUnlocked() {
@@ -271,7 +290,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 		}
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
-			a.hideApprovalWindowFor(p.id)
+			a.retireCLIRunPendingWindow(p)
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -289,7 +308,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 		}
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
-			a.hideApprovalWindowFor(p.id)
+			a.retireCLIRunPendingWindow(p)
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -319,100 +338,262 @@ func (a *App) approveCLIRun(id string, approved bool) bool {
 	}
 	p.decided = true
 	p.choose(approved)
+	popup := p.popup
+	if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == id {
+		popup = a.approvalPopup
+	}
+	win := a.approvalWin
+	if a.approvalWinPending == id {
+		a.approvalWinPending = ""
+		a.approvalWin = nil
+	}
+	if popup != nil && a.approvalPopup == popup {
+		a.approvalPopup = nil
+	}
 	a.brokerMu.Unlock()
-	a.hideApprovalWindowFor(id)
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
 	return true
 }
 
-// hideApprovalWindowFor hides the approval window only while it still renders
-// id. A cleanup queued for an old request therefore cannot hide the window of
-// a replacement request.
+// cliRunCloseHandler captures one immutable popup. A delayed close event from
+// an old window can therefore reject only its own pending id and retire only
+// its own window, never whatever happens to be rendered now.
+func (a *App) cliRunCloseHandler(popup *cliApprovalPopup) func(*mygo.CloseEvent) {
+	return func(e *mygo.CloseEvent) {
+		if e != nil {
+			e.PreventDefault()
+		}
+		a.closeCLIApprovalPopup(popup)
+	}
+}
+
+func (a *App) closeCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
+	// approveCLIRun rejects the captured id only while it is still current.
+	// A stale p1 popup leaves p2's decision and window untouched.
+	a.approveCLIRun(popup.id, false)
+	a.retireCLIApprovalPopup(popup)
+}
+
+// retireCLIApprovalPopup destroys exactly popup's window without firing a
+// close event, so retiring p1 cannot recurse into the live p2 popup.
+func (a *App) retireCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
+	a.brokerMu.Lock()
+	if popup.retired {
+		a.brokerMu.Unlock()
+		return
+	}
+	popup.retired = true
+	win := popup.win
+	popup.win = nil
+	if a.approvalPopup == popup {
+		a.approvalPopup = nil
+		a.approvalWin = nil
+		if a.approvalWinPending == popup.id {
+			a.approvalWinPending = ""
+		}
+	}
+	if a.cliPending != nil && a.cliPending.popup == popup {
+		a.cliPending.popup = nil
+	}
+	a.brokerMu.Unlock()
+	if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
+}
+
+// retireCLIRunPendingWindow retires the popup captured by one pending request,
+// even if a replacement request has since become current. It is safe to call
+// more than once and from a queued cleanup.
+func (a *App) retireCLIRunPendingWindow(p *cliRunPending) {
+	if p == nil {
+		return
+	}
+	a.brokerMu.Lock()
+	popup := p.popup
+	p.popup = nil
+	var win *mygo.Window
+	if a.approvalWinPending == p.id {
+		if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == p.id {
+			popup = a.approvalPopup
+		}
+		win = a.approvalWin
+		a.approvalWinPending = ""
+		a.approvalWin = nil
+		if popup != nil && a.approvalPopup == popup {
+			a.approvalPopup = nil
+		}
+	}
+	a.brokerMu.Unlock()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+		return
+	}
+	if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+		return
+	}
+	// Test/legacy state may have rendered an owner without a popup object.
+	a.hideApprovalWindowFor(p.id)
+}
+
+// hideApprovalWindowFor retires the popup only while it still renders id. A
+// cleanup queued for an old request therefore cannot hide the window of a
+// replacement request.
 func (a *App) hideApprovalWindowFor(id string) bool {
 	a.brokerMu.Lock()
 	if id == "" || a.approvalWinPending != id {
 		a.brokerMu.Unlock()
 		return false
 	}
-	a.approvalWinPending = ""
+	popup := a.approvalPopup
+	if popup == nil && a.cliPending != nil && a.cliPending.id == id {
+		popup = a.cliPending.popup
+	}
 	win := a.approvalWin
+	a.approvalWinPending = ""
+	a.approvalWin = nil
+	if popup != nil && a.approvalPopup == popup {
+		a.approvalPopup = nil
+	}
+	if a.cliPending != nil && a.cliPending.popup == popup {
+		a.cliPending.popup = nil
+	}
 	a.brokerMu.Unlock()
-	if win != nil && !win.IsDestroyed() {
-		win.Hide()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
 	}
 	return true
 }
 
-// rejectRenderedCLIRun is the window-close action. It refuses only the id the
-// approval window currently renders, so a close callback cannot reject a
-// different pending request.
-func (a *App) rejectRenderedCLIRun() {
-	a.brokerMu.Lock()
-	id := a.approvalWinPending
-	a.brokerMu.Unlock()
-	if id == "" {
-		a.hideApprovalWindow()
-		return
-	}
-	if !a.approveCLIRun(id, false) {
-		a.hideApprovalWindowFor(id)
-	}
-}
-
+// hideApprovalWindow retires the current popup without deciding its pending.
+// It is used for teardown paths such as lock/quit, not for a rendered action.
 func (a *App) hideApprovalWindow() {
 	a.brokerMu.Lock()
-	a.approvalWinPending = ""
+	popup := a.approvalPopup
+	if popup == nil && a.cliPending != nil {
+		popup = a.cliPending.popup
+	}
 	win := a.approvalWin
+	a.approvalWinPending = ""
+	a.approvalWin = nil
+	a.approvalPopup = nil
+	if a.cliPending != nil {
+		a.cliPending.popup = nil
+	}
 	a.brokerMu.Unlock()
-	if win != nil && !win.IsDestroyed() {
-		win.Hide()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
 	}
 }
 
-func (a *App) showApprovalWindow(id string) {
+func (a *App) showCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
 	a.brokerMu.Lock()
-	if a.cliPending == nil || a.cliPending.id != id {
+	if popup.retired || popup.win == nil {
 		a.brokerMu.Unlock()
 		return
 	}
-	a.approvalWinPending = id
-	win := a.approvalWin
+	win := popup.win
 	a.brokerMu.Unlock()
-	if win == nil || win.IsDestroyed() {
-		shell := plain.NewShell(plain.ShellOptions{
-			Title:     "Locklark · CLI 凭据请求审批",
-			Width:     560,
-			Height:    430,
-			MinWidth:  500,
-			MinHeight: 380,
-			Hidden:    true,
-			Theme:     a.onevraTheme,
-			Content:   a.cliApprovalPopupView,
-		})
-		win = shell.Window()
-		win.SetAlwaysOnTop(true)
-		win.SetResizable(false)
-		win.SetMinimizable(false)
-		win.SetMaximizable(false)
-		win.OnClose(func(e *mygo.CloseEvent) {
-			e.PreventDefault()
-			a.rejectRenderedCLIRun()
-		})
-		a.brokerMu.Lock()
-		a.approvalWin = win
-		a.brokerMu.Unlock()
-	}
-	// A decision or cleanup may have retired this id while the window was
-	// being created. Never show a prompt whose exact binding was cleared.
-	a.brokerMu.Lock()
-	current := a.cliPending != nil && a.cliPending.id == id && a.approvalWinPending == id
-	a.brokerMu.Unlock()
-	if !current {
+	if win.IsDestroyed() {
 		return
 	}
 	win.Center()
 	win.Show()
 	win.Focus()
 	win.Invalidate()
+}
+
+func (a *App) showApprovalWindow(id string) {
+	a.brokerMu.Lock()
+	p := a.cliPending
+	if p == nil || p.id != id {
+		a.brokerMu.Unlock()
+		return
+	}
+	if p.popup != nil && !p.popup.retired && p.popup.win != nil && !p.popup.win.IsDestroyed() {
+		popup := p.popup
+		a.approvalPopup = popup
+		a.approvalWin = popup.win
+		a.approvalWinPending = id
+		a.brokerMu.Unlock()
+		a.showCLIApprovalPopup(popup)
+		return
+	}
+	oldPopup, oldWin, stalePopup := a.approvalPopup, a.approvalWin, p.popup
+	a.approvalPopup = nil
+	a.approvalWin = nil
+	a.approvalWinPending = ""
+	a.brokerMu.Unlock()
+	if oldPopup != nil {
+		a.retireCLIApprovalPopup(oldPopup)
+	}
+	if stalePopup != nil && stalePopup != oldPopup {
+		a.retireCLIApprovalPopup(stalePopup)
+	}
+	if oldPopup == nil && stalePopup == nil && oldWin != nil && !oldWin.IsDestroyed() {
+		oldWin.Destroy()
+	}
+
+	// Every pending request gets its own popup and its own immutable close
+	// handler. A p2 handler is never appended to the reused p1 window.
+	shell := plain.NewShell(plain.ShellOptions{
+		Title:     "Locklark · CLI 凭据请求审批",
+		Width:     560,
+		Height:    430,
+		MinWidth:  500,
+		MinHeight: 380,
+		Hidden:    true,
+		Theme:     a.onevraTheme,
+		Content:   a.cliApprovalPopupView,
+	})
+	win := shell.Window()
+	win.SetAlwaysOnTop(true)
+	win.SetResizable(false)
+	win.SetMinimizable(false)
+	win.SetMaximizable(false)
+	popup := &cliApprovalPopup{id: id, win: win}
+	win.OnClose(a.cliRunCloseHandler(popup))
+
+	a.brokerMu.Lock()
+	if a.cliPending == nil || a.cliPending.id != id {
+		a.brokerMu.Unlock()
+		a.retireCLIApprovalPopup(popup)
+		return
+	}
+	if a.cliPending.popup != nil && !a.cliPending.popup.retired && a.cliPending.popup != popup {
+		existing := a.cliPending.popup
+		a.brokerMu.Unlock()
+		a.retireCLIApprovalPopup(popup)
+		a.showCLIApprovalPopup(existing)
+		return
+	}
+	previous := a.approvalPopup
+	p.popup = popup
+	a.approvalPopup = popup
+	a.approvalWin = win
+	a.approvalWinPending = id
+	a.brokerMu.Unlock()
+	if previous != nil && previous != popup {
+		a.retireCLIApprovalPopup(previous)
+	}
+	a.showCLIApprovalPopup(popup)
 }
 
 func (a *App) cliApprovalPopupView(c *ui.Context) {
