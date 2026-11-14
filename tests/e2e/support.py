@@ -2836,6 +2836,7 @@ CHECKOUT_SOURCE_FILES = (
     "browser-extension/options.js",
     "browser-extension/release-version.json",
     # Every direct and transitive local ES module imported by the journey.
+    "scripts/browser_native_failure_report.mjs",
     "scripts/browser_passkey_acceptance.mjs",
     "scripts/browser_passkey_management_acceptance.mjs",
     "scripts/browser_conditional_passkey_acceptance.mjs",
@@ -3429,6 +3430,71 @@ def _checkout_diagnostic_streams(
 
 
 _PICKER_STATUS_INVALID = object()
+_CHECKOUT_PICKER_DIAGNOSTIC_PHASES = (
+    "handler-entry",
+    "early-guard",
+    "gesture-refused",
+    "request-sent",
+    "reply-null",
+    "reply-present",
+    "adopt-refused",
+    "adopted",
+)
+_PICKER_DIAGNOSTIC_MISSING = object()
+_PICKER_DIAGNOSTIC_INVALID = object()
+
+
+def _checkout_picker_diagnostic(
+    diagnostic: dict[str, Any], picker_status: Any
+) -> Any:
+    """Project the sender's finite phase records, or keep a fixed unknown.
+
+    Missing means an older sender and stays absent. Malformed records are
+    reduced to ``"unknown"``; poison keys, labels, origins, ids, values, paths
+    and error text are never copied. A diagnostic without a valid picker
+    status is an inconsistent shape and rejects the whole record.
+    """
+
+    value = diagnostic.get("pickerDiagnostic", _PICKER_DIAGNOSTIC_MISSING)
+    if value is _PICKER_DIAGNOSTIC_MISSING:
+        return None
+    if picker_status is None:
+        return _PICKER_DIAGNOSTIC_INVALID
+    if value == "unknown":
+        return "unknown"
+    if not isinstance(value, list) or not (
+        1 <= len(value) <= len(_CHECKOUT_PICKER_DIAGNOSTIC_PHASES)
+    ):
+        return "unknown"
+    phases = set(_CHECKOUT_PICKER_DIAGNOSTIC_PHASES)
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for index, record in enumerate(value):
+        if not isinstance(record, dict):
+            return "unknown"
+        phase = record.get("phase")
+        if not isinstance(phase, str) or phase not in phases or phase in seen:
+            return "unknown"
+        seen.add(phase)
+        if index == 0:
+            if set(record) != {"phase", "isTrusted", "userActivation"}:
+                return "unknown"
+            if type(record["isTrusted"]) is not bool or type(
+                record["userActivation"]
+            ) is not bool:
+                return "unknown"
+            result.append({
+                "phase": phase,
+                "isTrusted": record["isTrusted"],
+                "userActivation": record["userActivation"],
+            })
+        else:
+            if set(record) != {"phase"}:
+                return "unknown"
+            result.append({"phase": phase})
+    if result[0]["phase"] != "handler-entry":
+        return "unknown"
+    return result
 
 
 def _checkout_picker_status(diagnostic: dict[str, Any]) -> Any:
@@ -3492,6 +3558,11 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     if picker_status is not None and "nativeError" in diagnostic:
         return None
     native = _checkout_failed_native(diagnostic.get("nativeError"))
+    picker_diagnostic = _checkout_picker_diagnostic(
+        diagnostic, picker_status
+    )
+    if picker_diagnostic is _PICKER_DIAGNOSTIC_INVALID:
+        return None
     # The human "reason" text is never copied; it only selects a fixed kind
     # for an allowlisted stage. A stage outside the allowlist is unclassified.
     stage = diagnostic.get("stage")
@@ -3502,6 +3573,8 @@ def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | Non
     optional = {"sourceFrames": source_frames} if source_frames else {}
     if picker_status is not None:
         optional["pickerStatus"] = picker_status
+    if picker_diagnostic is not None:
+        optional["pickerDiagnostic"] = picker_diagnostic
     if native is not None:
         return {
             "stage": stage, "kind": "native-helper", "native": native,
