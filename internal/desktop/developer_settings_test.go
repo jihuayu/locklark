@@ -438,7 +438,7 @@ func TestCLIRequestActivityStatusFilterChips(t *testing.T) {
 func TestStandaloneCLIApprovalPopupView(t *testing.T) {
 	a := New()
 	decision := make(chan bool, 1)
-	a.cliPending = &cliRunPending{
+	pending := &cliRunPending{
 		id:   "pending-1",
 		peer: browserhost.Peer{PID: 99, User: "tester", Process: "gh.exe"},
 		request: browserhost.BrokerCLIRequest{
@@ -452,7 +452,9 @@ func TestStandaloneCLIApprovalPopupView(t *testing.T) {
 		},
 		decision: decision,
 	}
-	tester := ui.NewTester(a.cliApprovalPopupView, 560, 430)
+	popup := &cliApprovalPopup{id: pending.id}
+	setCLIApprovalPopup(a, pending, popup)
+	tester := ui.NewTester(a.cliApprovalPopupContent(popup), 560, 430)
 	for _, want := range []string{"批准本地 CLI 凭据请求", "打开主窗口", "拒绝本次请求", "仅批准本次 CLI 请求"} {
 		if !tester.HasText(want) {
 			t.Fatalf("standalone CLI approval popup missing %q", want)

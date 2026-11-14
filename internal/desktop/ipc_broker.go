@@ -551,8 +551,11 @@ func (a *App) showApprovalWindow(id string) {
 		oldWin.Destroy()
 	}
 
-	// Every pending request gets its own popup and its own immutable close
-	// handler. A p2 handler is never appended to the reused p1 window.
+	// Every pending request gets its own popup, its own immutable close
+	// handler, and its own content closure. The content captures popup and
+	// revalidates exact ownership before rendering; it never substitutes the
+	// then-current global pending into an older window.
+	popup := &cliApprovalPopup{id: id}
 	shell := plain.NewShell(plain.ShellOptions{
 		Title:     "Locklark · CLI 凭据请求审批",
 		Width:     560,
@@ -561,14 +564,14 @@ func (a *App) showApprovalWindow(id string) {
 		MinHeight: 380,
 		Hidden:    true,
 		Theme:     a.onevraTheme,
-		Content:   a.cliApprovalPopupView,
+		Content:   a.cliApprovalPopupContent(popup),
 	})
 	win := shell.Window()
+	popup.win = win
 	win.SetAlwaysOnTop(true)
 	win.SetResizable(false)
 	win.SetMinimizable(false)
 	win.SetMaximizable(false)
-	popup := &cliApprovalPopup{id: id, win: win}
 	win.OnClose(a.cliRunCloseHandler(popup))
 
 	a.brokerMu.Lock()
@@ -596,12 +599,41 @@ func (a *App) showApprovalWindow(id string) {
 	a.showCLIApprovalPopup(popup)
 }
 
+// cliApprovalPopupContent binds a window's content to the immutable popup
+// created for one pending id. Every render revalidates that this popup is
+// still the exact current owner; otherwise it renders the neutral empty state
+// and never builds controls or details from a replacement pending.
+func (a *App) cliApprovalPopupContent(popup *cliApprovalPopup) func(*ui.Context) {
+	return func(c *ui.Context) {
+		a.renderCLIApprovalPopupExact(c, popup)
+	}
+}
+
+// cliApprovalPopupView renders only the exact live current popup. It is a
+// convenience entry point for the view tests; production windows use the
+// captured content closure above.
 func (a *App) cliApprovalPopupView(c *ui.Context) {
+	a.brokerMu.Lock()
+	popup := a.approvalPopup
+	a.brokerMu.Unlock()
+	a.renderCLIApprovalPopupExact(c, popup)
+}
+
+func (a *App) renderCLIApprovalPopupExact(c *ui.Context, popup *cliApprovalPopup) {
+	a.brokerMu.Lock()
+	var p *cliRunPending
+	if popup != nil && !popup.retired &&
+		a.approvalPopup == popup && a.approvalWinPending == popup.id &&
+		a.cliPending != nil && a.cliPending.id == popup.id && a.cliPending.popup == popup {
+		p = a.cliPending
+	}
+	a.brokerMu.Unlock()
+	a.renderCLIApprovalPopup(c, p)
+}
+
+func (a *App) renderCLIApprovalPopup(c *ui.Context, p *cliRunPending) {
 	c.SetTheme(a.onevraTheme(c))
 	t := c.Theme()
-	a.brokerMu.Lock()
-	p := a.cliPending
-	a.brokerMu.Unlock()
 	ui.Column(c.Key("cli-approval-popup")).Fill().Background(t.Background).Padding(t.Space(4)).Gap(t.Space(2.5)).Children(func() {
 		if p == nil {
 			oneui.Text(c, "暂无待处理的 CLI 凭据请求。").TextColor(t.TextMuted)

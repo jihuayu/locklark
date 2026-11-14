@@ -45,17 +45,29 @@ func setCLIPending(a *App, p *cliRunPending, rendered string) {
 	a.brokerMu.Unlock()
 }
 
+func setCLIApprovalPopup(a *App, p *cliRunPending, popup *cliApprovalPopup) {
+	a.brokerMu.Lock()
+	a.cliPending = p
+	p.popup = popup
+	a.approvalPopup = popup
+	a.approvalWinPending = popup.id
+	a.approvalWin = nil
+	a.brokerMu.Unlock()
+}
+
 // A rendered p1 must not be able to approve, refuse, or hide after p2 has
 // replaced it. These are the exact closures both approval views wire.
 func TestStaleCLIApprovalRenderCannotDecideReplacement(t *testing.T) {
 	a := New()
 	p1 := cliPendingBindingFixture("pending-1")
 	p2 := cliPendingBindingFixture("pending-2")
-	setCLIPending(a, p1, p1.id)
+	popup1 := &cliApprovalPopup{id: p1.id}
+	popup2 := &cliApprovalPopup{id: p2.id}
+	setCLIApprovalPopup(a, p1, popup1)
 
 	// Capture p1's rendered callbacks, then replace it before any click.
 	approve1, refuse1 := a.cliRunDecisionHandlers(p1)
-	setCLIPending(a, p2, p2.id)
+	setCLIApprovalPopup(a, p2, popup2)
 	approve1()
 	refuse1()
 	if a.hideApprovalWindowFor(p1.id) {
@@ -77,17 +89,16 @@ func TestStaleCLIApprovalRenderCannotDecideReplacement(t *testing.T) {
 		t.Fatal("stale click changed the replacement pending binding")
 	}
 
-	// A current p2 view decides exactly once; a second click is ignored.
-	currentView := ui.NewTester(a.cliApprovalPopupView, 560, 430)
+	// A current p2 view decides exactly once; a second decision is ignored.
+	currentView := ui.NewTester(a.cliApprovalPopupContent(popup2), 560, 430)
 	if err := currentView.Click("仅批准本次 CLI 请求"); err != nil {
 		t.Fatal(err)
 	}
 	if value, ok := cliPendingDecision(p2); !ok || !value {
 		t.Fatalf("current p2 approval = %v, %v", value, ok)
 	}
-	if err := currentView.Click("仅批准本次 CLI 请求"); err != nil {
-		t.Fatal(err)
-	}
+	approve2, _ := a.cliRunDecisionHandlers(p2)
+	approve2()
 	if _, ok := cliPendingDecision(p2); ok {
 		t.Fatal("p2 received a second decision")
 	}
@@ -104,20 +115,11 @@ func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
 	p2 := cliPendingBindingFixture("pending-2")
 	popup1 := &cliApprovalPopup{id: p1.id}
 	popup2 := &cliApprovalPopup{id: p2.id}
-	install := func(p *cliRunPending, popup *cliApprovalPopup) {
-		a.brokerMu.Lock()
-		a.cliPending = p
-		p.popup = popup
-		a.approvalPopup = popup
-		a.approvalWinPending = popup.id
-		a.approvalWin = nil
-		a.brokerMu.Unlock()
-	}
-	install(p1, popup1)
+	setCLIApprovalPopup(a, p1, popup1)
 	// Capture p1's permanent close closure before p2 replaces both the pending
 	// request and the rendered popup.
 	close1 := a.cliRunCloseHandler(popup1)
-	install(p2, popup2)
+	setCLIApprovalPopup(a, p2, popup2)
 
 	// A stale queued show must not replace p2's rendered popup either.
 	a.showApprovalWindow(p1.id)
@@ -186,6 +188,56 @@ func TestStaleCLIApprovalWindowCloseCannotRejectReplacement(t *testing.T) {
 	}
 	if _, ok := cliPendingDecision(p1); ok {
 		t.Fatal("p2 close decided p1")
+	}
+}
+
+// A captured p1 content callback must never reread the global pending and
+// build p2's body or decision controls after p2 replaces it.
+func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
+	a := New()
+	p1 := cliPendingBindingFixture("pending-1")
+	p2 := cliPendingBindingFixture("pending-2")
+	p2.peer.Process = "p2-process"
+	p2.request.VaultPath = "/fixture/p2-visible.ll"
+	p2.request.Targets[0].Slot = "P2_SLOT"
+	popup1 := &cliApprovalPopup{id: p1.id}
+	popup2 := &cliApprovalPopup{id: p2.id}
+	setCLIApprovalPopup(a, p1, popup1)
+	staleRender := a.cliApprovalPopupContent(popup1)
+
+	// Replace both the pending request and the rendered popup owner, then
+	// invoke the content callback captured for p1.
+	setCLIApprovalPopup(a, p2, popup2)
+	staleView := ui.NewTester(staleRender, 560, 430)
+	for _, leaked := range []string{"p2-visible.ll", "p2-process", "P2_SLOT",
+		"批准本地 CLI 凭据请求", "打开主窗口", "拒绝本次请求", "仅批准本次 CLI 请求"} {
+		if staleView.HasText(leaked) {
+			t.Fatalf("retired p1 content rendered p2 detail or action %q", leaked)
+		}
+	}
+	if !staleView.HasText("暂无待处理的 CLI 凭据请求") {
+		t.Fatal("retired p1 content did not render the neutral empty state")
+	}
+	if p2.decided {
+		t.Fatal("retired p1 content decided p2")
+	}
+
+	// The live p2 content still renders its own body and actions.
+	liveView := ui.NewTester(a.cliApprovalPopupContent(popup2), 560, 430)
+	for _, want := range []string{"p2-visible.ll", "p2-process", "P2_SLOT",
+		"批准本地 CLI 凭据请求", "打开主窗口", "拒绝本次请求", "仅批准本次 CLI 请求"} {
+		if !liveView.HasText(want) {
+			t.Fatalf("live p2 content missing %q", want)
+		}
+	}
+	if liveView.HasText("GH_TOKEN") {
+		t.Fatal("live p2 content rendered retired p1 details")
+	}
+	if err := liveView.Click("仅批准本次 CLI 请求"); err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := cliPendingDecision(p2); !ok || !value {
+		t.Fatalf("live p2 action = %v, %v", value, ok)
 	}
 }
 
