@@ -1527,22 +1527,70 @@ RUNNER_GLUE_SOURCES = (
 )
 
 
-def _local_python_closure(entry: Path) -> set[Path]:
-    """Resolve the package-local import closure of one Python entry module."""
+def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
+    """Resolve the package-local AST import closure of one Python module.
 
-    base = ROOT / "scripts" / "browserrelease"
-    seen: set[Path] = {entry.resolve(), (base / "__init__.py").resolve()}
-    pending = [entry.resolve()]
+    Only ``from .`` / ``from .module`` imports are considered. A relative
+    module that cannot be found, or a parent-relative import that escapes the
+    package, fails instead of being silently omitted. No imported module is
+    executed.
+    """
+
+    entry = Path(entry).resolve()
+    base = (Path(base) if base is not None else entry.parent).resolve()
+    try:
+        entry.relative_to(base)
+    except ValueError:
+        raise AssertionError("runtime closure entry escapes its package") from None
+    seen: set[Path] = {entry}
+    init = base / "__init__.py"
+    if init.is_file():
+        seen.add(init.resolve())
+    pending = list(seen)
+
+    def resolve(parts: list[str], package_dir: Path) -> Path:
+        target = package_dir.joinpath(*parts)
+        for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+            try:
+                resolved = candidate.resolve()
+                resolved.relative_to(package_dir)
+            except ValueError:
+                raise AssertionError("runtime import escapes its package") from None
+            if resolved.is_file():
+                return resolved
+        raise AssertionError("runtime import is unresolved")
+
     while pending:
         module = pending.pop()
         tree = ast.parse(module.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or not node.level or not node.module:
+            if not isinstance(node, ast.ImportFrom) or not node.level:
                 continue
-            target = (base / (node.module.replace(".", "/") + ".py")).resolve()
-            if target not in seen:
-                seen.add(target)
-                pending.append(target)
+            if node.level != 1:
+                raise AssertionError("runtime import escapes its package")
+            targets: list[Path] = []
+            if node.module:
+                target = resolve(node.module.split("."), module.parent)
+                targets.append(target)
+                # ``from .package import child`` may bind a real child module
+                # even when package __init__ does not import it.
+                if target.name == "__init__.py":
+                    for alias in node.names:
+                        child = target.parent / alias.name
+                        candidates = (
+                            child.with_suffix(".py"), child / "__init__.py"
+                        )
+                        for candidate in candidates:
+                            if candidate.is_file():
+                                targets.append(candidate.resolve())
+                                break
+            else:
+                for alias in node.names:
+                    targets.append(resolve([alias.name], module.parent))
+            for target in targets:
+                if target not in seen:
+                    seen.add(target)
+                    pending.append(target)
     return seen
 
 
@@ -1592,6 +1640,52 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
                 "browser-extension/build.js",
             ),
         )
+
+    def test_python_closure_expands_plain_from_import_and_subpackages(self):
+        base = self.temp / "synthetic" / "pkg"
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from . import newmodule as alias\n"
+            "from .sub import leaf\n",
+            encoding="utf-8",
+        )
+        (base / "newmodule.py").write_text("", encoding="utf-8")
+        (base / "sub").mkdir()
+        (base / "sub" / "__init__.py").write_text(
+            "from . import leaf\n", encoding="utf-8"
+        )
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        base = base.resolve()
+        closure = _local_python_closure(base / "entry.py", base)
+        names = {
+            "scripts/browserrelease/" + str(path.relative_to(base))
+            for path in closure
+        }
+        self.assertIn("scripts/browserrelease/newmodule.py", names)
+        self.assertIn("scripts/browserrelease/sub/__init__.py", names)
+        self.assertIn("scripts/browserrelease/sub/leaf.py", names)
+        unbound = names - set(support.CHECKOUT_SOURCE_FILES)
+        self.assertIn("scripts/browserrelease/newmodule.py", unbound)
+        self.assertIn("scripts/browserrelease/sub/leaf.py", unbound)
+        with self.assertRaises(AssertionError):
+            if unbound:
+                raise AssertionError("runtime dependency is not bound")
+
+    def test_python_closure_rejects_unresolved_and_parent_escape(self):
+        base = self.temp / "synthetic" / "broken"
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        entry = base / "entry.py"
+        entry.write_text("from . import missing\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "unresolved"):
+            _local_python_closure(entry, base)
+        entry.write_text("from .missing import value\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "unresolved"):
+            _local_python_closure(entry, base)
+        entry.write_text("from ..outside import value\n", encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "escapes"):
+            _local_python_closure(entry, base)
 
     def test_prebuilt_python_runtime_closure_is_bound(self):
         closure = _local_python_closure(
