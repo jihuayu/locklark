@@ -59,7 +59,7 @@ class SafariPrebuiltBuilderTests(unittest.TestCase):
 
     def run_builder(self, env=None):
         return subprocess.run(
-            [str(self.root / "safari/scripts/build_safari.sh")],
+            ["/bin/bash", str(self.root / "safari/scripts/build_safari.sh")],
             cwd=self.root, env=env or self.env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
         )
@@ -76,6 +76,17 @@ class SafariPrebuiltBuilderTests(unittest.TestCase):
         self.assertNotIn("node", calls)
 
     def test_missing_partial_and_prebuilt_mismatch_never_run_node_or_xcode(self):
+        # Flag omitted while prepared/product env is present: no fallback.
+        env = dict(self.env); env.pop("LOCKLARK_BROWSER_REQUIRE_PREBUILT")
+        completed = self.run_builder(env)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(self.calls(), [])
+        # Explicit empty/bad flag and partial product env all reject before node.
+        for value in ("", "yes"):
+            env = dict(self.env); env["LOCKLARK_BROWSER_REQUIRE_PREBUILT"] = value
+            completed = self.run_builder(env)
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertEqual(self.calls(), [])
         for key in ("LOCKLARK_BROWSER_EXTENSION_SAFARI", "LOCKLARK_BROWSER_EXTENSION_FIREFOX"):
             env = dict(self.env); env.pop(key)
             completed = self.run_builder(env)

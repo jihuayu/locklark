@@ -259,10 +259,10 @@ class SafariPackagingTests(unittest.TestCase):
 
     def test_build_script_default_order_and_strict_prebuilt_branch(self) -> None:
         script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
-        strict_start = script.index('if [[ "$REQUIRE_PREBUILT" == "1" ]]; then')
-        else_marker = script.index("\nelse\n", strict_start)
-        strict = script[strict_start:else_marker]
-        default = script[else_marker:]
+        strict_start = script.index('if [ "$REQUIRE_PREBUILT" = "1" ]; then')
+        elif_marker = script.index('\nelif [ "$PREBUILT_INPUTS"', strict_start)
+        strict = script[strict_start:elif_marker]
+        default = script[script.index("\nelse\n", elif_marker):]
         baseline = default.index('node "$ROOT/browser-extension/build.js"')
         safari = default.index('node "$ROOT/browser-extension/build.js" safari')
         verify = script.index("--verify-dist")
@@ -280,6 +280,7 @@ class SafariPackagingTests(unittest.TestCase):
             self.assertIn(token, script)
         self.assertIn("REQUIRE_PREBUILT", strict)
         self.assertIn("PREPARED_DIR", strict)
+        self.assertNotIn("${product^^}", script)
 
     def test_existing_chrome_and_firefox_manifests_are_byte_identical(self) -> None:
         for mode, expected in FROZEN_MANIFEST_SHA256.items():
