@@ -144,6 +144,7 @@ func TestCLIRunBrokerChildCancellationClosesRealProcess(t *testing.T) {
 		t.Fatal("child program digest unavailable")
 	}
 	f.binding.Program, f.binding.ProgramSHA256 = program, programSHA
+	f.request.ProgramSHA256 = programSHA
 	if err = f.binding.Validate(); err != nil {
 		t.Fatal("child binding fixture invalid")
 	}

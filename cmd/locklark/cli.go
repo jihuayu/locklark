@@ -1050,6 +1050,7 @@ func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec clipro
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
+		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), args...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,
@@ -1082,6 +1083,7 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
+		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), childArgs...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,

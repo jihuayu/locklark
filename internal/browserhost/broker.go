@@ -728,6 +728,7 @@ func CanonicalCLIRunRequest(scope CLIRunScope, tempRoot string) (personal.RunBun
 	}
 	request := personal.RunBundleRequest{
 		Program:        scope.Program,
+		ProgramSHA256:  scope.ProgramSH,
 		Args:           append([]string(nil), scope.Args...),
 		Directory:      scope.CWD,
 		TimeoutSeconds: scope.Timeout,
