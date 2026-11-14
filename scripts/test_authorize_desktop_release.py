@@ -2766,6 +2766,46 @@ class AuthorizationTests(unittest.TestCase):
             with self.subTest(case=label):
                 self.assertIs(trust._covers_all_v_tags(payload), None)
 
+    def test_tag_coverage_rejects_extra_condition_keys_composed(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        valid = self.authorize()
+        self.assertTrue(valid.authorized, valid.detail)
+
+        base = copy.deepcopy(
+            self.transport.responses[trust.ruleset_api(REPOSITORY, 7)]
+        )
+        conditions = copy.deepcopy(base["conditions"])
+        ref_name = copy.deepcopy(conditions["ref_name"])
+        cases: list[tuple[str, dict[str, object]]] = [
+            (
+                "extra conditions key",
+                {
+                    **base,
+                    "conditions": {**conditions, "unknown_scope": "narrow"},
+                },
+            ),
+            (
+                "extra ref_name key",
+                {
+                    **base,
+                    "conditions": {
+                        "ref_name": {
+                            **ref_name,
+                            "unknown_scope": "narrow",
+                        }
+                    },
+                },
+            ),
+        ]
+        for label, detail in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.ruleset_api(REPOSITORY, 7)] = detail
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.TAG_RULES_UNKNOWN,
+                )
+
     def test_trusted_organization_admin_bypass_remains_authorized(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
         transport = self.valid_transport()

@@ -1611,10 +1611,10 @@ def _covers_all_v_tags(detail: Mapping[str, object]) -> bool | None:
     """Return coverage, or None when the ruleset condition metadata is malformed."""
 
     conditions = detail.get("conditions")
-    if not isinstance(conditions, dict):
+    if not isinstance(conditions, dict) or set(conditions) != {"ref_name"}:
         return None
     ref_name = conditions.get("ref_name")
-    if not isinstance(ref_name, dict):
+    if not isinstance(ref_name, dict) or set(ref_name) != {"include", "exclude"}:
         return None
     includes = ref_name.get("include")
     excludes = ref_name.get("exclude", [])
