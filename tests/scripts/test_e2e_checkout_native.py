@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -1560,6 +1561,29 @@ def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
                 return resolved
         raise AssertionError("runtime import is unresolved")
 
+    def add_module(target: Path) -> None:
+        target = target.resolve()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            raise AssertionError("runtime import escapes its package") from None
+        directory = target.parent
+        while True:
+            try:
+                directory.relative_to(base)
+            except ValueError:
+                raise AssertionError("runtime import escapes its package") from None
+            init = directory / "__init__.py"
+            if init.is_file() and init.resolve() not in seen:
+                seen.add(init.resolve())
+                pending.append(init.resolve())
+            if directory == base:
+                break
+            directory = directory.parent
+        if target not in seen:
+            seen.add(target)
+            pending.append(target)
+
     while pending:
         module = pending.pop()
         tree = ast.parse(module.read_text(encoding="utf-8"))
@@ -1588,9 +1612,7 @@ def _local_python_closure(entry: Path, base: Path | None = None) -> set[Path]:
                 for alias in node.names:
                     targets.append(resolve([alias.name], module.parent))
             for target in targets:
-                if target not in seen:
-                    seen.add(target)
-                    pending.append(target)
+                add_module(target)
     return seen
 
 
@@ -1668,6 +1690,47 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
         unbound = names - set(support.CHECKOUT_SOURCE_FILES)
         self.assertIn("scripts/browserrelease/newmodule.py", unbound)
         self.assertIn("scripts/browserrelease/sub/leaf.py", unbound)
+        with self.assertRaises(AssertionError):
+            if unbound:
+                raise AssertionError("runtime dependency is not bound")
+
+    def test_nested_import_binds_ancestor_init_and_changes_digest(self):
+        base = (self.temp / "synthetic" / "nested").resolve()
+        base.mkdir(parents=True)
+        (base / "__init__.py").write_text("", encoding="utf-8")
+        (base / "entry.py").write_text(
+            "from .sub.leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub").mkdir()
+        (base / "sub" / "__init__.py").write_text(
+            "from .leaf import X\n", encoding="utf-8"
+        )
+        (base / "sub" / "leaf.py").write_text("", encoding="utf-8")
+        closure = _local_python_closure(base / "entry.py", base)
+        names = {
+            "scripts/browserrelease/" + str(path.relative_to(base))
+            for path in closure
+        }
+        ancestor = "scripts/browserrelease/sub/__init__.py"
+        self.assertIn(ancestor, names)
+
+        def digest():
+            value = hashlib.sha256()
+            for path in sorted(closure):
+                value.update(str(path.relative_to(base)).encode("utf-8"))
+                value.update(b"\0")
+                value.update(hashlib.sha256(path.read_bytes()).digest())
+            return value.hexdigest()
+
+        before = digest()
+        init = base / "sub" / "__init__.py"
+        original = init.read_bytes()
+        init.write_bytes(original + b"\n# ancestor drift\n")
+        self.assertNotEqual(digest(), before)
+        init.write_bytes(original)
+        self.assertEqual(digest(), before)
+        unbound = names - set(support.CHECKOUT_SOURCE_FILES)
+        self.assertIn(ancestor, unbound)
         with self.assertRaises(AssertionError):
             if unbound:
                 raise AssertionError("runtime dependency is not bound")
