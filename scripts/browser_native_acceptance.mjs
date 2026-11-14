@@ -26,6 +26,7 @@ import {
   prepareSharedEnvironment,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
+import { requirePrebuiltChromium } from "./browser_extension_prebuilt.mjs";
 
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 
@@ -54,6 +55,14 @@ assert(
 );
 const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
+let prebuilt;
+try {
+  prebuilt = requirePrebuiltChromium(root, env);
+} catch {
+  console.error("prebuilt Chromium input rejected");
+  process.exit(1);
+}
+const { extension, register } = prebuilt;
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
 const sharedEnvironment =
@@ -189,10 +198,8 @@ try {
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
   execFileSync(
-    go,
+    register,
     [
-      "run",
-      "./cmd/locklark-browser-register",
       "--browser",
       browserName === "edge" ? "edge" : "chrome",
       "--host",
@@ -202,10 +209,6 @@ try {
     ],
     { cwd: root, env, stdio: "inherit" },
   );
-  execFileSync(process.execPath, ["browser-extension/build.js", "chromium"], {
-    cwd: root,
-  });
-  const extension = join(root, "browser-extension/dist/chromium");
   browser = await chromium.launchPersistentContext(profile, {
     headless: false,
     channel: browserName === "edge" ? undefined : "chromium",
