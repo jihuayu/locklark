@@ -188,6 +188,7 @@ SECRET_PATTERN = re.compile(rb"LL1-[A-Z2-7]{26}")
 
 PROC_PIDTBSDINFO = 3
 GENERATION_FIELDS = ("pid", "executable", "euid", "start_sec", "start_usec")
+MAX_EXECUTABLE = 4096
 
 # The helper is generated into the private fixture. It reads the synthetic
 # token only from the product-injected environment variable, writes exactly one
@@ -306,9 +307,49 @@ def capture_process_generation(process, expected_executable):
         raise AcceptanceFailure() from None
 
 
+def _generation_descriptor_ok(generation):
+    """True only for the complete plain-typed five-field descriptor.
+
+    ``bool`` and ``float`` compare equal to some integers in Python, so exact
+    key equality plus dictionary equality is not a type check. Every numeric
+    field is therefore required to be a plain ``int`` (never ``bool``, a
+    float or an ``int`` subclass) with its own range, and the executable must
+    be a non-empty, canonical absolute path. This malformed-shape refusal
+    happens before any process authority is read or compared.
+    """
+    if type(generation) is not dict or set(generation) != set(GENERATION_FIELDS):
+        return False
+    pid = generation["pid"]
+    executable = generation["executable"]
+    euid = generation["euid"]
+    start_sec = generation["start_sec"]
+    start_usec = generation["start_usec"]
+    if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
+        return False
+    if type(euid) is not int or not 0 <= euid <= 0xFFFFFFFF:
+        return False
+    if type(start_sec) is not int or not 0 < start_sec <= 0xFFFFFFFFFFFFFFFF:
+        return False
+    if type(start_usec) is not int or not 0 <= start_usec < 1000000:
+        return False
+    if type(executable) is not str or not executable:
+        return False
+    if len(executable) > MAX_EXECUTABLE:
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in executable):
+        return False
+    if not os.path.isabs(executable):
+        return False
+    try:
+        return os.path.realpath(executable) == executable
+    except BaseException:
+        return False
+
+
 def validate_process_generation(process, expected_executable, generation):
     """Refuse unless the retained Popen still matches the captured generation."""
-    require(type(generation) is dict and set(generation) == set(GENERATION_FIELDS))
+    require(process is not None)
+    require(_generation_descriptor_ok(generation))
     require(capture_process_generation(process, expected_executable) == generation)
 
 

@@ -1315,12 +1315,102 @@ class ProcessGenerationProtocolTests(unittest.TestCase):
         with self.assertRaises(acceptance.AcceptanceFailure):
             instance.activation_request()
 
+    def assert_descriptor_refused_before_authority(self, process, generation):
+        with mock.patch.object(acceptance, "capture_process_generation") as capture:
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.validate_process_generation(process, "/bin/cat", generation)
+        capture.assert_not_called()
+
+    def test_each_numeric_field_rejects_bool_before_any_authority_read(self):
+        base = {"pid": 1, "executable": "/bin/cat", "euid": 0,
+                "start_sec": 1, "start_usec": 0}
+        process = _GenerationPopen(pid=1)
+        for field, value in (("pid", True), ("euid", False),
+                             ("start_sec", True), ("start_usec", False)):
+            malformed = dict(base)
+            malformed[field] = value
+            with self.subTest(field=field):
+                # bool == the original int, so equality alone cannot catch it.
+                self.assertTrue(base == malformed)
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_each_numeric_field_rejects_float_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        for field in ("pid", "euid", "start_sec", "start_usec"):
+            malformed = dict(base)
+            malformed[field] = float(base[field])
+            with self.subTest(field=field):
+                # int == the same-valued float, so equality alone cannot catch it.
+                self.assertTrue(base == malformed)
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_int_and_str_subclasses_are_refused_before_any_authority_read(self):
+        class IntSubclass(int):
+            pass
+
+        class StrSubclass(str):
+            pass
+
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        for field in ("pid", "euid", "start_sec", "start_usec"):
+            malformed = dict(base)
+            malformed[field] = IntSubclass(base[field])
+            with self.subTest(field=field):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+        malformed = dict(base)
+        malformed["executable"] = StrSubclass("/bin/cat")
+        self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_executable_rejects_invalid_plain_paths_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        values = (True, 1.0, None, "", "relative", "/bin/../bin/cat",
+                  "/bin/cat\x00x", 123,
+                  "/bin/" + "x" * (acceptance.MAX_EXECUTABLE + 1))
+        for value in values:
+            malformed = dict(base)
+            malformed["executable"] = value
+            with self.subTest(kind=type(value).__name__):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_invalid_numeric_ranges_are_refused_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        cases = (("pid", 0), ("pid", -1), ("pid", 0x100000000),
+                 ("euid", -1), ("euid", 0x100000000),
+                 ("start_sec", 0), ("start_sec", -1),
+                 ("start_sec", 0x10000000000000000),
+                 ("start_usec", -1), ("start_usec", 1000000))
+        for field, value in cases:
+            malformed = dict(base)
+            malformed[field] = value
+            with self.subTest(field=field):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_missing_and_extra_keys_are_refused_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        missing = dict(base)
+        missing.pop("start_usec")
+        malformed = (missing, dict(base, extra=1), [], "generation")
+        for generation in malformed:
+            with self.subTest(size=len(generation)):
+                self.assert_descriptor_refused_before_authority(process, generation)
+
     def test_cross_process_generation_is_refused(self):
         first = _GenerationPopen(54321)
         second = _GenerationPopen(54322)
         libproc = _GenerationLibproc()
         with mock.patch.object(acceptance.ctypes, "CDLL", return_value=libproc):
             generation = acceptance.capture_process_generation(first, "/bin/cat")
+            self.assertTrue(acceptance._generation_descriptor_ok(generation))
             self.assertIsNone(
                 acceptance.validate_process_generation(first, "/bin/cat", generation))
             with self.assertRaises(acceptance.AcceptanceFailure):
@@ -1331,6 +1421,7 @@ class ProcessGenerationProtocolTests(unittest.TestCase):
         libproc = _GenerationLibproc()
         with mock.patch.object(acceptance.ctypes, "CDLL", return_value=libproc):
             generation = acceptance.capture_process_generation(process, "/bin/cat")
+            self.assertTrue(acceptance._generation_descriptor_ok(generation))
             stale = dict(generation)
             stale["start_usec"] = (generation["start_usec"] + 1) % 1000000
             if stale["start_usec"] == 0:
