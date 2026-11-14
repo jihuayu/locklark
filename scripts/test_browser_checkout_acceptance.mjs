@@ -312,10 +312,36 @@ test("privacy context is strict and unknown still fails", () => {
     const failure = privacyFailure(() =>
       assertPrivateText(item.text, PRIVACY_FIXTURE, {
         scan_source: "controller",
-        artifact_class: "json",
+        artifact_class: item.expected.artifact_class,
       }),
     );
     expectPrivacyFields(failure, false, item.expected);
+  }
+});
+
+test("mixed matches and adjacent metadata stay unknown", () => {
+  const cases = [
+    { text: '{"timestamp":731,"mystery":731}', artifact_class: "json" },
+    { text: "timestamp=731 mystery=731", artifact_class: "txt" },
+    { text: '{"timestamp":999,"mystery":"731"}', artifact_class: "json" },
+    { text: "timestamp=999 mystery=731", artifact_class: "txt" },
+    { text: '{"timestamp":731,"cvv":"731"}', artifact_class: "json" },
+    { text: "timestamp=731 cvv=731", artifact_class: "txt" },
+  ];
+  for (const item of cases) {
+    const failure = privacyFailure(() =>
+      assertPrivateText(item.text, PRIVACY_FIXTURE, {
+        scan_source: "controller",
+        artifact_class: item.artifact_class,
+      }),
+    );
+    expectPrivacyFields(failure, false, {
+      artifact_class: item.artifact_class,
+      match_kind: "short_numeric",
+      canary_class: "CVV",
+      context_class: "unknown",
+      scan_source: "controller",
+    });
   }
 });
 

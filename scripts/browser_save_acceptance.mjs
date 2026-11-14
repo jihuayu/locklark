@@ -134,19 +134,6 @@ function isWordCharacter(character) {
   return typeof character === "string" && /[A-Za-z0-9_]/.test(character);
 }
 
-function containsShortNumericToken(text, value) {
-  for (
-    let index = text.indexOf(value);
-    index !== -1;
-    index = text.indexOf(value, index + 1)
-  ) {
-    const before = index > 0 ? text[index - 1] : undefined;
-    const after = text[index + value.length];
-    if (!isWordCharacter(before) && !isWordCharacter(after)) return true;
-  }
-  return false;
-}
-
 function isWordByte(byte) {
   return (
     typeof byte === "number" &&
@@ -195,59 +182,92 @@ function contextClassForKeys(keys) {
   return "unknown";
 }
 
-function collectJSONKeys(text, value, keys) {
-  const documents = [];
-  if (text.length <= 1_000_000) {
-    try {
-      documents.push(JSON.parse(text));
-    } catch {}
-  }
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.includes(value)) continue;
-    try {
-      documents.push(JSON.parse(line));
-    } catch {}
-  }
-  const visit = (node, key) => {
-    if (Array.isArray(node)) {
-      for (const item of node) visit(item, key);
-      return;
-    }
-    if (node && typeof node === "object") {
-      for (const [name, child] of Object.entries(node)) visit(child, name);
-      return;
-    }
-    if (key && node !== null && String(node).includes(value)) {
-      keys.add(String(key));
-    }
-  };
-  for (const document of documents) visit(document, null);
-}
-
-function collectTextKeys(text, value, keys) {
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.includes(value)) continue;
-    for (const match of line.matchAll(
-      /([A-Za-z_][A-Za-z0-9_.-]*)\s*[:=]\s*["']?([^"',}\s]*)/g,
-    )) {
-      if (match[2].includes(value)) keys.add(match[1]);
-    }
-    const stamps =
-      line.match(
-        /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g,
-      ) || [];
-    if (stamps.some((stamp) => stamp.includes(value))) keys.add("timestamp");
-  }
-}
-
-function classifyPrivacyContext(text, value) {
+function findExactSpans(text, value) {
+  const spans = [];
   if (typeof text !== "string" || typeof value !== "string" || !value) {
-    return "unknown";
+    return spans;
   }
-  const keys = new Set();
-  collectJSONKeys(text, value, keys);
-  collectTextKeys(text, value, keys);
-  return contextClassForKeys(keys);
+  for (
+    let index = text.indexOf(value);
+    index !== -1;
+    index = text.indexOf(value, index + 1)
+  ) {
+    spans.push({ start: index, end: index + value.length });
+  }
+  return spans;
+}
+
+function findShortNumericSpans(text, value) {
+  const spans = [];
+  if (typeof text !== "string" || typeof value !== "string" || !value) {
+    return spans;
+  }
+  for (
+    let index = text.indexOf(value);
+    index !== -1;
+    index = text.indexOf(value, index + 1)
+  ) {
+    const before = index > 0 ? text[index - 1] : undefined;
+    const after = text[index + value.length];
+    if (!isWordCharacter(before) && !isWordCharacter(after)) {
+      spans.push({ start: index, end: index + value.length });
+    }
+  }
+  return spans;
+}
+
+function findOTPSpans(text, code) {
+  const spans = [];
+  if (typeof text !== "string" || typeof code !== "string" || !code) {
+    return spans;
+  }
+  const pattern = new RegExp(
+    "(^|[^A-Za-z0-9_])(" + code + ")($|[^A-Za-z0-9_])",
+    "g",
+  );
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index + match[1].length;
+    spans.push({ start, end: start + code.length });
+  }
+  return spans;
+}
+
+// Key/value spans only. The value pattern refuses object/array starts so an
+// outer container key cannot own a scalar hit inside it.
+function findFieldSpans(text) {
+  const fields = [];
+  if (typeof text !== "string") return fields;
+  const pattern =
+    /["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*("(?:[^"\\]|\\.)*"|[^,\s{}\[\]]+)/g;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index + match[0].length - match[2].length;
+    fields.push({
+      key: match[1],
+      start,
+      end: start + match[2].length,
+    });
+  }
+  return fields;
+}
+
+function classifySpanContext(fields, span) {
+  const owners = fields.filter(
+    (field) => span.start >= field.start && span.end <= field.end,
+  );
+  if (owners.length === 0) return "unknown";
+  const classes = new Set(
+    owners.map((owner) => contextClassForKeys([owner.key])),
+  );
+  return classes.size === 1 ? [...classes][0] : "unknown";
+}
+
+function classifyPrivacyContextAt(text, spans) {
+  if (!Array.isArray(spans) || spans.length === 0) return "unknown";
+  const fields = findFieldSpans(text);
+  const classes = new Set(
+    spans.map((span) => classifySpanContext(fields, span)),
+  );
+  return classes.size === 1 ? [...classes][0] : "unknown";
 }
 
 function safeEnum(value, allowed) {
@@ -321,7 +341,8 @@ export function assertPrivateText(text, fixture, options = {}) {
   const persisted = scanSource === "artifact";
   const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
   for (const canary of exact) {
-    if (!text.includes(canary.value)) continue;
+    const spans = findExactSpans(text, canary.value);
+    if (spans.length === 0) continue;
     privacyFailure(
       persisted
         ? "Synthetic factor or field value persisted in diagnostics"
@@ -330,13 +351,14 @@ export function assertPrivateText(text, fixture, options = {}) {
         artifact_class: artifactClass,
         match_kind: "exact",
         canary_class: canary.canaryClass,
-        context_class: classifyPrivacyContext(text, canary.value),
+        context_class: classifyPrivacyContextAt(text, spans),
         scan_source: scanSource,
       },
     );
   }
   for (const canary of shortNumeric) {
-    if (!containsShortNumericToken(text, canary.value)) continue;
+    const spans = findShortNumericSpans(text, canary.value);
+    if (spans.length === 0) continue;
     privacyFailure(
       persisted
         ? "Synthetic card verification or PIN token persisted in diagnostics"
@@ -345,20 +367,15 @@ export function assertPrivateText(text, fixture, options = {}) {
         artifact_class: artifactClass,
         match_kind: "short_numeric",
         canary_class: canary.canaryClass,
-        context_class: classifyPrivacyContext(text, canary.value),
+        context_class: classifyPrivacyContextAt(text, spans),
         scan_source: scanSource,
       },
     );
   }
   for (const code of fixture.OTPCodes || []) {
     assert(/^(?:[0-9]{6}|[0-9]{8})$/.test(code), "Invalid private OTP canary");
-    if (
-      !new RegExp(
-        "(^|[^A-Za-z0-9_])" + code + "($|[^A-Za-z0-9_])",
-      ).test(text)
-    ) {
-      continue;
-    }
+    const spans = findOTPSpans(text, code);
+    if (spans.length === 0) continue;
     privacyFailure(
       persisted
         ? "Synthetic OTP token persisted in diagnostics"
@@ -367,7 +384,7 @@ export function assertPrivateText(text, fixture, options = {}) {
         artifact_class: artifactClass,
         match_kind: "otp",
         canary_class: "OTP",
-        context_class: classifyPrivacyContext(text, code),
+        context_class: classifyPrivacyContextAt(text, spans),
         scan_source: scanSource,
       },
     );
@@ -429,27 +446,34 @@ export function assertPrivateArtifacts(state, fixture) {
       const text = bytes.toString("utf8");
       const artifactClass = artifactClassFor(entry.name);
       for (const { canary, patterns } of exactPatterns) {
-        if (!patterns.some((pattern) => bytes.includes(pattern))) continue;
+        const matchedPatterns = patterns.filter((pattern) =>
+          bytes.includes(pattern),
+        );
+        if (matchedPatterns.length === 0) continue;
+        const spans = matchedPatterns.flatMap((pattern) =>
+          findExactSpans(text, pattern.toString("utf8")),
+        );
         privacyFailure(
           "Synthetic factor or field value persisted in diagnostics",
           {
             artifact_class: artifactClass,
             match_kind: "exact",
             canary_class: canary.canaryClass,
-            context_class: classifyPrivacyContext(text, canary.value),
+            context_class: classifyPrivacyContextAt(text, spans),
             scan_source: "artifact",
           },
         );
       }
       for (const canary of shortNumeric) {
         if (!containsShortNumericBytes(bytes, canary.value)) continue;
+        const spans = findShortNumericSpans(text, canary.value);
         privacyFailure(
           "Synthetic card verification or PIN token persisted in diagnostics",
           {
             artifact_class: artifactClass,
             match_kind: "short_numeric",
             canary_class: canary.canaryClass,
-            context_class: classifyPrivacyContext(text, canary.value),
+            context_class: classifyPrivacyContextAt(text, spans),
             scan_source: "artifact",
           },
         );
