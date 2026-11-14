@@ -121,42 +121,97 @@ class BrowserOTPPrivacyHandoff(unittest.TestCase):
 
 
 class BrowserOTPPrivacyResult(unittest.TestCase):
+    STAGE = "otp-6:positive:driver-arguments-failure"
+    PRIVACY_PREFIX = "Native browser privacy diagnostic: "
+
     def run_child(self, body):
         return subprocess.run(
             ["node", "--input-type=module", "-e", body],
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             check=False,
             timeout=20,
         )
 
+    def privacy_line(self, source):
+        return self.PRIVACY_PREFIX + json.dumps(
+            {"scan_source": source}, separators=(",", ":")
+        )
+
+    def assert_exact_result(self, result, stage_line, privacy_line=None):
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, stage_line + "\n")
+        self.assertEqual(
+            result.stderr,
+            "" if privacy_line is None else privacy_line + "\n",
+        )
+        self.assertNotIn("SyntaxError", result.stdout + result.stderr)
+        self.assertNotIn("console.log", result.stdout + result.stderr)
+        self.assertNotIn("process.exit", result.stdout + result.stderr)
+
     def test_real_child_expected_primary_plus_artifact_privacy_rejected(self):
+        line = self.privacy_line("artifact")
         result = self.run_child(
-            'console.log("otp-6:positive:driver-arguments-failure");'
-            'console.error("Native browser privacy diagnostic: {\"scan_source\":\"artifact\"}");'
+            f"console.log({json.dumps(self.STAGE)});"
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"artifact"}));'
             "process.exit(1);"
         )
-        self.assertEqual(result.returncode, 1)
+        self.assert_exact_result(result, self.STAGE, line)
         with self.assertRaises(ValueError) as raised:
-            check_child_result(result.stdout.encode(), result.returncode)
+            check_child_result(
+                (result.stdout + result.stderr).encode(), result.returncode
+            )
         self.assertEqual(raised.exception.args, ("privacy-scan",))
 
     def test_real_child_expected_primary_plus_controller_privacy_rejected(self):
+        line = self.privacy_line("controller")
         result = self.run_child(
-            'console.log("otp-6:positive:driver-arguments-failure");'
-            'console.error("Native browser privacy diagnostic: {\"scan_source\":\"controller\"}");'
+            f"console.log({json.dumps(self.STAGE)});"
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"controller"}));'
             "process.exit(1);"
         )
-        self.assertEqual(result.returncode, 1)
+        self.assert_exact_result(result, self.STAGE, line)
         with self.assertRaises(ValueError) as raised:
-            check_child_result(result.stdout.encode(), result.returncode)
+            check_child_result(
+                (result.stdout + result.stderr).encode(), result.returncode
+            )
         self.assertEqual(raised.exception.args, ("privacy-scan",))
 
     def test_real_child_clean_expected_primary_continues(self):
         result = self.run_child(
-            'console.log("otp-6:positive:driver-arguments-failure");'
+            f"console.log({json.dumps(self.STAGE)});"
             "process.exit(1);"
         )
-        self.assertEqual(result.returncode, 1)
-        check_child_result(result.stdout.encode(), result.returncode)
+        self.assert_exact_result(result, self.STAGE)
+        check_child_result(
+            (result.stdout + result.stderr).encode(), result.returncode
+        )
+
+        missing = self.run_child(
+            'console.log("not-the-expected-stage");'
+            f"console.error({json.dumps(self.PRIVACY_PREFIX)} + "
+            'JSON.stringify({scan_source:"artifact"}));'
+            "process.exit(1);"
+        )
+        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.stdout, "not-the-expected-stage\n")
+        self.assertEqual(missing.stderr, self.privacy_line("artifact") + "\n")
+        with self.assertRaises(ValueError) as raised:
+            check_child_result(
+                (missing.stdout + missing.stderr).encode(), missing.returncode
+            )
+        self.assertEqual(raised.exception.args, ("privacy-failure-stage",))
+
+        syntax = self.run_child(
+            f"console.log({json.dumps(self.STAGE)});"
+            'console.error("synthetic");'
+            "process.exit(1); )"
+        )
+        self.assertEqual(syntax.returncode, 1)
+        self.assertEqual(syntax.stdout, "")
+        self.assertIn("SyntaxError", syntax.stderr)
+        self.assertNotEqual(syntax.stdout, self.STAGE + "\n")
+        self.assertNotEqual(syntax.stderr, self.privacy_line("artifact") + "\n")
