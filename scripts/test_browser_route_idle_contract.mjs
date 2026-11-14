@@ -1511,28 +1511,27 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
 });
 
 // ---------------------------------------------------------------------------
-// Focused static contract for the Edge install ordering in `web-core`.
+// Focused static contract for the single extension producer's Edge ordering.
 //
-// The Edge install contract runs the Chromium extension build, so it must run
-// after the Chromium package command has left dist/chromium in place, not in
-// the earlier browser test command.
+// The Edge install contract reads the already-produced main Chromium dist; it
+// must run once in extension-producer after the official Chromium prepare and
+// strict verifier, and never in web-core's early browser test command.
 // ---------------------------------------------------------------------------
 const EARLY_BROWSER_TEST_STEP = "Test browser extension";
-const EXTENSION_PACKAGE_STEP = "Prepare reproducible unsigned extension packages";
+const PRODUCER_JOB = "extension-producer";
+const CHROMIUM_PREPARE_STEP = "Prepare Chromium once and strict smoke";
+const RELEASE_UNIT_STEP = "Run original release and legacy unit tests";
 const EDGE_INSTALL_TEST = "scripts/test_browser_edge_install.mjs";
-const CHROMIUM_PACKAGE_COMMAND =
-  'python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"';
+const CHROMIUM_PREPARE_COMMAND =
+  'python3 -m browserrelease --product chromium --output "$out/prepared/v2pairs"';
+const STRICT_CHROMIUM_COMMAND =
+  "python3 -m browserrelease.prebuilt --product chromium \\";
 
-test("CI runs the Edge install contract once, after the Chromium package command", () => {
+test("CI runs the Edge install contract once, after the official Chromium producer step", () => {
   // Scope to the web-core job so another job's same-named files cannot satisfy
   // this contract.
   const webCore = jobBlock("web-core");
   const early = stepBlock(webCore, EARLY_BROWSER_TEST_STEP);
-  const packages = stepBlock(webCore, EXTENSION_PACKAGE_STEP);
-  assert.ok(
-    early.start < packages.start,
-    "the browser test step must stay before the package preparation step",
-  );
   const earlyRun = stepField(early.lines, "run");
   assert.ok(
     earlyRun.startsWith("node --test "),
@@ -1543,19 +1542,43 @@ test("CI runs the Edge install contract once, after the Chromium package command
     0,
     "the Edge install contract must not run in the early browser test command",
   );
-  // Exactly one edge install command, immediately after the Chromium package.
-  const edges = packages.lines.filter(
-    (line) => line.trim() === `node --test ${EDGE_INSTALL_TEST}`,
+
+  const producer = jobBlock(PRODUCER_JOB);
+  const prepare = stepBlock(producer, CHROMIUM_PREPARE_STEP);
+  const units = stepBlock(producer, RELEASE_UNIT_STEP);
+  assert.ok(
+    prepare.start < units.start,
+    "the Chromium producer step must stay before the release/legacy unit step",
   );
-  assert.equal(edges.length, 1, "the preparation step must run the Edge install contract once");
+  const commands = stepRun(prepare.lines);
+  const prepareAt = commands.indexOf(CHROMIUM_PREPARE_COMMAND);
+  assert.ok(
+    prepareAt >= 0,
+    "the producer step must contain the official Chromium prepare command",
+  );
+  assert.equal(
+    commands[prepareAt + 1],
+    STRICT_CHROMIUM_COMMAND,
+    "the strict Chromium verifier must immediately follow the official prepare",
+  );
+  assert.match(
+    commands[prepareAt + 2],
+    /--prepared-dir "\$out\/prepared\/v2pairs" --dist browser-extension\/dist\/chromium/,
+    "the strict verifier must consume the official prepared pair and dist",
+  );
+
+  const unitCommands = stepRun(units.lines);
+  const edgeCommands = unitCommands.filter(
+    (line) => line === `node --test ${EDGE_INSTALL_TEST}`,
+  );
+  assert.equal(
+    edgeCommands.length,
+    1,
+    "the release/legacy unit step must run the Edge install contract once",
+  );
   assert.equal(
     countMatches(WORKFLOW, new RegExp(EDGE_INSTALL_TEST.replace(/\./g, "\\."), "g")),
     1,
     "the Edge install contract must be referenced exactly once in check.yml",
   );
-  const commands = stepRun(packages.lines);
-  const chromiumAt = commands.indexOf(CHROMIUM_PACKAGE_COMMAND);
-  assert.ok(chromiumAt >= 0, "the Chromium package command must stay verbatim");
-  const edgeAt = commands.indexOf(`node --test ${EDGE_INSTALL_TEST}`);
-  assert.equal(edgeAt, chromiumAt + 1, "the Edge install contract must follow the Chromium package command");
 });
