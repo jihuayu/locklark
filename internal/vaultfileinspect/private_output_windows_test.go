@@ -83,7 +83,7 @@ func assertPrivateOutput(t *testing.T, path string) {
 		t.Fatal("private output ACE read failed")
 	}
 	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-		ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE) != 0 {
+		ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE|windows.INHERITED_ACE) != 0 {
 		t.Fatal("private output ACE is inheritable or not allow-only")
 	}
 	sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))

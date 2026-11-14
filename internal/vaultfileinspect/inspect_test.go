@@ -34,11 +34,19 @@ func TestInspectRealFixture(t *testing.T) {
 
 	outPath := filepath.Join(dir, "stdout.json")
 	out := createPrivateOutput(t, outPath)
+	closed := false
+	defer func() {
+		if !closed {
+			_ = out.Close()
+		}
+	}()
 	if err := run([]string{"--file", vaultPath, "--checkpoint", checkpointPath}, out); err != nil {
 		t.Fatal(err)
 	}
-	if err := out.Close(); err != nil {
-		t.Fatal(err)
+	closeErr := out.Close()
+	closed = true
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	assertPrivateOutput(t, outPath)
 	raw, err := os.ReadFile(outPath)
