@@ -9,7 +9,6 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
 	"github.com/oneo-me/onevra/source/theme"
 )
 
@@ -257,14 +256,14 @@ func TestOnevraDetailSupportsAttachmentsDuplicateLargeTypeAndPurgeConfirm(t *tes
 	}
 }
 
-func TestOnevraEditorGeneratorSettingsAndWatchtowerViews(t *testing.T) {
+func TestOnevraEditorGeneratorAndSettingsViews(t *testing.T) {
 	a := newOnevraTestApp()
 	a.v2Mode = true
 
 	// 1. Settings opens cleanly inside Onevra detail pane and closes back to detail.
 	a.openSettings()
 	tester := newOnevraTestTesterSize(a, 1280, 1000)
-	for _, want := range []string{"安全与偏好设置", "自动锁定", "剪贴板防护", "关闭设置"} {
+	for _, want := range []string{"安全与偏好设置", "自动锁定", "剪贴板防护", "应用更新", "检查更新…", "关闭设置"} {
 		if !tester.HasText(want) {
 			t.Fatalf("Onevra settings pane missing %q", want)
 		}
@@ -281,7 +280,7 @@ func TestOnevraEditorGeneratorSettingsAndWatchtowerViews(t *testing.T) {
 	a.v2.draft = newItemDraft(vault.CategoryLogin)
 	a.v2.draft.Title = "Draft Login"
 	tester = newOnevraTestTesterSize(a, 1280, 1200)
-	for _, want := range []string{"编辑条目", "基本信息", "生成密码", "保存", "取消"} {
+	for _, want := range []string{"编辑条目", "登录信息", "生成密码", "保存", "取消"} {
 		if !tester.HasText(want) {
 			t.Fatalf("Onevra editor missing %q", want)
 		}
@@ -304,41 +303,76 @@ func TestOnevraEditorGeneratorSettingsAndWatchtowerViews(t *testing.T) {
 	}
 	a.cancelEdit()
 
-	// 3. Watchtower renders score hero, Chinese flag badges, and 打开条目 navigates out of Watchtower.
-	a.v2.nav = navWatchtower
-	a.v2.watchtower = &WatchtowerReport{
-		OverallScore: 62,
-		Checked:      3,
-		Counts: watchtower.Counts{
-			Vulnerable:    1,
-			Reused:        1,
-			Weak:          1,
-			UnsecuredHTTP: 1,
-			TOTPNotStored: 1,
+}
+
+func TestOnevraCustomFieldsDistinguishPlaintextAndEncrypted(t *testing.T) {
+	a := newOnevraTestApp()
+	a.v2.detail.Sections = []vault.ItemSection{{
+		ID:    "sec-custom",
+		Title: "自定义字段",
+		Fields: []vault.CustomField{
+			{ID: "env", Label: "Environment", Type: vault.FieldTypeString, Value: "production-us-east", Protected: false},
+			{ID: "secret_key", Label: "Signing Secret", Type: vault.FieldTypeConcealed, Value: "super-secret-signing-value", Protected: true},
 		},
-		Findings: []watchtower.Finding{
-			{
-				ID:            "item-1",
-				Revision:      "revision-1",
-				Title:         "Example Login",
-				Origin:        "http://example.test",
-				StrengthScore: 35,
-				Flags:         []string{"vulnerable", "weak", "unsecured-http"},
-				BreachCount:   42,
-			},
-		},
-	}
-	tester.Frame()
-	for _, want := range []string{"Watchtower 安全体检", "安全评分 62 / 100", "已泄露", "弱密码", "非加密 HTTP", "该密码在公开泄露库中出现 42 次，请立即更换。", "打开条目"} {
+	}}
+	tester := newOnevraTestTesterSize(a, 1280, 1000)
+
+	for _, want := range []string{
+		"1 加密 · 1 明文",
+		"自定义字段",
+		"Environment",
+		"明文",
+		"production-us-east",
+		"Signing Secret",
+		"加密",
+	} {
 		if !tester.HasText(want) {
-			t.Fatalf("Watchtower view missing %q", want)
+			t.Fatalf("custom fields detail missing %q", want)
 		}
 	}
-	if err := tester.Click("打开条目"); err != nil {
-		t.Fatal(err)
+	if tester.HasText("super-secret-signing-value") {
+		t.Fatal("encrypted custom field exposed unrevealed secret value")
 	}
-	if a.v2.nav == navWatchtower || a.v2.selectedID != "item-1" {
-		t.Fatalf("打开条目 did not switch from Watchtower to item detail: nav=%q selected=%q", a.v2.nav, a.v2.selectedID)
+
+	draft := newItemDraft(vault.CategoryLogin)
+	draft.Sections = []vault.ItemSection{{
+		ID:    "sec-1",
+		Title: "自定义字段",
+		Fields: []vault.CustomField{
+			{ID: "f-1", Label: "API Mode", Type: vault.FieldTypeString, Value: "sandbox", Protected: false},
+		},
+	}}
+	draft.SetFieldProtection(0, 0, true)
+	got := draft.Sections[0].Fields[0]
+	if !got.Protected || got.Type != vault.FieldTypeConcealed {
+		t.Fatalf("SetFieldProtection(true) = protected:%v type:%q, want concealed", got.Protected, got.Type)
+	}
+	draft.SetFieldProtection(0, 0, false)
+	got = draft.Sections[0].Fields[0]
+	if got.Protected || got.Type != vault.FieldTypeString {
+		t.Fatalf("SetFieldProtection(false) = protected:%v type:%q, want plaintext string", got.Protected, got.Type)
 	}
 }
 
+func TestOnevraLiveThemeAndCompactDensity(t *testing.T) {
+	a := newOnevraTestApp()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.v2Mode = true
+	a.openSettings()
+	a.v2.settingsSection = settingsSectionAppearance
+	tester := newOnevraTestTesterSize(a, 1280, 1000)
+
+	if err := tester.Click("主题：深色"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tester.Click("密度：紧凑"); err != nil {
+		t.Fatal(err)
+	}
+	snap := a.settingsSnapshot()
+	if snap.Theme != "dark" || snap.InterfaceDensity != "compact" {
+		t.Fatalf("appearance settings = theme:%q density:%q, want dark/compact", snap.Theme, snap.InterfaceDensity)
+	}
+	if !tester.HasText("Spacing 3.25 DIP · 深色") {
+		t.Fatal("live compact dark preview text did not update immediately")
+	}
+}

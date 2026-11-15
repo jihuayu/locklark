@@ -19,6 +19,8 @@ func TestSecurityViewShowsSystemUnlockCapability(t *testing.T) {
 		osunlock.Description(),
 		"启用系统快捷解锁（有效期 24 小时）",
 		"停用系统快捷解锁",
+		"应用更新",
+		"检查更新…",
 	} {
 		if !tester.HasText(want) {
 			t.Fatalf("security page missing %q", want)

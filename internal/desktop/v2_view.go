@@ -151,7 +151,7 @@ func v2DetailFields(detail *personal.ItemDetail) []v2DetailField {
 // editor and report view layer while onevra_view.go owns the vault shell.
 func (a *App) v2View(c *ui.Context) { a.onevraVaultView(c) }
 
-func (a *App) v2EditorView(c *ui.Context) {
+func (a *App) v2EditorViewLegacy(c *ui.Context) {
 	draft := a.v2.draft
 	if draft == nil {
 		return
@@ -159,7 +159,7 @@ func (a *App) v2EditorView(c *ui.Context) {
 	t := c.Theme()
 
 	// Editor header
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
+	ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
 		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
 			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
 		iconBox.Children(func() {
@@ -377,6 +377,503 @@ func (a *App) v2EditorView(c *ui.Context) {
 		ui.Spacer(c)
 		oneui.Button(c, "生成密码", oneui.ButtonSecondary).Disabled(a.busy).OnClick(func() { a.openGenerator("password") })
 	})
+}
+
+// v2EditorView is the item editor page. The page is assembled from the same
+// compact field-row component and field-group surface used by other native
+// dialogs, so every editable value has a stable label and one menu location.
+func (a *App) v2EditorView(c *ui.Context) {
+	draft := a.v2.draft
+	if draft == nil {
+		return
+	}
+	t := c.Theme()
+
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
+		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
+			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
+		iconBox.Children(func() {
+			oneui.Icon(c, onevraCategoryIcon(draft.Category)).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
+		})
+		ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
+			oneui.Text(c, "编辑条目").FontSize(t.Rem(1.35)).Bold().SingleLine()
+			oneui.Text(c, "保存后将生成新修订版本，原有字段值自动加密归入历史版本。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+		})
+		oneui.Button(c, "生成密码", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
+			a.openGenerator("password")
+		})
+		oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).OnClick(a.cancelEdit)
+		oneui.Button(c, "保存", oneui.ButtonPrimary).Disabled(a.busy || strings.TrimSpace(draft.Title) == "").OnClick(func() {
+			if err := a.saveDraft(); err != nil {
+				a.status = message(err)
+			}
+		})
+		if oneui.IconButton(c, lucide.X(), "关闭编辑", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
+			a.cancelEdit()
+		}
+	})
+
+	ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+		oneui.Text(c, "条目类别").FontSize(t.Rem(.82)).TextColor(t.TextMuted)
+		category := string(draft.Category)
+		sel := ui.Select(c, &category, v2CategoryOptions()).Label("条目类别").Disabled(a.busy)
+		sel.Width(180)
+		if sel.Changed() {
+			a.setDraftCategory(vault.ItemCategory(category))
+		}
+	})
+
+	a.editorPrimaryGroup(c, draft)
+	a.editorURLGroups(c, draft)
+	a.editorStructuredSectionGroups(c, draft)
+	a.editorTagGroup(c, draft)
+	a.editorNewSectionGroup(c, draft)
+
+	if a.v2.editorError != "" {
+		a.onevraNoticeCard(c, "保存提示", a.v2.editorError, t.Danger)
+	}
+
+	ui.Column(c.Key("dialog-add-custom-field")).Children(func() {
+		oneui.Dialog(c, &draft.FieldDialogOpen, oneui.DialogOptions{Label: "添加自定义字段"}, func(panel ui.Element) {
+			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))
+			panel.Children(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
+					oneui.Text(c, "添加自定义字段").FontSize(t.Rem(1.12)).Bold()
+					oneui.Text(c, "明确选择该字段是随条目明文直显（如环境名、Region），还是默认遮蔽保护（如备用 Token、API Secret）。").
+						FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+					oneui.TextBox(c, &draft.NewFieldLabel, oneui.TextBoxOptions{}).
+						Label("字段名称").Placeholder("例如：Environment、Region、Secondary Token").Disabled(a.busy)
+					ui.Row(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+						plainVariant := oneui.ButtonOutline
+						encVariant := oneui.ButtonOutline
+						if !draft.NewFieldProtected {
+							plainVariant = oneui.ButtonSecondary
+						} else {
+							encVariant = oneui.ButtonSecondary
+						}
+						if oneui.Button(c, "明文 · 详情直接显示", plainVariant).Grow(1).Clicked() {
+							draft.NewFieldProtected = false
+						}
+						if oneui.Button(c, "加密 · 默认遮蔽", encVariant).Grow(1).Clicked() {
+							draft.NewFieldProtected = true
+						}
+					})
+					valBox := oneui.TextBox(c, &draft.NewFieldValue, oneui.TextBoxOptions{}).
+						Label("字段值").Placeholder("输入字段内容").Disabled(a.busy)
+					if draft.NewFieldProtected {
+						valBox.Password()
+					}
+					ui.Row(c).FillWidth().Justify(ui.End).Gap(t.Space(1.5)).Children(func() {
+						if oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).Clicked() {
+							draft.FieldDialogOpen = false
+						}
+						if oneui.Button(c, "确认添加", oneui.ButtonPrimary).Disabled(a.busy).Clicked() {
+							a.confirmAddCustomField()
+						}
+					})
+				})
+			})
+		})
+	})
+}
+
+func (a *App) editorPrimaryGroup(c *ui.Context, draft *ItemDraft) {
+	title := "登录信息"
+	switch draft.Category {
+	case vault.CategorySecureNote:
+		title = "安全笔记"
+	case vault.CategoryAPICredential:
+		title = "API 凭据"
+	}
+
+	fields := []editorFieldSpec{
+		a.editorTextSpec("title", "标题", "例如：GitHub、公司邮箱、主力信用卡", &draft.Title, false, false),
+	}
+	switch draft.Category {
+	case vault.CategoryLogin, vault.CategoryPassword:
+		fields = append(fields,
+			a.editorTextSpec("username", "用户名", "用户名、邮箱或账号标识", &draft.Username, false, false),
+			a.editorTextSpec("password", "密码", "输入或使用生成器创建高强度密码", &draft.Password, true, false),
+			a.editorTextSpec("otp", "一次性验证码", "otpauth://totp/… 或 Base32 密钥", &draft.OTP, true, false),
+			a.editorTextSpec("url", "网站", "https://example.com", &draft.URL, false, false),
+			a.editorTextSpec("notes", "备注", "加密安全备注、恢复码或补充说明", &draft.Notes, true, true),
+		)
+	case vault.CategorySecureNote:
+		fields = append(fields, a.editorTextSpec("notes", "备注", "输入安全笔记", &draft.Notes, true, true))
+	default:
+		fields = append(fields, a.editorTextSpec("notes", "备注", "补充说明", &draft.Notes, true, true))
+	}
+
+	editorFieldGroup(c, editorFieldGroupSpec{
+		Key:      "item-primary",
+		Title:    title,
+		Badge:    CategoryDisplayName(draft.Category),
+		Fields:   fields,
+		AddLabel: "添加更多",
+		BuildAddMenu: func(menu *oneui.Menu) {
+			if menu.Item("安全问题").Chosen() {
+				a.addEditorCustomField("安全问题", vault.FieldTypeConcealed)
+			}
+			if menu.Item("恢复码").Chosen() {
+				a.addEditorCustomField("恢复码", vault.FieldTypeConcealed)
+			}
+			if menu.Item("自定义字段").Chosen() {
+				a.addEditorCustomField("自定义字段", vault.FieldTypeString)
+			}
+			if menu.Item("网址").Chosen() {
+				a.appendEditorURL()
+			}
+		},
+	})
+}
+
+func (a *App) editorTextSpec(key, label, placeholder string, value *string, concealed, multiline bool) editorFieldSpec {
+	return editorFieldSpec{
+		Key:         key,
+		Label:       label,
+		Placeholder: placeholder,
+		Value:       value,
+		Concealed:   concealed,
+		Multiline:   multiline,
+		Busy:        a.busy,
+		MenuLabel:   "字段选项：" + label,
+		BuildMenu: func(menu *oneui.Menu) {
+			if key == "password" {
+				if menu.Item("生成密码").Chosen() {
+					a.openGenerator("password")
+				}
+			}
+			clear := menu.Item("清空字段").Disabled(value == nil || strings.TrimSpace(*value) == "")
+			if clear.Chosen() && value != nil {
+				*value = ""
+			}
+		},
+	}
+}
+
+func (a *App) editorURLGroups(c *ui.Context, draft *ItemDraft) {
+	var fields []editorFieldSpec
+	for i := range draft.URLs {
+		i := i
+		url := &draft.URLs[i]
+		fields = append(fields,
+			editorFieldSpec{
+				Key:         fmt.Sprintf("url-%d-address", i),
+				Label:       "网站",
+				Placeholder: "https://example.com",
+				Value:       &url.URL,
+				Busy:        a.busy,
+				MenuLabel:   fmt.Sprintf("网址选项：%d", i+1),
+				BuildMenu: func(menu *oneui.Menu) {
+					if menu.Item("设为主网址").Disabled(url.Primary).Chosen() {
+						a.setPrimaryURL(i)
+					}
+					if menu.Item("移除网址").Chosen() {
+						a.removeURL(i)
+					}
+				},
+			},
+			editorFieldSpec{
+				Key:         fmt.Sprintf("url-%d-label", i),
+				Label:       "标签",
+				Placeholder: "例如：登录页、控制台",
+				Value:       &url.Label,
+				Busy:        a.busy,
+				MenuLabel:   fmt.Sprintf("网址标签选项：%d", i+1),
+				BuildMenu: func(menu *oneui.Menu) {
+					clear := menu.Item("清空标签").Disabled(strings.TrimSpace(url.Label) == "")
+					if clear.Chosen() {
+						url.Label = ""
+					}
+				},
+			},
+		)
+	}
+
+	var rows []func(*ui.Context)
+	for i := range draft.URLs {
+		i := i
+		rows = append(rows, func(c *ui.Context) {
+			t := c.Theme()
+			selected := v2MatchModeLabel(draft.URLs[i].MatchMode)
+			options := []string{"默认", "同源", "同主机", "同域名", "精确", "不填充"}
+			ui.Row(c).FillWidth().MinWidth(0).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).
+				Padding(t.Space(1.5), t.Space(7)).Children(func() {
+				oneui.Text(c, "自动填充匹配").FontSize(t.Rem(.74)).Bold().TextColor(t.Accent).Width(110)
+				matchSelect := ui.Select(c, &selected, options).Label("自动填充匹配")
+				matchSelect.Width(180)
+				if matchSelect.Changed() {
+					a.setURLMatchMode(i, v2MatchModeFromLabel(selected))
+				}
+				ui.Spacer(c)
+				if draft.URLs[i].Primary {
+					oneui.Badge(c, "主网址", oneui.BadgeOptions{Tone: oneui.BadgeSuccess})
+				}
+			})
+		})
+	}
+
+	editorFieldGroup(c, editorFieldGroupSpec{
+		Key:       "item-urls",
+		Title:     "网址",
+		Badge:     fmt.Sprintf("%d", len(draft.URLs)),
+		Fields:    fields,
+		ExtraRows: rows,
+		AddLabel:  "添加网址",
+		BuildAddMenu: func(menu *oneui.Menu) {
+			if menu.Item("新网址").Chosen() {
+				a.appendEditorURL()
+			}
+		},
+	})
+}
+
+func (a *App) editorStructuredSectionGroups(c *ui.Context, draft *ItemDraft) {
+	t := c.Theme()
+	oneui.Text(c, "分区与自定义字段").FontSize(t.Rem(.94)).Bold()
+	if len(draft.Sections) == 0 {
+		editorFieldGroup(c, editorFieldGroupSpec{
+			Key:               "item-section-empty",
+			Title:             "自定义字段",
+			SecondaryAddLabel: "+ 添加自定义字段…",
+			OnSecondaryAdd: func() {
+				a.openAddCustomFieldDialog(-1)
+			},
+			AddLabel: "添加字段",
+			BuildAddMenu: func(menu *oneui.Menu) {
+				a.editorAddFieldMenu(menu, -1)
+			},
+		})
+	}
+	for i := range draft.Sections {
+		i := i
+		section := &draft.Sections[i]
+		var fields []editorFieldSpec
+		for j := range section.Fields {
+			j := j
+			f := section.Fields[j]
+			label := f.Label
+			if label == "" {
+				label = v2FieldTypeLabel(f.Type)
+			}
+			if binding, canonical := v2DraftCanonicalField(draft, section.ID, f); canonical {
+				fields = append(fields, a.editorTextSpec(
+					fmt.Sprintf("%s/%s", section.ID, f.ID),
+					binding.Label,
+					"",
+					binding.resolve(draft),
+					binding.Concealed,
+					f.Type == vault.FieldTypeText,
+				))
+				continue
+			}
+			encrypted := v2FieldTypeConcealed(f)
+			protSuffix := "plain"
+			if encrypted {
+				protSuffix = "enc"
+			}
+			fields = append(fields, editorFieldSpec{
+				Key:         section.ID + "/" + f.ID + "/" + protSuffix,
+				Label:       v2FieldTypeLabel(f.Type),
+				LabelValue:  &section.Fields[j].Label,
+				Placeholder: "字段值",
+				Value:       &section.Fields[j].Value,
+				Concealed:   encrypted,
+				Multiline:   f.Type == vault.FieldTypeText,
+				Busy:        a.busy,
+				MenuLabel:   "字段选项：" + label,
+				Trailing: func(c *ui.Context) {
+					ui.Row(c).Gap(t.Space(.5)).AlignItems(ui.Center).Children(func() {
+						plainVariant := oneui.ButtonGhost
+						encVariant := oneui.ButtonGhost
+						if !encrypted {
+							plainVariant = oneui.ButtonSecondary
+						} else {
+							encVariant = oneui.ButtonSecondary
+						}
+						if oneui.Button(c, "明文", plainVariant).Disabled(a.busy || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP).Clicked() {
+							draft.SetFieldProtection(i, j, false)
+						}
+						if oneui.Button(c, "加密", encVariant).Disabled(a.busy).Clicked() {
+							draft.SetFieldProtection(i, j, true)
+						}
+					})
+				},
+				BuildMenu: func(menu *oneui.Menu) {
+					if menu.Item("上移字段").Disabled(j == 0).Chosen() {
+						a.moveField(i, j, -1)
+					}
+					if menu.Item("下移字段").Disabled(j == len(section.Fields)-1).Chosen() {
+						a.moveField(i, j, 1)
+					}
+					menu.Separator()
+					if menu.Item("删除字段").Chosen() {
+						a.removeField(i, j)
+					}
+				},
+			})
+		}
+
+		editorFieldGroup(c, editorFieldGroupSpec{
+			Key:               fmt.Sprintf("item-section-%s", section.ID),
+			Title:             section.Title,
+			Badge:             fmt.Sprintf("%d 个字段", len(fields)),
+			Fields:            fields,
+			SecondaryAddLabel: "+ 添加自定义字段…",
+			OnSecondaryAdd: func() {
+				a.openAddCustomFieldDialog(i)
+			},
+			AddLabel: "添加字段",
+			BuildAddMenu: func(menu *oneui.Menu) {
+				a.editorAddFieldMenu(menu, i)
+			},
+			HeaderAction: func() {
+				if oneui.IconButton(c, lucide.ChevronUp(), "上移分区", oneui.IconButtonPlain).Disabled(a.busy || i == 0).Clicked() {
+					a.moveSection(i, -1)
+				}
+				if oneui.IconButton(c, lucide.ChevronDown(), "下移分区", oneui.IconButtonPlain).Disabled(a.busy || i == len(draft.Sections)-1).Clicked() {
+					a.moveSection(i, 1)
+				}
+				if oneui.IconButton(c, lucide.Trash(), "删除分区", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
+					a.removeSection(i)
+				}
+			},
+		})
+	}
+}
+
+func (a *App) editorAddFieldMenu(menu *oneui.Menu, sectionIndex int) {
+	options := []struct {
+		label string
+		kind  vault.FieldType
+	}{
+		{"文本", vault.FieldTypeString},
+		{"密码", vault.FieldTypeConcealed},
+		{"一次性密码", vault.FieldTypeOTP},
+		{"网址", vault.FieldTypeURL},
+		{"邮箱", vault.FieldTypeEmail},
+		{"日期", vault.FieldTypeDate},
+		{"多行文本", vault.FieldTypeText},
+	}
+	for _, option := range options {
+		option := option
+		if menu.Item(option.label).Chosen() {
+			if sectionIndex < 0 {
+				a.addEditorCustomField(option.label, option.kind)
+			} else {
+				a.addField(sectionIndex, option.label, string(option.kind), "")
+			}
+		}
+	}
+}
+
+func (a *App) editorTagGroup(c *ui.Context, draft *ItemDraft) {
+	editorFieldGroup(c, editorFieldGroupSpec{
+		Key:   "item-tags",
+		Title: "标签",
+		Fields: []editorFieldSpec{
+			{
+				Key:         "new-tag",
+				Label:       "新标签",
+				Placeholder: "输入标签名称",
+				Value:       &draft.NewTag,
+				Busy:        a.busy,
+			},
+		},
+		ExtraRows: []func(*ui.Context){
+			func(c *ui.Context) {
+				t := c.Theme()
+				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).
+					Padding(t.Space(1.5), t.Space(7)).Children(func() {
+					if len(draft.Tags) == 0 {
+						oneui.Text(c, "尚无标签").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Grow(1)
+					} else {
+						for _, tag := range draft.Tags {
+							tag := tag
+							if oneui.Button(c, visible(tag)+" ✕", oneui.ButtonSecondary).Disabled(a.busy).Clicked() {
+								a.removeTag(tag)
+							}
+						}
+					}
+					oneui.Button(c, "添加标签", oneui.ButtonOutline).
+						Disabled(a.busy || strings.TrimSpace(draft.NewTag) == "").
+						OnClick(func() { a.addTag(draft.NewTag) })
+				})
+				oneui.Checkbox(c, &draft.Favorite, "收藏").Disabled(a.busy).
+					Padding(t.Space(1), t.Space(7))
+			},
+		},
+	})
+}
+
+func (a *App) editorNewSectionGroup(c *ui.Context, draft *ItemDraft) {
+	editorFieldGroup(c, editorFieldGroupSpec{
+		Key:   "item-new-section",
+		Title: "添加分区",
+		Fields: []editorFieldSpec{
+			{
+				Key:         "new-section-title",
+				Label:       "分区标题",
+				Placeholder: "例如：恢复信息、备用凭据",
+				Value:       &draft.NewSectionTitle,
+				Busy:        a.busy,
+			},
+		},
+		ExtraRows: []func(*ui.Context){
+			func(c *ui.Context) {
+				t := c.Theme()
+				ui.Row(c).FillWidth().Padding(t.Space(1.5), t.Space(7)).Children(func() {
+					oneui.Button(c, "添加分区", oneui.ButtonSecondary).
+						Disabled(a.busy || strings.TrimSpace(draft.NewSectionTitle) == "").
+						OnClick(func() { a.addSection(draft.NewSectionTitle) })
+				})
+			},
+		},
+	})
+}
+
+func (a *App) addEditorCustomField(label string, kind vault.FieldType) {
+	draft := a.v2.draft
+	if draft == nil {
+		return
+	}
+	sectionIndex := -1
+	for i := range draft.Sections {
+		if draft.Sections[i].Title == "附加字段" {
+			sectionIndex = i
+			break
+		}
+	}
+	if sectionIndex < 0 {
+		a.addSection("附加字段")
+		sectionIndex = len(draft.Sections) - 1
+	}
+	a.addField(sectionIndex, label, string(kind), "")
+}
+
+func (a *App) appendEditorURL() {
+	draft := a.v2.draft
+	if draft == nil {
+		return
+	}
+	draft.URLs = append(draft.URLs, vault.ItemURL{Primary: len(draft.URLs) == 0, MatchMode: vault.URLMatchOrigin})
+}
+
+func v2MatchModeFromLabel(label string) string {
+	switch label {
+	case "同源":
+		return vault.URLMatchOrigin
+	case "同主机":
+		return vault.URLMatchHost
+	case "同域名":
+		return vault.URLMatchDomain
+	case "精确":
+		return vault.URLMatchExact
+	case "不填充":
+		return vault.URLMatchNever
+	default:
+		return ""
+	}
 }
 
 // ---------- editor helpers (view-only, draft is UI state) ----------

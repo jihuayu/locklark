@@ -331,6 +331,7 @@ function unlockDesktop(context, desktop) {
     { text: context.fixture.Path },
     { click_label: "主密码" },
     { text: context.fixture.Password },
+    { click_label: "使用应急资料…" },
     { click_label: "Secret Key" },
     { text: context.fixture.Secret },
     { click_label: "解锁" },

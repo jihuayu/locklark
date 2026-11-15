@@ -117,6 +117,7 @@ class FakeFrameworks:
         self.getpid = getpid
         self.requests = []
         self.activations = []
+        self.capability_calls = 0
         self.applications = {}
 
     def __getattr__(self, name):
@@ -127,6 +128,7 @@ class FakeFrameworks:
 
     # -- ApplicationServices ----------------------------------------------
     def AXIsProcessTrusted(self):
+        self.capability_calls += 1
         return True
 
     def AXUIElementCreateApplication(self, pid):
@@ -284,25 +286,49 @@ class _Front:
 
 
 class _Libproc:
+    """Controllable libproc answers; no process or kernel call is made."""
+
+    def __init__(self, path=EXE, uid=None, start_sec=1700000000,
+                 start_usec=123, pid=None, path_result=None, info_size=None,
+                 error=None):
+        self.path = path
+        self.uid = os.geteuid() if uid is None else uid
+        self.start_sec = start_sec
+        self.start_usec = start_usec
+        self.pid = pid
+        self.path_result = path_result
+        self.info_size = info_size
+        self.error = error
+        self.calls = []
+
     def proc_pidpath(self, pid, buffer, size):
-        buffer.value = EXE.encode()
-        return len(EXE)
+        self.calls.append(("path", pid))
+        if self.error is not None:
+            raise self.error
+        if self.path_result is not None:
+            return self.path_result
+        buffer.value = self.path.encode()
+        return len(self.path)
 
     def proc_pidinfo(self, pid, flavor, arg, info, size):
+        self.calls.append(("info", pid))
+        if self.error is not None:
+            raise self.error
         buffer = ctypes.cast(info, ctypes.POINTER(ctypes.c_char * size)).contents
         bsd = macos.BSDInfo.from_buffer(buffer)
-        bsd.pbi_pid, bsd.pbi_uid = pid, os.getuid()
-        return size
+        bsd.pbi_pid, bsd.pbi_uid = pid if self.pid is None else self.pid, self.uid
+        bsd.pbi_start_tvsec, bsd.pbi_start_tvusec = self.start_sec, self.start_usec
+        return size if self.info_size is None else self.info_size
 
 
 
 
-def api_for(frameworks):
+def api_for(frameworks, libproc=None):
     api = macos.QuartzApi.__new__(macos.QuartzApi)
     api.ax = frameworks
     api.quartz = frameworks
     api.appkit = frameworks
-    api.libproc = _Libproc()
+    api.libproc = _Libproc() if libproc is None else libproc
     return api
 
 
@@ -1242,6 +1268,634 @@ class UnscopedPathTests(unittest.TestCase):
         # Poisoned CG inventory proves the unscoped path is the CG one.
         with self.assertRaises(AssertionError):
             adapter.list_windows()
+
+
+class OwnedGenerationTests(unittest.TestCase):
+    """Real process_generation over a fake libproc; no adapter stand-in."""
+
+    class Fatal(BaseException):
+        pass
+
+    def generation(self, **overrides):
+        value = {"pid": OWNED_PID, "executable": EXE, "euid": os.geteuid(),
+                 "start_sec": 1700000000, "start_usec": 123}
+        value.update(overrides)
+        return value
+
+    def api(self, windows=None, **libproc):
+        frameworks = FakeFrameworks([] if windows is None else windows)
+        api = api_for(frameworks, libproc=_Libproc(**libproc))
+        api.scope_to_owned_pid(OWNED_PID)
+        return api, frameworks
+
+    def test_process_generation_reads_the_actual_libproc_identity(self):
+        api, _ = self.api()
+        self.assertEqual(api.process_generation(OWNED_PID), self.generation())
+
+    def test_process_generation_is_none_for_malformed_or_raising_libproc(self):
+        for libproc in ({"info_size": 0}, {"pid": OTHER_PID},
+                        {"path_result": 0}, {"path": "", "path_result": 1},
+                        {"start_sec": 0},
+                        {"start_usec": 1000000}, {"error": self.Fatal()}):
+            with self.subTest(libproc=libproc):
+                api, _ = self.api(**libproc)
+                self.assertIsNone(api.process_generation(OWNED_PID))
+
+    def test_malformed_stale_and_wrong_euid_are_refused_before_any_ax(self):
+        window, _ = owned_window()
+        for altered in ({"start_usec": 124}, {"euid": os.geteuid() + 1}):
+            with self.subTest(altered=altered):
+                api, frameworks = self.api([window])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.set_owned_generation(self.generation(**altered))
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.requests, [])
+        malformed = (None, {}, {**self.generation(), "extra": 1},
+                     {**self.generation(), "pid": OTHER_PID},
+                     {**self.generation(), "euid": True},
+                     {**self.generation(), "start_sec": 0},
+                     {**self.generation(), "start_usec": 1000000},
+                     {**self.generation(), "executable": "relative"})
+        for value in malformed:
+            with self.subTest(value=value):
+                api, frameworks = self.api([window])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.set_owned_generation(value)
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.requests, [])
+
+    def test_bound_generation_is_rechecked_before_owned_ax(self):
+        window, _ = owned_window()
+        api, frameworks = self.api([window])
+        api.set_owned_generation(self.generation())
+        self.assertTrue(api._owned_generation_ok())
+        api.libproc.start_usec += 1
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_windows(OWNED_PID)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+
+    def test_foreign_euid_matching_actual_generation_is_refused_before_capability(self):
+        foreign = os.geteuid() + 1
+        window, _ = owned_window()
+        frameworks = FakeFrameworks([window])
+        adapter = macos.MacAdapter(api=api_for(frameworks, libproc=_Libproc(uid=foreign)))
+        plan = contract.parse_request(json.dumps({
+            "title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+            "owned_generation": self.generation(euid=foreign), "actions": [],
+        }))
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(plan, adapter)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
+        self.assertEqual(frameworks.activations, [])
+
+    def test_generation_euid_check_fails_closed_on_base_exception(self):
+        window, _ = owned_window()
+        api, frameworks = self.api([window])
+        generation = self.generation()
+        with unittest.mock.patch.object(macos.os, "geteuid", side_effect=self.Fatal()):
+            with self.assertRaises(contract.ContractError) as error:
+                api.set_owned_generation(generation)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+
+    def test_owned_windows_accepts_the_bound_live_generation(self):
+        window, _ = owned_window()
+        api, _ = self.api([window])
+        api.set_owned_generation(self.generation())
+        self.assertEqual(api.owned_windows(OWNED_PID), [window])
+
+    def test_activation_generation_is_proved_before_the_single_activation(self):
+        api, frameworks = self.api([owned_window()[0]])
+        self.assertIs(api.activate_process(OWNED_PID, EXE, self.generation()), True)
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_activation_foreign_euid_matching_actual_never_activates(self):
+        foreign = os.geteuid() + 1
+        api, frameworks = self.api([owned_window()[0]], uid=foreign)
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_process(OWNED_PID, EXE, self.generation(euid=foreign))
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.activations, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
+
+    def test_activation_provided_generation_euid_is_rejected_with_process_trust(self):
+        # Isolate the provided-generation boundary: process() is forced to
+        # report trust while the actual libproc generation still carries a
+        # foreign effective UID and the request mirrors it exactly.
+        foreign = os.geteuid() + 1
+        api, frameworks = self.api([owned_window()[0]], uid=foreign)
+        api.process = lambda pid: (EXE, True)
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_process(OWNED_PID, EXE, self.generation(euid=foreign))
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.activations, [])
+        self.assertEqual(frameworks.capability_calls, 0)
+        self.assertEqual(frameworks.requests, [])
+
+    def test_stale_wrong_euid_and_malformed_activation_never_activates(self):
+        for value in (self.generation(start_usec=124),
+                      self.generation(euid=os.geteuid() + 1),
+                      {}, {**self.generation(), "pid": OTHER_PID},
+                      {**self.generation(), "euid": True}):
+            with self.subTest(value=value):
+                api, frameworks = self.api([owned_window()[0]])
+                with self.assertRaises(contract.ContractError) as error:
+                    api.activate_process(OWNED_PID, EXE, value)
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.activations, [])
+
+    def test_process_trust_uses_the_effective_uid_not_the_real_uid(self):
+        api, _ = self.api()
+        real, effective = 1000, 501
+        with unittest.mock.patch.object(macos.os, "getuid", return_value=real), \
+                unittest.mock.patch.object(macos.os, "geteuid", return_value=effective):
+            api.process_uid = lambda pid: real
+            self.assertFalse(api.process(OWNED_PID)[1])
+            api.process_uid = lambda pid: effective
+            self.assertTrue(api.process(OWNED_PID)[1])
+
+
+class OwnedGenerationGuardTests(unittest.TestCase):
+    """Guard timing around every scoped owned AX touch; fake libproc only."""
+
+    class Fatal(BaseException):
+        pass
+
+    def generation(self, **overrides):
+        value = {"pid": OWNED_PID, "executable": EXE, "euid": os.geteuid(),
+                 "start_sec": 1700000000, "start_usec": 123}
+        value.update(overrides)
+        return value
+
+    def api(self, windows=None, **kwargs):
+        frameworks = FakeFrameworks([] if windows is None else windows, **kwargs)
+        api = api_for(frameworks)
+        api.scope_to_owned_pid(OWNED_PID)
+        return api, frameworks
+
+    def bound(self, windows=None, **kwargs):
+        api, frameworks = self.api(windows, **kwargs)
+        api.set_owned_generation(self.generation())
+        return api, frameworks
+
+    def guarded_cases(self, window):
+        return (
+            ("attribute", lambda api: api.attribute(window, "AXTitle")),
+            ("ax-value-read", lambda api: api._ax_value_read(window, "AXRole")),
+            ("owned-windows", lambda api: api.owned_windows(OWNED_PID)),
+            ("prove-owned-element",
+             lambda api: api._prove_owned_element(window, OWNED_PID)),
+            ("prove-window-role", lambda api: api._prove_ax_window_role(window)),
+            ("enumerate", lambda api: api._enumerate_owned_window(TITLE, None)),
+            ("records", lambda api: api.owned_window_records()),
+            ("proven-pid", lambda api: api._proven_pid(window)),
+            ("element-at", lambda api: api._element_at({"pid": OWNED_PID}, 1, 1)),
+            ("same-element", lambda api: api._same_element(window, window)),
+            ("geometry",
+             lambda api: api._geometry(window, "AXPosition",
+                                       api.ax.kAXValueCGPointType, "x", "y")),
+            ("focus-state",
+             lambda api: api.focus_state({"id": window, "pid": OWNED_PID})),
+            ("owned-root-at",
+             lambda api: api._owned_root_at(
+                 {"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)),
+        )
+
+    def test_pre_stale_refuses_every_guarded_method_before_any_ax(self):
+        window, _ = owned_window()
+        for name, invoke in self.guarded_cases(window):
+            with self.subTest(name=name):
+                api, frameworks = self.bound([window])
+                api.libproc.start_usec += 1
+                with self.assertRaises(contract.ContractError) as error:
+                    invoke(api)
+                self.assertEqual(error.exception.code, "process-untrusted")
+                self.assertEqual(frameworks.requests, [])
+
+    def test_valid_generation_checks_before_and_after_every_guarded_method(self):
+        window, _ = owned_window()
+        for name, invoke in self.guarded_cases(window):
+            with self.subTest(name=name):
+                api, frameworks = self.bound([window])
+                api.owned_discovery(TITLE)
+                api.libproc.calls = []
+                invoke(api)
+                self.assertGreaterEqual(len(api.libproc.calls), 4)
+
+    def test_attribute_checks_before_and_after_native_copy(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        at_native = []
+        original = frameworks.AXUIElementCopyAttributeValue
+
+        def copy(element, name, out):
+            at_native.append(len(api.libproc.calls))
+            return original(element, name, out)
+
+        frameworks.AXUIElementCopyAttributeValue = copy
+        api.libproc.calls = []
+        self.assertEqual(api.attribute(window, "AXTitle"), TITLE)
+        self.assertEqual(at_native, [2])
+        self.assertEqual(len(api.libproc.calls), 4)
+
+    def test_proven_pid_checks_before_and_after_native_getpid(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        at_native = []
+
+        def getpid(element, out):
+            at_native.append(len(api.libproc.calls))
+            return (0, OWNED_PID)
+
+        frameworks.AXUIElementGetPid = getpid
+        api.libproc.calls = []
+        self.assertEqual(api._proven_pid(window), OWNED_PID)
+        self.assertEqual(at_native, [2])
+        self.assertEqual(len(api.libproc.calls), 4)
+
+    def test_element_at_checks_before_and_after_native_hit(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        at_native = []
+
+        def hit(application, x, y, out):
+            at_native.append(len(api.libproc.calls))
+            return (0, None)
+
+        frameworks.AXUIElementCopyElementAtPosition = hit
+        api.libproc.calls = []
+        self.assertIsNone(api._element_at({"pid": OWNED_PID}, 1, 1))
+        self.assertEqual(at_native, [2])
+        self.assertEqual(len(api.libproc.calls), 4)
+
+    def test_midcall_stale_after_first_getpid_stops_before_next_element(self):
+        first, _ = owned_window()
+        second, _ = owned_window(title=OTHER_TITLE)
+        api, frameworks = self.bound([first, second])
+        getpid_calls = []
+
+        def changed_getpid(element, out):
+            getpid_calls.append(element)
+            if len(getpid_calls) == 1:
+                api.libproc.start_usec += 1
+            return (0, OWNED_PID)
+
+        frameworks.AXUIElementGetPid = changed_getpid
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_windows(OWNED_PID)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(len(getpid_calls), 1)
+        self.assertNotIn("AXRole", frameworks.names())
+
+    def test_midcall_stale_inside_proven_pid_runs_postcheck(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        getpid_calls = []
+
+        def changed_getpid(element, out):
+            getpid_calls.append(element)
+            api.libproc.start_usec += 1
+            return (0, OWNED_PID)
+
+        frameworks.AXUIElementGetPid = changed_getpid
+        with self.assertRaises(contract.ContractError) as error:
+            api._proven_pid(window)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(len(getpid_calls), 1)
+
+    def test_same_element_midchange_after_cf_equal_runs_postcheck(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        equal_calls = []
+        original = frameworks.CFEqual
+
+        def changed_equal(left, right):
+            equal_calls.append(1)
+            api.libproc.start_usec += 1
+            return original(left, right)
+
+        frameworks.CFEqual = changed_equal
+        with self.assertRaises(contract.ContractError) as error:
+            api._same_element(window, window)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(len(equal_calls), 1)
+
+    def test_identity_equal_preserves_process_untrusted(self):
+        window, _ = owned_window()
+        api, _ = self.bound([window])
+        api.libproc.start_usec += 1
+        with self.assertRaises(contract.ContractError) as error:
+            api.identity_equal(window, window)
+        self.assertEqual(error.exception.code, "process-untrusted")
+
+    def test_focus_state_pre_stale_never_asks_frontmost(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.libproc.start_usec += 1
+        calls = []
+        api.foreground_pid = lambda: calls.append(1) or OWNED_PID
+        with self.assertRaises(contract.ContractError) as error:
+            api.focus_state({"id": window, "pid": OWNED_PID})
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(calls, [])
+        self.assertEqual(frameworks.requests, [])
+
+    def test_geometry_pre_stale_never_reads_axvalue(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.libproc.start_usec += 1
+        calls = []
+        frameworks.AXValueGetValue = (
+            lambda value, kind, out: calls.append(1) or (True, value))
+        with self.assertRaises(contract.ContractError) as error:
+            api._geometry(window, "AXPosition",
+                         frameworks.kAXValueCGPointType, "x", "y")
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(calls, [])
+        self.assertEqual(frameworks.requests, [])
+
+    def test_application_midchange_refuses_before_axwindows(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        original = frameworks.AXUIElementCreateApplication
+
+        def create(pid):
+            answer = original(pid)
+            api.libproc.start_usec += 1
+            return answer
+
+        frameworks.AXUIElementCreateApplication = create
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_windows(OWNED_PID)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertNotIn("AXWindows", frameworks.names())
+
+    def test_application_midchange_in_owned_root_refuses_before_hit(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.owned_discovery(TITLE)
+        frameworks.requests = []
+        original = frameworks.AXUIElementCreateApplication
+        calls = []
+
+        def create(pid):
+            answer = original(pid)
+            calls.append(1)
+            if len(calls) == 2:
+                api.libproc.start_usec += 1
+            return answer
+
+        frameworks.AXUIElementCreateApplication = create
+        with self.assertRaises(contract.ContractError) as error:
+            api._owned_root_at({"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertNotIn("at", [request[0] for request in frameworks.requests])
+
+    def test_role_midchange_refuses_before_parent_read(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.owned_discovery(TITLE)
+        frameworks.requests = []
+        hit_node = Node(AXRole="AXButton")
+        original_copy = frameworks.AXUIElementCopyAttributeValue
+
+        def hit(application, x, y, out):
+            frameworks.requests.append(("at", application, x, y))
+            return (0, hit_node)
+
+        def copy(element, name, out):
+            if element is hit_node and name == "AXRole":
+                frameworks.requests.append(("copy", element, name))
+                api.libproc.start_usec += 1
+                return (0, "AXButton")
+            return original_copy(element, name, out)
+
+        frameworks.AXUIElementCopyElementAtPosition = hit
+        frameworks.AXUIElementCopyAttributeValue = copy
+        with self.assertRaises(contract.ContractError) as error:
+            api._owned_root_at({"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        role_reads = [request for request in frameworks.requests
+                      if request[0] == "copy" and request[1] is hit_node
+                      and request[2] == "AXRole"]
+        parent_reads = [request for request in frameworks.requests
+                        if request[0] == "copy" and request[1] is hit_node
+                        and request[2] == "AXParent"]
+        self.assertEqual(len(role_reads), 1)
+        self.assertEqual(parent_reads, [])
+
+
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.libproc.start_usec += 1
+        calls = []
+        api.activate = lambda pid: calls.append(pid) or True
+        with self.assertRaises(contract.ContractError) as error:
+            api.activate_owned({"id": window, "pid": OWNED_PID})
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(calls, [])
+        self.assertEqual(frameworks.activations, [])
+        self.assertEqual(frameworks.requests, [])
+
+    def test_activate_owned_valid_generation_activates_once(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window], focused=window)
+        self.assertTrue(api.owned_discovery(TITLE)[1])
+        self.assertTrue(api.activate_owned({"id": window, "pid": OWNED_PID}))
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+
+    def test_owned_root_at_midchange_after_hit_never_reads_axrole(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.owned_discovery(TITLE)
+        frameworks.requests = []
+        hits = []
+
+        def hit(application, x, y, out):
+            hits.append(1)
+            frameworks.requests.append(("at", application, x, y))
+            api.libproc.start_usec += 1
+            return (0, window)
+
+        frameworks.AXUIElementCopyElementAtPosition = hit
+        with self.assertRaises(contract.ContractError) as error:
+            api._owned_root_at({"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(frameworks.requests[-1][0], "at")
+
+    def test_foreign_uid_after_binding_refuses_before_native(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.libproc.uid = os.geteuid() + 1
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_window_records()
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+
+    def test_base_exception_before_native_refuses_with_zero_ax(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.libproc.error = self.Fatal()
+        with self.assertRaises(contract.ContractError) as error:
+            api.attribute(window, "AXTitle")
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(frameworks.requests, [])
+
+    def test_base_exception_after_native_runs_postcheck(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        native = []
+        original = frameworks.AXUIElementCopyAttributeValue
+
+        def copy(element, name, out):
+            native.append(name)
+            api.libproc.error = self.Fatal()
+            return original(element, name, out)
+
+        frameworks.AXUIElementCopyAttributeValue = copy
+        with self.assertRaises(contract.ContractError) as error:
+            api.attribute(window, "AXTitle")
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(len(native), 1)
+
+    def test_missing_generation_keeps_legacy_scoped_path_without_guard_reads(self):
+        window, _ = owned_window()
+        api, frameworks = self.api([window])
+        calls = []
+        api.process_generation = lambda pid: calls.append(pid) or self.generation()
+        self.assertTrue(api.owned_discovery(TITLE)[1])
+        self.assertEqual(len(api.owned_window_records()), 1)
+        self.assertEqual(api.attribute(window, "AXTitle"), TITLE)
+        self.assertEqual(calls, [])
+
+
+class StatusGenerationPropagationTests(unittest.TestCase):
+    """Optional status must not swallow the terminal generation refusal."""
+
+    def controls(self):
+        value = {label: {"present": True, "showing": True, "enabled": True}
+                 for label in macos.LOCKED_CONTROLS}
+        value[macos.LOCKED_VIEW_ABSENT] = {
+            "present": False, "showing": False, "enabled": False}
+        return value
+
+    def locked_window(self):
+        window, first = owned_window()
+        controls = [first]
+        for label in macos.LOCKED_CONTROLS:
+            if label == LABEL:
+                continue
+            node = Node(AXRole="AXButton", AXDescription=label, AXEnabled=True,
+                        AXHidden=False, AXPosition=Point(CONTROL_FRAME),
+                        AXSize=Size(CONTROL_FRAME), _pid=OWNED_PID)
+            node.attributes["AXParent"] = window
+            controls.append(node)
+        window.attributes["AXChildren"] = controls
+        return window
+
+    def setup(self, locked=False):
+        window = self.locked_window() if locked else owned_window()[0]
+        frameworks = FakeFrameworks([window], focused=window, front_pid=OWNED_PID)
+        api = api_for(frameworks)
+        api.scope_to_owned_pid(OWNED_PID)
+        generation = api.process_generation(OWNED_PID)
+        api.set_owned_generation(generation)
+        windows, _ = api.owned_discovery(TITLE)
+        return api, frameworks, windows[0], generation
+
+    def status_hook(self, api, frameworks, mutation):
+        active = []
+        original_walk = api._status_walk
+
+        def walk(window, controls):
+            active.append(1)
+            try:
+                return original_walk(window, controls)
+            finally:
+                active.pop()
+
+        api._status_walk = walk
+        original_copy = frameworks.AXUIElementCopyAttributeValue
+
+        def copy(element, name, out):
+            if active and name == "AXRole":
+                mutation(api, frameworks)
+            return original_copy(element, name, out)
+
+        frameworks.AXUIElementCopyAttributeValue = copy
+
+    @staticmethod
+    def stale(api, frameworks):
+        api.libproc.start_usec += 1
+
+    @staticmethod
+    def ordinary_failure(api, frameworks):
+        raise OSError("synthetic status query failure")
+
+    def test_status_propagates_process_untrusted(self):
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.stale)
+        with self.assertRaises(contract.ContractError) as error:
+            api.status(window, self.controls())
+        self.assertEqual(error.exception.code, "process-untrusted")
+
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.stale)
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            adapter.read_status(window, self.controls())
+        self.assertEqual(error.exception.code, "process-untrusted")
+
+    def test_ordinary_status_failure_stays_all_false(self):
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        status = api.status(window, self.controls())
+        self.assertEqual(status, macos._empty_status())
+
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        adapter = macos.MacAdapter(api=api)
+        self.assertEqual(adapter.read_status(window, self.controls()),
+                         macos._empty_status())
+
+    def inspect_request(self, generation):
+        return json.dumps({
+            "title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+            "owned_generation": generation, "actions": [], "inspect": True,
+        }).encode()
+
+    def test_inspect_status_change_fails_request_without_success(self):
+        api, frameworks, window, generation = self.setup(locked=True)
+        self.status_hook(api, frameworks, self.stale)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(
+            macos.MacAdapter(api=api), "macos",
+            stdin=io.BytesIO(self.inspect_request(generation)),
+            stdout=stdout, stderr=stderr)
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("code=process-untrusted", stderr.getvalue())
+        self.assertIn("action=snapshot", stderr.getvalue())
+
+    def test_inspect_ordinary_status_failure_is_all_false_success(self):
+        api, frameworks, window, generation = self.setup(locked=True)
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(
+            macos.MacAdapter(api=api), "macos",
+            stdin=io.BytesIO(self.inspect_request(generation)),
+            stdout=stdout, stderr=stderr)
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["status"], macos._empty_status())
+
 
 
 if __name__ == "__main__":

@@ -1,0 +1,410 @@
+name: Desktop Release
+
+# Cutover prerequisite: before dispatching this workflow for a real tag,
+# verify external credential isolation and main protection, and disable or
+# make inert every legacy tag-triggered workflow/script in historical tag
+# trees. Committing this file cannot retroactively stop workflows embedded in
+# old tags. The authorize job uses the separate release-metadata environment
+# and the owner-supplied RELEASE_METADATA_READ_TOKEN; it never falls back to
+# github.token for API metadata and never receives production signing keys.
+
+"on":
+  repository_dispatch:
+    types: [desktop-release]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  MYGO_VERSION: v0.7.4
+
+jobs:
+  authorize:
+    name: Authorize trusted release dispatch
+    runs-on: ubuntu-latest
+    environment: release-metadata
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      tag: ${{ steps.authorize.outputs.tag }}
+      commit: ${{ steps.authorize.outputs.commit }}
+      version: ${{ steps.authorize.outputs.version }}
+      prerelease: ${{ steps.authorize.outputs.prerelease }}
+    steps:
+      - name: Check out the trusted default-branch workflow
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Authorize the default-branch dispatch
+        id: authorize
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_METADATA_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "REFUSE release_metadata_credential_missing" >&2
+            exit 1
+          fi
+          python3 scripts/desktop_release_routing.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --repository "$GITHUB_REPOSITORY" \
+            --git-repo . \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --sha "$GITHUB_SHA" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+  draft-release:
+    name: Create or refresh draft release
+    needs: authorize
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PRERELEASE: ${{ needs.authorize.outputs.prerelease }}
+    steps:
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - name: Check required production release secrets
+        shell: bash
+        env:
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MYGO_UPDATER_PRIVATE_KEY MACOS_CERTIFICATE \
+            MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY \
+            MACOS_PROVISIONING_PROFILE APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "Missing production release secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+      - name: Validate release tag and notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$RELEASE_TAG" "$LOCKLARK_VERSION" <<'PY'
+          from pathlib import Path
+          import os
+          import re
+          import sys
+
+          tag = sys.argv[1]
+          version = sys.argv[2]
+          if tag != "v" + version:
+              raise SystemExit("validated tag and version outputs disagree")
+          changelog = Path("CHANGELOG.md")
+          try:
+              text = changelog.read_text(encoding="utf-8")
+          except OSError as exc:
+              raise SystemExit(f"cannot read {changelog}: {exc}")
+          heading = re.compile(
+              rf"^##[ \t]+(?:\[{re.escape(version)}\]|{re.escape(version)})(?:[ \t]+-[ \t]+.*)?[ \t]*$",
+              re.MULTILINE,
+          ).search(text)
+          if heading is None:
+              raise SystemExit(f"CHANGELOG.md has no '## {version}' section")
+          rest = text[heading.end():]
+          next_heading = re.search(r"^##[ \t]+", rest, re.MULTILINE)
+          notes = (rest[:next_heading.start()] if next_heading else rest).strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md has no notes under '## {version}'")
+          Path(os.environ["RUNNER_TEMP"], "release-notes.md").write_text(
+              notes + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Create or refresh the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          create_args=(--draft --verify-tag --title "Locklark $RELEASE_TAG" --notes-file "$notes")
+          if [[ "$PRERELEASE" == "true" ]]; then
+            create_args+=(--prerelease)
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace it" >&2
+              exit 1
+            fi
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+            if [[ "$PRERELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease
+            fi
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              "${create_args[@]}"
+          fi
+
+  windows:
+    name: Build Windows release
+    needs: [authorize, draft-release]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+      MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Check the update signing key
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MYGO_UPDATER_PRIVATE_KEY)) {
+            throw "Set the production updater key before releasing."
+          }
+      - name: Prepare optional Authenticode signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
+            Write-Warning "WINDOWS_CERTIFICATE is not set; Windows artifacts will be unsigned and SmartScreen may warn."
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:MYGO_WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD must be set when WINDOWS_CERTIFICATE is provided."
+          }
+          $path = Join-Path $env:RUNNER_TEMP 'locklark-code-signing.pfx'
+          try {
+            [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          } catch {
+            throw "WINDOWS_CERTIFICATE is not valid base64: $($_.Exception.Message)"
+          }
+          "LOCKLARK_WINDOWS_CERTIFICATE_FILE=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build and upload Windows packages
+        shell: pwsh
+        run: |
+          go run "github.com/egoist/mygo/cmd/mygo@$env:MYGO_VERSION" build `
+            -platform "windows/amd64" `
+            -upload
+      - name: Verify Windows packages
+        shell: pwsh
+        run: |
+          $version = $env:LOCKLARK_VERSION
+          $required = @(
+            "out\windows-amd64\Locklark.exe",
+            "out\windows-amd64\locklark-$version-windows-amd64.tar.gz",
+            "out\windows-amd64\locklark-setup-$version-amd64.exe",
+            "out\windows-amd64\update-windows-amd64.json",
+            "out\install.ps1",
+            "out\SHA256SUMS"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Missing Windows release artifact: $path"
+            }
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:LOCKLARK_WINDOWS_CERTIFICATE_FILE)) {
+            foreach ($file in Get-ChildItem -Path out\windows-* -Filter *.exe -File -Recurse) {
+              $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+              if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+                throw "$($file.FullName) is not validly Authenticode-signed: $($signature.Status)"
+              }
+            }
+          }
+          Get-ChildItem -Path out\windows-* -File | Select-Object FullName, Length
+
+  macos:
+    name: Build macOS release
+    needs: [authorize, draft-release]
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+    steps:
+      - name: Check out the authorized commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Check production signing secrets
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_SIGNING_IDENTITY \
+            MACOS_PROVISIONING_PROFILE APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ -z "${MYGO_UPDATER_PRIVATE_KEY:-}" ]]; then
+            missing+=(MYGO_UPDATER_PRIVATE_KEY)
+          fi
+          if (( ${#missing[@]} )); then
+            echo "Missing production release secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+      - name: Import signing and notarization credentials
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/locklark-signing.keychain-db"
+          password="$(openssl rand -base64 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+            <<<"$MACOS_CERTIFICATE" > "$RUNNER_TEMP/locklark-certificate.p12"
+          security import "$RUNNER_TEMP/locklark-certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/locklark-certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain
+
+          profile="$RUNNER_TEMP/locklark.provisionprofile"
+          python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+            <<<"$MACOS_PROVISIONING_PROFILE" > "$profile"
+          xcrun notarytool store-credentials notary --keychain "$keychain" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+          {
+            echo "LOCKLARK_MACOS_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY"
+            echo "LOCKLARK_MACOS_PROVISIONING_PROFILE=$profile"
+            echo "LOCKLARK_TEAM_ID=$APPLE_TEAM_ID"
+            echo "LOCKLARK_NOTARY_PROFILE=notary"
+            echo "NOTARY_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+      - name: Build and upload macOS package
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: ./scripts/macos_release.sh --upload
+      - name: Verify macOS package
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find out -type d -name 'Locklark.app' -print -quit)"
+          dmg="$(find out -type f -name '*.dmg' -print -quit)"
+          [[ -n "$app" && -d "$app" ]] || { echo "Locklark.app was not built" >&2; exit 1; }
+          [[ -n "$dmg" && -f "$dmg" ]] || { echo "Locklark DMG was not built" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$app"
+          team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+          [[ "$team" == "$LOCKLARK_TEAM_ID" ]] || {
+            echo "Signed TeamIdentifier is '$team', want '$LOCKLARK_TEAM_ID'" >&2
+            exit 1
+          }
+          bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
+          [[ "$bundle_id" == "app.locklark.desktop" ]] || {
+            echo "Bundle identifier is '$bundle_id'" >&2
+            exit 1
+          }
+          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/locklark-entitlements.plist" 2>&1
+          grep -q '<key>keychain-access-groups</key>' "$RUNNER_TEMP/locklark-entitlements.plist"
+          grep -q "$LOCKLARK_TEAM_ID.app.locklark.desktop" "$RUNNER_TEMP/locklark-entitlements.plist"
+          xcrun stapler validate "$app"
+          xcrun stapler validate "$dmg"
+          find out -maxdepth 3 -type f -print
+
+  verify-release:
+    name: Verify and checksum draft assets
+    needs: [authorize, draft-release, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
+      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+    steps:
+      - name: Check out the trusted default-branch verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Download the draft assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-assets"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/release-assets"
+      - name: Verify signed manifests and rebuild checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_key="$(bun -e 'import config from "./mygo.config.ts"; process.stdout.write(config.updates.publicKey)')"
+          python3 scripts/verify_desktop_release.py \
+            --assets "$RUNNER_TEMP/release-assets" \
+            --version "$LOCKLARK_VERSION" \
+            --public-key "$public_key"
+      - name: Publish the complete SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/release-assets/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" --clobber

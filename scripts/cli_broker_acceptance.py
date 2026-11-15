@@ -20,6 +20,7 @@ after the privacy scan. Every wait is bounded, and cleanup stops and reaps only
 processes this script created.
 """
 import base64
+import ctypes
 import hashlib
 import json
 import os
@@ -46,13 +47,16 @@ ACTIVATION_RESULT = {"activated": True}
 TITLE = "Locklark · 本地金库"
 APPROVE_LABEL = "仅批准本次 CLI 请求"
 UNLOCK_FIELDS = ("金库文件", "主密码", "Secret Key")
+EMERGENCY_ENTRY_LABEL = "使用应急资料…"
+UNLOCK_READY_FIELDS = UNLOCK_FIELDS[:2] + (EMERGENCY_ENTRY_LABEL,)
+SECRET_FIELD = UNLOCK_FIELDS[2]
 UNLOCK_LABEL = "解锁"
 UNLOCKED_LABEL = "新建登录"
 
 # Optional read-only inspect diagnostic after the terminal unlock wait. Only
 # these fixed labels and fixed control record fields are read; every value must
 # be a built-in boolean. The status object is exactly four built-in booleans.
-LOCKED_CONTROLS = ("金库文件", "主密码", "Secret Key", UNLOCK_LABEL)
+LOCKED_CONTROLS = ("金库文件", "主密码", SECRET_FIELD, UNLOCK_LABEL)
 CONTROL_RECORD_FIELDS = ("present", "enabled", "showing")
 STATUS_FIELDS = ("available", "generic_unlock_error",
                  "secret_key_format_error", "processing")
@@ -121,14 +125,20 @@ def inspect_summary_line(summary):
 def unlock_plans(vault, master, secret):
     """Fixed synthetic unlock actions split into bounded driver plans.
 
-    The order is the original nine-action sequence. Each plan is one fresh
-    request, so the per-request observation budget is never shared across the
-    whole unlock flow; a failing plan still stops the sequence.
+    The default desktop starts with the Secret Key field hidden. The sequence
+    therefore enters the file and master password, clicks the exact explicit
+    "使用应急资料…" entry, re-proves the now-visible Secret Key control, and only
+    then enters the fixture factor and unlocks. Each plan is one fresh request,
+    so the per-request observation budget is never shared across the whole
+    unlock flow; a failing plan still stops the sequence and later actions are
+    never sent.
     """
     return (
         ({"click_label": "金库文件"}, {"key": "Super_L+a"}, {"text": str(vault)}),
         ({"click_label": "主密码"}, {"text": master}),
-        ({"click_label": "Secret Key"}, {"text": secret}),
+        ({"click_label": EMERGENCY_ENTRY_LABEL},),
+        ({"wait_label": SECRET_FIELD},),
+        ({"click_label": SECRET_FIELD}, {"text": secret}),
         ({"click_label": UNLOCK_LABEL},),
         ({"wait_label": UNLOCKED_LABEL},),
     )
@@ -176,6 +186,10 @@ DRIVER_ERROR_CATEGORIES = frozenset({
 DRIVER_ERROR_OTHER = "other"
 SECRET_PATTERN = re.compile(rb"LL1-[A-Z2-7]{26}")
 
+PROC_PIDTBSDINFO = 3
+GENERATION_FIELDS = ("pid", "executable", "euid", "start_sec", "start_usec")
+MAX_EXECUTABLE = 4096
+
 # The helper is generated into the private fixture. It reads the synthetic
 # token only from the product-injected environment variable, writes exactly one
 # SHA-256 line to the caller-owned receipt path, emits two distinct fixed
@@ -217,6 +231,126 @@ class DriverRetry(Exception):
 def require(condition):
     if not condition:
         raise AcceptanceFailure()
+
+
+class _BSDInfo(ctypes.Structure):
+    """The libproc fields needed for one process generation.
+
+    ``pbi_uid`` is the effective UID (euid), never the real UID in
+    ``pbi_ruid``. Generation capture and validation intentionally compare this
+    euid so a process cannot substitute a different effective identity.
+    """
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+def capture_process_generation(process, expected_executable):
+    """Capture the retained actual Popen's full live libproc generation.
+
+    The caller must already own ``process``. The same Popen must be live
+    before and after the libproc reads, its exact PID must be the libproc PID,
+    the canonical executable must match, the effective UID must be ours, and
+    the start pair must be plausible. A missing, malformed, stale, exited,
+    different-executable or different-euid result refuses with the fixed
+    ``AcceptanceFailure``; no raw PID, path, UID or generation is printed.
+    """
+    try:
+        require(process is not None and process.poll() is None)
+        expected = os.path.realpath(str(expected_executable))
+        pid = process.pid
+        require(type(pid) is int and pid > 0)
+        libproc = ctypes.CDLL(None)
+        libproc.proc_pidinfo.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        libproc.proc_pidinfo.restype = ctypes.c_int
+        libproc.proc_pidpath.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        libproc.proc_pidpath.restype = ctypes.c_int
+        info = _BSDInfo()
+        size = ctypes.sizeof(info)
+        if libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+                                ctypes.byref(info), size) != size:
+            raise AcceptanceFailure()
+        buffer = ctypes.create_string_buffer(4096)
+        if libproc.proc_pidpath(pid, buffer, 4096) <= 0:
+            raise AcceptanceFailure()
+        raw_path = buffer.value.decode("utf-8", "strict")
+        require(bool(raw_path))
+        path = os.path.realpath(raw_path)
+        euid = int(info.pbi_uid)
+        start_sec = int(info.pbi_start_tvsec)
+        start_usec = int(info.pbi_start_tvusec)
+        require(process.poll() is None)
+        require(int(info.pbi_pid) == pid and path == expected)
+        require(euid == os.geteuid())
+        require(start_sec > 0 and 0 <= start_usec < 1000000)
+        return {"pid": pid, "executable": path, "euid": euid,
+                "start_sec": start_sec, "start_usec": start_usec}
+    except AcceptanceFailure:
+        raise
+    except BaseException:
+        raise AcceptanceFailure() from None
+
+
+def _generation_descriptor_ok(generation):
+    """True only for the complete plain-typed five-field descriptor.
+
+    ``bool`` and ``float`` compare equal to some integers in Python, so exact
+    key equality plus dictionary equality is not a type check. Every numeric
+    field is therefore required to be a plain ``int`` (never ``bool``, a
+    float or an ``int`` subclass) with its own range, and the executable must
+    be a non-empty, canonical absolute path. This malformed-shape refusal
+    happens before any process authority is read or compared.
+    """
+    if type(generation) is not dict or set(generation) != set(GENERATION_FIELDS):
+        return False
+    pid = generation["pid"]
+    executable = generation["executable"]
+    euid = generation["euid"]
+    start_sec = generation["start_sec"]
+    start_usec = generation["start_usec"]
+    if type(pid) is not int or not 0 < pid <= 0xFFFFFFFF:
+        return False
+    if type(euid) is not int or not 0 <= euid <= 0xFFFFFFFF:
+        return False
+    if type(start_sec) is not int or not 0 < start_sec <= 0xFFFFFFFFFFFFFFFF:
+        return False
+    if type(start_usec) is not int or not 0 <= start_usec < 1000000:
+        return False
+    if type(executable) is not str or not executable:
+        return False
+    if len(executable) > MAX_EXECUTABLE:
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in executable):
+        return False
+    if not os.path.isabs(executable):
+        return False
+    try:
+        return os.path.realpath(executable) == executable
+    except BaseException:
+        return False
+
+
+def validate_process_generation(process, expected_executable, generation):
+    """Refuse unless the retained Popen still matches the captured generation."""
+    require(process is not None)
+    require(_generation_descriptor_ok(generation))
+    require(capture_process_generation(process, expected_executable) == generation)
 
 
 def scan(raw, values):
@@ -671,6 +805,7 @@ class Acceptance:
         self.desktop = None
         self.env = {}
         self.desktop_process = None
+        self.desktop_generation = None
         self.cli_child = None
         self.driver_index = 0
         self.values = []
@@ -799,17 +934,27 @@ class Acceptance:
         require(type(process.pid) is int and process.pid > 0)
         return process.pid
 
+    def _validate_desktop_generation(self):
+        """Require the retained Popen to still match the captured generation."""
+        require(self.desktop_process is not None)
+        require(self.desktop_generation is not None)
+        validate_process_generation(self.desktop_process, self.desktop,
+                                    self.desktop_generation)
+
     def scoped_request(self, actions, inspect=False):
         """One normal macOS request scoped to this harness's own Popen PID.
 
         The exact fixture TITLE and the canonical executable are always sent;
         the PID only narrows every window observation to the owned process.
+        Every scoped request also carries the captured libproc generation.
         """
         require(self.desktop is not None and os.path.isabs(str(self.desktop)))
+        require(self.desktop_generation is not None)
         return json.dumps({
             "title": TITLE,
             "executable": str(self.desktop),
             "owned_pid": self.owned_desktop_pid(),
+            "owned_generation": self.desktop_generation,
             "actions": actions,
             "inspect": inspect,
         }).encode()
@@ -823,9 +968,14 @@ class Acceptance:
         """One bounded driver invocation; saves owner-only stdout/stderr.
 
         Every call starts by resetting the fixed error category; only the
-        allowlisted code below is ever stored, in memory.
+        allowlisted code below is ever stored, in memory. The same retained
+        desktop Popen and its captured libproc generation are validated
+        immediately before and after the child driver runs, so a missing,
+        stale, exited, wrong-executable or wrong-euid process is refused
+        rather than trusted for that call.
         """
         self.driver_error_category = None
+        self._validate_desktop_generation()
         try:
             result = subprocess.run(
                 [sys.executable, str(DRIVER), "--platform", "macos"],
@@ -835,6 +985,8 @@ class Acceptance:
         except subprocess.TimeoutExpired:
             # A hung driver is unknown delivery, never a retryable discovery.
             raise AcceptanceFailure() from None
+        finally:
+            self._validate_desktop_generation()
         self.driver_index += 1
         self.private_bytes("driver-" + str(self.driver_index) + ".stdout", result.stdout)
         self.private_bytes("driver-" + str(self.driver_index) + ".stderr", result.stderr)
@@ -869,6 +1021,8 @@ class Acceptance:
         finally:
             os.close(log)
         os.chmod(self.fixture.logs / "desktop.log", 0o600)
+        self.desktop_generation = capture_process_generation(
+            self.desktop_process, self.desktop)
         self.activate_desktop()
         self.wait_unlock_fields()
         self.mark("real_desktop_started_with_explicit_settings_socket")
@@ -876,17 +1030,22 @@ class Acceptance:
     def activation_request(self):
         """Activation-only request for the exact pid this harness launched.
 
-        Only the PID and the already validated canonical executable are named;
-        there is no title, action, inspect or window field. A native refusal is
+        Only the PID, the already validated canonical executable and the
+        captured libproc generation are named; there is no title, action,
+        inspect or window field. The generation is revalidated against the
+        live retained Popen before this request is built. A native refusal is
         an acceptance failure, never retried.
         """
         process = self.desktop_process
         require(process is not None and process.poll() is None)
         require(type(process.pid) is int and process.pid > 0)
         require(self.desktop is not None and os.path.isabs(str(self.desktop)))
+        require(self.desktop_generation is not None)
+        self._validate_desktop_generation()
         return json.dumps({
             "activate_pid": process.pid,
             "executable": str(self.desktop),
+            "owned_generation": self.desktop_generation,
         }).encode()
 
     def activate_desktop(self):
@@ -899,7 +1058,11 @@ class Acceptance:
 
     def wait_unlock_fields(self):
         retry_deadline = min(self.deadline, time.monotonic() + 45)
-        actions = [{"wait_label": label} for label in UNLOCK_FIELDS]
+        # Readiness proves the owned window's visible file/master controls and
+        # the exact explicit emergency entry. Secret Key is hidden until that
+        # entry is clicked, so it is deliberately not part of the initial wait;
+        # the unlock plans re-prove it after the real click.
+        actions = [{"wait_label": label} for label in UNLOCK_READY_FIELDS]
         while True:
             try:
                 self.driver(actions, "desktop")
@@ -1069,27 +1232,30 @@ class Acceptance:
                       json.dumps(self.result(success)).encode())
 
     def close(self):
-        if self.cli_child is not None:
-            self.cli_child.terminate()
-            self.cli_child = None
-        process = self.desktop_process
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+        try:
+            if self.cli_child is not None:
+                self.cli_child.terminate()
+                self.cli_child = None
+            process = self.desktop_process
+            if process is not None and process.poll() is None:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    os.killpg(process.pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
                     pass
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    pass
-        self.desktop_process = None
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+        finally:
+            self.desktop_generation = None
+            self.desktop_process = None
 
 
 def main(argv=None):

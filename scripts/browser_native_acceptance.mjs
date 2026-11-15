@@ -1,11 +1,11 @@
 // External end-to-end acceptance: actual extension action, native messaging,
 // MyGo UI input, and a controlled HTTPS document. No product test bypasses.
 import { createRequire } from "node:module";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, realpathSync, lstatSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import {
@@ -20,6 +20,7 @@ import {
 } from "./browser_save_acceptance.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
+import { nativeUnlockActions } from "./browser_unlock_sequence.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
 import {
@@ -247,7 +248,56 @@ assert(
     ),
   "Unsupported acceptance failure stage",
 );
-const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
+function privateStateParent() {
+  const value = process.env.LOCKLARK_TEST_PRIVATE_STATE_PARENT;
+  if (value === undefined) return null;
+  try {
+    if (
+      !isAbsolute(value) ||
+      resolve(value) !== value ||
+      realpathSync(value) !== value ||
+      typeof process.geteuid !== "function"
+    ) {
+      throw Error();
+    }
+    const info = lstatSync(value);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      info.uid !== process.geteuid() ||
+      (info.mode & 0o777) !== 0o700
+    ) {
+      throw Error();
+    }
+    return value;
+  } catch {
+    throw Error("Private state parent invalid");
+  }
+}
+
+function createPrivateState() {
+  const parent = privateStateParent();
+  if (parent === null) {
+    return mkdtempSync("/tmp/locklark-browser-acceptance-");
+  }
+  try {
+    const created = mkdtempSync(join(parent, "locklark-browser-acceptance-"));
+    const info = lstatSync(created);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      info.uid !== process.geteuid() ||
+      (info.mode & 0o777) !== 0o700
+    ) {
+      throw Error();
+    }
+    return created;
+  } catch {
+    throw Error("Private state parent invalid");
+  }
+}
+
+const state = createPrivateState();
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
@@ -1553,15 +1603,7 @@ async function acceptEdgePairDisconnect(driver) {
   mark("edge-pair-unlock");
   // Only the generated synthetic fixture values, through the existing native
   // X11 helper; no quick-pairing control and no page value is touched.
-  input([
-    { click_label: "金库文件" },
-    { text: fixture.Path },
-    { click_label: "主密码" },
-    { text: fixture.Password },
-    { click_label: "Secret Key" },
-    { text: fixture.Secret },
-    { click_label: "解锁" },
-  ]);
+  input(nativeUnlockActions(fixture));
   mark("edge-pair-approve");
   input([{ click_label: "确认连接此扩展" }]);
   mark("edge-pair-paired");
@@ -2823,15 +2865,7 @@ try {
   assert.equal(await popup.count("#save-new"), 1);
   await popup.click("#connect");
   phase("native-unlock");
-  input([
-    { click_label: "金库文件" },
-    { text: fixture.Path },
-    { click_label: "主密码" },
-    { text: fixture.Password },
-    { click_label: "Secret Key" },
-    { text: fixture.Secret },
-    { click_label: "解锁" },
-  ]);
+  input(nativeUnlockActions(fixture));
   phase("native-pair");
   // The popup-vault run pairs with the real quick-fill choice; no host status
   // text is observable in the native accessibility tree, so the successful
@@ -2933,15 +2967,7 @@ try {
     phase("native-reconnect");
     popup = await openPopup();
     await popup.click("#connect");
-    input([
-      { click_label: "金库文件" },
-      { text: fixture.Path },
-      { click_label: "主密码" },
-      { text: fixture.Password },
-      { click_label: "Secret Key" },
-      { text: fixture.Secret },
-      { click_label: "解锁" },
-    ]);
+    input(nativeUnlockActions(fixture));
     input([{ click_label: "确认连接此扩展" }]);
     // Native re-pair closes the popup that requested it; only openPopup returns
     // the focused, visible action popup again, so discard the stale handle.
@@ -3294,15 +3320,7 @@ try {
       input([], true, { wait_absent: true });
       popup = await openPopup();
       await popup.click("#connect");
-      input([
-        { click_label: "金库文件" },
-        { text: fixture.Path },
-        { click_label: "主密码" },
-        { text: fixture.Password },
-        { click_label: "Secret Key" },
-        { text: fixture.Secret },
-        { click_label: "解锁" },
-      ]);
+      input(nativeUnlockActions(fixture));
       input([{ click_label: "确认连接此扩展" }]);
     },
     // Explicit quick pairing for non-destructive Passkey metadata: disconnect
@@ -3314,15 +3332,7 @@ try {
       input([], true, { wait_absent: true });
       popup = await openPopup();
       await popup.click("#connect");
-      input([
-        { click_label: "金库文件" },
-        { text: fixture.Path },
-        { click_label: "主密码" },
-        { text: fixture.Password },
-        { click_label: "Secret Key" },
-        { text: fixture.Secret },
-        { click_label: "解锁" },
-      ]);
+      input(nativeUnlockActions(fixture));
       input([{ click_label: "连接并启用快捷填充" }]);
     },
     root,

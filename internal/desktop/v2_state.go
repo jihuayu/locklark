@@ -53,12 +53,11 @@ type v2State struct {
 	editing     bool
 	draft       *ItemDraft
 
-	historyOpen    bool
-	settingsOpen   bool
-	showWatchtower bool
-	watchtower     *WatchtowerReport
-	watchtowerErr  string
-	ignored        map[string]bool
+	historyOpen     bool
+	settingsOpen    bool
+	settingsSection string
+	watchtower      *WatchtowerReport
+	ignored         map[string]bool
 
 	generator generatorState
 
@@ -241,7 +240,7 @@ func legacyRows(rows []personal.ItemSummary) []personal.Row {
 
 // navigate switches the sidebar view. Supported targets:
 //
-//	all, favorites, watchtower, recently_deleted, archive
+//	all, favorites, recently_deleted, archive
 //	category:<slug>, tag:<name>, vault:<id|all>
 //	<category slug>            (e.g. "credit_card")
 func (a *App) navigate(target string) {
@@ -262,7 +261,6 @@ func (a *App) navigate(target string) {
 		a.v2.nav = navWatchtower
 		a.v2.category = ""
 		a.v2.tag = ""
-		a.v2.showWatchtower = true
 	case "recently_deleted", "recently deleted", "trash", "trashed", "recentlydeleted", "回收站", "最近删除":
 		a.v2.nav = navRecentlyDelete
 		a.v2.category = ""
@@ -831,6 +829,9 @@ func idleLockLabel(d time.Duration) string {
 
 func (a *App) openSettings() {
 	a.v2.settingsOpen = true
+	if a.v2.settingsSection == "" {
+		a.v2.settingsSection = settingsSectionSecurity
+	}
 	a.touchActivity()
 }
 

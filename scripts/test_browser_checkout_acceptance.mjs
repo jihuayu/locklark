@@ -3077,3 +3077,94 @@ test("native failure emission contains fixed picker records and survives disk fa
   }
   assert.deepEqual(error.pickerDiagnostic, records);
 });
+
+test("native failure projection drops raw window, ids, coords, clicks and unknown labels", () => {
+  const canary = "CANARY-native-extra-value";
+  const native = {
+    available: true,
+    window: "0xNATIVE-WINDOW",
+    pid: 424242,
+    uid: 501,
+    generation: 9,
+    x: 17,
+    y: 29,
+    clicks: [{ x: 1, y: 2, path: "/private/click-path" }],
+    controls: {
+      "金库文件": { present: true, enabled: true, showing: true, value: canary },
+      "使用应急资料…": { present: true, enabled: true, showing: true },
+      "Secret Key": { present: false, enabled: false, showing: false, text: canary },
+      "解锁": { present: true, enabled: true, showing: false },
+      "确认连接此扩展": { present: true, enabled: true, showing: true },
+      "批准本次填充": { present: false, enabled: false, showing: false },
+      [canary]: { present: true, enabled: true, showing: true },
+    },
+    extra: { canary, window: "0xEXTRA-WINDOW" },
+    canary,
+  };
+  const report = {
+    reason: "Synthetic native failure",
+    stage: "native-unlock",
+    pickerStatus: "other",
+    pickerDiagnostic: [{ phase: "handler-entry", isTrusted: true, userActivation: false }],
+    native,
+  };
+  const before = JSON.stringify(report);
+  const writes = [];
+  const lines = [];
+  const originalError = console.error;
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    const json = recordNativeFailure(
+      (path, data, options) => writes.push({ path, data, options }),
+      report,
+      "/tmp/synthetic-native-diagnostics",
+    );
+    const projected = JSON.parse(json);
+    assert.equal(projected.native.available, true);
+    assert.equal(projected.native.controlCount, 6);
+    assert.deepEqual(projected.native.controls["金库文件"], {
+      present: true, enabled: true, showing: true,
+    });
+    assert.deepEqual(projected.native.controls["Secret Key"], {
+      present: false, enabled: false, showing: false,
+    });
+    assert.equal(projected.native.controls[canary], undefined);
+    assert.deepEqual(projected.pickerDiagnostic, report.pickerDiagnostic);
+    assert.equal(JSON.stringify(report), before);
+    assert.equal(writes[0].data, json);
+    assert.equal(writes[0].options.mode, 0o600);
+    assert.equal(lines.some((line) => line.includes("/tmp/synthetic-native-diagnostics")), false);
+    const combined = json + "\n" + lines.join("\n") + writes[0].data;
+    for (const raw of [
+      "0xNATIVE-WINDOW", "424242", "501", "generation", "17", "29",
+      "/private/click-path", canary, "0xEXTRA-WINDOW", '"window"', '"pid"',
+      '"uid"', '"x"', '"y"', '"clicks"', '"extra"',
+    ]) {
+      assert.equal(combined.includes(raw), false, raw);
+    }
+
+    const malformed = recordNativeFailure(
+      () => {},
+      { reason: "Synthetic native failure", stage: "native-unlock", native: { available: "yes", window: "0xBAD" } },
+      "/tmp/synthetic-native-diagnostics",
+    );
+    assert.deepEqual(JSON.parse(malformed).native, { available: false });
+    assert.equal(malformed.includes("0xBAD"), false);
+
+    const cyclic = {
+      reason: "Synthetic native failure",
+      stage: "native-unlock",
+      native: { available: false },
+    };
+    cyclic.self = cyclic;
+    const cyclicJson = recordNativeFailure(
+      () => {},
+      cyclic,
+      "/tmp/synthetic-native-diagnostics",
+    );
+    assert.equal(JSON.parse(cyclicJson).reason, "native failure report unavailable");
+    assert.equal(cyclicJson.includes(canary), false);
+  } finally {
+    console.error = originalError;
+  }
+});

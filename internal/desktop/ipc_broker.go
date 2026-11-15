@@ -10,13 +10,23 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
+	"github.com/oneo-me/onevra/source/shells/plain"
 )
 
 var errCLIRunRefused = errors.New("refused")
+
+type cliApprovalPopup struct {
+	id      string
+	win     *mygo.Window
+	retired bool
+}
 
 // browserPairPending is one explicit OS-peer browser pairing review. The
 // decision is a fresh native gesture; no browser-supplied field can fill it in.
@@ -36,8 +46,12 @@ func (p *browserPairPending) choose(decision browserhost.BrowserPairDecision) {
 // matches exactly what was validated on the wire. The view only reads a
 // rendered summary, so the owner never holds or re-encodes the live scope.
 type cliRunPending struct {
-	id      string
-	peer    browserhost.Peer
+	id   string
+	peer browserhost.Peer
+	// request is the immutable 150-era view model retained for the owned
+	// approval window. It is a private copy and never read back into the
+	// broker's validated request.
+	request browserhost.BrokerCLIRequest
 	summary cliRunApprovalSummary
 	// session and epoch are the exact broker generation this request was
 	// published under. A decision is only valid while both are still current.
@@ -46,6 +60,9 @@ type cliRunPending struct {
 	decision chan bool
 	once     sync.Once
 	decided  bool
+	// popup is the exact window created for this pending id. Guarded by
+	// App.brokerMu.
+	popup *cliApprovalPopup
 }
 
 func (p *cliRunPending) choose(approved bool) {
@@ -82,6 +99,7 @@ func (a *App) browserBrokerCallbacks() browserhost.BrokerCallbacks {
 		RequestUnlockFocus: func() {
 			a.dispatch(func() {
 				if a.win != nil {
+					a.winHidden = false
 					a.win.Show()
 					a.win.Focus()
 				}
@@ -148,9 +166,22 @@ func (a *App) cancelPendingCLIRun() {
 	a.brokerMu.Lock()
 	p := a.cliPending
 	a.cliPending = nil
+	if p != nil {
+		p.decided = true
+	}
+	popup := a.approvalPopup
+	win := a.approvalWin
+	if p != nil && p.popup != nil {
+		popup = p.popup
+	}
 	a.brokerMu.Unlock()
 	if p != nil {
 		p.choose(false)
+	}
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
 	}
 }
 
@@ -193,6 +224,14 @@ func (a *App) notifyBrowserBrokerLocked() {
 // every other failure are the fixed errCLIRunRefused, so no later failure can
 // fall back as eligible.
 func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
+	if ctx == nil {
+		_ = a.recordCLIActivity("failed", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
+	// The absolute lifetime starts here and is never renewed. A shorter caller
+	// deadline remains authoritative through WithTimeout.
+	ctx, cancel := context.WithTimeout(ctx, browserhost.CLIRunApprovalMaxLifetime)
+	defer cancel()
 	// Everything below works on local copies: scope is the immutable copy the
 	// canonical request, the native review, and the preparation are built from,
 	// and callbackTargets is a fresh copy of the requested targets, so no later
@@ -235,6 +274,7 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	}
 	a.brokerMu.Unlock()
 	if s == nil || path == "" || !unlocked {
+		_ = a.recordCLIActivity("unavailable", peer, req)
 		return browserhost.BrokerCLIResponse{}, browserhost.ErrBrokerUnavailable
 	}
 	if path != req.VaultPath || browserhost.ValidateCLIRunScope(scope) != nil {
@@ -246,25 +286,26 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	if a.cliApprover != nil {
 		ok, e := a.cliApprover(ctx, peer, req)
 		if e != nil {
+			_ = a.recordCLIActivity("failed", peer, req)
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
 		approved = ok
 	} else {
 		ok, e := a.requestCLIRunApproval(ctx, peer, path, scope, callbackTargets, s, epoch)
 		if e != nil {
+			_ = a.recordCLIActivity("failed", peer, req)
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
 		approved = ok
 	}
 	if !approved {
+		_ = a.recordCLIActivity("refused", peer, req)
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
-	// An explicit approval only counts for the same session and epoch, still
-	// unlocked, that was current at entry.
-	if !a.brokerCurrent(s, epoch) {
-		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
-	}
-	if ctx == nil || ctx.Err() != nil {
+	// Approval is not disclosure. A deadline that elapsed while the prompt was
+	// open, or a lock/epoch change, must fail closed before extraction.
+	if ctx.Err() != nil || !a.brokerCurrent(s, epoch) {
+		_ = a.recordCLIActivity("failed", peer, req)
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
 	// Build the canonical request only from the approved scope. Its profile
@@ -294,6 +335,11 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	if !a.brokerCurrent(s, epoch) {
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
+	// The audited success record is part of the disclosure boundary: a record
+	// failure keeps ownership local so the deferred cleanup zeroes every buffer.
+	if e := a.recordCLIActivity("approved", peer, req); e != nil {
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
 	// The exact bytes and the audited receipt are complete, so ownership of
 	// the prepared map moves to the broker: the local cleanup must not touch it.
 	transferred = true
@@ -301,11 +347,31 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 }
 
 func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, vaultPath string, scope browserhost.CLIRunScope, targets []personal.CLIBrokerTarget, session *personal.Session, epoch uint64) (bool, error) {
+	if ctx == nil || session == nil {
+		return false, errCLIRunRefused
+	}
+	// One absolute cap. A shorter caller deadline wins; no prompt activity
+	// extends the deadline.
+	ctx, cancel := context.WithTimeout(ctx, browserhost.CLIRunApprovalMaxLifetime)
+	defer cancel()
+	if ctx.Err() != nil {
+		return false, errCLIRunRefused
+	}
 	summary := cliRunApprovalSummaryFor(peer, vaultPath, scope, targets)
-	scope = browserhost.CLIRunScope{}
+	// The window shows the same immutable request shape the 150 view always
+	// used, but it is a private copy: clearing the local containers below
+	// cannot change what is displayed.
+	request := browserhost.BrokerCLIRequest{
+		V:         1,
+		VaultPath: vaultPath,
+		Scope:     scope.Clone(),
+		Targets:   append([]personal.CLIBrokerTarget(nil), targets...),
+	}
+	scope.Clear()
 	targets = nil
 	p := &cliRunPending{
 		peer:     peer,
+		request:  request,
 		summary:  summary,
 		session:  session,
 		epoch:    epoch,
@@ -317,14 +383,19 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 	p.id = hex.EncodeToString(b[:])
 	a.brokerMu.Lock()
-	if a.cliPending != nil || a.brokerSession != session || a.brokerEpoch != epoch || session == nil || !session.Unlocked() {
+	if a.cliPending != nil || a.brokerSession != session || a.brokerEpoch != epoch || !session.Unlocked() {
 		a.brokerMu.Unlock()
 		return false, errCLIRunRefused
 	}
 	a.cliPending = p
 	a.brokerMu.Unlock()
 	a.dispatch(func() {
+		if a.onevra.shellActive && a.win != nil && (a.winHidden || !a.win.IsVisible()) {
+			a.showApprovalWindow(p.id)
+			return
+		}
 		if a.win != nil {
+			a.winHidden = false
 			a.win.Show()
 			a.win.Focus()
 			a.win.Invalidate()
@@ -345,19 +416,41 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 }
 
-// finishCLIRunApproval retires a decided or cancelled review and drops its
-// rendered summary, so a stale prompt cannot be redrawn after the decision. It
-// retires and revalidates the epoch binding under the same lock, so a stale
-// decision can never retire a newer review, and it reports whether p was
-// decided and its exact session, broker epoch and unlocked state still match.
+// finishCLIRunApproval retires a decided or cancelled review, drops its
+// rendered summary, and retires the window owned by exactly this pending id.
+// It revalidates the epoch binding under the same lock, so a stale decision can
+// never retire a newer review, and reports whether p was decided and its exact
+// session, broker epoch and unlocked state still match.
 func (a *App) finishCLIRunApproval(p *cliRunPending) bool {
+	if p == nil {
+		return false
+	}
 	a.brokerMu.Lock()
 	current := p.decided && p.session != nil && p.session.Unlocked() && a.brokerSession == p.session && a.brokerEpoch == p.epoch
 	if a.cliPending == p {
 		a.cliPending = nil
 	}
 	p.summary = cliRunApprovalSummary{}
+	popup := p.popup
+	p.popup = nil
+	var win *mygo.Window
+	if a.approvalWinPending == p.id {
+		if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == p.id {
+			popup = a.approvalPopup
+		}
+		win = a.approvalWin
+		a.approvalWinPending = ""
+		a.approvalWin = nil
+		if popup != nil && a.approvalPopup == popup {
+			a.approvalPopup = nil
+		}
+	}
 	a.brokerMu.Unlock()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
 	a.dispatch(func() {
 		if a.win != nil {
 			a.win.Invalidate()
@@ -394,24 +487,416 @@ func (a *App) cliRunHandlers(current, snapshot *cliRunPending) (approve, refuse 
 	return defaultCLIRunHandlerFactory(a, current, snapshot)
 }
 
-// approveCLIRun records and signals the decision for p, once, under brokerMu.
-// A native approval only counts while p is still the current pending review,
-// unbound approvals of reviews without a session never count, and p's exact
-// session (non-nil) and broker epoch snapshot must still be current and
-// unlocked. Any mismatch signals a refusal; the request waiter revalidates the
-// same binding again before it returns approved.
-func (a *App) approveCLIRun(p *cliRunPending, approved bool) {
-	a.brokerMu.Lock()
+// cliRunDecisionHandlers binds the approve and refuse callbacks to the exact
+// pending snapshot a popup rendered. The decision uses pointer identity, so a
+// queued callback from an older render cannot decide a replacement request.
+func (a *App) cliRunDecisionHandlers(p *cliRunPending) (approve, refuse func()) {
+	return func() { a.approveCLIRun(p, true) }, func() { a.approveCLIRun(p, false) }
+}
+
+// decideCLIRunLocked records exactly one decision for p while brokerMu is
+// held. A positive decision is published only for the exact non-nil session,
+// current broker epoch, and still-unlocked session bound at request entry;
+// every other positive attempt is signalled as a refusal. It returns the popup
+// and window owned by p so the caller can retire them after unlocking, and
+// reports whether p was the current undecided pending.
+func (a *App) decideCLIRunLocked(p *cliRunPending, approved bool) (*cliApprovalPopup, *mygo.Window, bool) {
 	if p == nil || a.cliPending != p || p.decided {
+		return nil, nil, false
+	}
+	p.decided = true
+	positive := approved && p.session != nil && p.session.Unlocked() &&
+		a.brokerSession == p.session && a.brokerEpoch == p.epoch
+	p.choose(positive)
+	id := p.id
+	popup := p.popup
+	if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == id {
+		popup = a.approvalPopup
+	}
+	win := a.approvalWin
+	if a.approvalWinPending == id {
+		a.approvalWinPending = ""
+		a.approvalWin = nil
+	}
+	if popup != nil && a.approvalPopup == popup {
+		a.approvalPopup = nil
+	}
+	return popup, win, true
+}
+
+// retireDecidedCLIRun retires the exact popup and window captured for an
+// accepted decision. Retirement takes brokerMu itself, so it must run only
+// after decideCLIRunLocked has released the lock.
+func (a *App) retireDecidedCLIRun(popup *cliApprovalPopup, win *mygo.Window) {
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
+}
+
+// approveCLIRun records and signals the decision for the exact pending pointer
+// once, under brokerMu. A positive decision also requires the exact non-nil
+// session and current broker epoch to be current and unlocked; every refusal
+// or stale binding is signalled as a refusal. The owned popup, if any, is
+// retired on every accepted decision; a stale pointer touches nothing and
+// reports false.
+func (a *App) approveCLIRun(p *cliRunPending, approved bool) bool {
+	a.brokerMu.Lock()
+	popup, win, ok := a.decideCLIRunLocked(p, approved)
+	a.brokerMu.Unlock()
+	if !ok {
+		return false
+	}
+	a.retireDecidedCLIRun(popup, win)
+	return true
+}
+
+// approveCLIRunID is the typed wrapper for the 150-owned popup close action,
+// which is bound to a rendered id rather than the pending pointer. It resolves
+// the id to the current pending under brokerMu and then applies the same
+// pointer/session/epoch checks as approveCLIRun; an empty, unknown, or stale
+// id reports false and decides nothing.
+func (a *App) approveCLIRunID(id string, approved bool) bool {
+	a.brokerMu.Lock()
+	p := a.cliPending
+	if p == nil || id == "" || p.id != id {
+		a.brokerMu.Unlock()
+		return false
+	}
+	popup, win, ok := a.decideCLIRunLocked(p, approved)
+	a.brokerMu.Unlock()
+	if !ok {
+		return false
+	}
+	a.retireDecidedCLIRun(popup, win)
+	return true
+}
+
+// cliRunCloseHandler captures one immutable popup. A delayed close event from
+// an old window can therefore reject only its own pending id and retire only
+// its own window, never whatever happens to be rendered now.
+func (a *App) cliRunCloseHandler(popup *cliApprovalPopup) func(*mygo.CloseEvent) {
+	return func(e *mygo.CloseEvent) {
+		if e != nil {
+			e.PreventDefault()
+		}
+		a.closeCLIApprovalPopup(popup)
+	}
+}
+
+func (a *App) closeCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
+	// approveCLIRun rejects the captured id only while it is still current.
+	// A stale p1 popup leaves p2's decision and window untouched.
+	a.approveCLIRunID(popup.id, false)
+	a.retireCLIApprovalPopup(popup)
+}
+
+// retireCLIApprovalPopup destroys exactly popup's window without firing a
+// close event, so retiring p1 cannot recurse into the live p2 popup.
+func (a *App) retireCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
+	a.brokerMu.Lock()
+	if popup.retired {
 		a.brokerMu.Unlock()
 		return
 	}
-	p.decided = true
-	if approved && (p.session == nil || a.brokerSession != p.session || a.brokerEpoch != p.epoch) {
-		approved = false
+	popup.retired = true
+	win := popup.win
+	popup.win = nil
+	if a.approvalPopup == popup {
+		a.approvalPopup = nil
+		a.approvalWin = nil
+		if a.approvalWinPending == popup.id {
+			a.approvalWinPending = ""
+		}
 	}
-	p.choose(approved)
+	if a.cliPending != nil && a.cliPending.popup == popup {
+		a.cliPending.popup = nil
+	}
 	a.brokerMu.Unlock()
+	if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
+}
+
+// retireCLIRunPendingWindow retires the popup captured by one pending request,
+// even if a replacement request has since become current. It is safe to call
+// more than once and from a queued cleanup.
+func (a *App) retireCLIRunPendingWindow(p *cliRunPending) {
+	if p == nil {
+		return
+	}
+	a.brokerMu.Lock()
+	popup := p.popup
+	p.popup = nil
+	var win *mygo.Window
+	if a.approvalWinPending == p.id {
+		if popup == nil && a.approvalPopup != nil && a.approvalPopup.id == p.id {
+			popup = a.approvalPopup
+		}
+		win = a.approvalWin
+		a.approvalWinPending = ""
+		a.approvalWin = nil
+		if popup != nil && a.approvalPopup == popup {
+			a.approvalPopup = nil
+		}
+	}
+	a.brokerMu.Unlock()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+		return
+	}
+	if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+		return
+	}
+	// Test/legacy state may have rendered an owner without a popup object.
+	a.hideApprovalWindowFor(p.id)
+}
+
+// hideApprovalWindowFor retires the popup only while it still renders id. A
+// cleanup queued for an old request therefore cannot hide the window of a
+// replacement request.
+func (a *App) hideApprovalWindowFor(id string) bool {
+	a.brokerMu.Lock()
+	if id == "" || a.approvalWinPending != id {
+		a.brokerMu.Unlock()
+		return false
+	}
+	popup := a.approvalPopup
+	if popup == nil && a.cliPending != nil && a.cliPending.id == id {
+		popup = a.cliPending.popup
+	}
+	win := a.approvalWin
+	a.approvalWinPending = ""
+	a.approvalWin = nil
+	if popup != nil && a.approvalPopup == popup {
+		a.approvalPopup = nil
+	}
+	if a.cliPending != nil && a.cliPending.popup == popup {
+		a.cliPending.popup = nil
+	}
+	a.brokerMu.Unlock()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
+	return true
+}
+
+// hideApprovalWindow retires the current popup without deciding its pending.
+// It is used for teardown paths such as lock/quit, not for a rendered action.
+func (a *App) hideApprovalWindow() {
+	a.brokerMu.Lock()
+	popup := a.approvalPopup
+	if popup == nil && a.cliPending != nil {
+		popup = a.cliPending.popup
+	}
+	win := a.approvalWin
+	a.approvalWinPending = ""
+	a.approvalWin = nil
+	a.approvalPopup = nil
+	if a.cliPending != nil {
+		a.cliPending.popup = nil
+	}
+	a.brokerMu.Unlock()
+	if popup != nil {
+		a.retireCLIApprovalPopup(popup)
+	} else if win != nil && !win.IsDestroyed() {
+		win.Destroy()
+	}
+}
+
+func (a *App) showCLIApprovalPopup(popup *cliApprovalPopup) {
+	if popup == nil {
+		return
+	}
+	a.brokerMu.Lock()
+	if popup.retired || popup.win == nil {
+		a.brokerMu.Unlock()
+		return
+	}
+	win := popup.win
+	a.brokerMu.Unlock()
+	if win.IsDestroyed() {
+		return
+	}
+	win.Center()
+	win.Show()
+	win.Focus()
+	win.Invalidate()
+}
+
+func (a *App) showApprovalWindow(id string) {
+	a.brokerMu.Lock()
+	p := a.cliPending
+	if p == nil || p.id != id {
+		a.brokerMu.Unlock()
+		return
+	}
+	if p.popup != nil && !p.popup.retired && p.popup.win != nil && !p.popup.win.IsDestroyed() {
+		popup := p.popup
+		a.approvalPopup = popup
+		a.approvalWin = popup.win
+		a.approvalWinPending = id
+		a.brokerMu.Unlock()
+		a.showCLIApprovalPopup(popup)
+		return
+	}
+	oldPopup, oldWin, stalePopup := a.approvalPopup, a.approvalWin, p.popup
+	a.approvalPopup = nil
+	a.approvalWin = nil
+	a.approvalWinPending = ""
+	a.brokerMu.Unlock()
+	if oldPopup != nil {
+		a.retireCLIApprovalPopup(oldPopup)
+	}
+	if stalePopup != nil && stalePopup != oldPopup {
+		a.retireCLIApprovalPopup(stalePopup)
+	}
+	if oldPopup == nil && stalePopup == nil && oldWin != nil && !oldWin.IsDestroyed() {
+		oldWin.Destroy()
+	}
+
+	// Every pending request gets its own popup, its own immutable close
+	// handler, and its own content closure. The content captures popup and
+	// revalidates exact ownership before rendering; it never substitutes the
+	// then-current global pending into an older window.
+	popup := &cliApprovalPopup{id: id}
+	shell := plain.NewShell(plain.ShellOptions{
+		Title:     "Locklark · CLI 凭据请求审批",
+		Width:     560,
+		Height:    430,
+		MinWidth:  500,
+		MinHeight: 380,
+		Hidden:    true,
+		Theme:     a.onevraTheme,
+		Content:   a.cliApprovalPopupContent(popup),
+	})
+	win := shell.Window()
+	popup.win = win
+	win.SetAlwaysOnTop(true)
+	win.SetResizable(false)
+	win.SetMinimizable(false)
+	win.SetMaximizable(false)
+	win.OnClose(a.cliRunCloseHandler(popup))
+
+	a.brokerMu.Lock()
+	if a.cliPending == nil || a.cliPending.id != id {
+		a.brokerMu.Unlock()
+		a.retireCLIApprovalPopup(popup)
+		return
+	}
+	if a.cliPending.popup != nil && !a.cliPending.popup.retired && a.cliPending.popup != popup {
+		existing := a.cliPending.popup
+		a.brokerMu.Unlock()
+		a.retireCLIApprovalPopup(popup)
+		a.showCLIApprovalPopup(existing)
+		return
+	}
+	previous := a.approvalPopup
+	p.popup = popup
+	a.approvalPopup = popup
+	a.approvalWin = win
+	a.approvalWinPending = id
+	a.brokerMu.Unlock()
+	if previous != nil && previous != popup {
+		a.retireCLIApprovalPopup(previous)
+	}
+	a.showCLIApprovalPopup(popup)
+}
+
+// cliApprovalPopupContent binds a window's content to the immutable popup
+// created for one pending id. Every render revalidates that this popup is
+// still the exact current owner; otherwise it renders the neutral empty state
+// and never builds controls or details from a replacement pending.
+func (a *App) cliApprovalPopupContent(popup *cliApprovalPopup) func(*ui.Context) {
+	return func(c *ui.Context) {
+		a.renderCLIApprovalPopupExact(c, popup)
+	}
+}
+
+// cliApprovalPopupView renders only the exact live current popup. It is a
+// convenience entry point for the view tests; production windows use the
+// captured content closure above.
+func (a *App) cliApprovalPopupView(c *ui.Context) {
+	a.brokerMu.Lock()
+	popup := a.approvalPopup
+	a.brokerMu.Unlock()
+	a.renderCLIApprovalPopupExact(c, popup)
+}
+
+func (a *App) renderCLIApprovalPopupExact(c *ui.Context, popup *cliApprovalPopup) {
+	a.brokerMu.Lock()
+	var p *cliRunPending
+	if popup != nil && !popup.retired &&
+		a.approvalPopup == popup && a.approvalWinPending == popup.id &&
+		a.cliPending != nil && a.cliPending.id == popup.id && a.cliPending.popup == popup {
+		p = a.cliPending
+	}
+	a.brokerMu.Unlock()
+	a.renderCLIApprovalPopup(c, p)
+}
+
+func (a *App) renderCLIApprovalPopup(c *ui.Context, p *cliRunPending) {
+	c.SetTheme(a.onevraTheme(c))
+	t := c.Theme()
+	ui.Column(c.Key("cli-approval-popup")).Fill().Background(t.Background).Padding(t.Space(4)).Gap(t.Space(2.5)).Children(func() {
+		if p == nil {
+			oneui.Text(c, "暂无待处理的 CLI 凭据请求。").TextColor(t.TextMuted)
+			return
+		}
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+			iconBox := ui.Box(c).Size(t.Space(9), t.Space(9)).Shrink(0).Radius(t.Space(2.25)).
+				Background(t.Accent.Alpha(.14)).AlignItems(ui.Center).Justify(ui.Center)
+			iconBox.Children(func() {
+				oneui.Icon(c, lucide.SquareTerminal()).Size(t.Space(4.5), t.Space(4.5)).TextColor(t.Accent)
+			})
+			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+				oneui.Text(c, "批准本地 CLI 凭据请求").FontSize(t.Rem(1.18)).Bold().TextColor(t.Text)
+				oneui.Text(c, "调用进程：PID "+uintString(p.peer.PID)+" · "+p.peer.Process).FontSize(t.Rem(.78)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+			})
+			oneui.Badge(c, "单次授权", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+		})
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(2.5)).Gap(t.Space(1)).Children(func() {
+			vaultName := vaultDisplayBaseName(p.request.VaultPath)
+			if vaultName == "" {
+				vaultName = p.request.VaultPath
+			}
+			oneui.Text(c, "绑定金库："+vaultName+" · 请求用户："+p.peer.User).FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+			oneui.Text(c, "请求字段槽位 ("+intString(len(p.request.Targets))+")：").FontSize(t.Rem(.78)).Bold().TextColor(t.Text)
+			for _, target := range p.request.Targets {
+				oneui.Text(c, "• "+target.Slot+" ← "+target.Field+" · "+shortDigest(target.ID)).FontSize(t.Rem(.76)).TextColor(t.Text)
+			}
+		})
+		oneui.Text(c, "批准后，以上固定字段将一次性交给本机 CLI 进程；主密码与 Secret Key 永不交付。").
+			FontSize(t.Rem(.76)).Bold().TextColor(t.Warning).Wrap()
+		ui.Spacer(c)
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(t.Space(1.5)).Children(func() {
+			oneui.Button(c, "打开主窗口", oneui.ButtonGhost).OnClick(func() {
+				a.hideApprovalWindowFor(p.id)
+				if a.win != nil {
+					a.winHidden = false
+					a.win.Show()
+					a.win.Focus()
+					a.win.Invalidate()
+				}
+			})
+			ui.Row(c).Gap(t.Space(1.5)).Children(func() {
+				approve, refuse := a.cliRunDecisionHandlers(p)
+				oneui.Button(c, "拒绝本次请求", oneui.ButtonOutline).OnClick(refuse)
+				oneui.Button(c, "仅批准本次 CLI 请求", oneui.ButtonPrimary).OnClick(approve)
+			})
+		})
+	})
 }
 
 func (a *App) cliApprovalView(c *ui.Context) {

@@ -399,8 +399,10 @@ def _contract_facts(argv: list[str], root: Path) -> dict:
 _FORBIDDEN_SETTING_KEY = re.compile(r"(?i)secret|password|private|file")
 _DISPLAY_ONLY_SETTINGS = {"security.revealPasswords"}
 
-# Keys the desktop schema in internal/desktop/settings.go declares. The smoke
-# document must match them exactly so a schema drift shows up here.
+# Keys emitted by the locked smoke settings document. The document must match
+# them exactly so schema drift shows up here. The complete Settings declaration
+# has one additional local-only field, app.vaultPath; the smoke document must
+# never emit it or any login factor.
 _SCHEMA_KEYS = {
     "security.autolock.minutes",
     "security.clipboard.clearAfterSeconds",
@@ -414,6 +416,41 @@ _SCHEMA_KEYS = {
     "app.keepInTray",
     "app.defaultVaultForSaving",
 }
+
+# Exact complete Settings declaration: the smoke-emitted keys plus only the
+# known local app.vaultPath. This is intentionally not the smoke document.
+_SETTINGS_DECLARED_KEYS = _SCHEMA_KEYS | {"app.vaultPath"}
+
+
+def _settings_struct_body(source: str) -> str:
+    """Return only the top-level Settings declaration body.
+
+    The persisted schema is owned by this one struct. A broad scan of every
+    production JSON tag would also pick up unrelated persisted records (CLI
+    activity, versioned logs, and their slot/outcome fields) and falsely
+    compare them with settings keys. The declaration is gofmt-formatted, so its
+    closing brace is the first column-zero ``}`` after the opening line.
+    """
+
+    match = re.search(r"(?m)^type Settings struct \{\n", source)
+    if match is None:
+        raise AssertionError("the Settings declaration moved")
+    start = match.end()
+    end = source.find("\n}\n", start)
+    if end < 0:
+        raise AssertionError("the Settings declaration is unterminated")
+    return source[start:end]
+
+
+def _settings_schema_keys(source: str) -> set[str]:
+    # Capture the whole tag value, then retain the key before any options such
+    # as ",omitempty". A pattern that requires an immediate closing quote would
+    # silently ignore optional fields such as app.vaultPath and any future
+    # unknown optional settings field.
+    tags = re.findall(r'json:"([^"]+)"', _settings_struct_body(source))
+    declared = {tag.split(",", 1)[0] for tag in tags}
+    declared.discard("-")
+    return declared
 
 
 def _sha256(path: Path) -> str:
@@ -1333,11 +1370,56 @@ class ProductContractTests(unittest.TestCase):
         self.assertEqual(usage.group(1), support.DESKTOP_SETTINGS_USAGE)
         self.assertEqual(source.count('"--settings"'), 1, "the desktop grew a second option spelling")
         self.assertNotRegex(source, r'args\[0\]\s*==\s*"--file"|"--file"\s*,')
-        # The settings schema has no vault/login path, so settings cannot
-        # select or unlock one: these keys are introspected by the product
-        # tests run with the same CI artifact, not rebuilt here.
-        declared = set(re.findall(r'json:"([^",]+)"', source)) - {"-"}
-        self.assertEqual(declared, _SCHEMA_KEYS)
+        # The smoke document intentionally excludes the known local
+        # app.vaultPath and never carries a vault/login selector or factor.
+        # Introspect only the actual Settings declaration in settings.go;
+        # unrelated persisted structs (CLI activity entries, version/id/utc/
+        # slot/outcome fields) are not settings keys.
+        settings_source = (ROOT / "internal" / "desktop" / "settings.go").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(_settings_schema_keys(settings_source), _SETTINGS_DECLARED_KEYS)
+        self.assertEqual(_SETTINGS_DECLARED_KEYS - _SCHEMA_KEYS, {"app.vaultPath"})
+        self.assertNotIn("app.vaultPath", _SCHEMA_KEYS)
+
+    def test_settings_schema_introspection_ignores_unrelated_json_structs(self):
+        unrelated = """
+type Settings struct {
+    Theme string `json:"appearance.theme"`
+    Hidden string `json:"-"`
+}
+
+type CLIActivityEntry struct {
+    Version int `json:"version"`
+    ID string `json:"id"`
+    UTC string `json:"utc"`
+    Slot string `json:"slot"`
+    Outcome string `json:"outcome"`
+    Optional string `json:"optional,omitempty"`
+}
+"""
+        self.assertEqual(_settings_schema_keys(unrelated), {"appearance.theme"})
+
+        settings_source = (ROOT / "internal" / "desktop" / "settings.go").read_text(
+            encoding="utf-8"
+        )
+        for case, tag in (
+            ("unknown-plain", "settings.unknown"),
+            ("unknown-omitempty", "settings.unknown,omitempty"),
+        ):
+            with self.subTest(case=case):
+                unknown = settings_source.replace(
+                    "type Settings struct {\n",
+                    f'type Settings struct {{\n\tUnknown string `json:"{tag}"`\n',
+                    1,
+                )
+                self.assertEqual(
+                    _settings_schema_keys(unknown),
+                    _SETTINGS_DECLARED_KEYS | {"settings.unknown"},
+                )
+                self.assertNotEqual(
+                    _settings_schema_keys(unknown), _SETTINGS_DECLARED_KEYS
+                )
 
     def test_tier1_smoke_calls_keep_the_locked_startup_scope(self):
         regression = (ROOT / "tests" / "e2e" / "tier1_f01_f08.py").read_text(encoding="utf-8")

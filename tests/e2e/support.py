@@ -2838,6 +2838,7 @@ CHECKOUT_SOURCE_FILES = (
     "browser-extension/release-version.json",
     # Every direct and transitive local ES module imported by the journey.
     "scripts/browser_native_failure_report.mjs",
+    "scripts/browser_unlock_sequence.mjs",
     "scripts/browser_passkey_acceptance.mjs",
     "scripts/browser_passkey_management_acceptance.mjs",
     "scripts/browser_conditional_passkey_acceptance.mjs",

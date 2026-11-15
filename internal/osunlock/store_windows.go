@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"runtime"
 	"unsafe"
 
@@ -236,6 +237,12 @@ type sealed struct {
 }
 
 func store() mygo.SecretsModule { return mygo.Secrets.Service("app.locklark.hello.v1") }
+
+// helloSecretGet is the Credential Manager read used before deleting a Hello
+// item. Tests replace it to classify Get failures without opening the real
+// store; the default path is unchanged.
+var helloSecretGet = func(id string) ([]byte, error) { return store().Get(id) }
+
 func (hello) Store(id string, raw []byte) error {
 	if !validID(id) || len(raw) > 1400 {
 		return ErrUnavailable
@@ -346,9 +353,14 @@ func (hello) Delete(id string) error {
 	if !validID(id) {
 		return ErrUnavailable
 	}
-	raw, e := store().Get(id)
+	raw, e := helloSecretGet(id)
 	defer clear(raw)
 	if e != nil {
+		// Missing means already absent. Any other read failure is unknown and
+		// must not proceed to KSP or Credential Manager deletion.
+		if errors.Is(e, mygo.ErrSecretNotFound) {
+			return ErrNotFound
+		}
 		return ErrUnavailable
 	}
 	var blob sealed

@@ -18,6 +18,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  EMERGENCY_INPUT_LABEL,
+  nativeUnlockActions,
+} from "./browser_unlock_sequence.mjs";
+import {
   EDGE_BACKGROUND_URL,
   EDGE_CHOOSER_ACTION_KEYS,
   EDGE_CHOOSER_NAVIGATE,
@@ -1307,30 +1311,48 @@ test("pair/disconnect uses the exact physical popup and native X11 controls", ()
     1,
   );
   assert.match(PAIR_FUNCTION, /await installedPopup\.count\("#connect"\)/);
-  // Only the generated synthetic fixture vault path, password and Secret Key
-  // reach the existing native X11 helper before the exact approval. No quick
-  // pairing control is ever chosen.
-  const native = [
-    '{ click_label: "金库文件" }',
-    "{ text: fixture.Path }",
-    '{ click_label: "主密码" }',
-    "{ text: fixture.Password }",
-    '{ click_label: "Secret Key" }',
-    "{ text: fixture.Secret }",
-    '{ click_label: "解锁" }',
-    '{ click_label: "确认连接此扩展" }',
-  ];
-  let previous = -1;
-  for (const marker of native) {
-    const index = PAIR_FUNCTION.indexOf(marker);
-    assert.ok(index > previous, marker);
-    previous = index;
-  }
-  assert.doesNotMatch(PAIR_FUNCTION, /连接并启用快捷填充/);
+  // The generated synthetic fixture factors go through the shared exact
+  // sequence: explicit emergency entry, then Secret Key, then unlock. No quick
+  // pairing control, label guessing or direct factor action array is used.
+  assert.match(PAIR_FUNCTION, /input\(nativeUnlockActions\(fixture\)\)/);
+  const native = nativeUnlockActions({
+    Path: "fixture-path",
+    Password: "fixture-password",
+    Secret: "fixture-secret",
+  });
   assert.deepEqual(
-    [...PAIR_FUNCTION.matchAll(/fixture\.([A-Za-z]+)/g)].map((match) => match[1]),
-    ["Path", "Password", "Secret"],
+    native.map((action) => action.click_label ?? action.key ?? action.text),
+    [
+      "金库文件",
+      "Control_L+a",
+      "fixture-path",
+      "主密码",
+      "fixture-password",
+      EMERGENCY_INPUT_LABEL,
+      "Secret Key",
+      "fixture-secret",
+      "解锁",
+    ],
   );
+  // The path replacement must select the non-empty product-default text first,
+  // not insert the fixture path into the existing value.
+  assert.deepEqual(native.slice(0, 3), [
+    { click_label: "金库文件" },
+    { key: "Control_L+a" },
+    { text: "fixture-path" },
+  ]);
+  assert.doesNotMatch(PAIR_FUNCTION, /click_label:\s*"Secret Key"/);
+  // A retry whose error fallback is already expanded must not click the absent
+  // opt-in control.
+  const expanded = nativeUnlockActions(
+    { Path: "fixture-path", Password: "fixture-password", Secret: "fixture-secret" },
+    { fallbackExpanded: true },
+  );
+  assert.equal(
+    expanded.some((action) => action.click_label === EMERGENCY_INPUT_LABEL),
+    false,
+  );
+  assert.doesNotMatch(PAIR_FUNCTION, /连接并启用快捷填充/);
   // No page fill, clipboard, credential-value inspection or added journey.
   assert.doesNotMatch(
     PAIR_FUNCTION,
