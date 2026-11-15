@@ -29,18 +29,28 @@ def step_text(name: str) -> str:
 
 
 class PersonalTestPartitionWorkflowContract(unittest.TestCase):
-    def test_windows_uses_the_runner_and_linux_keeps_the_ordinary_command(self):
+    def test_windows_uses_the_runner_and_linux_keeps_all_cases_once(self):
         source = WORKFLOW.read_text(encoding="utf-8")
         step = step_text("Test Go packages and native OpenSSH transport")
         final = step.rsplit("if ($IsWindows) {", 1)
         self.assertEqual(len(final), 2, "Windows/Linux final branch is missing")
         windows, linux = final[1].split("} else {", 1)
-        self.assertIn("python scripts/personal_test_partition.py", windows)
-        self.assertNotIn("go test -count=1 ./...", windows)
-        self.assertIn("go test -count=1 ./...", linux)
+        self.assertEqual([line.strip() for line in windows.splitlines() if line.strip()], [
+            "python scripts/personal_test_partition.py",
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+        ])
+        minimum = "go test -count=1 -run '^TestVaultFileResumeProductMinimum$' ./cmd/locklark"
+        remaining = "go test -count=1 -skip '^TestVaultFileResumeProductMinimum$' ./..."
+        # All packages/cases remain covered: exactly the minimum runs first,
+        # and only that same case is excluded from the following full suite.
+        self.assertEqual(
+            [line.strip() for line in linux.splitlines() if line.strip().startswith("go test ")],
+            [minimum, remaining],
+        )
         self.assertNotIn("-bench", windows)
         self.assertEqual(source.count("python scripts/personal_test_partition.py"), 1)
-        self.assertEqual(source.count("go test -count=1 ./..."), 1)
+        self.assertEqual(source.count(minimum), 1)
+        self.assertEqual(source.count(remaining), 1)
         self.assertNotIn("go test -count=1 ./internal/personal", source)
         self.assertNotIn("go test ./internal/personal -count=1", source)
         for preserved in (
