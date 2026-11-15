@@ -24,7 +24,7 @@ COMMAND GROUPS
   personal      Manage an owner-only local vault in an interactive hidden terminal
   cli           Bind and run pinned developer CLIs with ephemeral credentials
   team          Bootstrap and inspect owner team profiles and trust pins
-  vault-file    Resume an already prepared local-directory vault-file operation
+  vault-file    Import and resume prepared local-directory vault-file operations
   plugin        Manage signed local plugin catalogs (third-party execution disabled)
 
 PERSONAL VAULT (locklark personal <action> --file PATH ...)

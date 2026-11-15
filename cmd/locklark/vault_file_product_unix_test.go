@@ -148,6 +148,27 @@ type resumeProductCase struct {
 
 func newResumeProductCase(t *testing.T, material resumeProductMaterial, prepare bool) resumeProductCase {
 	t.Helper()
+	c := newBaselineProductCase(t, material)
+	journal, err := vaultfilejournal.OpenExisting(c.cfg.Journal)
+	if err != nil {
+		t.Fatal("FIXTURE_EDIT_JOURNAL_OPEN_FAILED")
+	}
+	if journal.UpdateWorking(0, material.p) != nil {
+		journal.Close()
+		t.Fatal("FIXTURE_WORKING_EDIT_FAILED")
+	}
+	if prepare && journal.Prepare(1, vaultfilejournal.Proposal{Generation: 1, OperationID: "prepared-operation", ExpectedRevision: c.initial.Revision, Bytes: material.p}) != nil {
+		journal.Close()
+		t.Fatal("FIXTURE_PREPARE_FAILED")
+	}
+	if journal.Close() != nil {
+		t.Fatal("FIXTURE_JOURNAL_CLOSE_FAILED")
+	}
+	return c
+}
+
+func newBaselineProductCase(t *testing.T, material resumeProductMaterial) resumeProductCase {
+	t.Helper()
 	root := t.TempDir()
 	cfg := vaultFileResumeConfig{Version: 1, BackendRoot: filepath.Join(root, "backend"), Name: "owned.locklark",
 		Journal: filepath.Join(root, "journal.db"), Checkpoint: &material.config}
@@ -175,14 +196,6 @@ func newResumeProductCase(t *testing.T, material resumeProductMaterial, prepare 
 	if journal.InitializeEmptyState(state) != nil {
 		journal.Close()
 		t.Fatal("FIXTURE_JOURNAL_STATE_FAILED")
-	}
-	if journal.UpdateWorking(0, material.p) != nil {
-		journal.Close()
-		t.Fatal("FIXTURE_WORKING_EDIT_FAILED")
-	}
-	if prepare && journal.Prepare(1, vaultfilejournal.Proposal{Generation: 1, OperationID: "prepared-operation", ExpectedRevision: read.Revision, Bytes: material.p}) != nil {
-		journal.Close()
-		t.Fatal("FIXTURE_PREPARE_FAILED")
 	}
 	if journal.Close() != nil {
 		t.Fatal("FIXTURE_JOURNAL_CLOSE_FAILED")

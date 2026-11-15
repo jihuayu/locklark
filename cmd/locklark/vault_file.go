@@ -25,10 +25,16 @@ import (
 )
 
 const vaultFileUsage = `USAGE
+  locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
-Resume one already prepared operation using an existing local-directory backend
-and an existing private journal. Supported on Darwin and Linux only.
+Import one already signed sealed content successor into an existing clean
+baseline journal, or resume its prepared operation. Darwin and Linux only.
+Import reads a private input file of at most 32 MiB; it never reads or writes the
+backend. Config, input and journal must be distinct and outside its namespace.
+No paths or baseline are created. Import saves working and prepares in separate
+transactions: LOCAL_REVIEW or LOCAL_UNKNOWN may leave saved working/prepared
+state. Retry the same exact input; different local edits are preserved.
 
 The independently supplied private JSON configuration requires version=1,
 backend_root, name, journal and checkpoint. The complete checkpoint requires
@@ -50,6 +56,9 @@ var (
 	errVaultFileCancelled    = errors.New("CANCELLED")
 	errVaultFileUnsupported  = errors.New("UNSUPPORTED")
 	errVaultFileUnconfirmed  = errors.New("RESUME_UNCONFIRMED")
+	errVaultFileInput        = errors.New("INPUT_REJECTED")
+	errVaultFileLocalReview  = errors.New("LOCAL_REVIEW")
+	errVaultFileLocalUnknown = errors.New("LOCAL_UNKNOWN")
 )
 
 type vaultFileCheckpointConfig struct {
@@ -106,7 +115,7 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 
 func runVaultFile(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
-		len(args) == 2 && args[0] == "resume-prepared" && (args[1] == "--help" || args[1] == "-h") {
+		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
 			return errVaultFileUnconfirmed
 		}
@@ -115,14 +124,22 @@ func runVaultFile(args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return errVaultFileUnsupported
 	}
-	if len(args) == 0 || args[0] != "resume-prepared" {
+	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" {
 		return errVaultFileConfig
 	}
-	flags := flag.NewFlagSet("vault-file resume-prepared", flag.ContinueOnError)
+	importing := args[0] == "import-prepared"
+	flags := flag.NewFlagSet("vault-file "+args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "independent operator configuration")
+	var inputPath string
+	if importing {
+		flags.StringVar(&inputPath, "input", "", "existing signed sealed content successor")
+	}
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !teamfiles.ValidPath(*configPath) {
 		return errVaultFileConfig
+	}
+	if importing && !teamfiles.ValidPath(inputPath) {
+		return errVaultFileInput
 	}
 	// Read only this explicit operator-owned-or-root-owned private regular
 	// file. No global settings, migration path or environment fallback is used.
@@ -132,14 +149,38 @@ func runVaultFile(args []string, out io.Writer) error {
 	}
 	defer clear(raw)
 	cfg, pin, err := decodeVaultFileResumeConfig(raw)
-	if err != nil || !teamfiles.Distinct(*configPath, cfg.Journal) {
+	if err != nil {
 		return errVaultFileConfig
 	}
-	if err := separateVaultFileResumeState(cfg.BackendRoot, *configPath, cfg.Journal); err != nil {
+	paths := []string{*configPath, cfg.Journal}
+	if importing {
+		paths = append(paths, inputPath)
+	}
+	if !teamfiles.Distinct(paths...) {
+		return errVaultFileConfig
+	}
+	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
 		return err
+	}
+	var input []byte
+	if importing {
+		input, err = teamfiles.Read(inputPath, vaultfilebackend.MaxValueSize, true)
+		if err != nil {
+			return errVaultFileInput
+		}
+		defer clear(input)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if importing {
+		if err := importPreparedVaultFile(ctx, cfg, pin, input); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(out, `{"status":"PREPARED"}`); err != nil {
+			return errVaultFileLocalUnknown
+		}
+		return nil
+	}
 	if err := resumeVaultFile(ctx, cfg, pin); err != nil {
 		return err
 	}
