@@ -26,8 +26,15 @@ import (
 
 const vaultFileUsage = `USAGE
   locklark vault-file track-existing --config ABS_CONFIG
+  locklark vault-file status --config ABS_CONFIG
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
+
+Status reads only the existing configured local journal and prints exactly one
+of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW
+means a legacy or inconsistent pending local record; it is never repaired.
+Missing, corrupt or unsafe local records are refused. Status never opens the
+backend, verifies a remote or grant, decrypts, re-signs, merges or edits.
 
 Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
@@ -123,7 +130,7 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 
 func runVaultFile(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
-		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing") && (args[1] == "--help" || args[1] == "-h") {
+		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing" || args[0] == "status") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
 			return errVaultFileUnconfirmed
 		}
@@ -132,7 +139,7 @@ func runVaultFile(args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return errVaultFileUnsupported
 	}
-	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" {
+	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" && args[0] != "status" {
 		return errVaultFileConfig
 	}
 	importing := args[0] == "import-prepared"
@@ -169,6 +176,9 @@ func runVaultFile(args []string, out io.Writer) error {
 	}
 	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
 		return err
+	}
+	if args[0] == "status" {
+		return statusVaultFile(out, cfg)
 	}
 	var input []byte
 	if importing {
