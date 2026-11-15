@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -134,6 +135,9 @@ func runVaultFile(args []string, out io.Writer) error {
 	if err != nil || !teamfiles.Distinct(*configPath, cfg.Journal) {
 		return errVaultFileConfig
 	}
+	if err := separateVaultFileResumeState(cfg.BackendRoot, *configPath, cfg.Journal); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := resumeVaultFile(ctx, cfg, pin); err != nil {
@@ -141,6 +145,47 @@ func runVaultFile(args []string, out io.Writer) error {
 	}
 	if _, err := fmt.Fprintln(out, `{"status":"RESUMED"}`); err != nil {
 		return errVaultFileUnconfirmed
+	}
+	return nil
+}
+
+// The backend owns its whole documented vaultfile-backend subtree, including
+// temporary-file recovery and future version directories. Operator config and
+// journal files must stay outside it before either persistent store is opened.
+// Resolve existing ancestors, then compare directory identity: lexical prefixes
+// miss symlink aliases and case aliases on case-insensitive filesystems.
+// This is a read-only scope check; the existing APIs still enforce their own
+// owner, mode, link and path-identity checks and same-operator threat model.
+func separateVaultFileResumeState(backendRoot string, paths ...string) error {
+	root, err := filepath.EvalSymlinks(backendRoot)
+	if err != nil {
+		return errVaultFileBackend
+	}
+	namespace, err := os.Lstat(filepath.Join(root, "vaultfile-backend"))
+	if err != nil || !namespace.IsDir() {
+		return errVaultFileBackend
+	}
+	for _, path := range paths {
+		// Include the namespace directory itself. A missing leaf is left for
+		// OpenExisting to reject; resolving its parent never creates it.
+		if info, err := os.Stat(path); err == nil && os.SameFile(namespace, info) {
+			return errVaultFileConfig
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return errVaultFileConfig
+		}
+		for {
+			info, err := os.Stat(parent)
+			if err != nil || !info.IsDir() || os.SameFile(namespace, info) {
+				return errVaultFileConfig
+			}
+			next := filepath.Dir(parent)
+			if next == parent {
+				break
+			}
+			parent = next
+		}
 	}
 	return nil
 }
