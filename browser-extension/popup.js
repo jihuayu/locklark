@@ -965,11 +965,22 @@
                 generation !== actionGeneration ? "reply-action-changed" :
                   "reply-superseded",
         );
+        // A later state snapshot cannot consume this action's result. Never
+        // render that older snapshot or move its watermark backwards; only
+        // the bounded picker metadata crosses to the checkout caller, which
+        // must revalidate the original document before displaying it.
+        if (
+          state && !popupInactive && epoch === connectionEpoch &&
+          generation === actionGeneration && sequence <= renderedSequence &&
+          message?.type === "checkout-frames"
+        ) return checkoutFramesResult(state, message, true);
         return null;
       }
       renderedSequence = sequence;
       render(state, message?.type);
-      return state;
+      return message?.type === "checkout-frames"
+        ? checkoutFramesResult(state, message, false)
+        : state;
     } catch {
       markDetailFillDiagnostic(
         checkoutDiagnostic,
@@ -2334,6 +2345,26 @@
       used: false,
     };
   }
+  function checkoutFramesResult(state, message, verifyCurrent) {
+    return {
+      checkoutPicker: adoptCheckoutPickerView(state.checkoutPicker, {
+        id: message.id, revision: message.revision,
+      }),
+      verifyCurrent,
+    };
+  }
+  function checkoutContextCurrent(captured, view = null) {
+    return (
+      !popupInactive && captured.epoch === connectionEpoch &&
+      captured.generation === actionGeneration &&
+      lastState?.connected === true && checkoutChoicesSupported(lastDetail) &&
+      document.body?.dataset?.view === "detail" &&
+      lastDetail === captured.detail && lastDetail.id === captured.id &&
+      lastDetail.revision === captured.revision && !!captured.origin &&
+      httpsOrigin(lastState?.site?.origin) === captured.origin &&
+      (!view || (view.topOrigin === captured.origin && view.expiresAt > Date.now()))
+    );
+  }
   function renderCheckoutPicker() {
     if (!els || !els.checkoutPicker) return;
     const picker = checkoutPicker;
@@ -2420,9 +2451,18 @@
       toast("当前原生宿主或浏览器不支持选择结账表单");
       return;
     }
+    const generation = ++actionGeneration;
+    const captured = {
+      detail, id: detail.id, revision: detail.revision,
+      origin: httpsOrigin(lastState?.site?.origin),
+      generation, epoch: connectionEpoch,
+    };
+    if (!checkoutContextCurrent(captured)) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
     // Any earlier unused list is dropped before a new one is requested.
     clearCheckoutPickerView({ keepChoice: true });
-    const generation = ++actionGeneration;
     busy = true;
     markDetailFillDiagnostic(diagnostic, "request-sent");
     const state = await send(
@@ -2439,19 +2479,41 @@
       markDetailFillDiagnostic(diagnostic, "early-guard");
       return;
     }
-    busy = false;
-    if (lastDetail) renderDetail(lastDetail);
     markDetailFillDiagnostic(
       diagnostic,
       state ? "reply-present" : "reply-null",
     );
-    const view =
-      state && detail === lastDetail
-        ? adoptCheckoutPickerView(state.checkoutPicker, detail)
-        : null;
+    let view = state?.checkoutPicker || null;
+    if (!checkoutContextCurrent(captured, view)) view = null;
+    if (view && state.verifyCurrent) {
+      try {
+        // This query observes the existing nonce/document only. It cannot
+        // select a form, renew the TTL or start native approval.
+        const reply = await api.runtime.sendMessage({
+          type: "checkout-picker-current", nonce: view.nonce,
+          id: captured.id, revision: captured.revision,
+        });
+        if (
+          !reply || typeof reply !== "object" || Array.isArray(reply) ||
+          Object.keys(reply).sort().join(",") !== "type,valid" ||
+          reply.type !== "checkout-picker-current" || reply.valid !== true ||
+          !checkoutContextCurrent(captured, view)
+        ) view = null;
+      } catch {
+        view = null;
+      }
+    }
+    if (generation !== actionGeneration || popupInactive) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
+    busy = false;
+    if (lastDetail) renderDetail(lastDetail);
+    // Includes the original absolute expiry after the validation await.
+    if (!checkoutContextCurrent(captured, view)) view = null;
     if (!view) {
       markDetailFillDiagnostic(diagnostic, "adopt-refused");
-      toast(state?.status || "无法列出当前页面的结账表单");
+      toast("无法列出当前页面的结账表单");
       return;
     }
     checkoutPicker = view;

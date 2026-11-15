@@ -119,6 +119,7 @@ function connectedState(overrides = {}) {
     connected: true,
     status: "ready",
     origin: TOP_ORIGIN,
+    site: { origin: TOP_ORIGIN },
     pending: false,
     saveBlocked: false,
     // The page's candidates are LOGIN/URL matches. A card that only the native
@@ -154,6 +155,10 @@ function harness() {
   const documentListeners = new Map();
   let poll = null;
   const pagehide = [];
+  let now = Date.now();
+  class PopupDate extends Date {
+    static now() { return now; }
+  }
   const document = {
     body: { dataset: { vault: "1", view: "vault" } },
     visibilityState: "visible",
@@ -197,6 +202,7 @@ function harness() {
     URL,
     Uint8Array,
     TextEncoder,
+    Date: PopupDate,
     // Product timers must not keep the test process alive.
     setTimeout: (fn, ms) => {
       const handle = setTimeout(fn, ms);
@@ -222,6 +228,7 @@ function harness() {
     context,
     requests,
     clipboardWrites,
+    setNow: (value) => { now = value; },
     el: (selector) => document.querySelector(selector),
     poll: () => poll?.(),
     pagehide: () => pagehide.forEach((callback) => callback()),
@@ -687,7 +694,7 @@ test("detail-fill diagnostics record reply and adopt phases", async () => {
 
 async function observedCheckout() {
   const h = harness();
-  await openCard(h);
+  const detail = await openCard(h);
   h.context.navigator.userActivation = { isActive: true };
   h.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   h.click("#detail-fill");
@@ -695,10 +702,34 @@ async function observedCheckout() {
   assertDiagnosticShape(records, ["handler-entry", "request-sent"]);
   assert.equal(records[0].isTrusted, true);
   assert.equal(records[0].userActivation, true);
-  return { h, records, request: h.take("checkout-frames") };
+  return { h, detail, records, request: h.take("checkout-frames") };
 }
 
-test("detail-fill send diagnostics identify a later state poll superseding checkout", async () => {
+test("a current checkout result survives a later poll without rolling back its snapshot", async () => {
+  const { h, request } = await observedCheckout();
+  h.poll();
+  const earlierPoll = h.take("state");
+  h.poll();
+  h.take("state").resolve(connectedState({ status: "latest snapshot" }));
+  await flush();
+  const view = pickerView();
+  request.resolve(connectedState({ status: "older snapshot", checkoutPicker: view }));
+  await flush();
+  const verify = h.take("checkout-picker-current");
+  assert.deepEqual(Object.keys(verify.message).sort(), ["id", "nonce", "revision", "type"]);
+  assert.equal(verify.message.nonce, view.nonce);
+  verify.resolve({ type: "checkout-picker-current", valid: true });
+  await flush();
+  assert.equal(h.el("#checkout-picker").hidden, false);
+  assert.equal(h.el("#checkout-choices").children.length, 2);
+  assert.equal(h.el("#status").textContent, "latest snapshot");
+  earlierPoll.resolve(connectedState({ status: "earlier poll snapshot" }));
+  await flush();
+  assert.equal(h.el("#status").textContent, "latest snapshot");
+  assert.equal(h.sent("checkout-picker-current").length, 1);
+});
+
+test("superseded checkout projects only picker metadata and refuses an absent picker", async () => {
   const { h, records, request } = await observedCheckout();
   h.poll();
   h.take("state").resolve(connectedState());
@@ -708,16 +739,19 @@ test("detail-fill send diagnostics identify a later state poll superseding check
     get(_target, key) {
       // Promise resolution checks then before the popup receives the value.
       if (key === "then") return undefined;
-      responseReads++;
-      throw Error("Discarded response must remain unread");
+      if (key === "checkoutPicker") {
+        responseReads++;
+        return null;
+      }
+      throw Error("Non-picker response fields must remain unread");
     },
   }));
   await flush();
   assertDiagnosticShape(records, [
     "handler-entry", "request-sent", "reply-superseded",
-    "reply-null", "adopt-refused",
+    "reply-present", "adopt-refused",
   ]);
-  assert.equal(responseReads, 0);
+  assert.equal(responseReads, 1);
   assert.equal(h.el("#checkout-picker").hidden, true);
   assert.equal(h.el("#checkout-choices").children.length, 0);
   assert.equal(h.sent("checkout-frames").length, 1);
@@ -729,6 +763,167 @@ test("detail-fill send diagnostics identify a later state poll superseding check
   h.take("state").reject({});
   await flush();
   assert.equal(JSON.stringify(records), before);
+});
+
+async function awaitingPickerVerification() {
+  const pending = await observedCheckout();
+  const view = pickerView();
+  pending.h.poll();
+  pending.h.take("state").resolve(connectedState({ status: "latest snapshot" }));
+  await flush();
+  pending.request.resolve({ checkoutPicker: view });
+  await flush();
+  return { ...pending, view, verify: pending.h.take("checkout-picker-current") };
+}
+
+async function pollState(h, overrides) {
+  h.poll();
+  h.take("state").resolve(connectedState(overrides));
+  await flush();
+}
+
+async function replaceDetail(h, detail) {
+  h.click("#detail-back");
+  h.el("#vault-list").children[0].listeners.get("click")();
+  h.take("item-get").resolve({ detail, connected: true });
+  await flush();
+}
+
+const contextChanges = [
+  ["cross-origin poll", async ({ h }) => pollState(h, { site: { origin: "https://other.test" } })],
+  ["missing site origin", async ({ h }) => pollState(h, { site: { origin: "" } })],
+  ["noncanonical site origin", async ({ h }) => pollState(h, { site: { origin: TOP_ORIGIN + "/" } })],
+  ["unsupported picker", async ({ h }) => pollState(h, { checkoutFramesSupported: false })],
+  ["detail object replacement", async ({ h }) => replaceDetail(h, cardDetail())],
+  ["detail id mutation", async ({ detail }) => { detail.id = "d".repeat(32); }],
+  ["detail revision mutation", async ({ detail }) => { detail.revision = "e".repeat(64); }],
+  ["detail view left", async ({ h }) => { h.context.document.body.dataset.view = "vault"; }],
+  ["pagehide", async ({ h }) => { h.pagehide(); }],
+  ["newer action", async ({ h }) => { h.click("#disconnect"); }],
+  ["lock poll wipes detail", async ({ h }) => {
+    await pollState(h, { connected: false });
+    assert.equal(h.context.document.body.dataset.view, "vault");
+    assert.equal(h.el("#detail-title").textContent, "");
+    assert.equal(h.el("#detail-fields").children.length, 0);
+  }],
+  ["connection epoch changed and detail restored", async ({ h, detail }) => {
+    await pollState(h, { connected: false });
+    assert.equal(h.el("#detail-title").textContent, "");
+    await pollState(h, {});
+    h.el("#vault-list").children[0].listeners.get("click")();
+    h.take("item-get").resolve({ detail, connected: true });
+    await flush();
+    assert.equal(h.context.document.body.dataset.view, "detail");
+  }],
+];
+
+test("checkout context changes refuse both normal replies and replies during verification", async (t) => {
+  for (const boundary of ["normal reply", "verification reply"]) {
+    for (const [name, change] of contextChanges) {
+      await t.test(boundary + ": " + name, async () => {
+        const pending = boundary === "normal reply"
+          ? await observedCheckout() : await awaitingPickerVerification();
+        await change(pending);
+        if (boundary === "normal reply")
+          pending.request.resolve(connectedState({ checkoutPicker: pickerView() }));
+        else pending.verify.resolve({ type: "checkout-picker-current", valid: true });
+        await flush();
+        assert.equal(pending.h.el("#checkout-picker").hidden, true);
+        assert.equal(pending.h.el("#checkout-choices").children.length, 0);
+        assert.equal(pending.h.sent("checkout-select").length, 0);
+        if (boundary === "normal reply")
+          assert.equal(pending.h.sent("checkout-picker-current").length, 0);
+      });
+    }
+  }
+});
+
+test("checkout verification refuses expired lists, refusals, malformed replies and transport failure", async (t) => {
+  const replies = [false, null, {}, { type: "checkout-picker-current", valid: false },
+    { type: "wrong", valid: true },
+    { type: "checkout-picker-current", valid: 1 },
+    { type: "checkout-picker-current", valid: true, extra: "private" }];
+  for (const [index, reply] of replies.entries()) {
+    await t.test("reply shape " + index, async () => {
+      const { h, verify } = await awaitingPickerVerification();
+      verify.resolve(reply);
+      await flush();
+      assert.equal(h.el("#checkout-picker").hidden, true);
+    });
+  }
+  const expired = await awaitingPickerVerification();
+  expired.h.setNow(expired.view.expiresAt);
+  expired.verify.resolve({ type: "checkout-picker-current", valid: true });
+  await flush();
+  assert.equal(expired.h.el("#checkout-picker").hidden, true);
+
+  const rejected = await awaitingPickerVerification();
+  rejected.verify.reject({});
+  await flush();
+  assert.equal(rejected.h.el("#checkout-picker").hidden, true);
+});
+
+test("checkout validates picker shape, original expiry and captured origin before querying", async (t) => {
+  const views = [pickerView({ expiresAt: 1 }), pickerView({ topOrigin: "https://other.test" }),
+    pickerView({ candidates: [] }), pickerView({ nonce: "invalid" })];
+  for (const [index, view] of views.entries()) {
+    await t.test("picker shape " + index, async () => {
+      const { h, request } = await observedCheckout();
+      await pollState(h, {});
+      request.resolve({ checkoutPicker: view });
+      await flush();
+      assert.equal(h.sent("checkout-picker-current").length, 0);
+      assert.equal(h.el("#checkout-picker").hidden, true);
+    });
+  }
+  const h = harness();
+  await openCard(h, { site: undefined, origin: TOP_ORIGIN });
+  h.click("#detail-fill");
+  assert.equal(h.sent("checkout-frames").length, 0);
+});
+
+test("checkout action projection never reads older snapshot or extra picker fields", async () => {
+  const { h, request } = await observedCheckout();
+  await pollState(h, { status: "latest snapshot" });
+  const view = pickerView();
+  for (const entry of view.candidates) {
+    Object.defineProperty(entry, "frameId", { get() { throw Error("unused frame metadata"); } });
+    Object.defineProperty(entry, "payload", { get() { throw Error("unused payload"); } });
+  }
+  request.resolve(new Proxy({ checkoutPicker: view }, {
+    get(target, key) {
+      if (key === "then") return undefined;
+      if (key === "checkoutPicker") return target.checkoutPicker;
+      throw Error("older state must not cross the action channel");
+    },
+  }));
+  await flush();
+  h.take("checkout-picker-current").resolve({ type: "checkout-picker-current", valid: true });
+  await flush();
+  assert.equal(h.el("#checkout-picker").hidden, false);
+  assert.equal(h.el("#status").textContent, "latest snapshot");
+});
+
+test("normal checkout replies need no verification and ordinary stale RPCs remain refused", async () => {
+  const h = harness();
+  await openCard(h);
+  await openPicker(h);
+  assert.equal(h.sent("checkout-picker-current").length, 0);
+  const choice = h.el("#checkout-choices").children[1];
+  h.click(choice);
+  const select = h.take("checkout-select");
+  await pollState(h, { status: "latest select snapshot" });
+  select.resolve(connectedState({ status: "older select snapshot", checkoutStarted: true }));
+  await flush();
+  assert.equal(h.el("#status").textContent, "latest select snapshot");
+  assert.equal(h.sent("checkout-picker-current").length, 0);
+  h.click("#refresh");
+  const refresh = h.take("match");
+  await pollState(h, { status: "latest ordinary snapshot" });
+  refresh.resolve(connectedState({ status: "older ordinary snapshot" }));
+  await flush();
+  assert.equal(h.el("#status").textContent, "latest ordinary snapshot");
+  assert.equal(h.sent("checkout-picker-current").length, 0);
 });
 
 test("detail-fill send diagnostics identify inactive popup and changed connection", async () => {

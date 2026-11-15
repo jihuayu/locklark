@@ -1473,6 +1473,31 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     return checkoutPickerView(picker);
   }
+  // Shared identity/TTL predicate only: the read-only query must not consume
+  // a choice or clear a picker, including when it refuses one.
+  function checkoutPickerMatches(picker, message) {
+    return !!picker && picker.nonce === message.nonce &&
+      picker.itemId === message.id && picker.revision === message.revision &&
+      picker.epoch === epoch && picker.capability === capability &&
+      Date.now() <= picker.expiresAt;
+  }
+  async function checkoutPickerCurrent(message) {
+    if (
+      !message || typeof message !== "object" || Array.isArray(message) ||
+      Object.keys(message).sort().join(",") !== "id,nonce,revision,type" ||
+      !/^[a-f0-9]{32}$/.test(message.nonce || "") ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    ) return false;
+    const picker = checkoutPicker;
+    const current = () =>
+      picker === checkoutPicker && checkoutPickerMatches(picker, message) &&
+      checkoutFramePolicy() && Date.now() < picker.expiresAt &&
+      !pending && !pendingOTP && !pendingPasskey;
+    if (!current()) return false;
+    const capture = await checkoutCaptureFrames();
+    return current() && checkoutFrameSignature(capture) === picker.signature;
+  }
   function consumeCheckoutChoice(message) {
     if (Object.keys(message).sort().join(",") !== "choice,id,nonce,revision,type")
       return null;
@@ -1484,17 +1509,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       return null;
     const picker = checkoutPicker;
-    if (
-      !picker ||
-      picker.nonce !== message.nonce ||
-      picker.itemId !== message.id ||
-      picker.revision !== message.revision ||
-      picker.epoch !== epoch ||
-      picker.capability !== capability ||
-      // The picker's own TTL alone governs selection; a consumed gesture does
-      // not retire the list the user is looking at.
-      Date.now() > picker.expiresAt
-    ) {
+    // The picker's own TTL alone governs selection; a consumed gesture does
+    // not retire the list the user is looking at.
+    if (!checkoutPickerMatches(picker, message)) {
       clearCheckoutPicker();
       return null;
     }
@@ -6991,8 +7008,20 @@ if (typeof importScripts === "function") importScripts("core.js");
     return true;
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!core.validSender(sender, api.runtime) || message?.type !== "checkout-picker-current")
+      return false;
+    checkoutPickerCurrent(message).then(
+      (valid) => sendResponse({ type: "checkout-picker-current", valid }),
+      () => sendResponse({ type: "checkout-picker-current", valid: false }),
+    );
+    return true;
+  });
+  api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
-    if (message && typeof message === "object" && ATTACHMENT_REQUESTS.has(message.type))
+    // The read-only query has one dedicated responder and no state/status
+    // path through this listener, even for malformed requests.
+    if (message && typeof message === "object" &&
+        (ATTACHMENT_REQUESTS.has(message.type) || message.type === "checkout-picker-current"))
       return false;
     const requestEpoch = epoch;
     const run = async () => {
