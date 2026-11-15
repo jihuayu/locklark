@@ -16,7 +16,7 @@ func newStateFixture() State {
 }
 
 func TestCreateNewStateMinimum(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "journal.db")
+	path := filepath.Join(privateDir(t), "journal.db")
 	s := newStateFixture()
 	if CreateNewState(path, s) != nil {
 		t.Fatal("CREATE_NEW_STATE_FAILED")
@@ -44,7 +44,7 @@ func TestCreateNewStateMinimum(t *testing.T) {
 func TestCreateNewStateRefusals(t *testing.T) {
 	for _, name := range []string{"EXISTING_EMPTY", "EXISTING_CORRUPT", "EXISTING_EDIT", "INVALID_STATE", "MISSING_PARENT", "SHARED_PARENT"} {
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			root := privateDir(t)
 			path := filepath.Join(root, "journal.db")
 			state := newStateFixture()
 			want := ErrTargetExists
@@ -127,7 +127,7 @@ func TestCreateNewStateParentBinding(t *testing.T) {
 func TestCreateNewStateUnknownPreservesTarget(t *testing.T) {
 	for _, stage := range []newStateStage{newStateFileCreated, newStateDatabaseLocked, newStateCommitted, newStateBeforeParentSync, newStateDatabaseClosed} {
 		t.Run([]string{"FILE_CREATED", "DATABASE_LOCKED", "COMMITTED", "BEFORE_PARENT_SYNC", "DATABASE_CLOSED"}[int(stage)-1], func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "journal.db")
+			path := filepath.Join(privateDir(t), "journal.db")
 			fault := errors.New("owned negative stage failure")
 			err := createNewStateWith(path, newStateFixture(), func(at newStateStage) error {
 				if at == stage {
