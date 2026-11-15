@@ -145,8 +145,15 @@ def ci_required_shell() -> str:
 
 class VaultFileProductCIContract(unittest.TestCase):
     STEP = "Test Go packages and native OpenSSH transport"
-    MINIMUM = "go test -count=1 -run '^TestVaultFileResumeProductMinimum$' ./cmd/locklark"
-    REMAINING = "go test -count=1 -skip '^TestVaultFileResumeProductMinimum$' ./..."
+    EARLY_PARENTS = (
+        "TestVaultFileResumeProductMinimum",
+        "TestVaultFileStatusProductMinimum",
+        "TestVaultFileStatusProductAbsentBackendMinimum",
+        "TestVaultFileDevicePublicProductMinimum",
+    )
+    SELECTOR = "^(" + "|".join(EARLY_PARENTS) + ")$"
+    MINIMUM = f"go test -count=1 -run '{SELECTOR}' ./cmd/locklark"
+    REMAINING = f"go test -count=1 -skip '{SELECTOR}' ./..."
     EXIT_CHECK = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
 
     @classmethod
@@ -182,13 +189,46 @@ class VaultFileProductCIContract(unittest.TestCase):
         self.assertIn("name: locklark-linux-bin", download)
         self.assertIn("path: ${{ runner.temp }}/locklark-bin", download)
 
+    def test_exact_go_parent_partition_runs_every_parent_once(self):
+        commands = self.linux_commands()
+        minimum = re.fullmatch(r"go test -count=1 -run '([^']+)' ./cmd/locklark", commands[3])
+        remaining = re.fullmatch(r"go test -count=1 -skip '([^']+)' ./\.\.\.", commands[5])
+        self.assertIsNotNone(minimum)
+        self.assertIsNotNone(remaining)
+        run_pattern, skip_pattern = minimum[1], remaining[1]
+        for pattern in (run_pattern, skip_pattern):
+            self.assertTrue(pattern.startswith("^") and pattern.endswith("$"))
+        parents = {
+            name
+            for path in (ROOT / "cmd" / "locklark").glob("*_test.go")
+            for name in re.findall(
+                r"^func (Test[A-Za-z0-9_]+)\(t \*testing\.T\)",
+                path.read_text(encoding="utf-8"), re.MULTILINE,
+            )
+        }
+        self.assertTrue(set(self.EARLY_PARENTS) <= parents)
+        early = {name for name in parents if re.search(run_pattern, name)}
+        excluded = {name for name in parents if re.search(skip_pattern, name)}
+        self.assertEqual(early, set(self.EARLY_PARENTS))
+        self.assertEqual(excluded, set(self.EARLY_PARENTS))
+        self.assertTrue({
+            "TestVaultFileImportProductMinimum",
+            "TestVaultFileTrackProductMinimum",
+            "TestVaultFileStatusProductAmbiguousBackendRefusal",
+            "TestVaultFileStatusProductUnsafeBackendRefusal",
+            "TestVaultFileDevicePublicProductFactorRefusal",
+        } <= parents - excluded)
+        for name in parents:
+            with self.subTest(parent=name):
+                self.assertEqual(int(name in early) + int(name not in excluded), 1)
+
     @unittest.skipUnless(shutil.which("pwsh"), "pwsh dispatch mock is unavailable")
     def test_actual_linux_commands_with_strict_mock_only_dispatch_and_propagate_exit(self):
         # This fixture cannot execute a product or build anything. It checks
         # only the extracted PowerShell's scheduling, argv, env and exit codes.
         expected = [
-            ["test", "-count=1", "-run", "^TestVaultFileResumeProductMinimum$", "./cmd/locklark"],
-            ["test", "-count=1", "-skip", "^TestVaultFileResumeProductMinimum$", "./..."],
+            ["test", "-count=1", "-run", self.SELECTOR, "./cmd/locklark"],
+            ["test", "-count=1", "-skip", self.SELECTOR, "./..."],
         ]
         for kind, fail_at, code, calls in (
             ("file", -1, 0, 2), ("file", 0, 7, 1), ("file", 1, 11, 2),
