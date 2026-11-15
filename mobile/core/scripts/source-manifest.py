@@ -20,10 +20,32 @@ phase = parser.add_mutually_exclusive_group(required=True)
 phase.add_argument("--prepare", action="store_true")
 phase.add_argument("--after-build", action="store_true")
 phase.add_argument("--check-tool-paths", action="store_true")
+phase.add_argument("--check-tool-dir", action="store_true")
 parser.add_argument("--tools-dir", type=pathlib.Path, required=True)
 args = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parents[3]
 output = root / "mobile/core/build"
+# This cached directory is added to PATH by the binders. Keep it closed to the
+# two installed regular executables; never remove or execute unexpected data.
+# The pre-install check also permits a missing directory, without creating it.
+try:
+    if args.tools_dir.is_symlink():
+        raise OSError()
+    if not args.tools_dir.exists() and args.check_tool_dir:
+        print("Binding tool directory has no unexpected entries")
+        raise SystemExit(0)
+    tools_dir = args.tools_dir.resolve(strict=True)
+    if not tools_dir.is_dir():
+        raise OSError()
+    for entry in tools_dir.iterdir():
+        if (entry.name not in ("gobind", "gomobile") or entry.is_symlink()
+                or not entry.is_file() or not os.access(entry, os.X_OK)):
+            raise SystemExit("Binding tool directory contains an unexpected entry")
+except OSError:
+    raise SystemExit("Binding tool directory unavailable")
+if args.check_tool_dir:
+    print("Binding tool directory has no unexpected entries")
+    raise SystemExit(0)
 go_bin = os.environ.get("GO_BIN", os.environ.get("LOCKLARK_GO", "go"))
 # gomobile invokes Go through PATH. Require the same file as the caller's
 # selected Go, then use that explicit file for every manifest subprocess.
@@ -41,15 +63,9 @@ except OSError:
 if not go_matches:
     raise SystemExit("Binding Go PATH mismatch")
 go_bin = str(explicit_go)
-# Bind metadata to the exact installed tools used by the caller. Symlink and
-# hardlink aliases are intentional only when they name the same installed file;
+# Bind metadata to the exact installed tools used by the caller. PATH symlink
+# and hardlink aliases are intentional only for the same installed regular file;
 # a different PATH executable is refused before any Go or tool process starts.
-try:
-    tools_dir = args.tools_dir.resolve(strict=True)
-    if not tools_dir.is_dir():
-        raise OSError()
-except OSError:
-    raise SystemExit("Binding tool directory unavailable")
 installed_tools = {}
 for name in ("gobind", "gomobile"):
     selected = shutil.which(name)
