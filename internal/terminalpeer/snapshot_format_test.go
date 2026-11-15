@@ -81,6 +81,9 @@ func formatName(format string) string {
 	return strings.ReplaceAll(format, "%", "pct")
 }
 
+// TestObservationFormatterValueMatrixIsOpaque proves the real Formatter path:
+// every data-bearing verb it receives renders exactly observationText, with no
+// width, precision, flag, or invalid-verb leakage.
 func TestObservationFormatterValueMatrixIsOpaque(t *testing.T) {
 	observation := syntheticObservation()
 	fragments := syntheticFragments(observation)
@@ -123,6 +126,11 @@ func TestObservationFormatterValueMatrixIsOpaque(t *testing.T) {
 	}
 }
 
+// TestObservationFormatterPointerAndTypeBounds distinguishes Formatter-backed
+// pointer verbs from fmt's special paths. %T and %p never enter Formatter.
+// %p on a value uses badVerb and renders the static typename plus the opaque
+// state handle; it must not be mistaken for Formatter output merely because
+// the typename is also "terminalpeer.Observation".
 func TestObservationFormatterPointerAndTypeBounds(t *testing.T) {
 	observation := syntheticObservation()
 	fragments := syntheticFragments(observation)
@@ -141,21 +149,38 @@ func TestObservationFormatterPointerAndTypeBounds(t *testing.T) {
 		})
 	}
 
-	t.Run("pointer_value_badverb", func(t *testing.T) {
-		formatted := fmt.Sprintf("%p", observation)
-		if !strings.Contains(formatted, observationText) {
-			t.Fatal("pointer verb on a value did not reach the opaque formatter")
-		}
-		assertNoFragments(t, formatted, fragments)
-	})
+	for _, test := range []struct {
+		name   string
+		format string
+	}{
+		{"value_p", "%p"},
+		{"value_sharp_p", "%#p"},
+		{"value_width_p", "%20p"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			formatted := fmt.Sprintf(test.format, observation)
+			if formatted == observationText {
+				t.Fatal("bad-verb pointer output was mistaken for Formatter output")
+			}
+			assertBadVerbOpaqueHandle(t, formatted, "", "p", "terminalpeer.Observation", false)
+			assertNoFragments(t, formatted, pointerSafe)
+		})
+	}
 
-	t.Run("pointer_address", func(t *testing.T) {
-		formatted := fmt.Sprintf("%p", &observation)
-		if !isHexAddress(formatted) {
-			t.Fatal("pointer verb on a pointer was not a single address")
-		}
-		assertNoFragments(t, formatted, pointerSafe)
-	})
+	for _, test := range []struct {
+		name   string
+		format string
+	}{
+		{"address_p", "%p"},
+		{"address_sharp_p", "%#p"},
+		{"address_width_p", "%20p"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			formatted := fmt.Sprintf(test.format, &observation)
+			assertPointerAddress(t, formatted)
+			assertNoFragments(t, formatted, pointerSafe)
+		})
+	}
 
 	t.Run("nil_pointer_address", func(t *testing.T) {
 		var nilObservation *Observation
@@ -183,9 +208,9 @@ func TestObservationFormatterPointerAndTypeBounds(t *testing.T) {
 }
 
 // TestObservationFormatterPercentWSpecialIsBounded covers fmt's non-error %w
-// path. That path bypasses Formatter and may render the opaque state handle;
-// it must never reach token, socket, PID, pidversion, path, start, or TTY
-// fields. This package therefore does not claim %w is a fixed byte string.
+// path. That path bypasses Formatter and renders the static typename plus the
+// opaque state handle. It must never reach token, socket, PID, pidversion,
+// path, start, or TTY fields, so this package does not claim %w is fixed bytes.
 func TestObservationFormatterPercentWSpecialIsBounded(t *testing.T) {
 	observation := syntheticObservation()
 	pointerSafe := pointerFragments(observation)
@@ -193,37 +218,47 @@ func TestObservationFormatterPercentWSpecialIsBounded(t *testing.T) {
 	pointer := any(&observation)
 
 	tests := []struct {
-		name      string
-		formatted func() string
+		name    string
+		lead    string
+		pointer bool
+		get     func() string
 	}{
-		{"sprintf_value", func() string {
+		{"sprintf_value", "", false, func() string {
 			format := "%w"
 			return fmt.Sprintf(format, value)
 		}},
-		{"sprintf_pointer", func() string {
+		{"sprintf_pointer", "", true, func() string {
 			format := "%w"
 			return fmt.Sprintf(format, pointer)
 		}},
-		{"errorf_value", func() string {
+		{"errorf_value", "wrap: ", false, func() string {
 			format := "wrap: %w"
 			return fmt.Errorf(format, value).Error()
 		}},
-		{"errorf_pointer", func() string {
+		{"errorf_pointer", "wrap: ", true, func() string {
 			format := "wrap: %w"
 			return fmt.Errorf(format, pointer).Error()
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			formatted := test.formatted()
-			if !strings.Contains(formatted, "%!w") {
-				t.Fatal("non-error wrap verb did not follow fmt's special path")
+			formatted := test.get()
+			if formatted == observationText {
+				t.Fatal("bad-verb wrap output was mistaken for Formatter output")
 			}
+			typeName := "terminalpeer.Observation"
+			if test.pointer {
+				typeName = "*terminalpeer.Observation"
+			}
+			assertBadVerbOpaqueHandle(t, formatted, test.lead, "w", typeName, test.pointer)
 			assertNoFragments(t, formatted, pointerSafe)
 		})
 	}
 }
 
+// TestObservationFormatterErrorAndContainerBounds proves ordinary error verbs
+// use Formatter exactly, and that composites render their Observation members
+// through Formatter rather than reflecting state fields.
 func TestObservationFormatterErrorAndContainerBounds(t *testing.T) {
 	observation := syntheticObservation()
 	fragments := syntheticFragments(observation)
@@ -242,30 +277,128 @@ func TestObservationFormatterErrorAndContainerBounds(t *testing.T) {
 				t.Fatal("error formatting returned nil")
 			}
 			formatted := err.Error()
-			if !strings.Contains(formatted, observationText) {
-				t.Fatal("error formatting did not reach the opaque formatter")
+			if formatted != "wrap: "+observationText {
+				t.Fatal("error formatting was not the fixed opaque text")
 			}
 			assertNoFragments(t, formatted, fragments)
 		})
 	}
 
 	containers := []struct {
-		name  string
-		value any
+		name                    string
+		value                   any
+		v, plus, sharp, decimal string
 	}{
-		{"slice", []Observation{observation}},
-		{"array", [1]Observation{observation}},
-		{"map", map[string]Observation{"key": observation}},
-		{"struct_value", struct{ Peer Observation }{observation}},
-		{"struct_pointer", &struct{ Peer Observation }{observation}},
-		{"pointer_field", struct{ Peer *Observation }{&observation}},
+		{
+			name:    "slice",
+			value:   []Observation{observation},
+			v:       "[terminalpeer.Observation]",
+			plus:    "[terminalpeer.Observation]",
+			sharp:   "[]terminalpeer.Observation{terminalpeer.Observation}",
+			decimal: "[terminalpeer.Observation]",
+		},
+		{
+			name:    "array",
+			value:   [1]Observation{observation},
+			v:       "[terminalpeer.Observation]",
+			plus:    "[terminalpeer.Observation]",
+			sharp:   "[1]terminalpeer.Observation{terminalpeer.Observation}",
+			decimal: "[terminalpeer.Observation]",
+		},
+		{
+			name:    "map",
+			value:   map[string]Observation{"key": observation},
+			v:       "map[key:terminalpeer.Observation]",
+			plus:    "map[key:terminalpeer.Observation]",
+			sharp:   `map[string]terminalpeer.Observation{"key":terminalpeer.Observation}`,
+			decimal: "map[%!d(string=key):terminalpeer.Observation]",
+		},
+		{
+			name:    "struct_value",
+			value:   struct{ Peer Observation }{observation},
+			v:       "{terminalpeer.Observation}",
+			plus:    "{Peer:terminalpeer.Observation}",
+			sharp:   "struct { Peer terminalpeer.Observation }{Peer:terminalpeer.Observation}",
+			decimal: "{terminalpeer.Observation}",
+		},
+		{
+			name:    "struct_pointer",
+			value:   &struct{ Peer Observation }{observation},
+			v:       "&{terminalpeer.Observation}",
+			plus:    "&{Peer:terminalpeer.Observation}",
+			sharp:   "&struct { Peer terminalpeer.Observation }{Peer:terminalpeer.Observation}",
+			decimal: "&{terminalpeer.Observation}",
+		},
+		{
+			name:    "pointer_field",
+			value:   struct{ Peer *Observation }{&observation},
+			v:       "{terminalpeer.Observation}",
+			plus:    "{Peer:terminalpeer.Observation}",
+			sharp:   "struct { Peer *terminalpeer.Observation }{Peer:terminalpeer.Observation}",
+			decimal: "{terminalpeer.Observation}",
+		},
 	}
+	otherContainerFormats := map[string]map[string]string{
+		"slice": {
+			"%x": "[terminalpeer.Observation]",
+			"%q": "[terminalpeer.Observation]",
+			"%s": "[terminalpeer.Observation]",
+		},
+		"array": {
+			"%x": "[terminalpeer.Observation]",
+			"%q": "[terminalpeer.Observation]",
+			"%s": "[terminalpeer.Observation]",
+		},
+		"map": {
+			"%x": "map[6b6579:terminalpeer.Observation]",
+			"%q": `map["key":terminalpeer.Observation]`,
+			"%s": "map[key:terminalpeer.Observation]",
+		},
+		"struct_value": {
+			"%x": "{terminalpeer.Observation}",
+			"%q": "{terminalpeer.Observation}",
+			"%s": "{terminalpeer.Observation}",
+		},
+		"struct_pointer": {
+			"%x": "&{terminalpeer.Observation}",
+			"%q": "&{terminalpeer.Observation}",
+			"%s": "&{terminalpeer.Observation}",
+		},
+		"pointer_field": {
+			"%x": "{terminalpeer.Observation}",
+			"%q": "{terminalpeer.Observation}",
+			"%s": "{terminalpeer.Observation}",
+		},
+	}
+
 	for _, test := range containers {
-		for _, format := range []string{"%v", "%+v", "%#v", "%d", "%x", "%q", "%s"} {
+		for _, format := range []struct {
+			name string
+			verb string
+			want string
+		}{
+			{"v", "%v", test.v},
+			{"plus", "%+v", test.plus},
+			{"sharp", "%#v", test.sharp},
+			{"decimal", "%d", test.decimal},
+		} {
+			t.Run(test.name+"_"+format.name, func(t *testing.T) {
+				formatted := fmt.Sprintf(format.verb, test.value)
+				if formatted != format.want {
+					t.Fatal("container formatting was not the expected opaque structure")
+				}
+				assertNoFragments(t, formatted, fragments)
+			})
+		}
+		for _, format := range []string{"%x", "%q", "%s"} {
 			t.Run(test.name+"_"+formatName(format), func(t *testing.T) {
+				want := otherContainerFormats[test.name][format]
+				if want == "" {
+					t.Fatal("missing expected container structure")
+				}
 				formatted := fmt.Sprintf(format, test.value)
-				if !strings.Contains(formatted, observationText) {
-					t.Fatal("container formatting did not reach the opaque formatter")
+				if formatted != want {
+					t.Fatal("container formatting was not the expected opaque structure")
 				}
 				assertNoFragments(t, formatted, fragments)
 			})
@@ -273,11 +406,50 @@ func TestObservationFormatterErrorAndContainerBounds(t *testing.T) {
 	}
 }
 
-func isHexAddress(value string) bool {
-	if !strings.HasPrefix(value, "0x") || len(value) <= 2 {
+// assertBadVerbOpaqueHandle checks fmt's exact special-path shape:
+//
+//	%!<verb>(<typename>={<address>})
+//	%!<verb>(<typename>=&{<address>})
+//
+// The angle brackets are an opaque state handle, not observation fields. Width
+// and # may change the address spelling; the wrapper remains the same.
+func assertBadVerbOpaqueHandle(t *testing.T, formatted, lead, verb, typeName string, pointer bool) {
+	t.Helper()
+	prefix := lead + "%!" + verb + "(" + typeName + "={"
+	if pointer {
+		prefix = lead + "%!" + verb + "(" + typeName + "=&{"
+	}
+	const suffix = "})"
+	if !strings.HasPrefix(formatted, prefix) || !strings.HasSuffix(formatted, suffix) {
+		t.Fatal("special verb output had an unexpected wrapper structure")
+	}
+	handle := strings.TrimSpace(formatted[len(prefix) : len(formatted)-len(suffix)])
+	if strings.HasPrefix(handle, "0x") {
+		handle = handle[2:]
+	}
+	if !isHexDigits(handle) {
+		t.Fatal("special verb did not contain only an opaque pointer handle")
+	}
+}
+
+// assertPointerAddress accepts one address, optionally width-padded and
+// optionally without the 0x prefix for %#p. It rejects any struct rendering.
+func assertPointerAddress(t *testing.T, formatted string) {
+	t.Helper()
+	address := strings.TrimSpace(formatted)
+	if strings.HasPrefix(address, "0x") {
+		address = address[2:]
+	}
+	if !isHexDigits(address) {
+		t.Fatal("pointer special path was not a single address")
+	}
+}
+
+func isHexDigits(value string) bool {
+	if value == "" {
 		return false
 	}
-	for _, digit := range value[2:] {
+	for _, digit := range value {
 		if digit >= '0' && digit <= '9' {
 			continue
 		}

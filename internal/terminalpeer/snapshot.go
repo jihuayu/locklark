@@ -234,16 +234,18 @@ func (Observation) GoString() string { return observationText }
 // precision, so numeric, character, quoted, flag, width, precision, and
 // invalid verbs cannot recurse into Observation fields.
 //
-// fmt handles %T and %p before Formatter. %T emits only the type name; %p on
-// a pointer emits only its address. Neither path reaches the state fields, but
-// this package does not claim those two special verbs are fixed bytes. %p on a
-// non-pointer value falls through fmt's bad-verb path to %v, which reaches
-// Format and therefore remains opaque.
+// fmt handles %T and %p before Formatter. %T emits only the type name. %p on
+// a pointer emits only its address. %p on a non-pointer value also bypasses
+// Formatter: fmt's bad-verb path renders the static type name and the opaque
+// state handle as an address. None of these paths can reach the token, socket,
+// PID, pidversion, path, start, or TTY fields, but this package does not claim
+// they are fixed bytes. Go fmt exposes no hook for these special paths, so %p
+// cannot be made byte-for-byte fixed here.
 //
 // fmt also handles %w specially when the argument is not an error: its
 // bad-verb path bypasses Formatter and may render the opaque state handle. It
-// still cannot reach the token, socket, PID, pidversion, path, start, or TTY
-// fields behind that handle, so this package does not claim %w is fixed bytes.
+// still cannot reach the sensitive fields behind that handle, so this package
+// does not claim %w is fixed bytes.
 func (Observation) Format(state fmt.State, _ rune) {
 	_, _ = state.Write([]byte(observationText))
 }
