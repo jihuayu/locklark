@@ -14,6 +14,38 @@ MASTER_PROMPT = "主密码: ".encode("utf-8")
 SECRET_PROMPT = b"Secret Key: "
 AUTH_REFUSAL = b"locklark: invalid personal vault, unlock factors or journal\n"
 MISSING_REFUSAL = b"locklark: terminal input cancelled or exceeded maximum length\n"
+PUBLIC_FIELDS = {"age_recipient", "content_signing_public_key"}
+
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate public field")
+        result[key] = value
+    return result
+
+
+def one_public_record(transcript):
+    prefix = MASTER_PROMPT + b"\n" + SECRET_PROMPT + b"\n"
+    if not transcript.startswith(prefix):
+        return None
+    record = transcript[len(prefix):]
+    if len(record) > 512 or not record.endswith(b"\n") or record.count(b"\n") != 1:
+        return None
+    try:
+        public = json.loads(record[:-1], object_pairs_hook=unique_fields)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(public, dict) or set(public) != PUBLIC_FIELDS:
+        return None
+    recipient = public["age_recipient"]
+    signer = public["content_signing_public_key"]
+    if (not isinstance(recipient, str) or not recipient.startswith("age1") or
+            len(recipient) > 128 or not isinstance(signer, str) or
+            len(signer) != 64 or any(c not in "0123456789abcdef" for c in signer)):
+        return None
+    return public
 
 
 def verdict(status, echoed=False, public=None):
@@ -67,19 +99,14 @@ def main():
             verdict("HARNESS_ERROR")
             return
         echoed = password in output or secret in output
-        public = None
-        for line in output.splitlines():
-            if line.startswith(b"{"):
-                try:
-                    public = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
-                    pass
         normalized = bytes(output).replace(b"\r\n", b"\n")
+        public = one_public_record(normalized)
         expected = (MASTER_PROMPT + b"\n" + SECRET_PROMPT +
                     (b"" if missing else b"\n") +
                     (MISSING_REFUSAL if missing else AUTH_REFUSAL))
-        if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and phase == 2 and isinstance(public, dict):
-            verdict("PUBLIC", echoed, public)
+        if (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and
+                phase == 2 and not echoed and public is not None):
+            verdict("PUBLIC", public=public)
         elif (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 1 and
               phase == 2 and not echoed and public is None and normalized == expected):
             verdict("REFUSED")
