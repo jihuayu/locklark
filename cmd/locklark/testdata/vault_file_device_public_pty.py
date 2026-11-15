@@ -10,6 +10,12 @@ import sys
 import time
 
 
+MASTER_PROMPT = "主密码: ".encode("utf-8")
+SECRET_PROMPT = b"Secret Key: "
+AUTH_REFUSAL = b"locklark: invalid personal vault, unlock factors or journal\n"
+MISSING_REFUSAL = b"locklark: terminal input cancelled or exceeded maximum length\n"
+
+
 def verdict(status, echoed=False, public=None):
     print(json.dumps({"status": status, "echoed": echoed, "public": public}), flush=True)
 
@@ -45,10 +51,10 @@ def main():
                     output.extend(chunk)
                     if len(output) > 128 * 1024:
                         break
-                    if phase == 0 and "主密码: ".encode("utf-8") in output:
+                    if phase == 0 and MASTER_PROMPT in output:
                         os.write(master, password + b"\n")
                         phase = 1
-                    if phase == 1 and b"Secret Key: " in output:
+                    if phase == 1 and SECRET_PROMPT in output:
                         os.write(master, b"\x04" if missing else secret + b"\n")
                         phase = 2
             got, wait_status = os.waitpid(pid, os.WNOHANG)
@@ -68,10 +74,15 @@ def main():
                     public = json.loads(line)
                 except (ValueError, UnicodeDecodeError):
                     pass
-        if os.waitstatus_to_exitcode(status) == 0 and phase == 2 and isinstance(public, dict):
+        normalized = bytes(output).replace(b"\r\n", b"\n")
+        expected = (MASTER_PROMPT + b"\n" + SECRET_PROMPT +
+                    (b"" if missing else b"\n") +
+                    (MISSING_REFUSAL if missing else AUTH_REFUSAL))
+        if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and phase == 2 and isinstance(public, dict):
             verdict("PUBLIC", echoed, public)
-        elif os.waitstatus_to_exitcode(status) != 0 and public is None and phase > 0:
-            verdict("REFUSED", echoed)
+        elif (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 1 and
+              phase == 2 and not echoed and public is None and normalized == expected):
+            verdict("REFUSED")
         else:
             verdict("HARNESS_ERROR", echoed)
     except (KeyError, OSError, ValueError):

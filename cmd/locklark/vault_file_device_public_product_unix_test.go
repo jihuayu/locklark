@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -114,6 +115,31 @@ func TestVaultFileDevicePublicProductFactorRefusal(t *testing.T) {
 			result := runVaultFileDevicePublicProduct(t, product, path, tc.password, tc.secret, tc.missing)
 			if result.Status != "REFUSED" || result.Echoed || result.Public != nil {
 				t.Fatal("PUBLIC_PRODUCT_FACTOR_REFUSAL_FAILED")
+			}
+		})
+	}
+}
+
+// A prompt-following child that crashes, exits with a different status or
+// reports another error must not be counted as a factor refusal. These are
+// separate real child processes under the same PTY helper, not a mock verdict.
+func TestVaultFileDevicePublicPTYRefusalClassifier(t *testing.T) {
+	const prompts = "#!/bin/sh\nstty -echo\nprintf '主密码: '\nIFS= read -r ignored\nprintf '\nSecret Key: '\nIFS= read -r ignored\n"
+	for _, tc := range []struct {
+		name, ending string
+	}{
+		{"wrong-exit", "printf '\nlocklark: invalid personal vault, unlock factors or journal\n'\nexit 2\n"},
+		{"unrelated-error", "printf '\nlocklark: unrelated error\n'\nexit 1\n"},
+		{"signaled", "printf '\nlocklark: invalid personal vault, unlock factors or journal\n'\nkill -TERM $$\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := filepath.Join(t.TempDir(), "owned-child")
+			if err := os.WriteFile(fake, []byte(prompts+tc.ending), 0700); err != nil {
+				t.Fatal("PTY_CONTRACT_CHILD_CREATE_FAILED")
+			}
+			result := runVaultFileDevicePublicProduct(t, fake, filepath.Join(t.TempDir(), "unused.ll"), []byte("owned-factor"), "owned-secret", false)
+			if result.Status != "HARNESS_ERROR" || result.Echoed || result.Public != nil {
+				t.Fatal("PTY_CONTRACT_FALSE_FACTOR_REFUSAL")
 			}
 		})
 	}
