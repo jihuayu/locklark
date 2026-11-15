@@ -1619,7 +1619,77 @@ class OwnedGenerationGuardTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(frameworks.requests, [])
 
-    def test_activate_owned_pre_stale_refuses_before_activation(self):
+    def test_application_midchange_refuses_before_axwindows(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        original = frameworks.AXUIElementCreateApplication
+
+        def create(pid):
+            answer = original(pid)
+            api.libproc.start_usec += 1
+            return answer
+
+        frameworks.AXUIElementCreateApplication = create
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_windows(OWNED_PID)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertNotIn("AXWindows", frameworks.names())
+
+    def test_application_midchange_in_owned_root_refuses_before_hit(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.owned_discovery(TITLE)
+        frameworks.requests = []
+        original = frameworks.AXUIElementCreateApplication
+        calls = []
+
+        def create(pid):
+            answer = original(pid)
+            calls.append(1)
+            if len(calls) == 2:
+                api.libproc.start_usec += 1
+            return answer
+
+        frameworks.AXUIElementCreateApplication = create
+        with self.assertRaises(contract.ContractError) as error:
+            api._owned_root_at({"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertNotIn("at", [request[0] for request in frameworks.requests])
+
+    def test_role_midchange_refuses_before_parent_read(self):
+        window, _ = owned_window()
+        api, frameworks = self.bound([window])
+        api.owned_discovery(TITLE)
+        frameworks.requests = []
+        hit_node = Node(AXRole="AXButton")
+        original_copy = frameworks.AXUIElementCopyAttributeValue
+
+        def hit(application, x, y, out):
+            frameworks.requests.append(("at", application, x, y))
+            return (0, hit_node)
+
+        def copy(element, name, out):
+            if element is hit_node and name == "AXRole":
+                frameworks.requests.append(("copy", element, name))
+                api.libproc.start_usec += 1
+                return (0, "AXButton")
+            return original_copy(element, name, out)
+
+        frameworks.AXUIElementCopyElementAtPosition = hit
+        frameworks.AXUIElementCopyAttributeValue = copy
+        with self.assertRaises(contract.ContractError) as error:
+            api._owned_root_at({"id": window, "pid": OWNED_PID}, OWNED_PID, 1, 1)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        role_reads = [request for request in frameworks.requests
+                      if request[0] == "copy" and request[1] is hit_node
+                      and request[2] == "AXRole"]
+        parent_reads = [request for request in frameworks.requests
+                        if request[0] == "copy" and request[1] is hit_node
+                        and request[2] == "AXParent"]
+        self.assertEqual(len(role_reads), 1)
+        self.assertEqual(parent_reads, [])
+
+
         window, _ = owned_window()
         api, frameworks = self.bound([window])
         api.libproc.start_usec += 1

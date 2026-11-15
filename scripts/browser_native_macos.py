@@ -754,6 +754,9 @@ class QuartzApi:
             raise _a11y_query()
         if application is None:
             raise _a11y_query()
+        # A generation change during AXUIElementCreateApplication must refuse
+        # before AXWindows is read; the outer finally alone is too late.
+        self._check_owned_generation()
         # Every AXWindows answer is classified here as a bare ``a11y-query``:
         # the status-walk guard of ``_ax_value_read`` is never passed through.
         try:
@@ -1852,6 +1855,41 @@ class QuartzApi:
         except Exception:
             raise contract.ContractError("a11y-query")
 
+    def _owned_ax_value(self, element, name, status):
+        """One guarded AX attribute read for the scoped root walk.
+
+        This deliberately does not call the module-level ``_ax_value`` helper:
+        the pre/post generation checks here run around this native read, and
+        the post-check runs before the value is returned, so a change during
+        AXRole can never continue to AXParent.
+        """
+        self._check_owned_generation()
+        try:
+            try:
+                result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise _a11y_query()
+            if isinstance(result, tuple):
+                if len(result) != 2:
+                    raise _a11y_query()
+                code = result[0]
+                if not _exact_status(code):
+                    raise _a11y_query()
+                if code == status[1]:
+                    value = result[1]
+                elif code == status[0]:
+                    value = None
+                else:
+                    raise _a11y_query()
+            else:
+                value = result
+            self._check_owned_generation()
+            return value
+        finally:
+            self._check_owned_generation()
+
     def _owned_root_at(self, window, pid, x, y):
         """Guard the exact owned generation around the scoped root hit test."""
         self._check_owned_generation()
@@ -1876,6 +1914,9 @@ class QuartzApi:
             raise contract.ContractError("a11y-query")
         if application is None:
             raise contract.ContractError("a11y-query")
+        # A generation change during AXUIElementCreateApplication must refuse
+        # before the hit test; the outer finally alone is too late.
+        self._check_owned_generation()
         try:
             result = self.ax.AXUIElementCopyElementAtPosition(
                 application, float(x), float(y), None)
@@ -1901,14 +1942,14 @@ class QuartzApi:
         if element is None:
             return False
         for _ in range(MAX_DEPTH + 1):
-            role = _native_text(_ax_value(self.ax, element, "AXRole", status))
+            role = _native_text(self._owned_ax_value(element, "AXRole", status))
             if not role:
                 raise contract.ContractError("a11y-query")
             if role == "AXWindow":
                 if self._proven_pid(element) != pid:
                     raise contract.ContractError("a11y-query")
                 return self._same_element(element, handle)
-            parent = _ax_value(self.ax, element, "AXParent", status)
+            parent = self._owned_ax_value(element, "AXParent", status)
             if parent is None:
                 return False
             element = parent
