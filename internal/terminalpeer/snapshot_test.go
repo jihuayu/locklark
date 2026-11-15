@@ -103,12 +103,12 @@ func TestObservationFormattingIsFixed(t *testing.T) {
 }
 
 func TestValidTokenPathIsShapeOnly(t *testing.T) {
-	for _, path := range []string{"/bin/echo", "/Applications/Example.app/Contents/MacOS/Example", "/a b/c"} {
+	for _, path := range []string{"/bin/echo", "/Applications/Example.app/Contents/MacOS/Example", "/a b/c", `/a\b/c`} {
 		if !validTokenPath(path) {
 			t.Fatalf("absolute clean path rejected: %q", path)
 		}
 	}
-	for _, path := range []string{"", "relative", "/a/../b", "/a//b", "/a/./b", "/a\x00b", "/a\rb", "/a\nb"} {
+	for _, path := range []string{"", "relative", "/a/../b", "/a//b", "/a/./b", "/a\x00b", "/a\rb", "/a\nb", `C:\a\b`, "C:/a/b", `\\server\share\a`} {
 		if validTokenPath(path) {
 			t.Fatalf("invalid path accepted: %q", path)
 		}
