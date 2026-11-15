@@ -2,6 +2,9 @@ package browserhost
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"io"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -118,6 +121,16 @@ func clipboardFixture(t *testing.T, fake *clipboardFake, ttl time.Duration) (*Co
 	if !nativeclipboard.NativeLeaseSupported() {
 		t.Skip("native clipboard leases are unavailable; platform fallback has separate coverage")
 	}
+	out := &memoryPipe{}
+	return clipboardFixtureWithPipe(t, fake, ttl, out, out)
+}
+
+// clipboardFixtureWithPipe builds the same encrypted session and desktop
+// connection as clipboardFixture. The sink is separate so a test can observe
+// or interleave wire frames without a product hook. Generic session and cancel
+// paths do not need native lease support, so only clipboardFixture guards on it.
+func clipboardFixtureWithPipe(t *testing.T, fake *clipboardFake, ttl time.Duration, out *memoryPipe, sink io.WriteCloser) (*Connection, *memoryPipe, *personal.Session, string, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "clipboard.ll")
 	key := bytes.Repeat([]byte{5}, 16)
 	if e := personal.Create(path, "clipboard", key); e != nil {
@@ -136,8 +149,7 @@ func clipboardFixture(t *testing.T, fake *clipboardFake, ttl time.Duration) (*Co
 	if e != nil || len(rows) != 1 {
 		t.Fatalf("rows: %v %#v", e, rows)
 	}
-	out := &memoryPipe{}
-	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	c := NewDesktopConnection(NewWriter(sink, time.Second), nil)
 	if fake != nil {
 		m := nativeclipboard.NewManagerWithWriter(fake.dispatch, fake.write, fake.clear)
 		c.setClipboard(m, ttl)
@@ -152,35 +164,41 @@ func clipboardRequest(c *Connection, id int, kind string) Request {
 	return Request{V: 1, ID: reqID(id), Type: kind, Capability: c.capability}
 }
 
+// clipboardHandle runs one request and returns only the response whose ID
+// matches it. Async work for another request may append its reply first or
+// last, so the newest frame is not necessarily the requested one.
 func clipboardHandle(t *testing.T, c *Connection, out *memoryPipe, r Request) Response {
 	t.Helper()
 	before := len(out.responses(t))
 	if e := c.Handle(r); e != nil {
 		t.Fatalf("handle %s: %v", r.Type, e)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		all := out.responses(t)
-		if len(all) > before {
-			return all[len(all)-1]
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("no response for %s", r.Type)
-	return Response{}
+	return clipboardReply(t, out, before, r.ID, time.Second)
 }
 
-func clipboardWait(t *testing.T, out *memoryPipe, before int) Response {
+func clipboardWait(t *testing.T, out *memoryPipe, before int, id string) Response {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	return clipboardReply(t, out, before, id, 2*time.Second)
+}
+
+// clipboardReply waits for the response carrying id among frames appended at
+// or after before. Frames already present before the request are ignored so a
+// repeated request ID cannot be mistaken for the new reply.
+func clipboardReply(t *testing.T, out *memoryPipe, before int, id string, timeout time.Duration) Response {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		all := out.responses(t)
-		if len(all) > before {
-			return all[len(all)-1]
+		if before < len(all) {
+			for _, resp := range all[before:] {
+				if resp.ID == id {
+					return resp
+				}
+			}
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("clipboard response timed out")
+	t.Fatalf("no correlated clipboard response")
 	return Response{}
 }
 
@@ -233,7 +251,7 @@ func TestClipboardCommitExactOneNativeWrite(t *testing.T) {
 	if !fake.runNext() {
 		t.Fatal("commit was not dispatched")
 	}
-	resp := clipboardWait(t, out, before)
+	resp := clipboardWait(t, out, before, commit.ID)
 	if resp.Type != "copy-result" || resp.State != "confirmed" || !resp.Copied || resp.CopyTicket != ticket || resp.CopyMode != "native" {
 		t.Fatalf("commit receipt: %#v", resp)
 	}
@@ -260,7 +278,7 @@ func TestClipboardUnknownNeverRetried(t *testing.T) {
 		t.Fatal(e)
 	}
 	fake.runNext()
-	resp := clipboardWait(t, out, before)
+	resp := clipboardWait(t, out, before, commit.ID)
 	if resp.Type != "copy-result" || resp.State != "unknown" || resp.Copied || resp.FieldValue != "" {
 		t.Fatalf("unknown receipt: %#v", resp)
 	}
@@ -317,7 +335,7 @@ func TestClipboardStrictRefusalsAndQueuedCancelNoWrite(t *testing.T) {
 	if !fake.runNext() {
 		t.Fatal("cancelled commit did not dispatch")
 	}
-	resp := clipboardWait(t, out, before+1)
+	resp := clipboardWait(t, out, before, commit.ID)
 	if resp.Type != "copy-result" || resp.State != "refused" {
 		t.Fatalf("queued cancel receipt: %#v", resp)
 	}
@@ -389,7 +407,7 @@ func TestClipboardConfiguredClearIntervalNotOfferLease(t *testing.T) {
 		if !fake.runNext() {
 			t.Fatal("commit was not dispatched")
 		}
-		if got := clipboardWait(t, out, before); got.State != "confirmed" {
+		if got := clipboardWait(t, out, before, commit.ID); got.State != "confirmed" {
 			t.Fatalf("commit: %#v", got)
 		}
 		remaining := time.Until(fake.deadline())
@@ -449,7 +467,7 @@ func TestClipboardOTPAbsoluteExpiryConfigOff(t *testing.T) {
 	if !fake.runNext() {
 		t.Fatal("otp commit was not dispatched")
 	}
-	if got := clipboardWait(t, out, before); got.State != "confirmed" {
+	if got := clipboardWait(t, out, before, commit.ID); got.State != "confirmed" {
 		t.Fatalf("otp commit: %#v", got)
 	}
 	// Config zero disables the ordinary interval, but the OTP code still
@@ -545,7 +563,7 @@ func TestClipboardGenericCancelDropsPendingButKeepsConfirmedLease(t *testing.T) 
 	if !fake.runNext() {
 		t.Fatal("commit was not dispatched")
 	}
-	if got := clipboardWait(t, out, before); got.State != "confirmed" {
+	if got := clipboardWait(t, out, before, commit.ID); got.State != "confirmed" {
 		t.Fatalf("commit: %#v", got)
 	}
 	cancel = clipboardRequest(c, 65, "cancel")
@@ -584,6 +602,70 @@ func TestClipboardGenericCancelDropsQueuedJob(t *testing.T) {
 	}
 	if writes, _ := fake.count(); writes != 0 {
 		t.Fatalf("cancelled queued job wrote natively: %d", writes)
+	}
+}
+
+// clipboardLateReplyWriter appends one unrelated frame immediately after the
+// matching requested frame. It is test-only wire interleaving, not a product
+// hook, and carries only the redacted metadata supplied by the caller.
+type clipboardLateReplyWriter struct {
+	out     *memoryPipe
+	afterID string
+	late    Response
+	fired   bool
+}
+
+func (w *clipboardLateReplyWriter) Write(p []byte) (int, error) {
+	n, err := w.out.Write(p)
+	if err != nil || n != len(p) || w.fired || len(p) < 4 {
+		return n, err
+	}
+	size := int(binary.NativeEndian.Uint32(p))
+	if size < 0 || size > len(p)-4 {
+		return n, nil
+	}
+	var requested struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(p[4:4+size], &requested) != nil || requested.ID != w.afterID {
+		return n, nil
+	}
+	w.fired = true
+	raw, err := json.Marshal(w.late)
+	if err != nil {
+		return n, err
+	}
+	frame := binary.NativeEndian.AppendUint32(nil, uint32(len(raw)))
+	if _, err := w.out.Write(append(frame, raw...)); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
+func (*clipboardLateReplyWriter) Close() error { return nil }
+
+// TestClipboardHandleCorrelatesLateUnrelatedReply pins request-ID
+// correlation. A reply for another request is appended after the requested
+// cancel reply, as an async prior commit receipt can overlap it. The helper
+// must return the cancel frame, not the newest frame.
+func TestClipboardHandleCorrelatesLateUnrelatedReply(t *testing.T) {
+	out := &memoryPipe{}
+	c, _, _, _, _ := clipboardFixtureWithPipe(t, nil, 0, out, &clipboardLateReplyWriter{
+		out:     out,
+		afterID: reqID(90),
+		late:    Response{ID: reqID(91), Type: "copy-result", CopyMode: "native", State: "refused"},
+	})
+	t.Cleanup(c.Close)
+	before := len(out.responses(t))
+	cancel := clipboardRequest(c, 90, "cancel")
+	resp := clipboardHandle(t, c, out, cancel)
+	if resp.ID != cancel.ID || resp.Type != "cancelled" {
+		t.Fatalf("cancel reply id match=%t type=%q", resp.ID == cancel.ID, resp.Type)
+	}
+	all := out.responses(t)
+	if len(all) != before+2 || all[before].ID != cancel.ID || all[before].Type != "cancelled" ||
+		all[before+1].ID != reqID(91) || all[before+1].Type != "copy-result" {
+		t.Fatal("late unrelated reply interleaving was not preserved")
 	}
 }
 

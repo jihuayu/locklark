@@ -1,29 +1,37 @@
 package org.locklark.android
 
 import android.app.KeyguardManager
+import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.graphics.Rect
 import android.os.SystemClock
+import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewParent
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.locklark.android.security.NativeFailureCode
 import org.locklark.android.security.NativePhase
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -37,6 +45,11 @@ class OfflineVaultTest {
     private var currentControl = "unknown"
     private var controlPhase = "ready"
     private var imeHideRequested = false
+    private val observedViewport = Rect()
+    // Fixed scroll geometry of the current wait, reported by failWait().
+    private val lastGeometry = AtomicReference<List<String>>(emptyList())
+    private fun rememberGeometry(entries: List<String>) { lastGeometry.set(entries) }
+    private var observedTicks = 0
     private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
         val fixture = File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json")
@@ -49,6 +62,81 @@ class OfflineVaultTest {
         return value
     }
     private fun all(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { all(view.getChildAt(it)) } else emptyList()
+    /** The app root that [appViewport] clips to; screen-to-content maps use it. */
+    private fun appRoot(activity: MainActivity): View? =
+        activity.findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+    /**
+     * Bounded scrollBy delta toward [target]: the target's viewport-local rect
+     * (offsetDescendantRectToMyCoords) compared with [safe], the app-safe
+     * screen rect mapped into the same local space; 0 also when the target is
+     * in a nested scroller or the viewport is absent.
+     */
+    private fun scrollStep(activity: MainActivity, scroll: ScrollView, target: View, vertical: Boolean, safe: Rect): Int {
+        val root = appRoot(activity) ?: return 0
+        val targetRect = descendantRectInScroll(scroll, target) ?: return 0
+        return boundedScrollStep(targetRect, safeLocalRect(scroll, safe, root), vertical)
+    }
+    // Geometry values are bounded so the diagnostic stays a fixed-size number.
+    private fun frozen(value: Int): String = if (value in -999_999..999_999) value.toString() else "clamped"
+    /**
+     * Fixed numeric scroll geometry for failure context: the scroll offset, the
+     * ScrollView's screen position, padding and scroll range, the app-safe
+     * viewport mapped into viewport-local coordinates (viewport top/bottom)
+     * and in screen coordinates (safe top/bottom) and the target's full
+     * viewport-local rect and screen rect. Only coordinates and rectangle
+     * sizes, never text.
+     */
+    private fun scrollContext(activity: MainActivity, scroll: ScrollView?, target: View?): List<String> {
+        if (scroll == null || target == null) return listOf("scroll=none")
+        val rect = descendantRectInScroll(scroll, target) ?: return listOf("scroll=detached")
+        val location = IntArray(2).also { scroll.getLocationOnScreen(it) }
+        val targetScreen = IntArray(2).also { target.getLocationOnScreen(it) }
+        val screen = Rect(targetScreen[0], targetScreen[1], targetScreen[0] + target.width, targetScreen[1] + target.height)
+        val viewport = Rect()
+        if (!appViewport(activity, viewport)) return listOf("scroll=none")
+        val visible = appRoot(activity)?.let { safeLocalRect(scroll, viewport, it) } ?: Rect()
+        return listOf(
+            "scroll_y=" + frozen(scroll.scrollY),
+            "scroll_span=" + frozen(visible.height()),
+            "scroll_range=" + frozen(maxOf(0, scroll.getChildAt(0)?.height?.minus(scroll.height) ?: 0)),
+            "scroll_top=" + frozen(location[1]),
+            "scroll_height=" + frozen(scroll.height),
+            "scroll_pad_top=" + frozen(scroll.paddingTop),
+            "scroll_pad_bottom=" + frozen(scroll.paddingBottom),
+            "viewport_top=" + frozen(visible.top),
+            "viewport_bottom=" + frozen(visible.bottom),
+            "safe_top=" + frozen(viewport.top),
+            "safe_bottom=" + frozen(viewport.bottom),
+            "target_top=" + frozen(rect.top),
+            "target_bottom=" + frozen(rect.bottom),
+            "screen_top=" + frozen(screen.top),
+            "screen_bottom=" + frozen(screen.bottom),
+        )
+    }
+    /**
+     * Whether [target]'s full rect actually lies inside the app viewport of
+     * [activity]; computing an app viewport alone is not enough. On success
+     * [bounds] holds the target's full rect.
+     */
+    private fun targetInViewport(activity: MainActivity, target: View, bounds: Rect, viewport: Rect = Rect()): Boolean {
+        if (!appViewport(activity, viewport)) return false
+        return target.getGlobalVisibleRect(bounds) &&
+            bounds.width() == target.width && bounds.height() == target.height && viewport.contains(bounds)
+    }
+    /** One bounded native scroll toward a visible target; [moved] is set only if the container scrolled. */
+    private fun scrollToward(activity: MainActivity, target: View, moved: (Boolean) -> Unit): Boolean {
+        // The editor's own ScrollView: its content coordinates, not a page one.
+        val scroll = pageScroll(target) ?: return false
+        val safe = Rect()
+        if (!appViewport(activity, safe)) return false
+        // A partially visible target gets a bounded step too, toward full
+        // containment in the app-safe viewport.
+        val down = scrollStep(activity, scroll, target, true, safe)
+        val right = if (down == 0) scrollStep(activity, scroll, target, false, safe) else 0
+        val scrolled = scrollPageStep(target, true, down) || scrollPageStep(target, false, right)
+        moved(scrolled)
+        return scrolled
+    }
     private fun view(tag: String): View? {
         var found: View? = null
         scenario.onActivity { found = it.window.decorView.findViewWithTag<View>(tag) }
@@ -138,14 +226,30 @@ class OfflineVaultTest {
         currentControl = tag
         controlPhase = "ready"
         imeHideRequested = false
+        observedViewport.setEmpty(); observedTicks = 0
         waitUntil("Native control unavailable", deadline) { ready(tag) }
         val bounds = Rect()
         val viewport = Rect()
         var previousBounds = Rect()
         var previousViewport = Rect()
         var previousVisible = false
-        var scrolledViewport: Rect? = null
-        var needsScroll = true
+        // Set when a bounded ScrollView.scrollBy or alignment was just issued, so
+        // the next observation can tell real container movement from a stuck
+        // range instead of waiting out the deadline.
+        var awaitingScroll = false
+        // The ScrollView offset captured BEFORE the last bounded scrollBy, and
+        // whether the target was partially visible when it was requested. A
+        // successful scroll changes the offset, so it is never mistaken for a
+        // stall.
+        var beforeOffset = Long.MIN_VALUE
+        var partial = false
+        // A control gets at most one native alignment request, only when a
+        // measured bounded step found no movable range. A second exhausted
+        // observation fails at once instead of re-requesting.
+        var alignedOnce = false
+        // The last live observation, attached to a failed wait so the
+        // diagnostic shows why the control was not clickable.
+        var liveGeometry: List<String> = emptyList()
         // IME appearance and padding/layout can arrive after a prior idle
         // observation. React to actual visibility while waiting, not only once
         // at entry. Only the owned window receives one hide request; BACK could
@@ -157,16 +261,14 @@ class OfflineVaultTest {
             var ime: Boolean? = null
             var requestedNow = false
             var scrolledNow = false
+            var inViewport = false
+            var stalled = false
             scenario.onActivity { activity ->
                 if (SystemClock.elapsedRealtime() >= deadline) return@onActivity
                 val target = activity.window.decorView.findViewWithTag<View>(tag)
                 ime = activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())
-                if (ime == null) {
-                    needsScroll = true
-                    return@onActivity
-                }
+                if (ime == null) return@onActivity
                 if (dismissKeyboard && ime == true) {
-                    needsScroll = true
                     if (!imeHideRequested && (activity.hasWindowFocus() || resumed) && SystemClock.elapsedRealtime() < deadline) {
                         activity.window.insetsController?.let { controller ->
                             imeHideRequested = true
@@ -177,14 +279,74 @@ class OfflineVaultTest {
                 } else if (target != null && target.isEnabled && target.isShown &&
                     (activity.hasWindowFocus() || resumed) &&
                     appViewport(activity, viewport)) {
-                    if ((needsScroll || scrolledViewport != viewport) && SystemClock.elapsedRealtime() < deadline) {
-                        target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
-                        scrolledViewport = Rect(viewport)
-                        needsScroll = false
-                        scrolledNow = true
-                    } else {
-                        visible = target.getGlobalVisibleRect(bounds) && bounds.width() == target.width &&
-                            bounds.height() == target.height && viewport.contains(bounds)
+                    val scroll: ScrollView? = pageScroll(target)
+                    // inViewport is only set when the control's own rect lies inside the
+                    // app viewport, not merely because an app viewport was computed.
+                    val shown = targetInViewport(activity, target, bounds, viewport)
+                    inViewport = shown
+                    val active = activity.hasWindowFocus() || resumed
+                    if (shown) {
+                        visible = true
+                    } else if (active && SystemClock.elapsedRealtime() < deadline) {
+                        liveGeometry = scrollContext(activity, scroll, target)
+                        // A previously issued bounded scrollBy succeeded only if
+                        // the container offset really differs from the one read
+                        // before the request; otherwise the range is exhausted.
+                        val pending = awaitingScroll
+                        val movedNow = scroll != null && pending && scrollOffset(scroll) != beforeOffset
+                        if (pending && !movedNow) {
+                            // One bounded request was issued and could not move
+                            // the container: fail fast instead of the deadline.
+                            stalled = true
+                        } else if (movedNow) {
+                            awaitingScroll = false; scrolledNow = true
+                        } else if (scroll == null) {
+                            // No owning ScrollView: the native alignment
+                            // request stays the only path, once.
+                            if (!alignedOnce) {
+                                target.requestRectangleOnScreen(Rect(0, 0, target.width, target.height), true)
+                                alignedOnce = true
+                            }
+                        } else {
+                            // Every not-yet-contained control now receives one
+                            // bounded ScrollView.scrollBy toward the app-safe
+                            // viewport, including a partially visible one whose
+                            // rect crosses an inset edge.
+                            partial = overlaps(bounds, viewport)
+                            val targetRect = descendantRectInScroll(scroll, target)
+                            val safe = appRoot(activity)?.let { safeLocalRect(scroll, viewport, it) } ?: Rect()
+                            val down = scrollStep(activity, scroll, target, true, viewport)
+                            val right = if (down == 0) scrollStep(activity, scroll, target, false, viewport) else 0
+                            var delta = if (down != 0) down else right
+                            // A control larger than the app-safe viewport
+                            // (or a step with no measurable geometry) can never
+                            // be fully contained: no-progress must not loop
+                            // into a step that only moves the overflow.
+                            val oversized = targetRect == null || safe.isEmpty ||
+                                targetRect.height() > safe.height() || targetRect.width() > safe.width()
+                            if (oversized) delta = 0
+                            val before = scrollOffset(scroll)
+                            val moved = delta != 0 && scrollPageStep(target, down != 0, delta)
+                            if (moved) {
+                                awaitingScroll = true; beforeOffset = before; scrolledNow = true
+                            } else if (!alignedOnce) {
+                                // No movable step (an exhausted range, an
+                                // oversized target, no owning scroller, or a
+                                // control not laid out in it): one native
+                                // alignment request remains.
+                                target.requestRectangleOnScreen(Rect(0, 0, target.width, target.height), true)
+                                alignedOnce = true
+                            } else if (partial || oversized) {
+                                // A partially visible or oversized control whose
+                                // range and alignment were both exhausted can
+                                // never be made fully visible: fail fast, and the
+                                // full-rect targetInViewport gate stays closed.
+                                stalled = true
+                            }
+                            // A fully offscreen control with no movable range is
+                            // still being laid out: the next observation
+                            // re-measures it.
+                        }
                     }
                 }
             }
@@ -202,13 +364,23 @@ class OfflineVaultTest {
                 return@waitUntil false
             }
             if (scrolledNow) {
+                rememberGeometry(liveGeometry)
                 previousBounds.setEmpty(); previousViewport.setEmpty()
                 previousVisible = false
                 controlPhase = "scroll"
                 return@waitUntil false
             }
-            controlPhase = "visibility"
-            val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport
+            // An enabled control outside the app viewport is pending real
+            // scrolling, not a product failure; report its own phase. A
+            // partially visible control that a pending bounded request left
+            // unmoved (its range is exhausted) can never reach the viewport:
+            // fail at once instead of re-requesting or waiting for the deadline.
+            controlPhase = if (inViewport) "visibility" else if (stalled) "clipped" else "offscreen"
+            // Only a stable full-rect observation inside the settled app viewport
+            // is a click target.
+            val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport &&
+                scrollComplete(viewport)
+            if (!stable) rememberGeometry(liveGeometry)
             previousBounds = Rect(bounds)
             previousViewport = Rect(viewport)
             previousVisible = visible
@@ -232,6 +404,18 @@ class OfflineVaultTest {
         controlPhase = "released"
         instrumentation.waitForIdleSync()
     }
+    /**
+     * True when inset-driven relayout (IME-safe padding) has stopped changing
+     * the app viewport, so a stable full-rect observation is a real click.
+     */
+    private fun scrollComplete(viewport: Rect): Boolean {
+        if (viewport.isEmpty) {
+            viewport.set(observedViewport); observedTicks = 0
+            return false
+        }
+        if (viewport == observedViewport) observedTicks += 1 else { observedViewport.set(viewport); observedTicks = 0 }
+        return observedTicks >= 2
+    }
     private fun appViewport(activity: MainActivity, viewport: Rect): Boolean {
         if (activity.window.decorView.rootWindowInsets == null) return false
         activity.window.decorView.getWindowVisibleDisplayFrame(viewport)
@@ -252,20 +436,39 @@ class OfflineVaultTest {
             putString("locklark_control_phase", controlPhase)
             putString("locklark_activity", scenario.state.name)
             putString("locklark_ime_hide_requested", imeHideRequested.toString())
+            putString("locklark_scroll", lastGeometry.get().joinToString(" ") { it })
         }
         scenario.onActivity { activity ->
             val target = activity.window.decorView.findViewWithTag<View>(currentControl)
-            val bounds = Rect()
             val viewport = Rect()
             diagnostic.putString("locklark_ime", activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())?.toString() ?: "unknown")
             diagnostic.putString("locklark_window_focus", activity.hasWindowFocus().toString())
             diagnostic.putString("locklark_control_present", (target != null).toString())
             diagnostic.putString("locklark_control_enabled", (target?.isEnabled == true).toString())
-            diagnostic.putString("locklark_control_visible", (target != null && appViewport(activity, viewport) && target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height && viewport.contains(bounds)).toString())
+            diagnostic.putString("locklark_control_visible", (target != null && targetInViewport(activity, target, Rect(), viewport)).toString())
             diagnostic.putString("locklark_control_focused", (target != null && activity.currentFocus === target && target.hasFocus()).toString())
             diagnostic.putString("locklark_input_active", (target is EditText && activity.getSystemService(InputMethodManager::class.java)?.isActive(target) == true).toString())
         }
         instrumentation.sendStatus(0, diagnostic)
+    }
+    private fun focused(tag: String, moved: (Boolean) -> Unit = {}): Boolean {
+        val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
+        var focused = false
+        var scrolled = false
+        scenario.onActivity { activity ->
+            val target = activity.window.decorView.findViewWithTag<View>(tag)
+            // Input editors get requestRectangleOnScreen below, never a coarse step.
+            if (target != null) scrollToward(activity, target) { moved(it); if (it) scrolled = true }
+            moved(scrolled)
+            if (scrolled) return@onActivity
+            if (target is EditText && (activity.hasWindowFocus() || resumed) && !(activity.currentFocus === target && target.hasFocus())) {
+                target.requestFocus()
+            }
+            focused = target is EditText && target.isEnabled && target.isAttachedToWindow &&
+                (activity.hasWindowFocus() || resumed) &&
+                (activity.currentFocus === target || target.hasFocus())
+        }
+        return focused
     }
     private fun enter(tag: String, value: String) {
         val deadline = SystemClock.elapsedRealtime() + 180_000
@@ -276,32 +479,18 @@ class OfflineVaultTest {
         // not prove that the IME has switched its served InputConnection.
         click(tag, dismissKeyboard = false, deadline = deadline)
         controlPhase = "input-focus"
-        fun focused(): Boolean {
-            val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
-            var focused = false
-            scenario.onActivity { activity ->
-                val target = activity.window.decorView.findViewWithTag<View>(tag)
-                // A headless CI window can transiently report no focus while
-                // the resumed activity still owns the target editor.
-                if (target is EditText && (activity.hasWindowFocus() || resumed) && !(activity.currentFocus === target && target.hasFocus())) {
-                    target.requestFocus()
-                }
-                focused = target is EditText && target.isEnabled && target.isAttachedToWindow &&
-                    (activity.hasWindowFocus() || resumed) &&
-                    (activity.currentFocus === target || target.hasFocus())
-            }
-            return focused
-        }
+        // A grown multiline editor (or a taller IME) can leave the requested
+        // editor fully offscreen; pageStep/scrollPageStep scroll natively first.
         waitUntil("Native input focus unavailable", deadline) {
             if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
-            focused()
+            var scrolled = false
+            val ready = focused(tag) { scrolled = it }
+            if (scrolled) { controlPhase = "scroll"; reportControl() }
+            ready
         }
         scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).text.clear() }
         instrumentation.waitForIdleSync()
-        waitUntil("Native input focus unavailable", deadline) {
-            if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
-            focused()
-        }
+        waitUntil("Native input focus unavailable", deadline) { focused(tag) }
         controlPhase = "input-send"
         reportControl()
         if (SystemClock.elapsedRealtime() >= deadline) failWait("Native input delivery incomplete")
@@ -342,6 +531,117 @@ class OfflineVaultTest {
         return text("secret-value")
     }
 
+    /**
+     * Viewport-local bounded step: exact signs and the half-span clamp for
+     * partial and far targets, monotone convergence under repeated
+     * scrollBy deltas, and no-progress for a target larger than the viewport
+     * (it can never be fully contained).
+     */
+    @Test fun boundedScrollStepHandlesNestedOffsetsAndEdges() {
+        val visible = Rect(0, 0, 800, 1600)
+        fun target(top: Int, bottom: Int) = Rect(0, top, 800, bottom)
+        // Fully inside: 0.
+        assertEquals(0, boundedScrollStep(target(900, 1000), visible))
+        // Truncated at the top needs a negative delta, at the bottom positive;
+        // the partial step is exactly the hidden part.
+        assertEquals(-100, boundedScrollStep(target(-100, 100), visible))
+        assertEquals(100, boundedScrollStep(target(1500, 1700), visible))
+        // Far below: positive and never more than half the visible span.
+        val farBelow = boundedScrollStep(target(2600, 3100), visible)
+        assertTrue("Far target below must step down", farBelow > 0 && farBelow <= 800)
+        // Far above: negative and never more than half the visible span.
+        val farAbove = boundedScrollStep(target(-3000, -2500), visible)
+        assertTrue("Far target above must step up", farAbove < 0 && farAbove >= -800)
+        // Horizontal uses the same rule on x.
+        val right = boundedScrollStep(Rect(1000, 0, 1200, 100), visible, false)
+        assertTrue("Far target right must step right", right > 0 && right <= 800)
+        // A degenerate viewport never produces a step.
+        assertEquals(0, boundedScrollStep(target(1800, 1900), Rect(0, 1600, 800, 1600)))
+        // Repeated deltas applied to the local rect (content moves by -delta)
+        // shrink the overflow monotonically until full containment, for both
+        // directions and a partial start.
+        for (start in listOf(target(-100, 100), target(1500, 1700), target(2600, 3100), target(-3000, -2500))) {
+            var current = Rect(start)
+            var overflow = overflow(current, visible)
+            assertTrue("A hidden target must overflow", overflow > 0)
+            var steps = 0
+            while (!visible.contains(current)) {
+                val step = boundedScrollStep(current, visible)
+                assertTrue("A step is needed while hidden", step != 0)
+                assertTrue("A step never exceeds the half span", abs(step) <= 800)
+                current.offset(0, -step)
+                val next = overflow(current, visible)
+                assertTrue("Each step must shrink the overflow ($start)", next < overflow || next == 0)
+                overflow = next
+                assertTrue("Bounded steps must converge", ++steps < 32)
+            }
+            assertEquals("Containment ends progress", 0, boundedScrollStep(current, visible))
+        }
+        // Larger than the visible span at both edges: no direction can make
+        // it fully contained, so the step is a no-progress 0 and the rect is
+        // never considered contained.
+        for (oversized in listOf(target(-200, 1800), target(-100, 1900), target(0, 1700))) {
+            assertTrue("An oversized target is never contained", !visible.contains(oversized))
+            assertEquals("An oversized target gets no-progress", 0, boundedScrollStep(oversized, visible))
+        }
+    }
+    /** Hidden extent of [target] beyond [visible] along y, 0 when contained. */
+    private fun overflow(target: Rect, visible: Rect): Int =
+        maxOf(0, visible.top - target.top) + maxOf(0, target.bottom - visible.bottom)
+    /**
+     * Real-layout regression for the bounded search: a detached tree with only
+     * explicit sizes (a fixed row height and the ScrollView's own layout), so
+     * its geometry is deterministic without inventing card arithmetic. The
+     * actual scroll must carry the control from fully offscreen to visible by
+     * bounded steps that never exceed its own extent, and converge.
+     */
+    @Test fun realNestedLayoutStepsTowardOffscreenControl() {
+        val scroll = ScrollView(InstrumentationRegistry.getInstrumentation().targetContext)
+        fun card() = LinearLayout(scroll.context).apply { orientation = LinearLayout.VERTICAL }
+        val body = LinearLayout(scroll.context).apply { orientation = LinearLayout.VERTICAL }
+        repeat(2) {
+            body.addView(card().apply { repeat(3) { addView(TextView(scroll.context).apply { height = 96 }) } })
+        }
+        val target = TextView(scroll.context).apply { height = 96 }
+        body.addView(card().apply { addView(TextView(scroll.context).apply { height = 96 }); addView(target) })
+        scroll.addView(body)
+        // A detached tree is never laid out by the system: measure and lay it
+        // out at a fixed size so every nested offset is real.
+        scroll.measure(View.MeasureSpec.makeMeasureSpec(360, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(420, View.MeasureSpec.EXACTLY))
+        scroll.layout(0, 0, 360, 420)
+        val safe = Rect(0, 0, 360, 420)
+        // The formal regression's fixture is a detached ScrollView laid out by
+        // hand; the detached mode is explicit and test-only, never used by the
+        // controller's live click path.
+        fun content() = safeLocalRect(scroll, safe, scroll, detached = true)
+        fun targetRect() = descendantRectInScroll(scroll, target)!!
+        val start = targetRect()
+        assertTrue("Fixture control must start offscreen", !content().contains(start))
+        assertTrue("It starts below the viewport", start.top >= content().bottom)
+        val seen = mutableListOf<Int>()
+        while (seen.size < 100 && !content().contains(targetRect())) {
+            // The control may be fully below or only partially overlapped while
+            // its bottom edge still overflows the safe viewport; either state
+            // still needs a bounded step.
+            assertTrue("The control must still overflow the viewport bottom",
+                targetRect().bottom > content().bottom)
+            val step = boundedScrollStep(targetRect(), content(), true)
+            assertTrue("A downward step must stay positive", step > 0)
+            assertTrue("A bounded step must move the ScrollView", scrollPageStep(target, true, step, { _, _ -> }))
+            seen.add(scroll.scrollY)
+        }
+        assertTrue("Bounded steps must converge", seen.isNotEmpty() && seen.size < 100)
+        assertEquals("Each step must advance", seen.size, seen.toSet().size)
+        val reached = targetRect()
+        assertTrue("A bounded step must reach the control", content().contains(reached))
+        // Real scroll offsets moved it all the way from fully offscreen, and the
+        // walk stopped only because it is now fully inside the app-safe viewport.
+        assertTrue("Real scroll offsets accumulate", scroll.scrollY >= start.top - reached.top)
+        val offset = start.top - scroll.scrollY - reached.top
+        assertTrue("The control moved only by real offsets ($offset)", abs(offset) <= 1)
+        assertEquals("The walk stopped only once visible", 0, boundedScrollStep(targetRect(), content(), true))
+    }
     private fun deviceAuthenticationUnavailable(): Boolean = text("status") ==
         NativePhase.DEVICE_READY.userText + "未完成：" + NativeFailureCode.UNAVAILABLE.userText
 
@@ -460,5 +760,13 @@ class OfflineVaultTest {
             waitFor("Late unlock must not reopen backgrounded vault") { ready("unlock") }
             assertTrue("Late callback exposed a secret", text("secret-value").isEmpty())
         } finally { scenario.close() }
+    }
+
+    /** Reports only fixed numeric scroll geometry; no label or entered text. */
+    private fun reportGeometry(scroll: ScrollView?, target: View?) {
+        var entries = listOf("scroll=none")
+        scenario.onActivity { entries = scrollContext(it, scroll, target) }
+        instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_scroll", entries.joinToString(" ")) })
+        rememberGeometry(entries)
     }
 }
