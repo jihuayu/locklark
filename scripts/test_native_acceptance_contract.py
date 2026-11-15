@@ -460,6 +460,158 @@ class ActivationRequestTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, stderr.getvalue())
 
 
+class OwnedGenerationContractTests(unittest.TestCase):
+    """Strict descriptor, activation/scoped forwarding and unknown keys."""
+
+    def generation(self, **overrides):
+        value = {"pid": 4242, "executable": EXE, "euid": 501,
+                 "start_sec": 1700000000, "start_usec": 123}
+        value.update(overrides)
+        return value
+
+    def scoped(self, generation=None, **overrides):
+        document = {"title": TITLE, "executable": EXE,
+                    "owned_pid": 4242, "actions": []}
+        document.update(overrides)
+        if generation is not None:
+            document["owned_generation"] = generation
+        return document
+
+    def test_missing_generation_keeps_the_legacy_scoped_plan(self):
+        plan = contract.parse_request(json.dumps(self.scoped()))
+        self.assertIsNone(plan["owned_generation"])
+        self.assertEqual(plan["owned_pid"], 4242)
+
+    def test_valid_generation_is_exact_private_plan_data(self):
+        generation = self.generation()
+        plan = contract.parse_request(json.dumps(self.scoped(generation)))
+        self.assertEqual(plan["owned_generation"], generation)
+        self.assertEqual(set(plan["owned_generation"]), set(contract.GENERATION_FIELDS))
+
+    def test_generation_requires_a_scoped_pid(self):
+        document = {"title": TITLE, "executable": EXE, "actions": [],
+                    "owned_generation": self.generation()}
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(json.dumps(document))
+        self.assertEqual(error.exception.code, "request-invalid")
+
+    def test_generation_shape_is_exactly_five_plain_fields(self):
+        valid = self.generation()
+        missing = dict(valid)
+        missing.pop("start_usec")
+        extra = dict(valid, extra=1)
+        cases = [
+            None, {}, missing, extra,
+            dict(valid, pid=True), dict(valid, pid=4243),
+            dict(valid, executable=EXE + ".other"),
+            dict(valid, executable="relative"),
+            dict(valid, euid=True), dict(valid, euid=-1),
+            dict(valid, start_sec=True), dict(valid, start_sec=0),
+            dict(valid, start_usec=True), dict(valid, start_usec=-1),
+            dict(valid, start_usec=1000000),
+        ]
+        for generation in cases:
+            with self.subTest(generation=generation):
+                document = self.scoped()
+                document["owned_generation"] = generation
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(json.dumps(document))
+                self.assertEqual(error.exception.code, "request-invalid")
+
+    def test_generation_unknown_key_is_refused_before_execution(self):
+        generation = dict(self.generation(), window_number=0x200003)
+        document = self.scoped(generation)
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(json.dumps(document))
+        self.assertEqual(error.exception.code, "request-invalid")
+        self.assertNotIn("window_number",
+                         contract.failure_line(error.exception, "discover", -1, "macos"))
+
+    def test_top_level_unknown_key_with_generation_is_refused(self):
+        document = self.scoped(self.generation(), value=PRIVATE)
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(json.dumps(document))
+        self.assertEqual(error.exception.code, "request-unknown-key")
+
+    def test_scoped_generation_is_bound_after_scope_and_before_capability(self):
+        generation = self.generation()
+        adapter = SpyAdapter()
+        order = []
+
+        def scope(pid):
+            order.append(("scope", pid))
+            return lambda: order.append(("release",))
+
+        adapter.scope_owned_process = scope
+        adapter.set_owned_generation = lambda value: order.append(("generation", dict(value)))
+        adapter.check_capability = lambda: order.append(("capability",))
+        result = contract.execute(
+            contract.parse_request(json.dumps(self.scoped(generation))), adapter)
+        self.assertEqual(result["window"], hex(WINDOW["id"]))
+        self.assertEqual(order[:3], [("scope", 4242), ("generation", generation),
+                                     ("capability",)])
+        self.assertEqual(adapter.calls, ["list_windows"])
+
+    def test_scoped_generation_without_the_hook_refuses_before_capability(self):
+        adapter = SpyAdapter()
+        order = []
+        adapter.scope_owned_process = lambda pid: lambda: None
+        adapter.check_capability = lambda: order.append("capability")
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(
+                contract.parse_request(json.dumps(self.scoped(self.generation()))), adapter)
+        self.assertEqual(error.exception.code, "process-untrusted")
+        self.assertEqual(order, [])
+        self.assertEqual(adapter.calls, [])
+
+    def test_activation_generation_is_forwarded_to_a_three_field_hook(self):
+        generation = self.generation()
+        adapter = SpyAdapter()
+        calls = []
+
+        def activate_process(pid, executable, supplied):
+            calls.append((pid, executable, supplied))
+            return True
+
+        adapter.activate_process = activate_process
+        plan = contract.parse_request(json.dumps({
+            "activate_pid": 4242, "executable": EXE,
+            "owned_generation": generation,
+        }))
+        self.assertEqual(contract.execute(plan, adapter), {"activated": True})
+        self.assertEqual(calls, [(4242, EXE, generation)])
+
+    def test_activation_generation_never_falls_back_to_the_two_field_hook(self):
+        adapter = SpyAdapter()
+        calls = []
+
+        def activate_process(pid, executable):
+            calls.append((pid, executable))
+            return True
+
+        adapter.activate_process = activate_process
+        plan = contract.parse_request(json.dumps({
+            "activate_pid": 4242, "executable": EXE,
+            "owned_generation": self.generation(),
+        }))
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(plan, adapter)
+        self.assertEqual(error.exception.code, "activation-failed")
+        self.assertEqual(calls, [])
+
+    def test_malformed_activation_generation_is_refused_before_the_hook(self):
+        adapter = SpyAdapter()
+        calls = []
+        adapter.activate_process = lambda *args: calls.append(args) or True
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(json.dumps({
+                "activate_pid": 4242, "executable": EXE,
+                "owned_generation": self.generation(start_sec=0),
+            }))
+        self.assertEqual(error.exception.code, "request-invalid")
+        self.assertEqual(calls, [])
+
+
 class ExecutionGuardTests(unittest.TestCase):
     def run_plan(self, adapter, **overrides):
         plan = contract.parse_request(request(**overrides))

@@ -6,6 +6,7 @@ oracles plus the deterministic no-network child helper as an ordinary local
 process.
 """
 import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -434,7 +435,12 @@ class ActivationOrderTests(unittest.TestCase):
         instance.run_driver = run_driver
         instance.wait_unlock_fields = lambda: calls.append(("wait_unlock_fields",))
         instance.mark = lambda name: calls.append(("mark", name))
+        generation = {"pid": _FakePopen.pid, "executable": str(instance.desktop),
+                      "euid": os.geteuid(), "start_sec": 1, "start_usec": 1}
         with mock.patch.object(acceptance.subprocess, "Popen", _FakePopen), \
+                mock.patch.object(acceptance, "capture_process_generation",
+                                  return_value=generation), \
+                mock.patch.object(acceptance, "validate_process_generation"), \
                 contextlib.redirect_stdout(io.StringIO()):
             instance.start_desktop()
         return calls
@@ -447,8 +453,10 @@ class ActivationOrderTests(unittest.TestCase):
                          ["driver", "wait_unlock_fields", "mark"])
         request = calls[0][1]
         self.assertEqual(request, {"activate_pid": _FakePopen.pid,
-                                   "executable": str(desktop)})
-        self.assertEqual(set(request), {"activate_pid", "executable"})
+                                   "executable": str(desktop),
+                                   "owned_generation": instance.desktop_generation})
+        self.assertEqual(set(request), {"activate_pid", "executable",
+                                        "owned_generation"})
         self.assertIs(type(request["activate_pid"]), int)
         self.assertIs(type(request["executable"]), str)
         self.assertNotIn(acceptance.TITLE, json.dumps(request))
@@ -460,9 +468,15 @@ class ActivationOrderTests(unittest.TestCase):
         desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
         instance = self.acceptance(desktop)
         instance.desktop_process = _FakePopen(None)
-        plan = contract.parse_request(instance.activation_request())
+        instance.desktop_generation = {
+            "pid": _FakePopen.pid, "executable": str(desktop),
+            "euid": os.geteuid(), "start_sec": 1, "start_usec": 1,
+        }
+        with mock.patch.object(acceptance, "validate_process_generation"):
+            plan = contract.parse_request(instance.activation_request())
         self.assertEqual(plan["activation"], {"pid": _FakePopen.pid,
-                                              "executable": str(desktop)})
+                                              "executable": str(desktop),
+                                              "generation": instance.desktop_generation})
 
     def test_activation_refusal_stops_before_any_window_wait(self):
         desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
@@ -696,6 +710,10 @@ class UnlockPlanTests(unittest.TestCase):
         instance.master = self.MASTER
         instance.secret = self.SECRET
         instance.desktop_process = _LiveDesktop()
+        instance.desktop_generation = {
+            "pid": _LiveDesktop.pid, "executable": str(instance.desktop),
+            "euid": os.geteuid(), "start_sec": 1, "start_usec": 1,
+        }
         return instance
 
     def original_actions(self, instance):
@@ -822,8 +840,11 @@ class UnlockPlanTests(unittest.TestCase):
         for request, plan in zip(requests, expected_plans):
             with self.subTest(actions=plan):
                 self.assertEqual(set(request), {"title", "executable", "actions",
-                                                "inspect", "owned_pid"})
+                                                "inspect", "owned_pid",
+                                                "owned_generation"})
                 self.assertEqual(request["owned_pid"], instance.desktop_process.pid)
+                self.assertEqual(request["owned_generation"],
+                                 instance.desktop_generation)
                 self.assertEqual(request["title"], acceptance.TITLE)
                 self.assertEqual(request["title"], "Locklark · 本地金库")
                 self.assertEqual(request["executable"], str(instance.desktop))
@@ -907,8 +928,11 @@ class UnlockPlanTests(unittest.TestCase):
         self.assertEqual(len(requests), len(expected_plans) + 1)
         inspect_request = requests[-1]
         self.assertEqual(set(inspect_request), {"title", "executable", "actions",
-                                                 "inspect", "owned_pid"})
+                                                 "inspect", "owned_pid",
+                                                 "owned_generation"})
         self.assertEqual(inspect_request["owned_pid"], instance.desktop_process.pid)
+        self.assertEqual(inspect_request["owned_generation"],
+                         instance.desktop_generation)
         self.assertEqual(inspect_request["title"], acceptance.TITLE)
         self.assertEqual(inspect_request["executable"], str(instance.desktop))
         self.assertEqual(inspect_request["actions"], [])
@@ -975,6 +999,15 @@ class DriverErrorCategoryTests(unittest.TestCase):
         instance = acceptance.Acceptance(args)
         instance.fixture = acceptance.Fixture(base)
         self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
+        instance.desktop = pathlib.Path("/build/bin/locklark-desktop")
+        instance.desktop_process = _FakePopen(None)
+        instance.desktop_generation = {
+            "pid": _FakePopen.pid, "executable": str(instance.desktop),
+            "euid": os.geteuid(), "start_sec": 1, "start_usec": 1,
+        }
+        patcher = mock.patch.object(acceptance, "validate_process_generation")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return instance
 
     def fake(self, instance, returncode, stdout, stderr):
@@ -1124,6 +1157,360 @@ class _FakePopen:
 
     def poll(self):
         return self.exit_code
+
+
+class ProcessGenerationSmokeTests(unittest.TestCase):
+    """Real owned no-GUI child identity smoke; no product, GUI, AX or driver."""
+
+    @staticmethod
+    def _reap(process):
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            try:
+                if process.stdin is not None and not process.stdin.closed:
+                    process.stdin.close()
+            except OSError:
+                pass
+
+    @unittest.skipUnless(sys.platform == "darwin", "libproc generation is Darwin-only")
+    def test_real_owned_cat_capture_and_rejections(self):
+        # Fixed private stdin pipe and DEVNULL streams; /bin/cat is the only
+        # executable. No product, driver, GUI, AX, file or network is touched.
+        first = subprocess.Popen(
+            ["/bin/cat"], stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        second = subprocess.Popen(
+            ["/bin/cat"], stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(self._reap, first)
+        self.addCleanup(self._reap, second)
+
+        generation = acceptance.capture_process_generation(first, "/bin/cat")
+        self.assertIsInstance(generation, dict)
+        self.assertEqual(set(generation), set(acceptance.GENERATION_FIELDS))
+        self.assertIsNone(
+            acceptance.validate_process_generation(first, "/bin/cat", generation))
+
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.capture_process_generation(first, "/bin/echo")
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.validate_process_generation(second, "/bin/cat", generation)
+
+        stale = dict(generation)
+        stale["start_usec"] = (generation["start_usec"] + 1) % 1000000
+        if stale["start_usec"] == 0:
+            stale["start_sec"] += 1
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.validate_process_generation(first, "/bin/cat", stale)
+
+        try:
+            first.stdin.close()
+        except OSError:
+            pass
+        first.wait(timeout=5)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.validate_process_generation(first, "/bin/cat", generation)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.capture_process_generation(first, "/bin/cat")
+
+
+class _GenerationPopen:
+    """A live-or-exited fake Popen identity, never a real process."""
+
+    def __init__(self, pid=54321, exit_code=None):
+        self.pid = pid
+        self.exit_code = exit_code
+
+    def poll(self):
+        return self.exit_code
+
+
+class _LibprocCall:
+    """A callable libproc symbol that accepts prototype attributes."""
+
+    def __init__(self, function):
+        self.function = function
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+class _GenerationLibproc:
+    """Controllable libproc answers for pure generation protocol tests."""
+
+    def __init__(self, path="/bin/cat", uid=None, start_sec=1700000000,
+                 start_usec=123, pid=None, info_size=None, path_result=None,
+                 error=None):
+        self.path = path
+        self.uid = os.geteuid() if uid is None else uid
+        self.start_sec = start_sec
+        self.start_usec = start_usec
+        self.pid = pid
+        self.info_size = info_size
+        self.path_result = path_result
+        self.error = error
+        self.proc_pidpath = _LibprocCall(self._pidpath)
+        self.proc_pidinfo = _LibprocCall(self._pidinfo)
+
+    def _pidpath(self, pid, buffer, size):
+        if self.error is not None:
+            raise self.error
+        if self.path_result is not None:
+            return self.path_result
+        raw = self.path.encode()
+        buffer.value = raw
+        return len(raw)
+
+    def _pidinfo(self, pid, flavor, arg, info, size):
+        if self.error is not None:
+            raise self.error
+        buffer = ctypes.cast(info, ctypes.POINTER(ctypes.c_char * size)).contents
+        bsd = acceptance._BSDInfo.from_buffer(buffer)
+        bsd.pbi_pid = pid if self.pid is None else self.pid
+        bsd.pbi_uid = self.uid
+        bsd.pbi_start_tvsec = self.start_sec
+        bsd.pbi_start_tvusec = self.start_usec
+        return size if self.info_size is None else self.info_size
+
+
+class ProcessGenerationProtocolTests(unittest.TestCase):
+    """Pure generation protocol fakes; no real process or libproc authority."""
+
+    class Fatal(BaseException):
+        pass
+
+    def capture(self, process, libproc=None, executable="/bin/cat"):
+        libproc = _GenerationLibproc() if libproc is None else libproc
+        with mock.patch.object(acceptance.ctypes, "CDLL", return_value=libproc):
+            return acceptance.capture_process_generation(process, executable)
+
+    def acceptance(self):
+        instance = acceptance.Acceptance(__import__("argparse").Namespace(
+            cli="/build/locklark", desktop="/bin/cat", timeout=240))
+        instance.desktop = pathlib.Path("/bin/cat")
+        instance.desktop_process = _GenerationPopen()
+        instance.desktop_generation = {
+            "pid": instance.desktop_process.pid, "executable": "/bin/cat",
+            "euid": os.geteuid(), "start_sec": 1700000000, "start_usec": 123,
+        }
+        instance.private_bytes = lambda name, raw: None
+        return instance
+
+    def test_missing_generation_is_refused_before_any_request(self):
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.validate_process_generation(None, "/bin/cat", None)
+        instance = self.acceptance()
+        instance.desktop_generation = None
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            instance.scoped_request([])
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            instance.activation_request()
+
+    def assert_descriptor_refused_before_authority(self, process, generation):
+        with mock.patch.object(acceptance, "capture_process_generation") as capture:
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.validate_process_generation(process, "/bin/cat", generation)
+        capture.assert_not_called()
+
+    def test_each_numeric_field_rejects_bool_before_any_authority_read(self):
+        base = {"pid": 1, "executable": "/bin/cat", "euid": 0,
+                "start_sec": 1, "start_usec": 0}
+        process = _GenerationPopen(pid=1)
+        for field, value in (("pid", True), ("euid", False),
+                             ("start_sec", True), ("start_usec", False)):
+            malformed = dict(base)
+            malformed[field] = value
+            with self.subTest(field=field):
+                # bool == the original int, so equality alone cannot catch it.
+                self.assertTrue(base == malformed)
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_each_numeric_field_rejects_float_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        for field in ("pid", "euid", "start_sec", "start_usec"):
+            malformed = dict(base)
+            malformed[field] = float(base[field])
+            with self.subTest(field=field):
+                # int == the same-valued float, so equality alone cannot catch it.
+                self.assertTrue(base == malformed)
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_int_and_str_subclasses_are_refused_before_any_authority_read(self):
+        class IntSubclass(int):
+            pass
+
+        class StrSubclass(str):
+            pass
+
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        for field in ("pid", "euid", "start_sec", "start_usec"):
+            malformed = dict(base)
+            malformed[field] = IntSubclass(base[field])
+            with self.subTest(field=field):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+        malformed = dict(base)
+        malformed["executable"] = StrSubclass("/bin/cat")
+        self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_executable_rejects_invalid_plain_paths_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        values = (True, 1.0, None, "", "relative", "/bin/../bin/cat",
+                  "/bin/cat\x00x", 123,
+                  "/bin/" + "x" * (acceptance.MAX_EXECUTABLE + 1))
+        for value in values:
+            malformed = dict(base)
+            malformed["executable"] = value
+            with self.subTest(kind=type(value).__name__):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_invalid_numeric_ranges_are_refused_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        cases = (("pid", 0), ("pid", -1), ("pid", 0x100000000),
+                 ("euid", -1), ("euid", 0x100000000),
+                 ("start_sec", 0), ("start_sec", -1),
+                 ("start_sec", 0x10000000000000000),
+                 ("start_usec", -1), ("start_usec", 1000000))
+        for field, value in cases:
+            malformed = dict(base)
+            malformed[field] = value
+            with self.subTest(field=field):
+                self.assert_descriptor_refused_before_authority(process, malformed)
+
+    def test_missing_and_extra_keys_are_refused_before_any_authority_read(self):
+        base = {"pid": 54321, "executable": "/bin/cat", "euid": os.geteuid(),
+                "start_sec": 1700000000, "start_usec": 123}
+        process = _GenerationPopen(pid=54321)
+        missing = dict(base)
+        missing.pop("start_usec")
+        malformed = (missing, dict(base, extra=1), [], "generation")
+        for generation in malformed:
+            with self.subTest(size=len(generation)):
+                self.assert_descriptor_refused_before_authority(process, generation)
+
+    def test_cross_process_generation_is_refused(self):
+        first = _GenerationPopen(54321)
+        second = _GenerationPopen(54322)
+        libproc = _GenerationLibproc()
+        with mock.patch.object(acceptance.ctypes, "CDLL", return_value=libproc):
+            generation = acceptance.capture_process_generation(first, "/bin/cat")
+            self.assertTrue(acceptance._generation_descriptor_ok(generation))
+            self.assertIsNone(
+                acceptance.validate_process_generation(first, "/bin/cat", generation))
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.validate_process_generation(second, "/bin/cat", generation)
+
+    def test_stale_generation_is_refused(self):
+        process = _GenerationPopen()
+        libproc = _GenerationLibproc()
+        with mock.patch.object(acceptance.ctypes, "CDLL", return_value=libproc):
+            generation = acceptance.capture_process_generation(process, "/bin/cat")
+            self.assertTrue(acceptance._generation_descriptor_ok(generation))
+            stale = dict(generation)
+            stale["start_usec"] = (generation["start_usec"] + 1) % 1000000
+            if stale["start_usec"] == 0:
+                stale["start_sec"] += 1
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.validate_process_generation(process, "/bin/cat", stale)
+
+    def test_wrong_executable_euid_exit_and_libproc_failure_are_refused(self):
+        process = _GenerationPopen()
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(process, _GenerationLibproc(), "/bin/echo")
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(process, _GenerationLibproc(uid=os.geteuid() + 1))
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(_GenerationPopen(exit_code=0))
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(process, _GenerationLibproc(info_size=0))
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(process, _GenerationLibproc(path_result=0))
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.capture(process, _GenerationLibproc(error=self.Fatal()))
+
+    def test_scoped_and_activation_requests_carry_the_captured_generation(self):
+        instance = self.acceptance()
+        generation = dict(instance.desktop_generation)
+        with mock.patch.object(acceptance, "validate_process_generation"):
+            scoped = json.loads(instance.scoped_request([]))
+            activation = json.loads(instance.activation_request())
+        self.assertEqual(scoped["owned_generation"], generation)
+        self.assertEqual(activation["owned_generation"], generation)
+        self.assertEqual(scoped["owned_pid"], instance.desktop_process.pid)
+        self.assertEqual(activation["activate_pid"], instance.desktop_process.pid)
+
+    def test_driver_validates_before_then_runs_then_validates_after(self):
+        instance = self.acceptance()
+        events = []
+        same = []
+
+        def validate(process, executable, generation):
+            same.append((process is instance.desktop_process,
+                         generation == instance.desktop_generation))
+            events.append("post" if "run" in events else "pre")
+
+        def run(*args, **kwargs):
+            events.append("run")
+            return subprocess.CompletedProcess([], 0, b"{}\n", b"")
+
+        with mock.patch.object(acceptance, "validate_process_generation",
+                               side_effect=validate), \
+                mock.patch.object(acceptance.subprocess, "run", side_effect=run):
+            self.assertEqual(instance.run_driver(b"{}"), {})
+        self.assertEqual(events, ["pre", "run", "post"])
+        self.assertEqual(same, [(True, True), (True, True)])
+
+    def test_pre_validation_failure_prevents_the_driver_call(self):
+        instance = self.acceptance()
+        runner = mock.Mock()
+        with mock.patch.object(acceptance, "validate_process_generation",
+                               side_effect=acceptance.AcceptanceFailure), \
+                mock.patch.object(acceptance.subprocess, "run", runner):
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                instance.run_driver(b"{}")
+        runner.assert_not_called()
+
+    def test_post_validation_failure_refuses_after_the_call(self):
+        instance = self.acceptance()
+        calls = []
+
+        def validate(*args):
+            calls.append(1)
+            if len(calls) == 2:
+                raise acceptance.AcceptanceFailure()
+
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, b"{}\n", b""))
+        with mock.patch.object(acceptance, "validate_process_generation",
+                               side_effect=validate), \
+                mock.patch.object(acceptance.subprocess, "run", runner):
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                instance.run_driver(b"{}")
+        self.assertEqual(len(calls), 2)
+        runner.assert_called_once()
+
+    def test_cleanup_clears_the_generation(self):
+        instance = self.acceptance()
+        instance.desktop_process = _GenerationPopen(exit_code=0)
+        instance.close()
+        self.assertIsNone(instance.desktop_generation)
+        self.assertIsNone(instance.desktop_process)
 
 
 class UnavailableTests(unittest.TestCase):

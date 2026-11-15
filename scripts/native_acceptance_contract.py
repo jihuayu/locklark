@@ -74,16 +74,25 @@ POLL = 0.05
 # absence, re-observation, focus, controls) is restricted to that owned process
 # through the adapter's owned-AX path and never the CoreGraphics inventory.
 SCOPE_KEY = "owned_pid"
+# Optional exact Popen generation. When supplied it must be the complete
+# five-field libproc identity, never a request-mirrored or partial shape.
+GENERATION_KEY = "owned_generation"
+GENERATION_FIELDS = ("pid", "executable", "euid", "start_sec", "start_usec")
+GENERATION_KEYS = frozenset(GENERATION_FIELDS)
 REQUEST_KEYS = frozenset({"title", "title_prefix", "executable", "actions",
-                          "inspect", "wait_absent", "preserve_focus"})
+                          "inspect", "wait_absent", "preserve_focus",
+                          SCOPE_KEY, GENERATION_KEY})
 ACTION_KEYS = frozenset({"click_label", "wait_label", "click", "text", "key"})
 # An absence check may also be scoped to an owned process: it then observes
 # only that process's AX windows. The absence form still forbids actions and
 # inspect, and still requires the exact title and canonical executable.
-ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent", SCOPE_KEY})
-# Activation-only form: exact {pid, executable} and nothing else. It is disjoint
-# from every normal request above and authorises no observation or input.
+ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent",
+                          SCOPE_KEY, GENERATION_KEY})
+# Activation-only form: exact {pid, executable}, optionally carrying the same
+# strict generation. It is disjoint from every normal request above and
+# authorises no observation or input.
 ACTIVATION_KEYS = frozenset({"activate_pid", "executable"})
+ACTIVATION_OPTIONAL_KEYS = frozenset({GENERATION_KEY})
 
 # Fixed code -> fixed message. Nothing here is ever formatted with request data.
 ERROR_MESSAGES = {
@@ -286,18 +295,50 @@ def _action(index, value):
 
 
 def _activation_plan(document):
-    """Exactly {activate_pid: positive plain int, executable: absolute path}."""
-    if set(document) != ACTIVATION_KEYS:
+    """Exact activation form, optionally with the captured startup generation."""
+    keys = set(document)
+    if not ACTIVATION_KEYS <= keys or keys - ACTIVATION_KEYS - ACTIVATION_OPTIONAL_KEYS:
         raise ContractError("activation-invalid")
     pid = document["activate_pid"]
     if type(pid) is not int or pid <= 0:
         raise ContractError("activation-invalid")
     if not _absolute_path(document["executable"]):
         raise ContractError("executable-invalid")
-    return {"activation": {"pid": pid, "executable": document["executable"]},
+    generation = _owned_generation(document, pid)
+    activation = {"pid": pid, "executable": document["executable"]}
+    if generation is not None:
+        activation["generation"] = generation
+    return {"activation": activation,
             "title": None, "title_prefix": None, "executable": None, "actions": (),
             "inspect": False, "wait_absent": False, "preserve_focus": False,
-            "owned_pid": None}
+            "owned_pid": None, "owned_generation": generation}
+
+
+def _owned_generation(document, pid):
+    """Optional strict five-field Popen generation; absent keeps old callers.
+
+    The generation is identity evidence from libproc, not request text: every
+    field must be present exactly once, be a plain built-in type (a ``bool``
+    never satisfies an integer field), name the same PID and executable as the
+    request, and carry a plausible effective UID and process start pair. An
+    explicitly ``null`` value is malformed rather than "absent".
+    """
+    value = document.get(GENERATION_KEY)
+    if value is None:
+        if GENERATION_KEY in document:
+            raise ContractError("request-invalid", {"field": GENERATION_KEY})
+        return None
+    if (type(value) is not dict or set(value) != GENERATION_KEYS
+            or type(value.get("pid")) is not int or value["pid"] != pid
+            or type(value.get("euid")) is not int or value["euid"] < 0
+            or type(value.get("start_sec")) is not int or value["start_sec"] <= 0
+            or type(value.get("start_usec")) is not int
+            or not 0 <= value["start_usec"] < 1000000
+            or not _absolute_path(value.get("executable"))):
+        raise ContractError("request-invalid", {"field": GENERATION_KEY})
+    if value["executable"] != document.get("executable"):
+        raise ContractError("request-invalid", {"field": GENERATION_KEY})
+    return {field: value[field] for field in GENERATION_FIELDS}
 
 
 def parse_request(raw):
@@ -318,7 +359,7 @@ def parse_request(raw):
         raise ContractError("request-invalid")
     if "activate_pid" in document:
         return _activation_plan(document)
-    if [key for key in document if key not in REQUEST_KEYS | {SCOPE_KEY}]:
+    if [key for key in document if key not in REQUEST_KEYS]:
         raise ContractError("request-unknown-key")
     # An owned-PID scope is validated BEFORE anything else can touch AX.
     if SCOPE_KEY in document:
@@ -328,6 +369,7 @@ def parse_request(raw):
     plan = {
         "title": None, "title_prefix": None, "executable": None, "actions": [],
         "inspect": False, "wait_absent": False, "preserve_focus": False,
+        "owned_generation": None,
     }
     for name, limit in (("title", MAX_TITLE), ("title_prefix", MAX_TITLE)):
         if name in document:
@@ -370,6 +412,10 @@ def parse_request(raw):
                                   or plan["executable"] is None):
         raise ContractError("request-invalid", {"field": SCOPE_KEY})
     plan["owned_pid"] = document.get(SCOPE_KEY)
+    if GENERATION_KEY in document:
+        if plan["owned_pid"] is None:
+            raise ContractError("request-invalid", {"field": GENERATION_KEY})
+        plan["owned_generation"] = _owned_generation(document, plan["owned_pid"])
     return plan
 
 # --------------------------------------------------------------- observation --
@@ -1182,14 +1228,21 @@ def empty_status():
     return {field: False for field in STATUS_FIELDS}
 
 
+def _process_untrusted(error):
+    """True only for the exact terminal generation refusal."""
+    return type(error) is ContractError and error.code == "process-untrusted"
+
+
 def status_snapshot(adapter, window, controls):
     """Optional status snapshot and its fixed AX diagnostic.
 
     Returns ``(status, diagnostic)``: ``status`` is None when the adapter has
     no status hook, else exactly the four built-in booleans; ``diagnostic`` is
     the allowlisted ``ax_diagnostic`` of the FIRST failure or None. The
-    diagnostic is only carried, never interpreted, and a failure still yields
-    the fixed all-false status without failing the surfaces snapshot.
+    diagnostic is only carried, never interpreted, and any other failure still
+    yields the fixed all-false status without failing the surfaces snapshot.
+    The exact ``process-untrusted`` generation refusal is never converted:
+    it propagates as a terminal request failure.
 
     The hook receives an explicit per-call ``_AxCall`` result so a sanitized
     refusal is reported for exactly THIS call; the shipped hooks record it and
@@ -1199,7 +1252,9 @@ def status_snapshot(adapter, window, controls):
     """
     try:
         reader = getattr(adapter, "read_status", None)
-    except Exception:
+    except Exception as error:
+        if _process_untrusted(error):
+            raise
         return empty_status(), None
     if not callable(reader):
         return None, None
@@ -1214,8 +1269,12 @@ def status_snapshot(adapter, window, controls):
         try:
             value = reader(window, controls)
         except Exception as error:
+            if _process_untrusted(error):
+                raise
             return empty_status(), call.failed(error)
     except Exception as error:
+        if _process_untrusted(error):
+            raise
         return empty_status(), call.failed(error)
     return call.accept(value), call.recorded()
 
@@ -1345,8 +1404,11 @@ FAILURE_CONTEXT = {"action": "setup", "index": -1}
 def execute_activation(plan, adapter):
     """One identity-proved NSRunningApplication activation; no observation.
 
-    The adapter's ``activate_process(pid, executable)`` must itself prove the
-    exact pid/executable/uid identity and perform exactly one OS activation.
+    The adapter's ``activate_process(pid, executable[, generation])`` must
+    itself prove the exact pid/executable/uid identity and perform exactly one
+    OS activation. When the request carried a strict generation it is passed
+    as the third argument; an adapter that cannot accept it fails closed
+    instead of silently activating on the weaker two-field proof.
     It returns the literal ``True`` only after that one call reported success.
     Any other verdict, a raised error or a missing hook fails closed; nothing
     is retried, no window is listed and no input is emitted.
@@ -1357,7 +1419,11 @@ def execute_activation(plan, adapter):
     if hook is None or getattr(adapter, "supports_activation", False) is not True:
         raise ContractError("activation-unsupported")
     try:
-        verdict = hook(request["pid"], request["executable"])
+        generation = request.get("generation")
+        if generation is None:
+            verdict = hook(request["pid"], request["executable"])
+        else:
+            verdict = hook(request["pid"], request["executable"], generation)
     except ContractError:
         raise
     except Exception:
@@ -1411,6 +1477,20 @@ def execute(plan, adapter):
         if not callable(release):
             raise ContractError("a11y-query")
         plan["releases"].append(release)
+        # The generation is bound BEFORE capability or any observation. A
+        # platform adapter without the hook refuses here rather than falling
+        # back to the weaker PID-only scope.
+        generation = plan.get("owned_generation")
+        if generation is not None:
+            setter = getattr(adapter, "set_owned_generation", None)
+            if not callable(setter):
+                raise ContractError("process-untrusted")
+            try:
+                setter(generation)
+            except ContractError:
+                raise
+            except BaseException:
+                raise ContractError("process-untrusted")
     if check is not None:
         check()
     if plan["wait_absent"]:
