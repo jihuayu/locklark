@@ -27,9 +27,14 @@
 // The running kernel is not that source tree, and this package does not claim
 // that it is.
 //
-// This checkpoint does not test descriptor inheritance or descriptor passing;
-// that accessor-change behavior is deferred to a later R1b checkpoint. PID
-// reuse was not reproduced here. The tests cover real exec, real exit, and two
-// distinct peers on distinct PTYs; no guarantee is claimed for a reused PID or
-// for an accessor change caused by passing a descriptor.
+// The component tests cover a controlled duplicate of the accepted server
+// socket, including revalidation after the original wrapper closes, and a
+// client descriptor inherited by an owned child. In that controlled inheritance
+// test, after the child writes, the token names that current accessor: the old
+// observation is rejected and a new observation describes the child. The tests
+// also cover real exec, real exit, and distinct peers on distinct PTYs.
+//
+// SCM_RIGHTS descriptor passing and actual PID reuse remain untested. These
+// controlled cases do not establish the original connector, executable contents
+// or authenticity, or any lease or authorization guarantee.
 package terminalpeer
