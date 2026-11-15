@@ -24,7 +24,7 @@ class RevisionAuditTests(unittest.TestCase):
             {"action": "desktop.unlock"},
             {"action": "item.edit.password", "result": "succeeded", "item_id": self.ITEM, "base_revision": self.OLD},
             {"action": "item.list"},
-            {"action": "item.run.password", "result": "conflict", "item_id": self.ITEM, "base_revision": self.OLD},
+            {"action": "item.run.password", "result": "conflict", "item_id": self.ITEM, "base_revision": self.NEW},
             {"action": "item.run.password", "result": "intent", "item_id": self.ITEM, "base_revision": self.NEW},
         ]
 
@@ -32,6 +32,28 @@ class RevisionAuditTests(unittest.TestCase):
         flags = acceptance.revision_audit_flags([], self.events(), self.ITEM, self.OLD, self.NEW)
         self.assertEqual(flags, {"same_item_edit": True, "old_revision_conflict": True, "new_revision_intent": True})
         self.assertTrue(all(value not in json.dumps(flags) for value in (self.ITEM, self.OLD, self.NEW)))
+
+    def test_current_revision_conflict_extends_the_complete_chronological_prefix(self):
+        before = [
+            {"sequence": 1, "action": "vault.create", "result": "succeeded"},
+            {"sequence": 2, "action": "audit.list", "result": "succeeded"},
+        ]
+        effects = self.events()
+        for sequence, event in enumerate(effects, start=3):
+            event["sequence"] = sequence
+        flags = acceptance.revision_audit_flags(before, before + effects, self.ITEM, self.OLD, self.NEW)
+        self.assertEqual(flags, {"same_item_edit": True, "old_revision_conflict": True, "new_revision_intent": True})
+        changed_prefix = copy.deepcopy(before + effects)
+        changed_prefix[0]["result"] = "conflict"
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.revision_audit_flags(before, changed_prefix, self.ITEM, self.OLD, self.NEW)
+
+    def test_conflict_cannot_report_the_rejected_old_selector_as_its_current_base(self):
+        events = self.events()
+        events[3]["base_revision"] = self.OLD
+        with self.assertRaises(acceptance.AcceptanceFailure) as error:
+            acceptance.revision_audit_flags([], events, self.ITEM, self.OLD, self.NEW)
+        self.assertEqual(error.exception.code, "revision-audit-mismatch")
 
     def test_wrong_target_revision_result_order_or_extra_effect_is_refused(self):
         for index, key, value in ((1, "item_id", "d" * 32), (1, "base_revision", self.NEW),
