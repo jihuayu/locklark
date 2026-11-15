@@ -2,6 +2,7 @@ package terminalpeer
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"os"
@@ -78,12 +79,21 @@ type observed struct {
 	ttyDev     uint32
 }
 
-// Observation is an opaque, per-connection observational snapshot. It is not
-// an authorization token, an image identity, a lease, or reusable approval
-// evidence. The fields are unexported; formatting it yields a fixed name.
-type Observation struct {
+// observationState holds the bounded observation behind an opaque handle.
+// Keeping it behind one pointer means fmt reflection cannot walk into token,
+// socket, PID, pidversion, path, start, or TTY fields if a special fmt path
+// bypasses Formatter.
+type observationState struct {
 	socket   socketID
 	observed observed
+}
+
+// Observation is an opaque, per-connection observational snapshot. It is not
+// an authorization token, an image identity, a lease, or reusable approval
+// evidence. Its only reflectable field is the opaque state handle; formatting
+// yields a fixed name for every Formatter-dispatched verb.
+type Observation struct {
+	state *observationState
 }
 
 // Observe captures one observational snapshot of an already-connected Unix
@@ -142,7 +152,7 @@ func Observe(conn *net.UnixConn) (Observation, error) {
 	if err := validateObserved(raw, uint32(os.Geteuid())); err != nil {
 		return Observation{}, err
 	}
-	return Observation{socket: before, observed: raw}, nil
+	return Observation{state: &observationState{socket: before, observed: raw}}, nil
 }
 
 // Revalidate re-reads the same socket and rejects any observed change to the
@@ -155,14 +165,14 @@ func Observe(conn *net.UnixConn) (Observation, error) {
 // original connector, image authenticity, or a lease. It must not be used to
 // create or extend authority.
 func (o Observation) Revalidate(conn *net.UnixConn) error {
-	if conn == nil {
+	if conn == nil || o.state == nil {
 		return ErrUnavailable
 	}
 	before, err := socketIdentity(conn)
 	if err != nil {
 		return ErrUnavailable
 	}
-	if before != o.socket {
+	if before != o.state.socket {
 		return ErrMismatch
 	}
 	first, err := readPeerSample(conn)
@@ -181,7 +191,7 @@ func (o Observation) Revalidate(conn *net.UnixConn) error {
 	if err != nil {
 		return ErrUnavailable
 	}
-	if after != o.socket {
+	if after != o.state.socket {
 		return ErrMismatch
 	}
 	if first != second {
@@ -200,7 +210,7 @@ func (o Observation) Revalidate(conn *net.UnixConn) error {
 		startUsec:  cred.startUsec,
 		ttyDev:     cred.ttyDev,
 	}
-	if !sameObserved(raw, o.observed) {
+	if !sameObserved(raw, o.state.observed) {
 		return ErrMismatch
 	}
 	if raw.euid != uint32(os.Geteuid()) {
@@ -209,12 +219,34 @@ func (o Observation) Revalidate(conn *net.UnixConn) error {
 	return nil
 }
 
+// observationText is the only text Formatter emits for an Observation.
+const observationText = "terminalpeer.Observation"
+
 // String keeps an accidental formatting of an Observation from disclosing the
 // token, PID, pidversion, start pair, TTY device, or path.
-func (Observation) String() string { return "terminalpeer.Observation" }
+func (Observation) String() string { return observationText }
 
 // GoString keeps %#v formatting on the same fixed text.
-func (Observation) GoString() string { return "terminalpeer.Observation" }
+func (Observation) GoString() string { return observationText }
+
+// Format makes every verb that fmt dispatches to Formatter opaque. It writes
+// only observationText and deliberately ignores the verb, flags, width, and
+// precision, so numeric, character, quoted, flag, width, precision, and
+// invalid verbs cannot recurse into Observation fields.
+//
+// fmt handles %T and %p before Formatter. %T emits only the type name; %p on
+// a pointer emits only its address. Neither path reaches the state fields, but
+// this package does not claim those two special verbs are fixed bytes. %p on a
+// non-pointer value falls through fmt's bad-verb path to %v, which reaches
+// Format and therefore remains opaque.
+//
+// fmt also handles %w specially when the argument is not an error: its
+// bad-verb path bypasses Formatter and may render the opaque state handle. It
+// still cannot reach the token, socket, PID, pidversion, path, start, or TTY
+// fields behind that handle, so this package does not claim %w is fixed bytes.
+func (Observation) Format(state fmt.State, _ rune) {
+	_, _ = state.Write([]byte(observationText))
+}
 
 // sameObserved compares every bounded observation field exactly.
 func sameObserved(a, b observed) bool {

@@ -39,19 +39,19 @@ func TestDarwinPeerSnapshotOwnedPTY(t *testing.T) {
 		if err != nil {
 			t.Fatalf("baseline observation failed: %v", err)
 		}
-		if observation.observed.pid != int32(peer.cmd.Process.Pid) {
+		if observation.state.observed.pid != int32(peer.cmd.Process.Pid) {
 			t.Fatal("baseline PID did not match the owned child")
 		}
-		if observation.observed.pidVersion <= 0 {
+		if observation.state.observed.pidVersion <= 0 {
 			t.Fatal("baseline token generation missing")
 		}
-		if observation.observed.euid != uint32(os.Geteuid()) {
+		if observation.state.observed.euid != uint32(os.Geteuid()) {
 			t.Fatal("baseline credential did not match this user")
 		}
-		if observation.observed.ttyDev != peer.ttyDev {
+		if observation.state.observed.ttyDev != peer.ttyDev {
 			t.Fatal("baseline controlling terminal did not match the owned PTY")
 		}
-		if !sameFilePath(observation.observed.path, peer.executable) {
+		if !sameFilePath(observation.state.observed.path, peer.executable) {
 			t.Fatal("baseline token-bound path did not name the running child")
 		}
 		if err := observation.Revalidate(peer.conn); err != nil {
@@ -66,26 +66,26 @@ func TestDarwinPeerSnapshotOwnedPTY(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pre-exec observation failed: %v", err)
 		}
-		oldToken := observation.observed.token
+		oldToken := observation.state.observed.token
 		peer.signal(t)
 		changed := waitTokenChange(t, peer.conn, oldToken)
-		if changed.pid != observation.observed.pid {
+		if changed.pid != observation.state.observed.pid {
 			t.Fatal("real exec changed the peer PID")
 		}
-		if changed.pidVersion == observation.observed.pidVersion {
+		if changed.pidVersion == observation.state.observed.pidVersion {
 			t.Fatal("real exec did not change the token generation")
 		}
-		if changed.path == observation.observed.path {
+		if changed.path == observation.state.observed.path {
 			t.Fatal("real exec did not change the token-bound path")
 		}
 		credential, err := readPeerCredential(changed.pid)
 		if err != nil {
 			t.Fatal("post-exec credential unavailable")
 		}
-		if credential.startSec != observation.observed.startSec || credential.startUsec != observation.observed.startUsec {
+		if credential.startSec != observation.state.observed.startSec || credential.startUsec != observation.state.observed.startUsec {
 			t.Fatal("real exec changed the process start pair")
 		}
-		if credential.ttyDev != observation.observed.ttyDev {
+		if credential.ttyDev != observation.state.observed.ttyDev {
 			t.Fatal("real exec changed the controlling terminal")
 		}
 		if err := observation.Revalidate(peer.conn); !errors.Is(err, ErrMismatch) {
@@ -119,13 +119,13 @@ func TestDarwinPeerSnapshotOwnedPTY(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second peer observation failed: %v", err)
 		}
-		if firstObservation.observed.pid == secondObservation.observed.pid {
+		if firstObservation.state.observed.pid == secondObservation.state.observed.pid {
 			t.Fatal("different peers shared a PID")
 		}
-		if firstObservation.observed.ttyDev == secondObservation.observed.ttyDev {
+		if firstObservation.state.observed.ttyDev == secondObservation.state.observed.ttyDev {
 			t.Fatal("different peers shared a controlling terminal")
 		}
-		if firstObservation.observed.token == secondObservation.observed.token {
+		if firstObservation.state.observed.token == secondObservation.state.observed.token {
 			t.Fatal("different peers shared an audit token")
 		}
 		if err := firstObservation.Revalidate(second.conn); !errors.Is(err, ErrMismatch) {

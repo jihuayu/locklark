@@ -76,7 +76,7 @@ func TestObserveMissingArgumentIsUnavailable(t *testing.T) {
 }
 
 func TestObservationFormattingIsFixed(t *testing.T) {
-	observation := Observation{
+	observation := Observation{state: &observationState{
 		socket: socketID{dev: 111, ino: 222},
 		observed: observed{
 			token:      peerToken{333, 444, 555, 666, 777, 888, 999, 1000},
@@ -88,7 +88,7 @@ func TestObservationFormattingIsFixed(t *testing.T) {
 			startUsec:  1357,
 			ttyDev:     0x10000001,
 		},
-	}
+	}}
 	for _, format := range []string{"%v", "%+v", "%#v"} {
 		got := fmt.Sprintf(format, observation)
 		if got != "terminalpeer.Observation" {
