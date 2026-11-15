@@ -162,7 +162,11 @@ func TestDarwinPeerSnapshotHelper(t *testing.T) {
 
 	switch mode {
 	case "hold":
-		_, _ = io.Copy(io.Discard, conn)
+		// io.Copy returns nil on normal EOF. A read error must not be
+		// mistaken for evidence that every server descriptor was closed.
+		if _, err := io.Copy(io.Discard, conn); err != nil {
+			os.Exit(10)
+		}
 	case "exec":
 		var signal [1]byte
 		if _, err := io.ReadFull(conn, signal[:]); err != nil {

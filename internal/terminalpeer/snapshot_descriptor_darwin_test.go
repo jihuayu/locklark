@@ -81,6 +81,9 @@ func TestDarwinPeerServerDuplicate(t *testing.T) {
 		t.Fatal("final server duplicate did not close")
 	}
 	peer.wait(t, descriptorStepLimit)
+	if peer.cmd.ProcessState == nil || !peer.cmd.ProcessState.Success() {
+		t.Fatal("duplicate peer did not exit successfully after EOF")
+	}
 	t.Log("terminal_peer_descriptor server_duplicate=true original_closed=true different_socket_refused=true eof_reaped=true")
 }
 
