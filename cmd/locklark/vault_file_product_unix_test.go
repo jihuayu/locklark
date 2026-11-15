@@ -169,7 +169,7 @@ func newResumeProductCase(t *testing.T, material resumeProductMaterial, prepare 
 
 func newBaselineProductCase(t *testing.T, material resumeProductMaterial) resumeProductCase {
 	t.Helper()
-	root := t.TempDir()
+	root := newProductPrivateRoot(t, t.TempDir())
 	cfg := vaultFileResumeConfig{Version: 1, BackendRoot: filepath.Join(root, "backend"), Name: "owned.locklark",
 		Journal: filepath.Join(root, "journal.db"), Checkpoint: &material.config}
 	configPath := filepath.Join(root, "operator.json")
@@ -201,6 +201,52 @@ func newBaselineProductCase(t *testing.T, material resumeProductMaterial) resume
 		t.Fatal("FIXTURE_JOURNAL_CLOSE_FAILED")
 	}
 	return resumeProductCase{root: root, configPath: configPath, cfg: cfg, initial: read}
+}
+
+func newProductPrivateRoot(t *testing.T, parent string) string {
+	t.Helper()
+	// TempDir's returned directory inherits the process umask. Own a fresh
+	// private child for the journal without changing the enclosing directory.
+	root := filepath.Join(parent, "private")
+	if os.Mkdir(root, 0700) != nil {
+		t.Fatal("FIXTURE_PRIVATE_ROOT_CREATE_FAILED")
+	}
+	return root
+}
+
+func TestVaultFileProductFixturePrivateParent(t *testing.T) {
+	outer := t.TempDir()
+	if os.Chmod(outer, 0755) != nil {
+		t.Fatal("FIXTURE_SHARED_OUTER_CREATE_FAILED")
+	}
+	if journal, err := vaultfilejournal.Open(filepath.Join(outer, "shared.db")); !errors.Is(err, vaultfilejournal.ErrInvalid) {
+		if journal != nil {
+			journal.Close()
+		}
+		t.Fatal("FIXTURE_SHARED_OUTER_NOT_REJECTED")
+	}
+	root := newProductPrivateRoot(t, outer)
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatal("FIXTURE_ROOT_NOT_PRIVATE")
+	}
+	material := newResumeProductMaterial(t)
+	journal, err := vaultfilejournal.Open(filepath.Join(root, "journal.db"))
+	if err != nil {
+		t.Fatal("FIXTURE_PRIVATE_JOURNAL_OPEN_FAILED")
+	}
+	state := vaultfilejournal.State{BaseBytes: material.r, WorkingBytes: material.r, RemoteRevision: "fixture-revision"}
+	if journal.InitializeEmptyState(state) != nil {
+		journal.Close()
+		t.Fatal("FIXTURE_PRIVATE_JOURNAL_STATE_FAILED")
+	}
+	if journal.Close() != nil {
+		t.Fatal("FIXTURE_PRIVATE_JOURNAL_CLOSE_FAILED")
+	}
+	info, err = os.Lstat(outer)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0755 {
+		t.Fatal("FIXTURE_SHARED_OUTER_CHANGED")
+	}
 }
 
 func invokeResumeProduct(t *testing.T, product, config, want string) {
