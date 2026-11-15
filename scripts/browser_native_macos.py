@@ -1330,16 +1330,17 @@ class QuartzApi:
 
         The existing controls snapshot is proved locked first, before any AX
         binding or label read. Only then is the exact already-bound AX window
-        walked and its AXDescription values compared internally. This method
-        NEVER raises: a false/incomplete proof, an unavailable binding, any
-        query/shape error and any traversal overrun all return the same
-        all-false object, so this diagnostic can never fail the caller.
+        walked and its AXDescription values compared internally. Every ordinary
+        diagnostic failure returns the same all-false object, so this optional
+        diagnostic never fails the caller. The exact ``process-untrusted``
+        generation refusal is terminal and propagates instead of becoming
+        all-false success.
 
         The FIRST failed query carries only the fixed diagnostic triple of our
         own ``a11y-query`` refusal. It is delivered ONLY through the explicit
-        per-call ``call`` result (``record``), never raised and never kept in
-        module or instance state, so no diagnostic outlives the call that
-        produced it. Without a ``call`` the failure is simply all-false.
+        per-call ``call`` result (``record``), never kept in module or instance
+        state, so no diagnostic outlives the call that produced it. Without a
+        ``call`` the ordinary failure is simply all-false.
         """
         status, diagnostic = self._status_walk(window, controls)
         if diagnostic is not None and call is not None:
@@ -1355,11 +1356,12 @@ class QuartzApi:
     def _status_walk(self, window, controls):
         """``(fixed four-boolean status, sanitized diagnostic or None)``.
 
-        Never raises. Every failure of the proof, binding, walk or traversal is
+        Every ordinary failure of the proof, binding, walk or traversal is
         converted to the all-false status; the diagnostic is the already
         allowlisted ``{operation, attribute, error}`` of the FIRST status-walk
         query refusal (None for any other error), handed back for exactly this
-        call and never raised or stored.
+        call. The exact ``process-untrusted`` generation refusal is terminal
+        and is re-raised rather than converted to all-false success.
         """
         refusal = _NO_FAILURE
         try:
@@ -1368,6 +1370,8 @@ class QuartzApi:
             target = self.window_element(window)
             found = self._status_matches(target)
         except Exception as failure:
+            if type(failure) is contract.ContractError and failure.code == "process-untrusted":
+                raise
             refusal = failure
         if refusal is not _NO_FAILURE:
             try:
@@ -2403,24 +2407,28 @@ class MacAdapter:
         return controls
 
     def read_status(self, window, controls, call=None):
-        """Optional macOS-only inspect diagnostic; always exactly four bools.
+        """Optional macOS-only inspect diagnostic; exactly four bools on failure.
 
-        The proof, binding and AX reads belong to the platform API. This reader
-        NEVER raises: any missing or malformed hook answer, and any exception
-        a hook still raises, is converted to the fixed all-false object, so the
-        optional diagnostic never changes the existing controls snapshot.
+        The proof, binding and AX reads belong to the platform API. Any missing
+        or malformed hook answer, and any ordinary exception a hook still
+        raises, is converted to the fixed all-false object, so the optional
+        diagnostic never changes the existing controls snapshot. The exact
+        ``process-untrusted`` generation refusal is terminal and re-raised.
 
         The platform hook receives the explicit per-call ``call`` result only
         when its signature accepts a third argument (``QuartzApi`` does, and
         records its sanitized refusal there); a two-argument hook is called
-        exactly as before and still never raises. A hook that raises its own
-        sanitized ``a11y-query`` refusal instead of recording it has that
-        refusal placed in this call's ``call``, never re-raised.
+        exactly as before and still returns all-false on ordinary failures. A
+        hook that raises its own sanitized ``a11y-query`` refusal instead of
+        recording it has that refusal placed in this call's ``call``, never
+        re-raised.
         """
         for name in ("read_status", "status", "inspect_status"):
             try:
                 reader = getattr(self.api, name, None)
-            except Exception:
+            except Exception as error:
+                if type(error) is contract.ContractError and error.code == "process-untrusted":
+                    raise
                 continue
             if not callable(reader):
                 continue
@@ -2430,6 +2438,8 @@ class MacAdapter:
                 else:
                     result = reader(window, controls)
             except Exception as error:
+                if type(error) is contract.ContractError and error.code == "process-untrusted":
+                    raise
                 diagnostic = diagnostic_of(error)
                 report = (getattr(call, "report", None)
                           or getattr(call, "record", None))

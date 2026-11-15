@@ -1228,14 +1228,21 @@ def empty_status():
     return {field: False for field in STATUS_FIELDS}
 
 
+def _process_untrusted(error):
+    """True only for the exact terminal generation refusal."""
+    return type(error) is ContractError and error.code == "process-untrusted"
+
+
 def status_snapshot(adapter, window, controls):
     """Optional status snapshot and its fixed AX diagnostic.
 
     Returns ``(status, diagnostic)``: ``status`` is None when the adapter has
     no status hook, else exactly the four built-in booleans; ``diagnostic`` is
     the allowlisted ``ax_diagnostic`` of the FIRST failure or None. The
-    diagnostic is only carried, never interpreted, and a failure still yields
-    the fixed all-false status without failing the surfaces snapshot.
+    diagnostic is only carried, never interpreted, and any other failure still
+    yields the fixed all-false status without failing the surfaces snapshot.
+    The exact ``process-untrusted`` generation refusal is never converted:
+    it propagates as a terminal request failure.
 
     The hook receives an explicit per-call ``_AxCall`` result so a sanitized
     refusal is reported for exactly THIS call; the shipped hooks record it and
@@ -1245,7 +1252,9 @@ def status_snapshot(adapter, window, controls):
     """
     try:
         reader = getattr(adapter, "read_status", None)
-    except Exception:
+    except Exception as error:
+        if _process_untrusted(error):
+            raise
         return empty_status(), None
     if not callable(reader):
         return None, None
@@ -1260,8 +1269,12 @@ def status_snapshot(adapter, window, controls):
         try:
             value = reader(window, controls)
         except Exception as error:
+            if _process_untrusted(error):
+                raise
             return empty_status(), call.failed(error)
     except Exception as error:
+        if _process_untrusted(error):
+            raise
         return empty_status(), call.failed(error)
     return call.accept(value), call.recorded()
 

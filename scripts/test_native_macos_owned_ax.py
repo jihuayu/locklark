@@ -1775,5 +1775,128 @@ class OwnedGenerationGuardTests(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class StatusGenerationPropagationTests(unittest.TestCase):
+    """Optional status must not swallow the terminal generation refusal."""
+
+    def controls(self):
+        value = {label: {"present": True, "showing": True, "enabled": True}
+                 for label in macos.LOCKED_CONTROLS}
+        value[macos.LOCKED_VIEW_ABSENT] = {
+            "present": False, "showing": False, "enabled": False}
+        return value
+
+    def locked_window(self):
+        window, first = owned_window()
+        controls = [first]
+        for label in macos.LOCKED_CONTROLS:
+            if label == LABEL:
+                continue
+            node = Node(AXRole="AXButton", AXDescription=label, AXEnabled=True,
+                        AXHidden=False, AXPosition=Point(CONTROL_FRAME),
+                        AXSize=Size(CONTROL_FRAME), _pid=OWNED_PID)
+            node.attributes["AXParent"] = window
+            controls.append(node)
+        window.attributes["AXChildren"] = controls
+        return window
+
+    def setup(self, locked=False):
+        window = self.locked_window() if locked else owned_window()[0]
+        frameworks = FakeFrameworks([window], focused=window, front_pid=OWNED_PID)
+        api = api_for(frameworks)
+        api.scope_to_owned_pid(OWNED_PID)
+        generation = api.process_generation(OWNED_PID)
+        api.set_owned_generation(generation)
+        windows, _ = api.owned_discovery(TITLE)
+        return api, frameworks, windows[0], generation
+
+    def status_hook(self, api, frameworks, mutation):
+        active = []
+        original_walk = api._status_walk
+
+        def walk(window, controls):
+            active.append(1)
+            try:
+                return original_walk(window, controls)
+            finally:
+                active.pop()
+
+        api._status_walk = walk
+        original_copy = frameworks.AXUIElementCopyAttributeValue
+
+        def copy(element, name, out):
+            if active and name == "AXRole":
+                mutation(api, frameworks)
+            return original_copy(element, name, out)
+
+        frameworks.AXUIElementCopyAttributeValue = copy
+
+    @staticmethod
+    def stale(api, frameworks):
+        api.libproc.start_usec += 1
+
+    @staticmethod
+    def ordinary_failure(api, frameworks):
+        raise OSError("synthetic status query failure")
+
+    def test_status_propagates_process_untrusted(self):
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.stale)
+        with self.assertRaises(contract.ContractError) as error:
+            api.status(window, self.controls())
+        self.assertEqual(error.exception.code, "process-untrusted")
+
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.stale)
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            adapter.read_status(window, self.controls())
+        self.assertEqual(error.exception.code, "process-untrusted")
+
+    def test_ordinary_status_failure_stays_all_false(self):
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        status = api.status(window, self.controls())
+        self.assertEqual(status, macos._empty_status())
+
+        api, frameworks, window, _ = self.setup()
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        adapter = macos.MacAdapter(api=api)
+        self.assertEqual(adapter.read_status(window, self.controls()),
+                         macos._empty_status())
+
+    def inspect_request(self, generation):
+        return json.dumps({
+            "title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+            "owned_generation": generation, "actions": [], "inspect": True,
+        }).encode()
+
+    def test_inspect_status_change_fails_request_without_success(self):
+        api, frameworks, window, generation = self.setup(locked=True)
+        self.status_hook(api, frameworks, self.stale)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(
+            macos.MacAdapter(api=api), "macos",
+            stdin=io.BytesIO(self.inspect_request(generation)),
+            stdout=stdout, stderr=stderr)
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("code=process-untrusted", stderr.getvalue())
+        self.assertIn("action=snapshot", stderr.getvalue())
+
+    def test_inspect_ordinary_status_failure_is_all_false_success(self):
+        api, frameworks, window, generation = self.setup(locked=True)
+        self.status_hook(api, frameworks, self.ordinary_failure)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(
+            macos.MacAdapter(api=api), "macos",
+            stdin=io.BytesIO(self.inspect_request(generation)),
+            stdout=stdout, stderr=stderr)
+        self.assertEqual(status, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["status"], macos._empty_status())
+
+
+
 if __name__ == "__main__":
     unittest.main()
