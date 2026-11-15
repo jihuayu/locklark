@@ -194,7 +194,13 @@ jobs:
             python scripts/personal_test_partition.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            go test -count=1 ./...
+            $vaultFileProduct = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark'
+            if (-not [System.IO.Path]::IsPathFullyQualified($vaultFileProduct) -or -not (Test-Path -LiteralPath $vaultFileProduct -PathType Leaf)) { throw 'VAULTFILE_PRODUCT_UNAVAILABLE' }
+            $env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct
+            go test -count=1 -run '^TestVaultFileResumeProductMinimum$' ./cmd/locklark
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go test -count=1 -skip '^TestVaultFileResumeProductMinimum$' ./...
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - if: runner.os == 'Linux'
         env:

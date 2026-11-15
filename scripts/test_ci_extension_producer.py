@@ -2,10 +2,13 @@
 """Dependency and aggregate contract for the extension-producer workflow."""
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -138,6 +141,110 @@ def ci_required_shell() -> str:
         elif not line.strip() and shell:
             shell.append("")
     return "\n".join(shell)
+
+
+class VaultFileProductCIContract(unittest.TestCase):
+    STEP = "Test Go packages and native OpenSSH transport"
+    MINIMUM = "go test -count=1 -run '^TestVaultFileResumeProductMinimum$' ./cmd/locklark"
+    REMAINING = "go test -count=1 -skip '^TestVaultFileResumeProductMinimum$' ./..."
+    EXIT_CHECK = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+
+    @classmethod
+    def linux_commands(cls) -> list[str]:
+        commands = step_commands("go", cls.STEP)
+        split = commands.index("} else {")
+        if commands[-1] != "}" or commands[split - 3:split] != [
+            "if ($IsWindows) {",
+            "  python scripts/personal_test_partition.py",
+            "  " + cls.EXIT_CHECK,
+        ]:
+            raise AssertionError("Windows partition or Linux branch changed")
+        return [line[2:] for line in commands[split + 1:-1]]
+
+    def test_linux_reuses_one_product_and_partitions_minimum_before_remaining(self):
+        commands = self.linux_commands()
+        self.assertEqual(commands, [
+            "$vaultFileProduct = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark'",
+            "if (-not [System.IO.Path]::IsPathFullyQualified($vaultFileProduct) -or -not "
+            "(Test-Path -LiteralPath $vaultFileProduct -PathType Leaf)) "
+            "{ throw 'VAULTFILE_PRODUCT_UNAVAILABLE' }",
+            "$env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct",
+            self.MINIMUM, self.EXIT_CHECK, self.REMAINING, self.EXIT_CHECK,
+        ])
+        self.assertEqual(text().count("LOCKLARK_TEST_VAULTFILE_PRODUCT"), 1)
+        self.assertNotIn("go build", "\n".join(commands))
+        self.assertEqual(block("linux-build").count(
+            'go build -trimpath -o "$bin/locklark" ./cmd/locklark'
+        ), 1)
+        self.assertIn("if-no-files-found: error", block("linux-build"))
+        download = step_text("go", "Download Linux primary binaries")
+        self.assertIn("if: runner.os == 'Linux'", download)
+        self.assertIn("name: locklark-linux-bin", download)
+        self.assertIn("path: ${{ runner.temp }}/locklark-bin", download)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh dispatch mock is unavailable")
+    def test_actual_linux_commands_with_strict_mock_only_dispatch_and_propagate_exit(self):
+        # This fixture cannot execute a product or build anything. It checks
+        # only the extracted PowerShell's scheduling, argv, env and exit codes.
+        expected = [
+            ["test", "-count=1", "-run", "^TestVaultFileResumeProductMinimum$", "./cmd/locklark"],
+            ["test", "-count=1", "-skip", "^TestVaultFileResumeProductMinimum$", "./..."],
+        ]
+        for kind, fail_at, code, calls in (
+            ("file", -1, 0, 2), ("file", 0, 7, 1), ("file", 1, 11, 2),
+            ("missing", -1, None, 0), ("directory", -1, None, 0),
+            ("relative", -1, None, 0),
+        ):
+            with self.subTest(kind=kind, fail_at=fail_at), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                runner = root / "runner"
+                product = runner / "locklark-bin" / "locklark"
+                product.parent.mkdir(parents=True)
+                if kind == "directory":
+                    product.mkdir()
+                elif kind != "missing":
+                    product.write_text("not an executable product", encoding="utf-8")
+                    product.chmod(0o600)
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                log = root / "go-argv.jsonl"
+                fake_go = fake_bin / "go"
+                fake_go.write_text("#!" + sys.executable + "\n" + (
+                    "import json, os, pathlib, sys\n"
+                    "log = pathlib.Path(os.environ['VAULTFILE_DISPATCH_LOG'])\n"
+                    "seen = log.read_text().splitlines() if log.exists() else []\n"
+                    "expected = json.loads(os.environ['VAULTFILE_DISPATCH_EXPECTED'])\n"
+                    "index = len(seen)\n"
+                    "if index >= len(expected) or sys.argv[1:] != expected[index]: sys.exit(85)\n"
+                    "if os.environ.get('LOCKLARK_TEST_VAULTFILE_PRODUCT') != os.environ['VAULTFILE_DISPATCH_PRODUCT']: sys.exit(86)\n"
+                    "with log.open('a') as output: output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                    "sys.exit(int(os.environ['VAULTFILE_DISPATCH_EXIT']) if index == int(os.environ['VAULTFILE_DISPATCH_FAIL_AT']) else 0)\n"
+                ), encoding="utf-8")
+                fake_go.chmod(0o755)
+                script = root / "dispatch.ps1"
+                script.write_text(
+                    "$ErrorActionPreference = 'Stop'\n" + "\n".join(self.linux_commands()) + "\n",
+                    encoding="utf-8",
+                )
+                env = {**os.environ, "RUNNER_TEMP": "runner" if kind == "relative" else str(runner),
+                       "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                       "VAULTFILE_DISPATCH_LOG": str(log),
+                       "VAULTFILE_DISPATCH_EXPECTED": json.dumps(expected),
+                       "VAULTFILE_DISPATCH_PRODUCT": str(product),
+                       "VAULTFILE_DISPATCH_FAIL_AT": str(fail_at),
+                       "VAULTFILE_DISPATCH_EXIT": str(code or 0)}
+                env.pop("LOCKLARK_TEST_VAULTFILE_PRODUCT", None)
+                result = subprocess.run(
+                    [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                    env=env, cwd=root, text=True, capture_output=True, check=False,
+                )
+                if code is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("VAULTFILE_PRODUCT_UNAVAILABLE", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, code, result.stderr)
+                actual = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+                self.assertEqual(actual, expected[:calls])
 
 
 class ExtensionProducerWorkflowContract(unittest.TestCase):
