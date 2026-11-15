@@ -96,6 +96,13 @@
     "reply-present",
     "adopt-refused",
     "adopted",
+    "reply-empty",
+    "reply-inactive",
+    "reply-connection-changed",
+    "reply-action-changed",
+    "reply-superseded",
+    "reply-transport-failed",
+    "reply-render-failed",
   ]);
   function detailFillDiagnosticEnabled() {
     try {
@@ -931,24 +938,43 @@
       list.append(container);
     }
   }
-  async function send(message, generation = actionGeneration) {
+  async function send(message, generation = actionGeneration, diagnostic = null) {
     // A route page only ever sends route-claim/route-copy-field/route-close.
     if (routeRequested) return null;
+    // Only the explicitly observed checkout request owns this log. State polls
+    // cannot write it, and no response, error or counter value is recorded.
+    const checkoutDiagnostic =
+      diagnostic && message?.type === "checkout-frames" ? diagnostic : null;
     const sequence = ++requestSequence;
     const epoch = connectionEpoch;
+    let replyReceived = false;
     try {
       const state = await api.runtime.sendMessage(message);
+      replyReceived = true;
       if (
         !state ||
         popupInactive || epoch !== connectionEpoch ||
         generation !== actionGeneration ||
         sequence <= renderedSequence
-      )
+      ) {
+        markDetailFillDiagnostic(
+          checkoutDiagnostic,
+          !state ? "reply-empty" :
+            popupInactive ? "reply-inactive" :
+              epoch !== connectionEpoch ? "reply-connection-changed" :
+                generation !== actionGeneration ? "reply-action-changed" :
+                  "reply-superseded",
+        );
         return null;
+      }
       renderedSequence = sequence;
       render(state, message?.type);
       return state;
     } catch {
+      markDetailFillDiagnostic(
+        checkoutDiagnostic,
+        replyReceived ? "reply-render-failed" : "reply-transport-failed",
+      );
       if (popupInactive || epoch !== connectionEpoch || generation !== actionGeneration || sequence <= renderedSequence)
         return null;
       renderedSequence = sequence;
@@ -2407,6 +2433,7 @@
         userGesture,
       },
       generation,
+      diagnostic,
     );
     if (generation !== actionGeneration || popupInactive) {
       markDetailFillDiagnostic(diagnostic, "early-guard");

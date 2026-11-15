@@ -3456,7 +3456,16 @@ _CHECKOUT_PICKER_DIAGNOSTIC_PHASES = (
     "reply-present",
     "adopt-refused",
     "adopted",
+    "reply-empty",
+    "reply-inactive",
+    "reply-connection-changed",
+    "reply-action-changed",
+    "reply-superseded",
+    "reply-transport-failed",
+    "reply-render-failed",
 )
+# Preserve the pre-existing eight-record capacity as the enum set grows.
+_CHECKOUT_PICKER_DIAGNOSTIC_MAX_RECORDS = 8
 _PICKER_DIAGNOSTIC_MISSING = object()
 _PICKER_DIAGNOSTIC_INVALID = object()
 
@@ -3480,7 +3489,7 @@ def _checkout_picker_diagnostic(
     if value == "unknown":
         return "unknown"
     if not isinstance(value, list) or not (
-        1 <= len(value) <= len(_CHECKOUT_PICKER_DIAGNOSTIC_PHASES)
+        1 <= len(value) <= _CHECKOUT_PICKER_DIAGNOSTIC_MAX_RECORDS
     ):
         return "unknown"
     phases = set(_CHECKOUT_PICKER_DIAGNOSTIC_PHASES)
