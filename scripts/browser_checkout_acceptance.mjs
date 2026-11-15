@@ -567,13 +567,25 @@ export const DETAIL_FILL_DIAGNOSTIC_PHASES = Object.freeze([
   "reply-present",
   "adopt-refused",
   "adopted",
+  "reply-empty",
+  "reply-inactive",
+  "reply-connection-changed",
+  "reply-action-changed",
+  "reply-superseded",
+  "reply-transport-failed",
+  "reply-render-failed",
 ]);
+// Keep the original eight-record capacity independent of the enum vocabulary.
+const DETAIL_FILL_DIAGNOSTIC_MAX_RECORDS = 8;
 
 // The harness reads only this fixed test-only record. Entry carries the two
 // booleans; every async record carries only its phase. Unknown keys, phases or
 // types are discarded rather than echoed.
 export function sanitizeDetailFillDiagnostic(value) {
-  if (!Array.isArray(value) || value.length === 0) return null;
+  if (
+    !Array.isArray(value) || value.length === 0 ||
+    value.length > DETAIL_FILL_DIAGNOSTIC_MAX_RECORDS
+  ) return null;
   const phases = new Set(DETAIL_FILL_DIAGNOSTIC_PHASES);
   const seen = new Set();
   const result = [];

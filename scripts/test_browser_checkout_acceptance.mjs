@@ -2915,6 +2915,13 @@ test("detail-fill diagnostic contract rejects unknown fields and phases", () => 
     "reply-present",
     "adopt-refused",
     "adopted",
+    "reply-empty",
+    "reply-inactive",
+    "reply-connection-changed",
+    "reply-action-changed",
+    "reply-superseded",
+    "reply-transport-failed",
+    "reply-render-failed",
   ]);
   const valid = [
     { phase: "handler-entry", isTrusted: true, userActivation: false },
@@ -2923,6 +2930,20 @@ test("detail-fill diagnostic contract rejects unknown fields and phases", () => 
     { phase: "adopted" },
   ];
   assert.deepEqual(sanitizeDetailFillDiagnostic(valid), valid);
+  for (const phase of DETAIL_FILL_DIAGNOSTIC_PHASES.slice(8)) {
+    const records = [valid[0], { phase: "request-sent" }, { phase },
+      { phase: "reply-null" }, { phase: "adopt-refused" }];
+    assert.deepEqual(sanitizeDetailFillDiagnostic(records), records);
+    assert.equal(sanitizeDetailFillDiagnostic([
+      valid[0], { phase, requestId: "private", epoch: "private", payload: "private" },
+    ]), null);
+  }
+  const originalCapacity = [valid[0],
+    ...DETAIL_FILL_DIAGNOSTIC_PHASES.slice(1, 8).map((phase) => ({ phase }))];
+  assert.deepEqual(sanitizeDetailFillDiagnostic(originalCapacity), originalCapacity);
+  assert.equal(sanitizeDetailFillDiagnostic([
+    ...originalCapacity, { phase: "reply-empty" },
+  ]), null);
   for (const invalid of [
     null,
     [],

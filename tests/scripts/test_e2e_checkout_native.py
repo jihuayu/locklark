@@ -1055,6 +1055,45 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertNotIn("pickerDiagnostic", record)
         self.assertEqual(record["kind"], "acceptance-failure")
 
+    def test_picker_send_phases_keep_fixed_projection_and_original_capacity(self):
+        phases = (
+            "reply-empty", "reply-inactive", "reply-connection-changed",
+            "reply-action-changed", "reply-superseded",
+            "reply-transport-failed", "reply-render-failed",
+        )
+        entry = {"phase": "handler-entry", "isTrusted": True, "userActivation": True}
+        for phase in phases:
+            with self.subTest(phase=phase):
+                records = [entry, {"phase": "request-sent"}, {"phase": phase},
+                           {"phase": "reply-null"}, {"phase": "adopt-refused"}]
+                stdout, stderr = self._node_failure_report(error={
+                    "pickerStatus": "other", "pickerDiagnostic": records,
+                    "requestId": "private", "epoch": "private",
+                    "sequence": "private", "payload": "private",
+                })
+                record, message = self._nonzero(stderr, stdout)
+                self.assertEqual(record["pickerDiagnostic"], records)
+                self.assertNotIn("private", json.dumps(record) + message)
+
+                poisoned = [entry, {"phase": phase, "requestId": "private"}]
+                stdout, stderr = self._node_failure_report(error={
+                    "pickerStatus": "other", "pickerDiagnostic": poisoned,
+                })
+                record, message = self._nonzero(stderr, stdout)
+                self.assertEqual(record["pickerDiagnostic"], "unknown")
+                self.assertNotIn("private", json.dumps(record) + message)
+
+        original_capacity = [entry] + [
+            {"phase": phase}
+            for phase in support._CHECKOUT_PICKER_DIAGNOSTIC_PHASES[1:8]
+        ]
+        report = {"pickerDiagnostic": original_capacity}
+        self.assertEqual(
+            support._checkout_picker_diagnostic(report, "other"), original_capacity
+        )
+        report["pickerDiagnostic"] = original_capacity + [{"phase": "reply-empty"}]
+        self.assertEqual(support._checkout_picker_diagnostic(report, "other"), "unknown")
+
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX
         diag = support._CHECKOUT_DIAGNOSTIC_PREFIX

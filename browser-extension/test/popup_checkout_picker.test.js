@@ -153,7 +153,7 @@ function harness() {
   const clipboardWrites = [];
   const documentListeners = new Map();
   let poll = null;
-  let pagehide = null;
+  const pagehide = [];
   const document = {
     body: { dataset: { vault: "1", view: "vault" } },
     visibilityState: "visible",
@@ -210,7 +210,7 @@ function harness() {
     },
     clearInterval: () => {},
     addEventListener(type, callback) {
-      if (type === "pagehide") pagehide = callback;
+      if (type === "pagehide") pagehide.push(callback);
     },
   };
   context.globalThis = context;
@@ -224,7 +224,7 @@ function harness() {
     clipboardWrites,
     el: (selector) => document.querySelector(selector),
     poll: () => poll?.(),
-    pagehide: () => pagehide?.(),
+    pagehide: () => pagehide.forEach((callback) => callback()),
     // A real popup hide both changes visibilityState and fires the document
     // visibilitychange event every registered listener observes.
     hide: () => {
@@ -637,6 +637,7 @@ test("detail-fill diagnostics record reply and adopt phases", async () => {
   assertDiagnosticShape(detailFillDiagnosticLog(nullReply), [
     "handler-entry",
     "request-sent",
+    "reply-empty",
     "reply-null",
     "adopt-refused",
   ]);
@@ -682,4 +683,128 @@ test("detail-fill diagnostics record reply and adopt phases", async () => {
       ["phase"],
     ],
   );
+});
+
+async function observedCheckout() {
+  const h = harness();
+  await openCard(h);
+  h.context.navigator.userActivation = { isActive: true };
+  h.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  h.click("#detail-fill");
+  const records = detailFillDiagnosticLog(h);
+  assertDiagnosticShape(records, ["handler-entry", "request-sent"]);
+  assert.equal(records[0].isTrusted, true);
+  assert.equal(records[0].userActivation, true);
+  return { h, records, request: h.take("checkout-frames") };
+}
+
+test("detail-fill send diagnostics identify a later state poll superseding checkout", async () => {
+  const { h, records, request } = await observedCheckout();
+  h.poll();
+  h.take("state").resolve(connectedState());
+  await flush();
+  let responseReads = 0;
+  request.resolve(new Proxy({}, {
+    get(_target, key) {
+      // Promise resolution checks then before the popup receives the value.
+      if (key === "then") return undefined;
+      responseReads++;
+      throw Error("Discarded response must remain unread");
+    },
+  }));
+  await flush();
+  assertDiagnosticShape(records, [
+    "handler-entry", "request-sent", "reply-superseded",
+    "reply-null", "adopt-refused",
+  ]);
+  assert.equal(responseReads, 0);
+  assert.equal(h.el("#checkout-picker").hidden, true);
+  assert.equal(h.el("#checkout-choices").children.length, 0);
+  assert.equal(h.sent("checkout-frames").length, 1);
+  assert.equal(h.sent("checkout-select").length, 0);
+
+  // An unrelated poll failure cannot replace this request's recorded reason.
+  const before = JSON.stringify(records);
+  h.poll();
+  h.take("state").reject({});
+  await flush();
+  assert.equal(JSON.stringify(records), before);
+});
+
+test("detail-fill send diagnostics identify inactive popup and changed connection", async () => {
+  const inactive = await observedCheckout();
+  inactive.h.pagehide();
+  inactive.request.resolve(connectedState({ checkoutPicker: pickerView() }));
+  await flush();
+  assertDiagnosticShape(inactive.records, [
+    "handler-entry", "request-sent", "reply-inactive", "early-guard",
+  ]);
+
+  const disconnected = await observedCheckout();
+  disconnected.h.poll();
+  disconnected.h.take("state").resolve(connectedState({ connected: false }));
+  await flush();
+  disconnected.request.resolve(connectedState({ checkoutPicker: pickerView() }));
+  await flush();
+  assertDiagnosticShape(disconnected.records, [
+    "handler-entry", "request-sent", "reply-connection-changed",
+    "reply-null", "adopt-refused",
+  ]);
+});
+
+test("detail-fill send diagnostics identify a newer action", async () => {
+  const { h, records, request } = await observedCheckout();
+  h.click("#disconnect");
+  request.resolve(connectedState({ checkoutPicker: pickerView() }));
+  await flush();
+  assertDiagnosticShape(records, [
+    "handler-entry", "request-sent", "reply-action-changed", "early-guard",
+  ]);
+});
+
+test("detail-fill send diagnostics distinguish transport and render failures without reading errors", async () => {
+  const rejected = await observedCheckout();
+  let errorReads = 0;
+  const opaqueError = new Proxy({}, {
+    get() {
+      errorReads++;
+      throw Error("Failure detail must remain unread");
+    },
+  });
+  rejected.request.reject(opaqueError);
+  await flush();
+  assertDiagnosticShape(rejected.records, [
+    "handler-entry", "request-sent", "reply-transport-failed",
+    "reply-null", "adopt-refused",
+  ]);
+  assert.equal(errorReads, 0);
+
+  const rendered = await observedCheckout();
+  const state = connectedState({ checkoutPicker: pickerView() });
+  Object.defineProperty(state, "connected", {
+    get() { throw opaqueError; },
+  });
+  rendered.request.resolve(state);
+  await flush();
+  assertDiagnosticShape(rendered.records, [
+    "handler-entry", "request-sent", "reply-render-failed",
+    "reply-null", "adopt-refused",
+  ]);
+  assert.equal(errorReads, 0);
+});
+
+test("detail-fill send diagnostics remain owned by their issuing request", async () => {
+  const { h, records, request } = await observedCheckout();
+  // A second click replaces the exposed log but cannot start while busy.
+  h.click("#detail-fill");
+  const newer = detailFillDiagnosticLog(h);
+  assert.notEqual(newer, records);
+  assertDiagnosticShape(newer, ["handler-entry", "early-guard"]);
+  request.resolve(null);
+  await flush();
+  assertDiagnosticShape(records, [
+    "handler-entry", "request-sent", "reply-empty", "reply-null", "adopt-refused",
+  ]);
+  assertDiagnosticShape(newer, ["handler-entry", "early-guard"]);
+  assert.equal(h.sent("checkout-frames").length, 1);
 });
