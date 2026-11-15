@@ -815,6 +815,14 @@ jobs:
       with:
         distribution: temurin
         java-version: '21'
+        cache: gradle
+        cache-dependency-path: |
+          mobile/android/build.gradle.kts
+          mobile/android/settings.gradle.kts
+          mobile/android/app/build.gradle.kts
+          mobile/android/policy/build.gradle.kts
+          mobile/android/gradle.properties
+          mobile/android/gradle/wrapper/gradle-wrapper.properties
     - name: Install fixed Android build components
       run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"'
     - name: Bind the real Go vault and build Android applications
