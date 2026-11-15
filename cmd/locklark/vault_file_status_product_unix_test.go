@@ -89,6 +89,34 @@ func TestVaultFileStatusProductMinimum(t *testing.T) {
 	}
 }
 
+// The product creates a valid journal while the backend is present. Status
+// must still read that same journal after the backend root is removed.
+func TestVaultFileStatusProductAbsentBackendMinimum(t *testing.T) {
+	product := vaultFileProductBinary(t)
+	material := newResumeProductMaterial(t)
+	for _, name := range []string{"CLEAN", "PREPARED"} {
+		t.Run(name, func(t *testing.T) {
+			c := newTrackProductCase(t, material)
+			if runTrackProduct(product, c.configPath, false) != "TRACKED" {
+				t.Fatal("STATUS_ABSENT_BACKEND_TRACK_FAILED")
+			}
+			if name == "PREPARED" {
+				invokeImportProduct(t, product, c, "PREPARED")
+			}
+			if os.RemoveAll(c.cfg.BackendRoot) != nil {
+				t.Fatal("STATUS_ABSENT_BACKEND_FIXTURE_FAILED")
+			}
+			before := resumeDisk(t, c.root)
+			if got := runStatusProduct(product, c.configPath); got != name {
+				t.Fatal("STATUS_ABSENT_BACKEND_LOCAL_STATE_FAILED")
+			}
+			if !maps.Equal(before, resumeDisk(t, c.root)) {
+				t.Fatal("STATUS_ABSENT_BACKEND_CHANGED_DISK")
+			}
+		})
+	}
+}
+
 func TestVaultFileStatusProductMatrix(t *testing.T) {
 	product := vaultFileProductBinary(t)
 	material := newResumeProductMaterial(t)
@@ -237,10 +265,9 @@ func TestVaultFileStatusProductMatrix(t *testing.T) {
 	}
 }
 
-// A backend root with a self-referential symlink makes even EvalSymlinks fail.
-// All four valid local journal states must still be reported by the real CLI,
-// with no backend repair and no change to the configured journal.
-func TestVaultFileStatusProductBackendIndependent(t *testing.T) {
+// A self-referential backend root is ambiguous, not definitely absent. The
+// real CLI must refuse it for each otherwise valid local journal state.
+func TestVaultFileStatusProductAmbiguousBackendRefusal(t *testing.T) {
 	product := vaultFileProductBinary(t)
 	material := newResumeProductMaterial(t)
 	for _, name := range []string{"CLEAN", "DIRTY", "PREPARED", "REVIEW"} {
@@ -268,11 +295,93 @@ func TestVaultFileStatusProductBackendIndependent(t *testing.T) {
 				t.Fatal("STATUS_OFFLINE_BACKEND_FIXTURE_FAILED")
 			}
 			before := resumeDisk(t, c.root)
-			if got := runStatusProduct(product, c.configPath); got != name {
-				t.Fatal("STATUS_OFFLINE_BACKEND_LOCAL_STATE_FAILED")
+			if got := runStatusProduct(product, c.configPath); got != "BACKEND_REJECTED" {
+				t.Fatal("STATUS_AMBIGUOUS_BACKEND_WAS_ACCEPTED")
 			}
 			if !maps.Equal(before, resumeDisk(t, c.root)) {
 				t.Fatal("STATUS_OFFLINE_BACKEND_CHANGED_DISK")
+			}
+		})
+	}
+}
+
+func TestVaultFileStatusProductUnsafeBackendRefusal(t *testing.T) {
+	product := vaultFileProductBinary(t)
+	material := newResumeProductMaterial(t)
+	for _, name := range []string{"DANGLING_ROOT", "FILE_ROOT", "SYMLINK_NAMESPACE", "FILE_NAMESPACE"} {
+		t.Run(name, func(t *testing.T) {
+			c := newBaselineProductCase(t, material)
+			namespace := filepath.Join(c.cfg.BackendRoot, "vaultfile-backend")
+			switch name {
+			case "DANGLING_ROOT":
+				if os.RemoveAll(c.cfg.BackendRoot) != nil || os.Symlink(filepath.Join(c.root, "missing-target"), c.cfg.BackendRoot) != nil {
+					t.Fatal("STATUS_DANGLING_ROOT_FIXTURE_FAILED")
+				}
+			case "FILE_ROOT":
+				if os.RemoveAll(c.cfg.BackendRoot) != nil || os.WriteFile(c.cfg.BackendRoot, []byte("not a directory"), 0600) != nil {
+					t.Fatal("STATUS_FILE_ROOT_FIXTURE_FAILED")
+				}
+			case "SYMLINK_NAMESPACE":
+				if os.RemoveAll(namespace) != nil || os.Symlink(c.root, namespace) != nil {
+					t.Fatal("STATUS_SYMLINK_NAMESPACE_FIXTURE_FAILED")
+				}
+			case "FILE_NAMESPACE":
+				if os.RemoveAll(namespace) != nil || os.WriteFile(namespace, []byte("not a directory"), 0600) != nil {
+					t.Fatal("STATUS_FILE_NAMESPACE_FIXTURE_FAILED")
+				}
+			}
+			before := resumeDisk(t, c.root)
+			if got := runStatusProduct(product, c.configPath); got != "BACKEND_REJECTED" {
+				t.Fatal("STATUS_UNSAFE_BACKEND_WAS_ACCEPTED")
+			}
+			if !maps.Equal(before, resumeDisk(t, c.root)) {
+				t.Fatal("STATUS_UNSAFE_BACKEND_CHANGED_DISK")
+			}
+		})
+	}
+}
+
+// Compare filesystem identity when the namespace exists: textual prefix
+// checks cannot recognize root aliases, ancestor links or case aliases.
+func TestVaultFileStatusProductManagedScope(t *testing.T) {
+	product := vaultFileProductBinary(t)
+	material := newResumeProductMaterial(t)
+	cases := []string{"BACKEND_ROOT_ALIAS", "JOURNAL_ANCESTOR_ALIAS", "CONFIG_ANCESTOR_ALIAS"}
+	if resumeScopeCaseAliases(t) {
+		cases = append(cases, "BACKEND_ROOT_CASE_ALIAS", "JOURNAL_NAMESPACE_CASE_ALIAS")
+	}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := newBaselineProductCase(t, material)
+			namespace := filepath.Join(c.cfg.BackendRoot, "vaultfile-backend")
+			target := filepath.Join(namespace, "v1", "tmp", "op-00112233445566778899aabbccddeeff")
+			switch name {
+			case "BACKEND_ROOT_ALIAS", "BACKEND_ROOT_CASE_ALIAS":
+				moveResumeScopeJournal(t, &c, target)
+				if name == "BACKEND_ROOT_ALIAS" {
+					c.cfg.BackendRoot = resumeScopeAlias(t, c, c.cfg.BackendRoot)
+				} else {
+					c.cfg.BackendRoot = filepath.Join(c.root, "BACKEND")
+				}
+			case "JOURNAL_ANCESTOR_ALIAS":
+				moveResumeScopeJournal(t, &c, target)
+				alias := resumeScopeAlias(t, c, filepath.Join(namespace, "v1"))
+				c.cfg.Journal = filepath.Join(alias, "tmp", filepath.Base(target))
+			case "CONFIG_ANCESTOR_ALIAS":
+				moveResumeScopeConfig(t, &c, target)
+				alias := resumeScopeAlias(t, c, filepath.Join(namespace, "v1"))
+				c.configPath = filepath.Join(alias, "tmp", filepath.Base(target))
+			case "JOURNAL_NAMESPACE_CASE_ALIAS":
+				moveResumeScopeJournal(t, &c, target)
+				c.cfg.Journal = filepath.Join(c.cfg.BackendRoot, "VAULTFILE-BACKEND", "v1", "tmp", filepath.Base(target))
+			}
+			writeResumeScopeConfig(t, c)
+			before := resumeDisk(t, c.root)
+			if got := runStatusProduct(product, c.configPath); got != "CONFIG_REJECTED" {
+				t.Fatal("STATUS_MANAGED_SCOPE_WAS_ACCEPTED")
+			}
+			if !maps.Equal(before, resumeDisk(t, c.root)) {
+				t.Fatal("STATUS_MANAGED_SCOPE_CHANGED_DISK")
 			}
 		})
 	}

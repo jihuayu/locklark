@@ -30,11 +30,13 @@ const vaultFileUsage = `USAGE
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
-Status reads only the existing configured local journal and prints exactly one
-of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW
+Status reads only the existing configured local journal's contents and prints
+exactly one of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW
 means a legacy or inconsistent pending local record; it is never repaired.
 Missing, corrupt or unsafe local records are refused. Status never opens the
-backend, verifies a remote or grant, decrypts, re-signs, merges or edits.
+backend store or reads its contents; it checks backend path metadata only to
+reject journal or config paths inside its managed namespace. It never verifies
+a remote or grant, decrypts, re-signs, merges or edits.
 
 Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
@@ -171,16 +173,13 @@ func runVaultFile(args []string, out io.Writer) error {
 	if importing {
 		paths = append(paths, inputPath)
 	}
-	// Status reports local journal state even when the backend is unavailable.
-	// Keep its namespace guard purely lexical; resolving or statting the
-	// backend here would turn an offline backend into a status refusal.
-	if args[0] == "status" && !separateVaultFileStatusState(cfg.BackendRoot, paths...) {
-		return errVaultFileConfig
-	}
 	if !teamfiles.Distinct(paths...) {
 		return errVaultFileConfig
 	}
 	if args[0] == "status" {
+		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
+			return err
+		}
 		return statusVaultFile(out, cfg)
 	}
 	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
@@ -223,18 +222,79 @@ func runVaultFile(args []string, out io.Writer) error {
 	return nil
 }
 
-// Status must not inspect the backend, including its directory metadata. The
-// configured absolute paths are already clean and valid; this rejects direct
-// placement in its managed namespace without requiring that namespace to
-// exist. The mutating commands retain the identity-aware scope check below.
-func separateVaultFileStatusState(backendRoot string, paths ...string) bool {
-	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+// Status uses backend path metadata only for namespace separation. A missing
+// path is safe only when an existing, resolved directory has an absent child;
+// dangling links, loops, non-directories and inaccessible paths are refused.
+// Mutating commands retain their stricter existing-backend check below.
+func separateVaultFileStatusState(backendRoot string, paths ...string) error {
+	namespacePath := filepath.Join(backendRoot, "vaultfile-backend")
 	for _, path := range paths {
-		if path == namespace || strings.HasPrefix(path, namespace+string(os.PathSeparator)) {
-			return false
+		if path == namespacePath || strings.HasPrefix(path, namespacePath+string(os.PathSeparator)) {
+			return errVaultFileConfig
 		}
 	}
-	return true
+	root, absent, err := statusVaultFileExistingDir(backendRoot)
+	if err != nil {
+		return errVaultFileBackend
+	}
+	if absent {
+		return nil
+	}
+	namespace, err := os.Lstat(filepath.Join(root, "vaultfile-backend"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !namespace.IsDir() || namespace.Mode()&os.ModeSymlink != 0 {
+		return errVaultFileBackend
+	}
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && os.SameFile(namespace, info) {
+			return errVaultFileConfig
+		}
+		parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return errVaultFileConfig
+		}
+		for {
+			info, err := os.Stat(parent)
+			if err != nil || !info.IsDir() || os.SameFile(namespace, info) {
+				return errVaultFileConfig
+			}
+			next := filepath.Dir(parent)
+			if next == parent {
+				break
+			}
+			parent = next
+		}
+	}
+	return nil
+}
+
+// Resolve each existing component separately so ENOENT means a truly absent
+// child, not the target of a dangling ancestor symlink.
+func statusVaultFileExistingDir(path string) (string, bool, error) {
+	resolved := string(os.PathSeparator)
+	for _, component := range strings.Split(strings.TrimPrefix(path, resolved), resolved) {
+		if component == "" {
+			continue
+		}
+		next := filepath.Join(resolved, component)
+		if _, err := os.Lstat(next); os.IsNotExist(err) {
+			return "", true, nil
+		} else if err != nil {
+			return "", false, err
+		}
+		var err error
+		resolved, err = filepath.EvalSymlinks(next)
+		if err != nil {
+			return "", false, err
+		}
+		info, err := os.Stat(resolved)
+		if err != nil || !info.IsDir() {
+			return "", false, errVaultFileBackend
+		}
+	}
+	return resolved, false, nil
 }
 
 // The backend owns its whole documented vaultfile-backend subtree, including

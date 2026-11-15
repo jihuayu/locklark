@@ -97,10 +97,11 @@ func writeVaultFileStatus(out io.Writer, state vaultFileLocalState) error {
 	return nil
 }
 
-// statusVaultFile opens only the existing configured journal. It never opens,
-// reads or writes a backend, never verifies a remote or a current grant, and
-// never decrypts or re-signs content. Close is completed before any success
-// line is written so an unconfirmed close cannot look like a status result.
+// statusVaultFile opens only the existing configured journal. Its caller has
+// already checked backend path metadata for namespace separation; neither
+// layer opens the backend store or reads backend content. Close is completed
+// before any success line is written so an unconfirmed close cannot look like
+// a status result.
 func statusVaultFile(out io.Writer, cfg vaultFileResumeConfig) error {
 	journal, err := vaultfilejournal.OpenExisting(cfg.Journal)
 	if err != nil {
