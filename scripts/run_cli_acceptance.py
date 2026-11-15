@@ -162,7 +162,10 @@ def revision_audit_flags(before, after, item_id, old_revision, new_revision):
                 for event in after[len(before):] if event.get("action") not in reads]
     require(observed == [
         ("item.edit.password", "succeeded", item_id, old_revision),
-        ("item.run.password", "conflict", item_id, old_revision),
+        # The producer signs the authenticated current revision to preserve
+        # audit-chain continuity, including a rejected stale-selector request.
+        # The live request boundary separately proves that selector was R0.
+        ("item.run.password", "conflict", item_id, new_revision),
         ("item.run.password", "intent", item_id, new_revision),
     ], "revision-audit-mismatch")
     return {"same_item_edit": True, "old_revision_conflict": True, "new_revision_intent": True}
