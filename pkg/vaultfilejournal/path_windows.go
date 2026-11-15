@@ -529,6 +529,23 @@ func openExistingDatabase(path string) (*Journal, error) {
 	return &Journal{db: db}, nil
 }
 
+// openExistingOnlyDatabase shares the existing validated-handle and identity
+// checks, but suppresses all open-time initialization/repair before state is
+// confirmed. Open's existing-file behavior above is intentionally unchanged.
+func openExistingOnlyDatabase(path string) (*Journal, error) {
+	file, info, missing, err := openValidatedDB(path)
+	if err != nil || missing {
+		return nil, ErrInvalid
+	}
+	return openExistingValidated(path, file, func() error {
+		var current windows.ByHandleFileInformation
+		if err := validateDBHandle(path, windows.Handle(file.Fd()), &current); err != nil {
+			return ErrInvalid
+		}
+		return verifyDBPathIdentity(path, info)
+	})
+}
+
 // publishNewDatabase initializes a new database as a collision-resistant
 // temporary file in parent with a protected, trusted-only DACL and publishes
 // it to name with a non-replacing, write-through move. Only when another
