@@ -139,7 +139,11 @@ def _frame_relation(frame, bounds):
 
 
 class BSDInfo(ctypes.Structure):
-    """Complete struct proc_bsdinfo: pbi_uid is the real process UID."""
+    """Complete struct proc_bsdinfo.
+
+    ``pbi_uid`` is the effective process UID (euid); the real UID is
+    ``pbi_ruid``. Generation matching intentionally uses the effective UID.
+    """
 
     _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
                 ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
@@ -257,6 +261,40 @@ def _ax_status(ax):
 def _exact_status(code):
     """True only for an exact built-in ``int`` status (never ``bool``/subclass)."""
     return type(code) is int
+
+
+def _generation_shape(value, pid):
+    """True only for the complete five-field generation of exactly ``pid``.
+
+    Plain built-in types are mandatory: a ``bool`` or an ``int`` subclass is
+    not an identity value. The range checks match libproc's own answer, so a
+    malformed descriptor is refused before any capability or AX call.
+    """
+    return (type(value) is dict and set(value) == contract.GENERATION_KEYS
+            and type(value.get("pid")) is int and value["pid"] == pid
+            and type(value.get("executable")) is str and bool(value["executable"])
+            and type(value.get("euid")) is int and value["euid"] >= 0
+            and type(value.get("start_sec")) is int and value["start_sec"] > 0
+            and type(value.get("start_usec")) is int
+            and 0 <= value["start_usec"] < 1000000)
+
+
+def _generation_euid_matches(value):
+    """True only when the supplied generation names OUR effective UID.
+
+    ``proc_bsdinfo.pbi_uid`` is an effective UID, so a foreign-euid process can
+    otherwise describe itself consistently and still bind. Reading our own
+    effective UID here, with ``BaseException`` treated as a mismatch, keeps the
+    generation check aligned with the existing process-trust boundary.
+    """
+    try:
+        euid = os.geteuid()
+    except BaseException:
+        return False
+    return (type(euid) is int and euid >= 0
+            and type(value) is dict
+            and type(value.get("euid")) is int
+            and value["euid"] == euid)
 
 
 def _application_pid(application):
@@ -547,14 +585,18 @@ class QuartzApi:
 
     # -- read-only AX helpers ----------------------------------------------
     def attribute(self, element, name):
-        result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
-        if isinstance(result, tuple) and len(result) == 2:
-            code, value = result
-        else:
-            code, value = 0, result
-        if code != 0 or value is None:
-            return None
-        return value
+        self._check_owned_generation()
+        try:
+            result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+            if isinstance(result, tuple) and len(result) == 2:
+                code, value = result
+            else:
+                code, value = 0, result
+            if code != 0 or value is None:
+                return None
+            return value
+        finally:
+            self._check_owned_generation()
 
     def _status_attribute(self, element, name):
         """Strict status-walk AX read: success, documented no-value, or refuse.
@@ -602,36 +644,45 @@ class QuartzApi:
         the fixed sanitized ``a11y-query`` refusal naming ``name``. The value is
         returned verbatim (including nil) for the caller to classify.
         """
+        self._check_owned_generation()
         try:
-            result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
-        except contract.ContractError:
-            raise
-        except Exception:
-            raise _status_query(name)
-        decoded = _ax_result(result)
-        if decoded is None:
-            raise _status_query(name)
-        return decoded
+            try:
+                result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise _status_query(name)
+            decoded = _ax_result(result)
+            if decoded is None:
+                raise _status_query(name)
+            return decoded
+        finally:
+            self._check_owned_generation()
 
     def _geometry(self, element, name, value_type, first, second):
-        value = self.attribute(element, name)
-        if value is None:
-            return None
+        self._check_owned_generation()
         try:
-            result = self.ax.AXValueGetValue(value, value_type, None)
-        except Exception:
-            raise AxValueUnavailable()
-        if not isinstance(result, tuple) or len(result) != 2 or not result[0]:
-            raise AxValueUnavailable()
-        payload = result[1]
-        try:
-            pair = (getattr(payload, first), getattr(payload, second))
-        except Exception:
+            value = self.attribute(element, name)
+            if value is None:
+                return None
+            self._check_owned_generation()
             try:
-                pair = (payload[0], payload[1])
+                result = self.ax.AXValueGetValue(value, value_type, None)
             except Exception:
                 raise AxValueUnavailable()
-        return _geometry_int(pair[0]), _geometry_int(pair[1])
+            if not isinstance(result, tuple) or len(result) != 2 or not result[0]:
+                raise AxValueUnavailable()
+            payload = result[1]
+            try:
+                pair = (getattr(payload, first), getattr(payload, second))
+            except Exception:
+                try:
+                    pair = (payload[0], payload[1])
+                except Exception:
+                    raise AxValueUnavailable()
+            return _geometry_int(pair[0]), _geometry_int(pair[1])
+        finally:
+            self._check_owned_generation()
 
     def frame(self, element):
         """AX frame in global display coordinates, or AxValueUnavailable.
@@ -658,6 +709,14 @@ class QuartzApi:
         return list(value) if value else []
 
     def owned_windows(self, pid):
+        """Guard the exact owned generation before and after the AX read."""
+        self._check_owned_generation()
+        try:
+            return self._owned_windows_unchecked(pid)
+        finally:
+            self._check_owned_generation()
+
+    def _owned_windows_unchecked(self, pid):
         """The opaque AX window handles of exactly this explicit owned PID.
 
         AXWindows is obtained ONLY from
@@ -695,6 +754,9 @@ class QuartzApi:
             raise _a11y_query()
         if application is None:
             raise _a11y_query()
+        # A generation change during AXUIElementCreateApplication must refuse
+        # before AXWindows is read; the outer finally alone is too late.
+        self._check_owned_generation()
         # Every AXWindows answer is classified here as a bare ``a11y-query``:
         # the status-walk guard of ``_ax_value_read`` is never passed through.
         try:
@@ -733,28 +795,36 @@ class QuartzApi:
 
     def _prove_owned_element(self, element, pid):
         """The listed element's owner PID must be the exact requested ``pid``."""
+        self._check_owned_generation()
         try:
-            answer = self.ax.AXUIElementGetPid(element, None)
-        except Exception:
-            raise _a11y_query()
-        decoded = _ax_result(answer)
-        if decoded is None or decoded[0] != 0:
-            raise _a11y_query()
-        owner = decoded[1]
-        if not _exact_status(owner) or owner != pid:
-            raise _a11y_query()
+            try:
+                answer = self.ax.AXUIElementGetPid(element, None)
+            except Exception:
+                raise _a11y_query()
+            decoded = _ax_result(answer)
+            if decoded is None or decoded[0] != 0:
+                raise _a11y_query()
+            owner = decoded[1]
+            if not _exact_status(owner) or owner != pid:
+                raise _a11y_query()
+        finally:
+            self._check_owned_generation()
 
     def _prove_ax_window_role(self, element):
         """The element's AXRole must be the strict success answer ``AXWindow``."""
+        self._check_owned_generation()
         try:
-            answer = self.ax.AXUIElementCopyAttributeValue(element, "AXRole", None)
-        except Exception:
-            raise _a11y_query()
-        decoded = _ax_result(answer)
-        if decoded is None or decoded[0] != 0:
-            raise _a11y_query()
-        if _native_text(decoded[1]) != "AXWindow":
-            raise _a11y_query()
+            try:
+                answer = self.ax.AXUIElementCopyAttributeValue(element, "AXRole", None)
+            except Exception:
+                raise _a11y_query()
+            decoded = _ax_result(answer)
+            if decoded is None or decoded[0] != 0:
+                raise _a11y_query()
+            if _native_text(decoded[1]) != "AXWindow":
+                raise _a11y_query()
+        finally:
+            self._check_owned_generation()
 
     # -- owned-PID AX path (no CoreGraphics window inventory) ----------------
     def scope_to_owned_pid(self, pid):
@@ -768,6 +838,7 @@ class QuartzApi:
             raise _a11y_query()
         self._owned_scope_pid = pid
         self._owned_scope_title = None
+        self._owned_scope_generation = None
         # Strong, bounded, per-instance list (not a set: a native AXUIElement
         # need not be hashable, weak-referenceable or stable under Python
         # ``id``). Membership is CFEqual only, never hash/identity.
@@ -776,12 +847,95 @@ class QuartzApi:
     def unscope_owned_pid(self):
         """Drop the scope AND every retained handle; the CG path applies again."""
         self._owned_scope_pid, self._owned_scope_title = None, None
+        self._owned_scope_generation = None
         self._owned_handles = None
 
     def owned_pid_scope(self):
         """The validated scoped PID, or None for the unscoped CG path."""
         pid = getattr(self, "_owned_scope_pid", None)
         return pid if _exact_status(pid) and pid > 0 else None
+
+    def process_generation(self, pid):
+        """Full live libproc identity for the scoped PID, or None.
+
+        The executable path, effective UID (``pbi_uid``) and the ``pbi_start``
+        second/microsecond pair are read together and must all belong to the
+        exact PID; a missing field, a malformed answer or any raised value -
+        including ``BaseException`` - is None. The executable file's owner is
+        never used as a process-identity guess.
+        """
+        if not _exact_status(pid) or pid <= 0:
+            return None
+        info = BSDInfo()
+        try:
+            size = ctypes.sizeof(info)
+            if self.libproc.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0,
+                                         ctypes.byref(info), size) != size:
+                return None
+            if int(info.pbi_pid) != int(pid):
+                return None
+            buffer = ctypes.create_string_buffer(4096)
+            if self.libproc.proc_pidpath(pid, buffer, 4096) <= 0:
+                return None
+            raw_path = buffer.value.decode("utf-8", "strict")
+            if not raw_path:
+                return None
+            path = os.path.realpath(raw_path)
+            euid = int(info.pbi_uid)
+            start_sec = int(info.pbi_start_tvsec)
+            start_usec = int(info.pbi_start_tvusec)
+        except BaseException:
+            return None
+        if euid < 0 or start_sec <= 0 or not 0 <= start_usec < 1000000:
+            return None
+        return {"pid": int(pid), "executable": path, "euid": euid,
+                "start_sec": start_sec, "start_usec": start_usec}
+
+    def set_owned_generation(self, generation):
+        """Bind and PROVE the exact live generation before capability/AX.
+
+        The request value is never trusted on its own: the complete shape is
+        validated, its effective UID must be OUR effective UID, and only then
+        is it compared with a fresh libproc read. A malformed, stale,
+        foreign-euid or wrong-effective-UID value clears any prior binding and
+        refuses ``process-untrusted`` without touching AX.
+        """
+        pid = self.owned_pid_scope()
+        if pid is None or not _generation_shape(generation, pid):
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
+        expected = {field: generation[field] for field in contract.GENERATION_FIELDS}
+        if not _generation_euid_matches(expected):
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
+        try:
+            actual = self.process_generation(pid)
+        except BaseException:
+            actual = None
+        if actual is None or actual != expected:
+            self._owned_scope_generation = None
+            raise contract.ContractError("process-untrusted")
+        self._owned_scope_generation = expected
+
+    def _owned_generation_ok(self):
+        """True while the bound generation still matches the live process."""
+        generation = getattr(self, "_owned_scope_generation", None)
+        if generation is None:
+            return True
+        try:
+            pid = self.owned_pid_scope()
+            if pid is None or generation.get("pid") != pid:
+                return False
+            if not _generation_euid_matches(generation):
+                return False
+            actual = self.process_generation(pid)
+            return actual is not None and actual == generation
+        except BaseException:
+            return False
+
+    def _check_owned_generation(self):
+        if not self._owned_generation_ok():
+            raise contract.ContractError("process-untrusted")
 
     def owned_discovery(self, title):
         """``([], False)`` while absent, ``([window], True)`` once unique.
@@ -807,6 +961,14 @@ class QuartzApi:
         return [raw], True
 
     def _enumerate_owned_window(self, title, expect):
+        """Guard the exact owned generation around this owned re-enumeration."""
+        self._check_owned_generation()
+        try:
+            return self._enumerate_owned_window_unchecked(title, expect)
+        finally:
+            self._check_owned_generation()
+
+    def _enumerate_owned_window_unchecked(self, title, expect):
         """Re-enumerate ONLY the owned AX windows and prove the ONE window.
 
         Shared by discovery, re-observation, controls, hit tests, focus and
@@ -864,6 +1026,14 @@ class QuartzApi:
         }
 
     def owned_window_records(self):
+        """Guard the exact owned generation around every owned window record."""
+        self._check_owned_generation()
+        try:
+            return self._owned_window_records_unchecked()
+        finally:
+            self._check_owned_generation()
+
+    def _owned_window_records_unchecked(self):
         """Public records of EVERY owned AX window (scoped; no CG inventory).
 
         Discovery and absence both observe through here. Every listed window is
@@ -941,17 +1111,21 @@ class QuartzApi:
 
     def _proven_pid(self, element):
         """The proven owner PID of one AX element (fail closed)."""
+        self._check_owned_generation()
         try:
-            answer = self.ax.AXUIElementGetPid(element, None)
-        except Exception:
-            raise _a11y_query()
-        decoded = _ax_result(answer)
-        if decoded is None or decoded[0] != 0:
-            raise _a11y_query()
-        owner = decoded[1]
-        if not _exact_status(owner) or owner <= 0:
-            raise _a11y_query()
-        return owner
+            try:
+                answer = self.ax.AXUIElementGetPid(element, None)
+            except Exception:
+                raise _a11y_query()
+            decoded = _ax_result(answer)
+            if decoded is None or decoded[0] != 0:
+                raise _a11y_query()
+            owner = decoded[1]
+            if not _exact_status(owner) or owner <= 0:
+                raise _a11y_query()
+            return owner
+        finally:
+            self._check_owned_generation()
 
     def _current_owned_window(self, element, title=None):
         """Re-enumerate and prove THIS request's retained owned window.
@@ -1156,16 +1330,17 @@ class QuartzApi:
 
         The existing controls snapshot is proved locked first, before any AX
         binding or label read. Only then is the exact already-bound AX window
-        walked and its AXDescription values compared internally. This method
-        NEVER raises: a false/incomplete proof, an unavailable binding, any
-        query/shape error and any traversal overrun all return the same
-        all-false object, so this diagnostic can never fail the caller.
+        walked and its AXDescription values compared internally. Every ordinary
+        diagnostic failure returns the same all-false object, so this optional
+        diagnostic never fails the caller. The exact ``process-untrusted``
+        generation refusal is terminal and propagates instead of becoming
+        all-false success.
 
         The FIRST failed query carries only the fixed diagnostic triple of our
         own ``a11y-query`` refusal. It is delivered ONLY through the explicit
-        per-call ``call`` result (``record``), never raised and never kept in
-        module or instance state, so no diagnostic outlives the call that
-        produced it. Without a ``call`` the failure is simply all-false.
+        per-call ``call`` result (``record``), never kept in module or instance
+        state, so no diagnostic outlives the call that produced it. Without a
+        ``call`` the ordinary failure is simply all-false.
         """
         status, diagnostic = self._status_walk(window, controls)
         if diagnostic is not None and call is not None:
@@ -1181,11 +1356,12 @@ class QuartzApi:
     def _status_walk(self, window, controls):
         """``(fixed four-boolean status, sanitized diagnostic or None)``.
 
-        Never raises. Every failure of the proof, binding, walk or traversal is
+        Every ordinary failure of the proof, binding, walk or traversal is
         converted to the all-false status; the diagnostic is the already
         allowlisted ``{operation, attribute, error}`` of the FIRST status-walk
         query refusal (None for any other error), handed back for exactly this
-        call and never raised or stored.
+        call. The exact ``process-untrusted`` generation refusal is terminal
+        and is re-raised rather than converted to all-false success.
         """
         refusal = _NO_FAILURE
         try:
@@ -1194,6 +1370,8 @@ class QuartzApi:
             target = self.window_element(window)
             found = self._status_matches(target)
         except Exception as failure:
+            if type(failure) is contract.ContractError and failure.code == "process-untrusted":
+                raise
             refusal = failure
         if refusal is not _NO_FAILURE:
             try:
@@ -1261,7 +1439,9 @@ class QuartzApi:
                 return True
             if self._same_element(second, first):
                 return True
-        except contract.ContractError:
+        except contract.ContractError as error:
+            if error.code == "process-untrusted":
+                raise
             raise contract.ContractError("window-changed")
         return False
 
@@ -1310,36 +1490,44 @@ class QuartzApi:
         other answer - including a name, role or frame that happens to match -
         is not equality.
         """
-        if left is None or right is None:
-            return False
-        equal = self._cf_equal()
+        self._check_owned_generation()
         try:
-            verdict = equal(left, right)
-        except contract.ContractError:
-            raise
-        except Exception:
-            raise contract.ContractError("a11y-query")
-        return verdict is True or (type(verdict) is int and verdict == 1)
+            if left is None or right is None:
+                return False
+            equal = self._cf_equal()
+            try:
+                verdict = equal(left, right)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise contract.ContractError("a11y-query")
+            return verdict is True or (type(verdict) is int and verdict == 1)
+        finally:
+            self._check_owned_generation()
 
     def _element_at(self, window, x, y):
         """AX element under the point; a failed query refuses, never a hit."""
-        application = self.application(window["pid"])
-        if application is None:
-            return None
+        self._check_owned_generation()
         try:
-            result = self.ax.AXUIElementCopyElementAtPosition(
-                application, float(x), float(y), None)
-        except contract.ContractError:
-            raise
-        except Exception:
-            raise contract.ContractError("a11y-query")
-        if isinstance(result, tuple) and len(result) == 2:
-            code, element = result
-        else:
-            code, element = 0, result
-        if code != 0:
-            raise contract.ContractError("a11y-query")
-        return element
+            application = self.application(window["pid"])
+            if application is None:
+                return None
+            try:
+                result = self.ax.AXUIElementCopyElementAtPosition(
+                    application, float(x), float(y), None)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise contract.ContractError("a11y-query")
+            if isinstance(result, tuple) and len(result) == 2:
+                code, element = result
+            else:
+                code, element = 0, result
+            if code != 0:
+                raise contract.ContractError("a11y-query")
+            return element
+        finally:
+            self._check_owned_generation()
 
     def _reaches(self, element, target):
         """Walk AXParent from the hit element; True only for the selection.
@@ -1407,7 +1595,7 @@ class QuartzApi:
 
     # -- process identity ---------------------------------------------------
     def process_uid(self, pid):
-        """True process uid from proc_pidinfo(PROC_PIDTBSDINFO), else None."""
+        """Effective process uid (pbi_uid) from proc_pidinfo, else None."""
         info = BSDInfo()
         try:
             size = self.libproc.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0,
@@ -1421,11 +1609,11 @@ class QuartzApi:
         return int(info.pbi_uid)
 
     def process(self, pid):
-        """Read-only pid -> path plus SAME PROCESS uid; unknown uid is untrusted.
+        """Read-only pid -> path plus SAME PROCESS effective uid.
 
         The executable file owner is never used as a process-identity guess:
-        when proc_pidinfo cannot prove the process uid, the window is untrusted
-        and every request against it is refused.
+        when proc_pidinfo cannot prove the process effective uid, the window
+        is untrusted and every request against it is refused.
         """
         buffer = ctypes.create_string_buffer(4096)
         try:
@@ -1436,7 +1624,7 @@ class QuartzApi:
             return "", False
         path = buffer.value.decode("utf-8", "replace")
         uid = self.process_uid(pid)
-        if uid is None or uid != os.getuid():
+        if uid is None or uid != os.geteuid():
             return path, False
         return path, True
 
@@ -1548,19 +1736,23 @@ class QuartzApi:
         before any control read. When the OS also exposes AXMainWindow it is
         only an additional consistency check under the same identity.
         """
-        front = self.foreground_pid()
-        if window is None or type(front) is not int or front != window["pid"]:
-            return {"pid": front, "window": None}
-        if self.owned_pid_scope() is not None:
-            return self._owned_focus_state(front, window)
-        application = self.application(window["pid"])
-        focused = self.attribute(application, "AXFocusedWindow")
-        if focused is None or not self._identity_matches(focused, window):
-            return {"pid": front, "window": None}
-        main = self.attribute(application, "AXMainWindow")
-        if main is not None and not self._identity_matches(main, window):
-            return {"pid": front, "window": None}
-        return {"pid": front, "window": window["id"]}
+        self._check_owned_generation()
+        try:
+            front = self.foreground_pid()
+            if window is None or type(front) is not int or front != window["pid"]:
+                return {"pid": front, "window": None}
+            if self.owned_pid_scope() is not None:
+                return self._owned_focus_state(front, window)
+            application = self.application(window["pid"])
+            focused = self.attribute(application, "AXFocusedWindow")
+            if focused is None or not self._identity_matches(focused, window):
+                return {"pid": front, "window": None}
+            main = self.attribute(application, "AXMainWindow")
+            if main is not None and not self._identity_matches(main, window):
+                return {"pid": front, "window": None}
+            return {"pid": front, "window": window["id"]}
+        finally:
+            self._check_owned_generation()
 
     def root_at(self, window, x, y):
         """The AXWindow above the point must BE the unique bound AX window.
@@ -1667,7 +1859,50 @@ class QuartzApi:
         except Exception:
             raise contract.ContractError("a11y-query")
 
+    def _owned_ax_value(self, element, name, status):
+        """One guarded AX attribute read for the scoped root walk.
+
+        This deliberately does not call the module-level ``_ax_value`` helper:
+        the pre/post generation checks here run around this native read, and
+        the post-check runs before the value is returned, so a change during
+        AXRole can never continue to AXParent.
+        """
+        self._check_owned_generation()
+        try:
+            try:
+                result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise _a11y_query()
+            if isinstance(result, tuple):
+                if len(result) != 2:
+                    raise _a11y_query()
+                code = result[0]
+                if not _exact_status(code):
+                    raise _a11y_query()
+                if code == status[1]:
+                    value = result[1]
+                elif code == status[0]:
+                    value = None
+                else:
+                    raise _a11y_query()
+            else:
+                value = result
+            self._check_owned_generation()
+            return value
+        finally:
+            self._check_owned_generation()
+
     def _owned_root_at(self, window, pid, x, y):
+        """Guard the exact owned generation around the scoped root hit test."""
+        self._check_owned_generation()
+        try:
+            return self._owned_root_at_unchecked(window, pid, x, y)
+        finally:
+            self._check_owned_generation()
+
+    def _owned_root_at_unchecked(self, window, pid, x, y):
         """Scoped window-root hit test over the retained owned AX handle."""
         handle = window.get("id") if type(window) is dict else None
         if handle is None or self._current_owned_window(handle) is None:
@@ -1683,6 +1918,9 @@ class QuartzApi:
             raise contract.ContractError("a11y-query")
         if application is None:
             raise contract.ContractError("a11y-query")
+        # A generation change during AXUIElementCreateApplication must refuse
+        # before the hit test; the outer finally alone is too late.
+        self._check_owned_generation()
         try:
             result = self.ax.AXUIElementCopyElementAtPosition(
                 application, float(x), float(y), None)
@@ -1690,6 +1928,7 @@ class QuartzApi:
             raise
         except Exception:
             raise contract.ContractError("a11y-query")
+        self._check_owned_generation()
         decoded = None
         if isinstance(result, tuple) and len(result) == 2:
             decoded = result
@@ -1707,14 +1946,14 @@ class QuartzApi:
         if element is None:
             return False
         for _ in range(MAX_DEPTH + 1):
-            role = _native_text(_ax_value(self.ax, element, "AXRole", status))
+            role = _native_text(self._owned_ax_value(element, "AXRole", status))
             if not role:
                 raise contract.ContractError("a11y-query")
             if role == "AXWindow":
                 if self._proven_pid(element) != pid:
                     raise contract.ContractError("a11y-query")
                 return self._same_element(element, handle)
-            parent = _ax_value(self.ax, element, "AXParent", status)
+            parent = self._owned_ax_value(element, "AXParent", status)
             if parent is None:
                 return False
             element = parent
@@ -1727,29 +1966,35 @@ class QuartzApi:
         (CFEqual) and the frontmost process must be the owned PID; a same-PID
         different window never authorises input.
         """
-        pid = self.owned_pid_scope()
-        handle = window.get("id") if type(window) is dict else None
-        if pid is None or handle is None or window.get("pid") != pid:
-            raise contract.ContractError("focus-lost")
-        # Re-enumerate and prove the owned window BEFORE any activation.
+        self._check_owned_generation()
         try:
-            if self._current_owned_window(handle) is None:
+            pid = self.owned_pid_scope()
+            handle = window.get("id") if type(window) is dict else None
+            if pid is None or handle is None or window.get("pid") != pid:
                 raise contract.ContractError("focus-lost")
-        except contract.ContractError as error:
-            if error.code not in ("focus-lost", "window-changed", "window-ambiguous"):
-                raise
-            raise contract.ContractError("focus-lost")
-        if not self.activate(pid):
-            raise contract.ContractError("focus-lost")
-        state = self.focus_state(window)
-        if self.focus_identity(window, state) is not True:
-            raise contract.ContractError("focus-lost")
-        app = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
-        # The final check uses the same strict exact-int PID as foreground_pid:
-        # a malformed answer is no PID at all and refuses focus-lost.
-        if app is None or _application_pid(app) != pid:
-            raise contract.ContractError("focus-lost")
-        return True
+            # Re-enumerate and prove the owned window BEFORE any activation.
+            try:
+                if self._current_owned_window(handle) is None:
+                    raise contract.ContractError("focus-lost")
+            except contract.ContractError as error:
+                if error.code not in ("focus-lost", "window-changed", "window-ambiguous"):
+                    raise
+                raise contract.ContractError("focus-lost")
+            self._check_owned_generation()
+            if not self.activate(pid):
+                raise contract.ContractError("focus-lost")
+            self._check_owned_generation()
+            state = self.focus_state(window)
+            if self.focus_identity(window, state) is not True:
+                raise contract.ContractError("focus-lost")
+            app = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            # The final check uses the same strict exact-int PID as foreground_pid:
+            # a malformed answer is no PID at all and refuses focus-lost.
+            if app is None or _application_pid(app) != pid:
+                raise contract.ContractError("focus-lost")
+            return True
+        finally:
+            self._check_owned_generation()
 
     def activate(self, pid):
         running = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
@@ -1760,14 +2005,14 @@ class QuartzApi:
         return bool(running.activateWithOptions_(
             self.appkit.NSApplicationActivateIgnoringOtherApps))
 
-    def _activation_identity(self, pid, executable):
-        """Re-read ONE pid's live path/uid and prove it is the exact request.
+    def _activation_identity(self, pid, executable, generation=None):
+        """Re-read ONE pid's live path/uid and optional exact generation.
 
-        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) is read. A
-        dead or unreadable process refuses ``activation-failed``; a path that
-        is not the exact requested canonical executable, or a uid that is not
-        provably ours, refuses ``process-untrusted``. Both are final: the
-        caller never waits or retries after them.
+        The legacy path/effective-UID proof is retained. When the CLI supplies
+        a generation, its complete five-field libproc identity is checked
+        before and after the single activation; a malformed, stale,
+        foreign-euid or wrong-effective-UID value refuses without activating.
+        Both checks are final: the caller never waits or retries after them.
         """
         path, trusted = self.process(pid)
         if not path:
@@ -1776,6 +2021,19 @@ class QuartzApi:
             raise contract.ContractError("process-untrusted")
         if trusted is not True:
             raise contract.ContractError("process-untrusted")
+        if generation is not None:
+            if not _generation_shape(generation, pid):
+                raise contract.ContractError("process-untrusted")
+            if not _generation_euid_matches(generation):
+                raise contract.ContractError("process-untrusted")
+            try:
+                actual = self.process_generation(pid)
+            except BaseException:
+                actual = None
+            if actual is None:
+                raise contract.ContractError("activation-failed")
+            if actual != generation:
+                raise contract.ContractError("process-untrusted")
 
     def activation_ready(self, pid):
         """Read-only readiness of THIS pid's NSRunningApplication, or raise.
@@ -1814,14 +2072,15 @@ class QuartzApi:
             return False
         raise contract.ContractError("activation-failed")
 
-    def activate_process(self, pid, executable):
+    def activate_process(self, pid, executable, generation=None):
         """Identity-proofed, bounded-readiness, once-only activation of ONE known pid.
 
-        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) and this
-        pid's own ``NSRunningApplication`` registration/isFinishedLaunching are
-        read: no window is listed, no AX element is created and no title,
-        control or foreground content is queried. The identity (exact
-        executable, our uid, live process) must hold BEFORE the readiness wait
+        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid), the
+        optional generation read and this pid's own ``NSRunningApplication``
+        registration/isFinishedLaunching are read: no window is listed, no AX
+        element is created and no title, control or foreground content is
+        queried. The identity (exact executable, our effective uid, live
+        process, optional exact generation) must hold BEFORE the readiness wait
         (re-read on every poll, so a process that dies or is replaced while
         waiting refuses) and is re-read once more after readiness and BEFORE
         the single activation. An absent or not-yet-finished application may
@@ -1835,7 +2094,7 @@ class QuartzApi:
             raise contract.ContractError("activation-invalid")
         deadline = time.monotonic() + ACTIVATE_READY_TIMEOUT
         while True:
-            self._activation_identity(pid, executable)
+            self._activation_identity(pid, executable, generation)
             ready = self.activation_ready(pid)
             if ready is True:
                 break
@@ -1846,8 +2105,11 @@ class QuartzApi:
                 time.sleep(max(0.0, min(ACTIVATE_READY_POLL, deadline - time.monotonic())))
                 continue
             raise contract.ContractError("activation-failed")
-        self._activation_identity(pid, executable)
-        return self.activate(pid)
+        self._activation_identity(pid, executable, generation)
+        verdict = self.activate(pid)
+        if generation is not None:
+            self._activation_identity(pid, executable, generation)
+        return verdict
 
     def _post(self, events):
         """Post an already complete, already validated event list exactly once.
@@ -2002,6 +2264,23 @@ class MacAdapter:
         setter(pid)
         return clearer
 
+    def set_owned_generation(self, generation):
+        """Pass the CLI's exact Popen generation to the scoped API.
+
+        A missing hook is a refusal, never a reason to proceed with the weaker
+        PID-only scope. Any unexpected backend failure, ``BaseException``
+        included, is converted to the same fixed refusal.
+        """
+        setter = getattr(self.api, "set_owned_generation", None)
+        if not callable(setter):
+            raise contract.ContractError("process-untrusted")
+        try:
+            setter(generation)
+        except contract.ContractError:
+            raise
+        except BaseException:
+            raise contract.ContractError("process-untrusted")
+
     def identity_equal(self, first, second):
         """Trusted opaque handle equality for the contract (native CFEqual)."""
         equal = getattr(self.api, "identity_equal", None)
@@ -2128,24 +2407,28 @@ class MacAdapter:
         return controls
 
     def read_status(self, window, controls, call=None):
-        """Optional macOS-only inspect diagnostic; always exactly four bools.
+        """Optional macOS-only inspect diagnostic; exactly four bools on failure.
 
-        The proof, binding and AX reads belong to the platform API. This reader
-        NEVER raises: any missing or malformed hook answer, and any exception
-        a hook still raises, is converted to the fixed all-false object, so the
-        optional diagnostic never changes the existing controls snapshot.
+        The proof, binding and AX reads belong to the platform API. Any missing
+        or malformed hook answer, and any ordinary exception a hook still
+        raises, is converted to the fixed all-false object, so the optional
+        diagnostic never changes the existing controls snapshot. The exact
+        ``process-untrusted`` generation refusal is terminal and re-raised.
 
         The platform hook receives the explicit per-call ``call`` result only
         when its signature accepts a third argument (``QuartzApi`` does, and
         records its sanitized refusal there); a two-argument hook is called
-        exactly as before and still never raises. A hook that raises its own
-        sanitized ``a11y-query`` refusal instead of recording it has that
-        refusal placed in this call's ``call``, never re-raised.
+        exactly as before and still returns all-false on ordinary failures. A
+        hook that raises its own sanitized ``a11y-query`` refusal instead of
+        recording it has that refusal placed in this call's ``call``, never
+        re-raised.
         """
         for name in ("read_status", "status", "inspect_status"):
             try:
                 reader = getattr(self.api, name, None)
-            except Exception:
+            except Exception as error:
+                if type(error) is contract.ContractError and error.code == "process-untrusted":
+                    raise
                 continue
             if not callable(reader):
                 continue
@@ -2155,6 +2438,8 @@ class MacAdapter:
                 else:
                     result = reader(window, controls)
             except Exception as error:
+                if type(error) is contract.ContractError and error.code == "process-untrusted":
+                    raise
                 diagnostic = diagnostic_of(error)
                 report = (getattr(call, "report", None)
                           or getattr(call, "record", None))
@@ -2244,9 +2529,23 @@ class MacAdapter:
         if not self.api.activate(window["pid"]):
             raise contract.ContractError("focus-lost")
 
-    def activate_process(self, pid, executable):
-        """Activation-only mode: strict literal True, never a truthy value."""
-        if self.api.activate_process(pid, executable) is not True:
+    def activate_process(self, pid, executable, generation=None):
+        """Activation-only mode: strict literal True, never a truthy value.
+
+        When a generation was supplied it is handed to the API's three-field
+        proof; an API that cannot accept it fails closed rather than dropping
+        the stronger identity.
+        """
+        try:
+            if generation is None:
+                verdict = self.api.activate_process(pid, executable)
+            else:
+                verdict = self.api.activate_process(pid, executable, generation)
+        except contract.ContractError:
+            raise
+        except BaseException:
+            raise contract.ContractError("activation-failed")
+        if verdict is not True:
             raise contract.ContractError("activation-failed")
         return True
 
