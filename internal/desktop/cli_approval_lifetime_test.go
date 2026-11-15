@@ -77,13 +77,19 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 		if pending == nil || ctx.Err() != nil || !time.Now().Equal(begin) {
 			t.Fatal("approval was not published before the caller deadline")
 		}
+		// Headless unit rendered-state fixture only: no GUI window is opened.
+		// Bind the real pending's ID so timeout must retire its rendered owner.
+		a.brokerMu.Lock()
+		a.approvalWinPending = pending.id
+		a.brokerMu.Unlock()
 		time.Sleep(callerLifetime - time.Millisecond)
 		synctest.Wait()
 		a.brokerMu.Lock()
 		current := a.cliPending == pending
+		renderedCurrent := a.approvalWinPending == pending.id
 		a.brokerMu.Unlock()
-		if !current || ctx.Err() != nil {
-			t.Fatal("approval retired before the caller deadline")
+		if !current || !renderedCurrent || ctx.Err() != nil {
+			t.Fatal("approval or rendered binding retired before the caller deadline")
 		}
 		select {
 		case <-done:
@@ -123,6 +129,13 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 		setCLIPending(a, replacement, replacement.id)
 		if a.approveCLIRunID(pending.id, true) || a.hideApprovalWindowFor(pending.id) {
 			t.Fatal("retired callback touched the replacement pending")
+		}
+		a.brokerMu.Lock()
+		replacementCurrent := a.cliPending == replacement
+		replacementRendered := a.approvalWinPending == replacement.id
+		a.brokerMu.Unlock()
+		if !replacementCurrent || !replacementRendered {
+			t.Fatal("retired callback changed the replacement pending or rendered binding")
 		}
 		if replacement.decided {
 			t.Fatal("retired callback decided the replacement pending")
