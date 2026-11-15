@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Publish fixed diagnostic metadata, never source excerpts or runtime values."""
+import argparse
 import json
 import re
 import sys
@@ -9,6 +10,37 @@ KNOWN_SOURCES = {p.name for p in Path(__file__).resolve().parents[1].rglob("*") 
 TESTS = {}
 DECLARATIONS = {}
 REASONS = set()
+PHASES = {"protection-preflight", "capability-denial", "full-positive"}
+TERMINAL_MARKERS = {
+    "** BUILD FAILED **": "build-failed-marker",
+    "** TEST FAILED **": "testing-failed-marker",
+    "** TEST SUCCEEDED **": "test-succeeded-marker",
+}
+DENIAL_CASES = {
+    "unit": ("LocklarkCapabilityTests", "ProtectionCapabilityDenialTests", "testUnavailableCompleteProtectionIsRefusedBeforeVaultCreation"),
+    "ui": ("LocklarkCapabilityUITests", "ProtectionCapabilityDenialUITests", "testActualAppKeepsCreationDisabledWhenProtectionIsUnavailable"),
+}
+
+
+def process_metadata(text, phase, exit_code):
+    # Exit numbers describe the process result, never its underlying cause.
+    if type(exit_code) is not int or not 0 <= exit_code <= 255:
+        exit_class = "unknown"
+    else:
+        exit_class = {0: "zero", 65: "exit-65", 70: "exit-70"}.get(exit_code, "other-nonzero")
+    terminals = {TERMINAL_MARKERS[line] for line in text.splitlines() if line in TERMINAL_MARKERS}
+    terminal = next(iter(terminals)) if len(terminals) == 1 else ("conflicting" if terminals else "unknown")
+    denial = {kind: "unknown" for kind in DENIAL_CASES}
+    if phase == "capability-denial":
+        for kind, (module, name, method) in DENIAL_CASES.items():
+            owner = rf"(?:{re.escape(module)}\.)?{re.escape(name)}"
+            pattern = rf"^Test Case '-\[{owner} {re.escape(method)}\]' (started\.|(?:passed|failed) \([0-9]+(?:\.[0-9]+)? seconds\)\.)$"
+            observed = {match[1].split(" ", 1)[0].rstrip(".") for match in re.finditer(pattern, text, re.MULTILINE)}
+            if {"passed", "failed"} <= observed:
+                denial[kind] = "conflicting"
+            else:
+                denial[kind] = next((status for status in ("failed", "passed", "started") if status in observed), "unknown")
+    return {"phase": phase if phase in PHASES else "unknown", "exit_class": exit_class, "xcodebuild_terminal": terminal, "denial_tests": denial}
 
 
 def fixed_reasons(source):
@@ -35,7 +67,7 @@ for path in Path(__file__).resolve().parents[1].rglob("*.swift"):
     REASONS.update(fixed_reasons(source))
 
 
-def summary(text):
+def summary(text, phase="unknown", exit_code=None):
     output = []
     for match in re.finditer(r"(?m)^([^\n:]+\.(?:swift|m|h)):(\d+):\d+:\s*error:\s*([^\n]*)", text):
         name = Path(match[1]).name
@@ -78,8 +110,29 @@ def summary(text):
                 filename, declared = DECLARATIONS[pair]
                 runtime.append({"file": filename, "line": declared, "location": "method-declaration", "case": case, "reason": "unexpected-error"})
                 seen.add(case)
-    return {"compile_diagnostics": output, "runtime_diagnostics": runtime[:24], "runtime_failed_cases": len(re.findall(r"Test Case .* failed", text))}
+    return {**process_metadata(text, phase, exit_code), "compile_diagnostics": output, "runtime_diagnostics": runtime[:24], "runtime_failed_cases": len(re.findall(r"Test Case .* failed", text))}
+
+
+class PrivateArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError("invalid diagnostic arguments")
+
+
+def main(argv):
+    try:
+        parser = PrivateArgumentParser(description=__doc__)
+        parser.add_argument("log", type=Path)
+        parser.add_argument("--phase", choices=sorted(PHASES), default="unknown")
+        parser.add_argument("--exit-code", type=int)
+        args = parser.parse_args(argv)
+        if args.exit_code is not None and not 0 <= args.exit_code <= 255:
+            raise ValueError("invalid process exit code")
+        print("ios failure metadata " + json.dumps(summary(args.log.read_text(errors="replace"), args.phase, args.exit_code), separators=(",", ":")))
+        return 0
+    except Exception:
+        print("ios failure metadata unavailable")
+        return 1
 
 
 if __name__ == "__main__":
-    print("ios failure metadata " + json.dumps(summary(Path(sys.argv[1]).read_text(errors="replace")), separators=(",", ":")))
+    sys.exit(main(sys.argv[1:]))

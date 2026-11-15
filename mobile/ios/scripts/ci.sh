@@ -29,7 +29,7 @@ metadata_exit=0
 python3 "$ios_dir/scripts/read-protection-probe.py" "$ios_dir/Build/protection-preflight-private.log" || metadata_exit=$?
 if [[ "$preflight_exit" -ne 0 || "$metadata_exit" -ne 0 ]]; then
   echo "ios native protection preflight FAIL"
-  python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/protection-preflight-private.log"
+  python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/protection-preflight-private.log" --phase protection-preflight --exit-code "$preflight_exit"
   denial_bundle="$ios_dir/Build/CapabilityDenial-${GITHUB_RUN_ID:-local}-$(date +%s).xcresult"
   denial_exit=0
   xcodebuild test -project "$ios_dir/Locklark.xcodeproj" -scheme LocklarkCapabilityDenial -destination "platform=iOS Simulator,id=$simulator_id" -derivedDataPath "$ios_dir/Build/DerivedData" -resultBundlePath "$denial_bundle" CODE_SIGNING_ALLOWED=NO >"$ios_dir/Build/capability-denial-private.log" 2>&1 || denial_exit=$?
@@ -37,7 +37,7 @@ if [[ "$preflight_exit" -ne 0 || "$metadata_exit" -ne 0 ]]; then
     echo "ios simulator capability-denial tests PASS"
   else
     echo "ios simulator capability-denial tests FAIL"
-    python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/capability-denial-private.log"
+    python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/capability-denial-private.log" --phase capability-denial --exit-code "$denial_exit"
   fi
   if [[ "$preflight_exit" -ne 0 && "$metadata_exit" -eq 0 && "$denial_exit" -eq 0 ]]; then
     echo "ios simulator capability-refusal verified; positive protection preflight still FAIL"
@@ -55,6 +55,6 @@ if [[ "$test_exit" -eq 0 && "$privacy_exit" -eq 0 ]]; then
   echo "ios simulator tests PASS"
 else
   echo "ios simulator tests FAIL"
-  python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/runtime-private.log"
+  python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/runtime-private.log" --phase full-positive --exit-code "$test_exit"
   exit 1
 fi
