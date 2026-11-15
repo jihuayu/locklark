@@ -4,7 +4,7 @@ package sshagent
 
 import (
 	"errors"
-	"github.com/jihuayu/locklark/internal/localpath"
+	"github.com/jihuayu/passme/internal/localpath"
 	"net"
 	"os"
 	"path/filepath"

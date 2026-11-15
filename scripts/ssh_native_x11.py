@@ -284,7 +284,7 @@ def approval_observer():
     if len(line) > 4096:
         raise RuntimeError()
     request = json.loads(line)
-    if (set(request) != {"title", "pid", "executable"} or request["title"] != "Locklark · 本地金库"
+    if (set(request) != {"title", "pid", "executable"} or request["title"] != "Passme · 本地金库"
             or type(request["pid"]) is not int or request["pid"] <= 0
             or os.readlink("/proc/" + str(request["pid"]) + "/exe") != os.path.realpath(request["executable"])):
         raise RuntimeError()
@@ -306,7 +306,7 @@ def main():
     if not stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode):
         raise RuntimeError()
     request = json.load(sys.stdin)
-    SAFE_TARGET = "app" if request.get("title") == "Locklark · 本地金库" else "picker" if request.get("title") == "选择未加密 OpenSSH Ed25519 私钥" else "none"
+    SAFE_TARGET = "app" if request.get("title") == "Passme · 本地金库" else "picker" if request.get("title") == "选择未加密 OpenSSH Ed25519 私钥" else "none"
     if request.get("observe"):
         native.FAILURE_CONTEXT.update(action="snapshot", index=-1)
     if request.get("observe") == "clipboard":

@@ -1,6 +1,6 @@
 # 审计历史性能验收
 
-日期：2026-11-07；起点 `main` `41e31f7`（PR #45）。实现分支 `codex/audit-history-performance`，对应 [#35](https://github.com/jihuayu/locklark/issues/35)。主代理设计算法和独立验收，外部 DeepSeek worker 实现并跑首轮测试，另一个只读 worker 独立审查验证路径。算法及未改变的威胁模型见[设计](audit-history-performance-design.md)。
+日期：2026-11-07；起点 `main` `41e31f7`（PR #45）。实现分支 `codex/audit-history-performance`，对应 [#35](https://github.com/jihuayu/passme/issues/35)。主代理设计算法和独立验收，外部 DeepSeek worker 实现并跑首轮测试，另一个只读 worker 独立审查验证路径。算法及未改变的威胁模型见[设计](audit-history-performance-design.md)。
 
 ## 安全与等价性
 

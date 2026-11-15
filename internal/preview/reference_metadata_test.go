@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func nativeReferenceFixture(t testing.TB) (nativeMeta, []vault.Item, string) {

@@ -49,42 +49,42 @@ def complete_pass(returncode, raw, expected_tests=2):
 
 def safe_diagnostic(raw):
     allowed_steps = {"platform-fs", "binding-create", "binding-unlock", "capsule-storage", "bound-operation", "create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
-    steps = re.findall(rb"INSTRUMENTATION_STATUS: locklark_stage=([a-z-]+)", raw)
+    steps = re.findall(rb"INSTRUMENTATION_STATUS: passme_stage=([a-z-]+)", raw)
     step = steps[-1].decode("ascii") if steps and steps[-1].decode("ascii") in allowed_steps else "unknown"
     exception = "unknown"
     for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException", "android.system.ErrnoException", "java.lang.RuntimeException"):
         if name.encode() in raw: exception = name; break
     lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
-    waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
+    waits = re.findall(rb"INSTRUMENTATION_STATUS: passme_wait=([a-z-]+)", raw)
     allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-visible", "ime-hidden", "native-input", "native-input-focus", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
     wait = waits[-1].decode() if waits and waits[-1].decode() in allowed_waits else "unknown"
-    statuses = re.findall(rb"INSTRUMENTATION_STATUS: locklark_ui_status=([a-z-]+)", raw)
+    statuses = re.findall(rb"INSTRUMENTATION_STATUS: passme_ui_status=([a-z-]+)", raw)
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
                                               "control", "control_phase", "ime", "ime_hide_requested", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
     context = empty_context.copy()
     failures = []
-    fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
-              (b"INSTRUMENTATION_STATUS: locklark_wait=", "wait", allowed_waits),
-              (b"INSTRUMENTATION_STATUS: locklark_ui_status=", "ui_status", allowed_status),
-              (b"INSTRUMENTATION_STATUS: locklark_core_phase=", "core_phase", {"operation", "capture", "create", "unlock", "refresh", "device_setup", "device_ready", "device_key", "device_cipher", "device_prompt", "device_wait", "device_aad", "device_crypto", "device_read", "device_write"}),
-              (b"INSTRUMENTATION_STATUS: locklark_core_error=", "core_error", {"locked", "closed", "invalid", "conflict", "cancelled", "unknown", "expired", "unavailable", "exists", "capacity", "other"}),
-              (b"INSTRUMENTATION_STATUS: locklark_inputs_intact=", "inputs_intact", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_fs_owned=", "fs_owned", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
-              (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "quick-unlock", "lock", "unlock", "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-observe", "ime-dismiss", "ime-hidden", "ime-wait-hidden", "scroll", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
-              (b"INSTRUMENTATION_STATUS: locklark_ime=", "ime", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=", "ime_hide_requested", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_window_focus=", "window_focus", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_visible=", "control_visible", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_enabled=", "control_enabled", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_present=", "control_present", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_focused=", "control_focused", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_input_active=", "input_active", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
+    fields = ((b"INSTRUMENTATION_STATUS: passme_stage=", "step", allowed_steps),
+              (b"INSTRUMENTATION_STATUS: passme_wait=", "wait", allowed_waits),
+              (b"INSTRUMENTATION_STATUS: passme_ui_status=", "ui_status", allowed_status),
+              (b"INSTRUMENTATION_STATUS: passme_core_phase=", "core_phase", {"operation", "capture", "create", "unlock", "refresh", "device_setup", "device_ready", "device_key", "device_cipher", "device_prompt", "device_wait", "device_aad", "device_crypto", "device_read", "device_write"}),
+              (b"INSTRUMENTATION_STATUS: passme_core_error=", "core_error", {"locked", "closed", "invalid", "conflict", "cancelled", "unknown", "expired", "unavailable", "exists", "capacity", "other"}),
+              (b"INSTRUMENTATION_STATUS: passme_inputs_intact=", "inputs_intact", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_fs_owned=", "fs_owned", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_fs_link=", "fs_link", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
+              (b"INSTRUMENTATION_STATUS: passme_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "quick-unlock", "lock", "unlock", "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key"}),
+              (b"INSTRUMENTATION_STATUS: passme_control_phase=", "control_phase", {"ready", "ime-observe", "ime-dismiss", "ime-hidden", "ime-wait-hidden", "scroll", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
+              (b"INSTRUMENTATION_STATUS: passme_ime=", "ime", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_ime_hide_requested=", "ime_hide_requested", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_window_focus=", "window_focus", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_control_visible=", "control_visible", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_control_enabled=", "control_enabled", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_control_present=", "control_present", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_control_focused=", "control_focused", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_input_active=", "input_active", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: passme_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
     for line in raw.splitlines():
         for prefix, key, allowed in fields:
             if line.startswith(prefix):
@@ -116,7 +116,7 @@ def main():
     if not re.fullmatch(r"emulator-[0-9]+", serial):
         raise RuntimeFailure()
     adb = [str(sdk / "platform-tools/adb"), "-s", serial]
-    state = STATE = Path(tempfile.mkdtemp(prefix="locklark-android-runtime-"))
+    state = STATE = Path(tempfile.mkdtemp(prefix="passme-android-runtime-"))
     log = (state / "controller.log").open("xb")
     os.chmod(log.name, 0o600)
     def command(arguments, *, private=False, timeout=60, required=True):
@@ -130,11 +130,11 @@ def main():
         raise RuntimeFailure()
     if command(["shell", "service", "check", "package"]).stdout.strip() != b"Service package: found":
         raise RuntimeFailure()
-    package, test_package = "org.locklark.android", "org.locklark.android.test"
+    package, test_package = "org.passme.android", "org.passme.android.test"
     STAGE = "install"
     command(["install", "-r", str(root / "app/build/outputs/apk/debug/app-debug.apk")], timeout=120)
     command(["install", "-t", "-r", str(root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")], timeout=120)
-    if os.environ.get("LOCKLARK_ANDROID_TEST_RESET") != "1":
+    if os.environ.get("PASSME_ANDROID_TEST_RESET") != "1":
         raise RuntimeFailure()
     command(["shell", "pm", "clear", package]); command(["shell", "pm", "clear", test_package])
     runtime = (state / "runtime.log").open("xb")
@@ -156,7 +156,7 @@ def main():
     STAGE = "instrumentation"
     result = None
     try:
-        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
+        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.passme.android.BoundOperationTest,org.passme.android.OfflineVaultTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
     except subprocess.TimeoutExpired as error:
         for data in (error.stdout, error.stderr):
             if data: log.write(data)

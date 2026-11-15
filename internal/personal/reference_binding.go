@@ -1,8 +1,8 @@
 package personal
 
 import (
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // BindReferenceMetadata maps a resolved target to this profile's native slot.

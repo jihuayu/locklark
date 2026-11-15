@@ -5,7 +5,7 @@ package teamclient
 import (
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 type SystemStore interface {

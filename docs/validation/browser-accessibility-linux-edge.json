@@ -1,5 +1,5 @@
 {
-  "schema": "locklark.browser-accessibility-receipt.v1",
+  "schema": "passme.browser-accessibility-receipt.v1",
   "state": "PASS",
   "head": "2778d7cbc076f01bae167f361dc7510c001b7476",
   "source_clean": true,

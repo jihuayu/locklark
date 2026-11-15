@@ -3,8 +3,8 @@
 package desktop
 
 import (
-	"github.com/jihuayu/locklark/internal/localpath"
-	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/passme/internal/localpath"
+	"github.com/jihuayu/passme/internal/sshagent"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +21,6 @@ func TestNativeSSHCancelledStartupCleansEndpointWithoutUIDispatch(t *testing.T) 
 		t.Fatal("lifecycle fixture unavailable")
 	}
 	defer os.RemoveAll(dir)
-
 
 	h := newSSHNativeHost(nil, nil, nil)
 	h.trackServiceStart()

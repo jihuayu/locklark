@@ -10,7 +10,7 @@ from . import allowlist, zipbuild
 from .bundle import read_regular_file
 from .version import metadata_bytes
 
-SCHEMA = "locklark-browser-extension-unsigned-receipt/v2"
+SCHEMA = "passme-browser-extension-unsigned-receipt/v2"
 TOOL_PATH = "scripts/browserrelease"
 BUILD_SCRIPT_RELATIVE = "browser-extension/build.js"
 VERSION_METADATA_RELATIVE = "browser-extension/release-version.json"
@@ -22,8 +22,8 @@ def sha256_hex(data: bytes) -> str:
 
 def artifact_names(product: str) -> tuple[str, str]:
     return (
-        f"locklark-browser-extension-{product}-unsigned.zip",
-        f"locklark-browser-extension-{product}-unsigned.receipt.json",
+        f"passme-browser-extension-{product}-unsigned.zip",
+        f"passme-browser-extension-{product}-unsigned.receipt.json",
     )
 
 

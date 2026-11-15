@@ -3,7 +3,7 @@ package teamfiles
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/testtemp"
+	"github.com/jihuayu/passme/internal/testtemp"
 )
 
 func TestMain(m *testing.M) {

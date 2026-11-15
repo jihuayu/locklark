@@ -413,7 +413,7 @@ func TestRenderPSQL(t *testing.T) {
 	}
 }
 
-const expectedAskpassScript = "#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\nesac\n"
+const expectedAskpassScript = "#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$PASSME_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$PASSME_GIT_SECRET_FILE\" ;;\nesac\n"
 
 func TestRenderGitAndNetrc(t *testing.T) {
 	rendered := renderBuiltin(t, "git", "", map[string][]byte{
@@ -441,7 +441,7 @@ func TestRenderGitAndNetrc(t *testing.T) {
 		t.Fatalf("gitconfig %q", gitconfig.Content)
 	}
 	env := envLookup(rendered.Env)
-	if env["GIT_TERMINAL_PROMPT"] != "0" || env["GIT_ASKPASS"] == "" || env["LOCKLARK_GIT_SECRET_FILE"] == "" || env["GIT_CONFIG_GLOBAL"] == "" || env["NETRC"] == "" {
+	if env["GIT_TERMINAL_PROMPT"] != "0" || env["GIT_ASKPASS"] == "" || env["PASSME_GIT_SECRET_FILE"] == "" || env["GIT_CONFIG_GLOBAL"] == "" || env["NETRC"] == "" {
 		t.Fatalf("git environment %v", env)
 	}
 
@@ -682,10 +682,10 @@ func TestValidPassthroughName(t *testing.T) {
 	if !ValidPassthroughName(psql, "PGHOST", "db.example.com") {
 		t.Fatal("PGHOST refused")
 	}
-	if !ValidPassthroughName(git, "SSH_AUTH_SOCK", `\\.\pipe\Locklark-SSH-agent-test`) {
+	if !ValidPassthroughName(git, "SSH_AUTH_SOCK", `\\.\pipe\Passme-SSH-agent-test`) {
 		t.Fatal("git SSH_AUTH_SOCK refused")
 	}
-	for _, name := range []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY", "NODE_OPTIONS", "PATH", "SystemRoot", "GIT_ASKPASS", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "PGPASSWORD", "XDG_CONFIG_HOME", "LOCKLARK_SECRET", "_PRIVATE"} {
+	for _, name := range []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY", "NODE_OPTIONS", "PATH", "SystemRoot", "GIT_ASKPASS", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "PGPASSWORD", "XDG_CONFIG_HOME", "PASSME_SECRET", "_PRIVATE"} {
 		if ValidPassthroughName(aws, name, "value") {
 			t.Fatalf("denied passthrough %q accepted", name)
 		}

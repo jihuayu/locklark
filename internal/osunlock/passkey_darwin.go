@@ -15,7 +15,7 @@ import "unsafe"
 // passkey user-verification operation.
 //
 // The read targets the same scoped keychain item as Store and Load (service
-// app.locklark.unlock.v1) and never creates, replaces or migrates it. The item's
+// app.passme.unlock.v1) and never creates, replaces or migrates it. The item's
 // userPresence access control is evaluated by Security.framework through an
 // explicit, freshly created LAContext per call (see passkey_darwin.m):
 // touchIDAuthenticationAllowableReuseDuration is 0, the context is invalidated
@@ -34,18 +34,18 @@ func (keychain) LoadForPasskeyVerification(id string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(name))
 	var value *C.uchar
 	var n C.long
-	if status := int(C.ll_passkey_load(name, &value, &n)); status != 0 {
+	if status := int(C.pm_passkey_load(name, &value, &n)); status != 0 {
 		if value != nil {
-			C.ll_passkey_clear_free(value, n)
+			C.pm_passkey_clear_free(value, n)
 		}
 		return nil, nativeError(status)
 	}
 	if value == nil || n <= 0 || n > maxPasskeyCapsule {
 		if value != nil {
-			C.ll_passkey_clear_free(value, n)
+			C.pm_passkey_clear_free(value, n)
 		}
 		return nil, ErrUnavailable
 	}
-	defer C.ll_passkey_clear_free(value, n)
+	defer C.pm_passkey_clear_free(value, n)
 	return C.GoBytes(unsafe.Pointer(value), C.int(n)), nil
 }

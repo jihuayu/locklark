@@ -38,7 +38,7 @@ SSH_AUTH_SOCK='/界面复制的完整端点' /usr/bin/ssh-add -T /公钥文件�
 
 ## Windows 客户端配置
 
-Windows 使用单独的用户管道，界面复制的端点形如 `\\.\pipe\Locklark-SSH-agent-…`。用 Windows 自带 OpenSSH 时，可在 PowerShell 中临时设置端点，并在完成后恢复原值。下面的占位内容须整体替换为界面复制的完整端点：
+Windows 使用单独的用户管道，界面复制的端点形如 `\\.\pipe\Passme-SSH-agent-…`。用 Windows 自带 OpenSSH 时，可在 PowerShell 中临时设置端点，并在完成后恢复原值。下面的占位内容须整体替换为界面复制的完整端点：
 
 ```powershell
 $previousAgent = $env:SSH_AUTH_SOCK

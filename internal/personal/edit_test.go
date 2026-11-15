@@ -10,7 +10,7 @@ import (
 )
 
 func TestEditTargetsObservedItem(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "vault.ll")
+	path := filepath.Join(t.TempDir(), "vault.pm")
 	pw := "synthetic"
 	key := bytes.Repeat([]byte{3}, 16)
 	if e := Create(path, pw, key); e != nil {

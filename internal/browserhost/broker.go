@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // Peer identifies the authenticated local OS peer of a broker connection.

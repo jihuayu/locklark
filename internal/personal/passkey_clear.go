@@ -1,6 +1,6 @@
 package personal
 
-import "github.com/jihuayu/locklark/internal/vault"
+import "github.com/jihuayu/passme/internal/vault"
 
 // clearItemPasskeys zeroes every raw passkey buffer an item owns, in both
 // persisted forms. Item.Passkey tracks the legacy single record and

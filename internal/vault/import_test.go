@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 func TestImportProvenanceNativeRoundtrip(t *testing.T) {
@@ -45,7 +45,7 @@ func TestImportProvenanceRejectsUnprotectedOrNoncanonicalField(t *testing.T) {
 		group := db.Content.Root.Groups[0]
 		for j := range group.Entries[1].Values {
 			v := &group.Entries[1].Values[j]
-			if v.Key == "Locklark.ImportSource" {
+			if v.Key == "Passme.ImportSource" {
 				v.Value.Content = value
 			}
 		}
@@ -60,7 +60,7 @@ func TestImportProvenanceRejectsUnprotectedOrNoncanonicalField(t *testing.T) {
 	group := db.Content.Root.Groups[0]
 	for j := range group.Entries[1].Values {
 		v := &group.Entries[1].Values[j]
-		if v.Key == "Locklark.ImportSource" {
+		if v.Key == "Passme.ImportSource" {
 			v.Value.Protected = wrappers.NewBoolWrapper(false)
 		}
 	}

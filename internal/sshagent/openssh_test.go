@@ -26,10 +26,10 @@ import (
 // This is a transport/runtime gate using the platform's actual OpenSSH client.
 // It does not replace encrypted-vault/native-approval product acceptance.
 func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
-	if os.Getenv("LOCKLARK_TEST_OPENSSH") != "1" {
+	if os.Getenv("PASSME_TEST_OPENSSH") != "1" {
 		t.Skip("explicit native OpenSSH runtime gate disabled")
 	}
-	executable := os.Getenv("LOCKLARK_TEST_OPENSSH_BIN")
+	executable := os.Getenv("PASSME_TEST_OPENSSH_BIN")
 	if executable == "" {
 		if runtime.GOOS == "windows" {
 			executable = filepath.Join(os.Getenv("WINDIR"), "System32", "OpenSSH", "ssh-add.exe")
@@ -76,7 +76,7 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 		t.Fatal("native OpenSSH could not enumerate the private custom endpoint: " + diagnostic())
 	}
 	public, comment, options, rest, e := ssh.ParseAuthorizedKey(listing)
-	if e != nil || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 || comment != "Locklark fixture" || !bytes.Equal(public.Marshal(), h.signer.PublicKey().Marshal()) {
+	if e != nil || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 || comment != "Passme fixture" || !bytes.Equal(public.Marshal(), h.signer.PublicKey().Marshal()) {
 		t.Fatal("native OpenSSH enumerated an unexpected key or endpoint")
 	}
 	publicFile := filepath.Join(t.TempDir(), "probe.pub")
@@ -200,7 +200,7 @@ func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *tes
 		t.Fatal("SSH host signer fixture failed")
 	}
 	config := &ssh.ServerConfig{PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		if meta.User() != "locklark-probe" || !bytes.Equal(key.Marshal(), h.signer.PublicKey().Marshal()) {
+		if meta.User() != "passme-probe" || !bytes.Equal(key.Marshal(), h.signer.PublicKey().Marshal()) {
 			return nil, errors.New("unrecognized test identity")
 		}
 		return &ssh.Permissions{}, nil
@@ -239,7 +239,7 @@ func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *tes
 			}
 			for request := range requests {
 				var command struct{ Command string }
-				if request.Type != "exec" || ssh.Unmarshal(request.Payload, &command) != nil || command.Command != "locklark-agent-probe" {
+				if request.Type != "exec" || ssh.Unmarshal(request.Payload, &command) != nil || command.Command != "passme-agent-probe" {
 					if request.WantReply {
 						_ = request.Reply(false, nil)
 					}
@@ -269,7 +269,7 @@ func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *tes
 		t.Fatal("public SSH configuration fixture failed")
 	}
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	output, e := run(executable, "-F", empty, "-T", "-a", "-x", "-p", port, "-oBatchMode=yes", "-oIdentitiesOnly=yes", "-oPreferredAuthentications=publickey", "-oPasswordAuthentication=no", "-oKbdInteractiveAuthentication=no", "-oStrictHostKeyChecking=yes", "-oConnectTimeout=5", "-oUserKnownHostsFile="+strconv.Quote(filepath.ToSlash(known)), "-oGlobalKnownHostsFile="+strconv.Quote(filepath.ToSlash(empty)), "-i", publicFile, "locklark-probe@127.0.0.1", "locklark-agent-probe")
+	output, e := run(executable, "-F", empty, "-T", "-a", "-x", "-p", port, "-oBatchMode=yes", "-oIdentitiesOnly=yes", "-oPreferredAuthentications=publickey", "-oPasswordAuthentication=no", "-oKbdInteractiveAuthentication=no", "-oStrictHostKeyChecking=yes", "-oConnectTimeout=5", "-oUserKnownHostsFile="+strconv.Quote(filepath.ToSlash(known)), "-oGlobalKnownHostsFile="+strconv.Quote(filepath.ToSlash(empty)), "-i", publicFile, "passme-probe@127.0.0.1", "passme-agent-probe")
 	defer clear(output)
 	if e != nil {
 		t.Fatal("actual native OpenSSH connection did not authenticate through the private custom agent: " + diagnostic())

@@ -1,6 +1,6 @@
 {
   "accounts": [{
-    "attrs": {"uuid":"synthetic-account","name":"Locklark sample"},
+    "attrs": {"uuid":"synthetic-account","name":"Passme sample"},
     "vaults": [{
       "attrs": {"uuid":"synthetic-vault","name":"演练","type":"P"},
       "items": [

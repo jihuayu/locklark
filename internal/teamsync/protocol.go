@@ -13,8 +13,8 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 )
 
 const (
-	protocol         = "locklark.team-sync/v1"
+	protocol         = "passme.team-sync/v1"
 	ReadPath         = "/v1/team-sync/read"
 	PublishPath      = "/v1/team-sync/publish"
 	MaxReadBytes     = 8 << 10
@@ -78,16 +78,16 @@ type response struct {
 func encode(v any) []byte { raw, _ := json.Marshal(v); return raw }
 func digest(domain string, v any) string {
 	h := sha256.New()
-	h.Write([]byte("locklark/team-sync/" + domain + "/v1\x00"))
+	h.Write([]byte("passme/team-sync/" + domain + "/v1\x00"))
 	h.Write(encode(v))
 	return hex.EncodeToString(h.Sum(nil))
 }
 func (p requestProof) signingBytes() []byte {
 	p.Signature = nil
-	return append([]byte("locklark/team-sync/request/v1\x00"), encode(p)...)
+	return append([]byte("passme/team-sync/request/v1\x00"), encode(p)...)
 }
 func (r response) signingBytes() []byte {
-	return append([]byte("locklark/team-sync/response/v1\x00"), encode(struct {
+	return append([]byte("passme/team-sync/response/v1\x00"), encode(struct {
 		Protocol, RequestDigest, Nonce, Status string
 		Head                                   directory.Checkpoint
 		HistoryDigest, ReceiptDigest           string

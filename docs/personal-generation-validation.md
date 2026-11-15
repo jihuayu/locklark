@@ -12,7 +12,7 @@
 
 ## 失败先行与回归
 
-先运行新增测试，因 `GenerateLogin`、`RegeneratePassword` 和 `Event.Generation` 未实现而编译失败；临时日志 `/tmp/locklark-validation/generation-red.log`。后续验证覆盖：
+先运行新增测试，因 `GenerateLogin`、`RegeneratePassword` 和 `Event.Generation` 未实现而编译失败；临时日志 `/tmp/passme-validation/generation-red.log`。后续验证覆盖：
 
 - 生成密码经加密落盘、关库重开后仍可通过独立披露流程查看；公开回执/审计和数据库明文扫描无原值。
 - 错误因素、未知 ID、旧修订、损坏审计均不调用生成器；未知 ID/版本冲突只记拒绝。
@@ -26,9 +26,9 @@
 
 ## 检查与复核记录
 
-使用 Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。实跑命令包括 `go test -count=1 ./...`（设置 Bun/PyKeePass 路径）、`go test -race -count=1 ./internal/personal ./cmd/locklark -run 'TestGenerateSaved|TestRegenerate|TestGeneration|TestReveal'`、`go vet ./...`、`go mod verify`、ConPTY 驱动单测和四项终端/进程验收（个人恢复、披露、生成、MCP）。每项最终结果、用户指定 Luna/max 独立复核及发现关闭情况记录在 PR 正文；远端双平台检查针对最终提交核对。
+使用 Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。实跑命令包括 `go test -count=1 ./...`（设置 Bun/PyKeePass 路径）、`go test -race -count=1 ./internal/personal ./cmd/passme -run 'TestGenerateSaved|TestRegenerate|TestGeneration|TestReveal'`、`go vet ./...`、`go mod verify`、ConPTY 驱动单测和四项终端/进程验收（个人恢复、披露、生成、MCP）。每项最终结果、用户指定 Luna/max 独立复核及发现关闭情况记录在 PR 正文；远端双平台检查针对最终提交核对。
 
-上述本地检查全部通过，定向 race 用时 225.734s / 1.051s，全仓个人包 56.350s。以旧版实际二进制运行生成升级验收通过，macOS arm64 交叉构建通过。PR 为 [#3](https://github.com/jihuayu/locklark/pull/3)，首个实现 head `8458438b50b076c334ddee3982b456f2e1a0de66`；文案修正与交接 head 及最终检查链接以 PR 正文为准。
+上述本地检查全部通过，定向 race 用时 225.734s / 1.051s，全仓个人包 56.350s。以旧版实际二进制运行生成升级验收通过，macOS arm64 交叉构建通过。PR 为 [#3](https://github.com/jihuayu/passme/pull/3)，首个实现 head `8458438b50b076c334ddee3982b456f2e1a0de66`；文案修正与交接 head 及最终检查链接以 PR 正文为准。
 
 Luna/max 独立复核未发现阻塞问题，实跑 personal/CLI 全包测试（42.893s / 8.518s）、构建、生成 PTY、定向 vet 和 diff 检查通过。唯一文案意见是生成登录标题为空时不应提示调用者提供密码，已改为只提示标题必填。此复核不替代外部密码评审。
 

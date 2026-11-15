@@ -4,8 +4,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrReferenceProfile = errors.New("unsupported personal reference metadata profile")

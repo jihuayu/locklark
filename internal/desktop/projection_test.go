@@ -1,7 +1,7 @@
 package desktop
 
 import (
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	"testing"
 )
 

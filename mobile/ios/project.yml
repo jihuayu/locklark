@@ -1,4 +1,4 @@
-name: Locklark
+name: Passme
 options:
   minimumXcodeGenVersion: 2.46.0
   deploymentTarget:
@@ -10,25 +10,25 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     GENERATE_INFOPLIST_FILE: YES
     CODE_SIGN_STYLE: Automatic
-    LOCKLARK_BUNDLE_BASE: org.locklark.mobile.ios
+    PASSME_BUNDLE_BASE: org.passme.mobile.ios
 packages:
-  LocklarkSecurityLogic:
+  PassmeSecurityLogic:
     path: SecurityLogic
 targets:
-  Locklark:
+  Passme:
     type: application
     platform: iOS
     sources:
-      - Locklark
+      - Passme
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE)
-        PRODUCT_NAME: Locklark
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSME_BUNDLE_BASE)
+        PRODUCT_NAME: Passme
         TARGETED_DEVICE_FAMILY: "1,2"
-        SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
-        CODE_SIGN_ENTITLEMENTS: Locklark/Locklark.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Passme/Passme-Bridging-Header.h
+        CODE_SIGN_ENTITLEMENTS: Passme/Passme.entitlements
         CLANG_ENABLE_OBJC_ARC: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Locklark
+        INFOPLIST_KEY_CFBundleDisplayName: Passme
         INFOPLIST_KEY_NSFaceIDUsageDescription: 使用系统验证解锁此设备上已明确启用的本机快速解锁。
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
@@ -36,59 +36,59 @@ targets:
     dependencies:
       - framework: Build/Mobilecore.xcframework
         embed: false
-      - package: LocklarkSecurityLogic
-  LocklarkTests:
+      - package: PassmeSecurityLogic
+  PassmeTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [LocklarkTests]
+    sources: [PassmeTests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).tests
-        SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSME_BUNDLE_BASE).tests
+        SWIFT_OBJC_BRIDGING_HEADER: Passme/Passme-Bridging-Header.h
     dependencies:
-      - target: Locklark
-      - package: LocklarkSecurityLogic
-  LocklarkUITests:
+      - target: Passme
+      - package: PassmeSecurityLogic
+  PassmeUITests:
     type: bundle.ui-testing
     platform: iOS
-    sources: [LocklarkUITests]
+    sources: [PassmeUITests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).uitests
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSME_BUNDLE_BASE).uitests
     dependencies:
-      - target: Locklark
-  LocklarkCapabilityTests:
+      - target: Passme
+  PassmeCapabilityTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [LocklarkCapabilityTests]
+    sources: [PassmeCapabilityTests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).capabilitytests
-        SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSME_BUNDLE_BASE).capabilitytests
+        SWIFT_OBJC_BRIDGING_HEADER: Passme/Passme-Bridging-Header.h
     dependencies:
-      - target: Locklark
-      - package: LocklarkSecurityLogic
-  LocklarkCapabilityUITests:
+      - target: Passme
+      - package: PassmeSecurityLogic
+  PassmeCapabilityUITests:
     type: bundle.ui-testing
     platform: iOS
-    sources: [LocklarkCapabilityUITests]
+    sources: [PassmeCapabilityUITests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).capabilityuitests
+        PRODUCT_BUNDLE_IDENTIFIER: $(PASSME_BUNDLE_BASE).capabilityuitests
     dependencies:
-      - target: Locklark
+      - target: Passme
 schemes:
-  Locklark:
+  Passme:
     build:
       targets:
-        Locklark: all
+        Passme: all
     test:
-      targets: [LocklarkTests, LocklarkUITests]
+      targets: [PassmeTests, PassmeUITests]
       gatherCoverageData: false
-  LocklarkCapabilityDenial:
+  PassmeCapabilityDenial:
     build:
       targets:
-        Locklark: all
+        Passme: all
     test:
-      targets: [LocklarkCapabilityTests, LocklarkCapabilityUITests]
+      targets: [PassmeCapabilityTests, PassmeCapabilityUITests]
       gatherCoverageData: false

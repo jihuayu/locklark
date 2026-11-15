@@ -18,15 +18,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/teamclient"
-	"github.com/jihuayu/locklark/internal/teamconsent"
-	"github.com/jihuayu/locklark/internal/teamfiles"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/teamclient"
+	"github.com/jihuayu/passme/internal/teamconsent"
+	"github.com/jihuayu/passme/internal/teamfiles"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
-const OwnerUsage = `usage: locklark team <command> --profile ABS_PATH [flags]
+const OwnerUsage = `usage: passme team <command> --profile ABS_PATH [flags]
 
 Bootstrap and inspect OS-protected owner team profiles without exposing private keys.
 
@@ -45,10 +45,10 @@ EXIT CODES
   3  Outcome unknown — retain the original profile and reconcile the same operation
   4  State or identity conflict — never replace original files or identities
 
-Run "locklark team <command> --help" for command-specific flag details.
+Run "passme team <command> --help" for command-specific flag details.
 `
 
-const ServiceUsage = `OS-PROTECTED SERVICE BOOTSTRAP COMMANDS (usage: locklark-team-sync <command> --profile ABS_PATH [flags])
+const ServiceUsage = `OS-PROTECTED SERVICE BOOTSTRAP COMMANDS (usage: passme-team-sync <command> --profile ABS_PATH [flags])
   prepare-identity      --profile NEW_PROFILE --public-out NEW_SERVICE_JSON
   initialize            --profile PROFILE --service SERVICE_JSON --trusted-pins PINS_JSON
                         --expect-owner-fingerprint SHA256:HEX64 --artifact ARTIFACT_JSON

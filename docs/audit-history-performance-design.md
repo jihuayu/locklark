@@ -1,6 +1,6 @@
 # 已验证审计前缀复用
 
-对应 [issue #35](https://github.com/jihuayu/locklark/issues/35)。目标是在长期使用的库中减少交互操作反复进行的 AEAD、JSON 和 Ed25519 工作，保留现有完整历史、恢复链、快照及修订校验。存储格式、协议和回滚威胁模型不变，不增加持久化 checkpoint 或未签名索引。
+对应 [issue #35](https://github.com/jihuayu/passme/issues/35)。目标是在长期使用的库中减少交互操作反复进行的 AEAD、JSON 和 Ed25519 工作，保留现有完整历史、恢复链、快照及修订校验。存储格式、协议和回滚威胁模型不变，不增加持久化 checkpoint 或未签名索引。
 
 每次认证仍读取并检查当前 slot、会话权限、签名快照和加密 tip；按顺序遍历所有事件，哈希 `domain || sequence(8 bytes) || raw length(8 bytes) || raw ciphertext`。序号必须连续，不能有嵌套 bucket、空值、超限记录或超出 tip 的事件。归档也逐字节计算密文摘要。因此修改中间事件，即使最后事件和 tip 未变，也不能命中旧前缀。
 

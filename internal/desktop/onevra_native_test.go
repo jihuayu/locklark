@@ -13,17 +13,17 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if os.Getenv("LOCKLARK_NATIVE_SMOKE") != "1" {
+	if os.Getenv("PASSME_NATIVE_SMOKE") != "1" {
 		os.Exit(m.Run())
 	}
-	dir, err := os.MkdirTemp("", "locklark-desktop-native-smoke-")
+	dir, err := os.MkdirTemp("", "passme-desktop-native-smoke-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	mygo.App.SetName("Locklark native smoke")
+	mygo.App.SetName("Passme native smoke")
 	mygo.App.SetPath(mygo.PathUserData, dir)
-	if os.Getenv("LOCKLARK_NATIVE_FOREGROUND") != "1" {
+	if os.Getenv("PASSME_NATIVE_FOREGROUND") != "1" {
 		mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 	}
 	mygo.App.OnWindowAllClosed(func() {})
@@ -45,19 +45,19 @@ func TestMain(m *testing.M) {
 }
 
 func TestOnevraNativeWindowSnapshot(t *testing.T) {
-	if os.Getenv("LOCKLARK_NATIVE_SMOKE") != "1" {
-		t.Skip("requires LOCKLARK_NATIVE_SMOKE=1 in a Windows desktop session")
+	if os.Getenv("PASSME_NATIVE_SMOKE") != "1" {
+		t.Skip("requires PASSME_NATIVE_SMOKE=1 in a Windows desktop session")
 	}
 	a := newOnevraTestApp()
 	var shell *plain.Shell
 	mygo.RunOnMain(func() {
 		shell = plain.NewShell(plain.ShellOptions{
-			Title:         "Locklark · Onevra desktop",
+			Title:         "Passme · Onevra desktop",
 			Width:         1240,
 			Height:        820,
 			MinWidth:      980,
 			MinHeight:     680,
-			Hidden:        os.Getenv("LOCKLARK_NATIVE_FOREGROUND") != "1",
+			Hidden:        os.Getenv("PASSME_NATIVE_FOREGROUND") != "1",
 			Theme:         theme.Onevra,
 			HeaderLeading: a.onevraHeaderLeading,
 			HeaderActions: a.onevraHeaderActions,
@@ -68,7 +68,7 @@ func TestOnevraNativeWindowSnapshot(t *testing.T) {
 	if shell == nil {
 		t.Fatal("Onevra shell was not created")
 	}
-	foreground := os.Getenv("LOCKLARK_NATIVE_FOREGROUND") == "1"
+	foreground := os.Getenv("PASSME_NATIVE_FOREGROUND") == "1"
 	mygo.RunOnMain(func() {
 		if !foreground {
 			// Windows does not paint a fully hidden window. Keep the capture
@@ -99,7 +99,7 @@ func TestOnevraNativeWindowSnapshot(t *testing.T) {
 	if len(data) < 8 || string(data[:8]) != "\x89PNG\r\n\x1a\n" {
 		t.Fatalf("native capture is not a PNG: %d bytes", len(data))
 	}
-	dir := os.Getenv("LOCKLARK_SCREENSHOTS")
+	dir := os.Getenv("PASSME_SCREENSHOTS")
 	if dir == "" {
 		dir = t.TempDir()
 	}

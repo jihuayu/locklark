@@ -127,7 +127,7 @@ function harness() {
   };
   document.querySelector("#tab-passkeys").dataset.filter = "passkeys";
   const context = {
-    LocklarkCore: core,
+    PassmeCore: core,
     document,
     navigator: {
       clipboard: {

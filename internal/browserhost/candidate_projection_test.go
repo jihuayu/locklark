@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestCandidateProjectionPreservesStrictBrowserDTO(t *testing.T) {

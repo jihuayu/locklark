@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	bolt "go.etcd.io/bbolt"
 )
 
 func mobileFixture(t *testing.T) (*Vault, string, []byte) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "personal.ll")
+	path := filepath.Join(t.TempDir(), "personal.pm")
 	v, e := Open(path)
 	if e != nil {
 		t.Fatal("open failed")
@@ -504,7 +504,7 @@ func TestMobileEmptyNativeFieldDisclosureIsSuccessfulAndSingleUse(t *testing.T) 
 }
 
 func TestMobileCapturedOperationRejectsCheckToCallCreateAfterLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "must-not-create.ll")
+	path := filepath.Join(t.TempDir(), "must-not-create.pm")
 	v, e := Open(path)
 	if e != nil {
 		t.Fatal("open captured create failed")

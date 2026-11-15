@@ -135,7 +135,7 @@ func keyName(id, token string) (string, error) {
 	if e != nil {
 		return "", ErrUnavailable
 	}
-	return u.User.Sid.String() + "//Locklark/" + id + "/" + token, nil
+	return u.User.Sid.String() + "//Passme/" + id + "/" + token, nil
 }
 func openKey(id, token string) (uintptr, error) {
 	name, e := keyName(id, token)
@@ -235,7 +235,7 @@ type sealed struct {
 	Wrapped, Nonce, Data []byte
 }
 
-func store() mygo.SecretsModule { return mygo.Secrets.Service("app.locklark.hello.v1") }
+func store() mygo.SecretsModule { return mygo.Secrets.Service("app.passme.hello.v1") }
 func (hello) Store(id string, raw []byte) error {
 	if !validID(id) || len(raw) > 1400 {
 		return ErrUnavailable
@@ -283,7 +283,7 @@ func (hello) Store(id string, raw []byte) error {
 	if _, e = rand.Read(iv); e != nil {
 		return ErrUnavailable
 	}
-	data := aead.Seal(nil, iv, raw, []byte("locklark/hello/v1/"+id+"/"+token))
+	data := aead.Seal(nil, iv, raw, []byte("passme/hello/v1/"+id+"/"+token))
 	encoded, e := json.Marshal(sealed{1, token, wrapped, iv, data})
 	if e != nil || len(encoded) > mygo.MaxSecretSize {
 		return ErrUnavailable
@@ -324,7 +324,7 @@ func (hello) Load(id string) ([]byte, error) {
 	}
 	block, _ := aes.NewCipher(key)
 	aead, _ := cipher.NewGCM(block)
-	value, e := aead.Open(nil, blob.Nonce, blob.Data, []byte("locklark/hello/v1/"+id+"/"+blob.Token))
+	value, e := aead.Open(nil, blob.Nonce, blob.Data, []byte("passme/hello/v1/"+id+"/"+blob.Token))
 	if e != nil {
 		return nil, ErrUnavailable
 	}

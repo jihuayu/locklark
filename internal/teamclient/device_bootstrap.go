@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // ConfirmInitial is worker-only. It uses the first device's own HTTP signature,
@@ -121,7 +121,7 @@ func ConfirmInitial(ctx context.Context, path string, trusted directory.Pins, s 
 			items[n] = vault.Item{}
 		}
 	}()
-	if e != nil || items == nil || len(items) != 0 || !bytes.Equal(data, []byte("locklark/team/items/v1/"+c.Genesis().Scope)) {
+	if e != nil || items == nil || len(items) != 0 || !bytes.Equal(data, []byte("passme/team/items/v1/"+c.Genesis().Scope)) {
 		return out, ErrIdentity
 	}
 	// This slice only activates an empty bootstrap. No plaintext item or key

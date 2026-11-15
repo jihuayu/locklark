@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -694,5 +694,3 @@ func (a *App) v2WatchtowerView(c *ui.Context) {
 		})
 	}
 }
-
-

@@ -11,7 +11,7 @@ from personal_acceptance import invoke
 
 def check(binary, legacy=None):
     with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "owner.ll")
+        path = str(pathlib.Path(tmp) / "owner.pm")
         pw = "synthetic-master-" + os.urandom(8).hex()
         _, key = invoke(legacy or binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                         ("重新输入刚保存的 Secret Key", None)], issue=True)

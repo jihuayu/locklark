@@ -22,8 +22,8 @@ import native_acceptance_contract as contract
 import native_acceptance_driver as driver
 
 LABEL = "确认连接此扩展"
-TITLE = "Locklark · 浏览器原生确认"
-EXE = "C:/Program Files/Locklark test/browser.exe" if os.name == "nt" else "/opt/locklark/test-browser"
+TITLE = "Passme · 浏览器原生确认"
+EXE = "C:/Program Files/Passme test/browser.exe" if os.name == "nt" else "/opt/passme/test-browser"
 WINDOW_RAW = {
     "id": 0x200003, "pid": 4242, "title": TITLE, "executable": EXE, "trusted": True,
     "visible": True, "onscreen": True, "secure": False,
@@ -827,10 +827,10 @@ class MacAdapterTests(unittest.TestCase):
         self.assertEqual(api.activations, 0)
 
     def test_preserve_focus_refuses_instead_of_stealing_focus(self):
-        api = FakeMacApi(windows_list=[dict(WINDOW_RAW, title="Locklark acceptance popup")], focus=999)
+        api = FakeMacApi(windows_list=[dict(WINDOW_RAW, title="Passme acceptance popup")], focus=999)
         adapter = macos.MacAdapter(api=api)
         with self.assertRaises(contract.ContractError) as error:
-            execute(adapter, document(title=None, title_prefix="Locklark acceptance", preserve_focus=True))
+            execute(adapter, document(title=None, title_prefix="Passme acceptance", preserve_focus=True))
         self.assertEqual(error.exception.code, "preserve-focus-lost")
         self.assertEqual(api.activations, 0)
         self.assertEqual(api.clicks, [])
@@ -893,7 +893,7 @@ class MacProcessIdentityTests(unittest.TestCase):
     def api(self, pidinfo_result=0):
         class LibProc(object):
             def proc_pidpath(self, pid, buffer, size):
-                buffer.value = b"/opt/locklark/test-browser"
+                buffer.value = b"/opt/passme/test-browser"
                 return len(buffer.value)
 
             def proc_pidinfo(self, pid, flavor, argument, buffer, size):
@@ -907,7 +907,7 @@ class MacProcessIdentityTests(unittest.TestCase):
         api = self.api(pidinfo_result=0)
         with patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
             path, trusted = api.process(4242)
-        self.assertEqual(path, "/opt/locklark/test-browser")
+        self.assertEqual(path, "/opt/passme/test-browser")
         self.assertFalse(trusted)
 
     def test_same_process_uid_is_trusted_without_any_stat(self):

@@ -49,7 +49,7 @@ async function scenario(browser, pathname, html, check) {
 
 async function checkGitHubFill(page) {
   const result = await page.evaluate(() => {
-    const core = globalThis.LocklarkCore;
+    const core = globalThis.PassmeCore;
     const inputs = [...document.querySelectorAll("input")];
     const describe = () =>
       inputs.map((el) => ({
@@ -118,7 +118,7 @@ async function checkGitHubFill(page) {
 
 async function checkGitHubCapture(page) {
   const result = await page.evaluate(() => {
-    const core = globalThis.LocklarkCore;
+    const core = globalThis.PassmeCore;
     const inputs = [...document.querySelectorAll("input")];
     const user = document.querySelector('input[name="login"]');
     const pass = document.querySelector('input[type="password"]');
@@ -170,7 +170,7 @@ async function checkGitHubCapture(page) {
 
 async function checkWebAuthn(page) {
   const result = await page.evaluate(() => {
-    const core = globalThis.LocklarkCore;
+    const core = globalThis.PassmeCore;
     const input = document.getElementById("input-email");
     const describe = () => ({
       id: input.id,
@@ -249,25 +249,25 @@ async function checkWebAuthn(page) {
 }
 
 async function main() {
-  const browserName = process.env.LOCKLARK_TEST_BROWSER || "chromium";
+  const browserName = process.env.PASSME_TEST_BROWSER || "chromium";
   assert(
     ["chromium", "firefox", "edge"].includes(browserName),
-    "LOCKLARK_TEST_BROWSER must be chromium, firefox or edge",
+    "PASSME_TEST_BROWSER must be chromium, firefox or edge",
   );
-  const executable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
+  const executable = process.env.PASSME_TEST_BROWSER_EXECUTABLE;
   if (browserName === "edge")
     assert(
       typeof executable === "string" && executable.startsWith("/"),
-      "Edge requires LOCKLARK_TEST_BROWSER_EXECUTABLE (absolute path)",
+      "Edge requires PASSME_TEST_BROWSER_EXECUTABLE (absolute path)",
     );
   const modulePath =
-    process.env.LOCKLARK_TEST_PLAYWRIGHT ||
+    process.env.PASSME_TEST_PLAYWRIGHT ||
     path.resolve(__dirname, "../web/node_modules/playwright");
   let playwright;
   try {
     playwright = require(modulePath);
   } catch {
-    throw new Error("Playwright is unavailable; set LOCKLARK_TEST_PLAYWRIGHT");
+    throw new Error("Playwright is unavailable; set PASSME_TEST_PLAYWRIGHT");
   }
   const browser = await playwright[browserName === "edge" ? "chromium" : browserName].launch({
     headless: true,

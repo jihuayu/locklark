@@ -12,8 +12,8 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/sshagent"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -140,7 +140,7 @@ func (h *sshNativeHost) Identities(ctx context.Context, _ sshagent.Peer) ([]ssha
 		if e != nil {
 			return nil, sshagent.ErrRefused
 		}
-		keys = append(keys, sshagent.Identity{Blob: pub.Marshal(), Comment: "Locklark " + row.Fingerprint + " " + row.ID})
+		keys = append(keys, sshagent.Identity{Blob: pub.Marshal(), Comment: "Passme " + row.Fingerprint + " " + row.ID})
 	}
 	return keys, nil
 }

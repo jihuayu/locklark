@@ -92,7 +92,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
     def manifest(complete=True):
         return {"version": 1, "run_id": "12345678-1234-4234-8234-1234567890AB", "test": evidence.TEST_NAME,
                 "complete": complete, "canaries": ["MasterFixture", "PasswordFixture", "EditedFixture", "UserFixture",
-                    "LL1-" + "A" * 26, "A" * 32, "otpauth://totp/Fixture?secret=" + "A" * 32,
+                    "PM1-" + "A" * 26, "A" * 32, "otpauth://totp/Fixture?secret=" + "A" * 32,
                     "123456", "GeneratedFixturePassword", "RegeneratedFixturePassword"]}
 
     def test_partial_failed_manifest_retains_available_canaries_for_scan(self):
@@ -114,7 +114,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
 
     def test_only_fresh_named_booted_simulator_is_accepted(self):
         identifier = "12345678-1234-4234-8234-1234567890AB"
-        device = {"udid": identifier, "name": "Locklark-CI-test", "isAvailable": True, "state": "Booted"}
+        device = {"udid": identifier, "name": "Passme-CI-test", "isAvailable": True, "state": "Booted"}
         evidence.owned_device(json.dumps({"devices": {"runtime": [device]}}), identifier)
         for change in ({"name": "Personal phone"}, {"state": "Shutdown"}, {"isAvailable": False}):
             with self.subTest(change=change), self.assertRaises(evidence.EvidenceFailure):
@@ -165,7 +165,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
 class PhysicalTransportTests(unittest.TestCase):
     device = "00008110-0008040A0A11801E"
     simulator = "12345678-1234-4234-8234-1234567890AB"
-    runner = "com.example.locklark.acceptance.uitests.xctrunner"
+    runner = "com.example.passme.acceptance.uitests.xctrunner"
 
     def arguments(self, root, **changes):
         values = dict(artifacts=root, xcrun="/unused-xcrun", simulator=None, device=self.device,
@@ -190,7 +190,7 @@ class PhysicalTransportTests(unittest.TestCase):
             destination = verifier.root / "runner-canaries-private.json"
             self.assertEqual(calls, [["/unused-xcrun", "devicectl", "device", "copy", "from",
                 "--device", self.device, "--domain-type", "appDataContainer", "--domain-identifier", self.runner,
-                "--source", "Library/Application Support/LocklarkUITestEvidence/canaries.json",
+                "--source", "Library/Application Support/PassmeUITestEvidence/canaries.json",
                 "--destination", str(destination)]])
             self.assertTrue(verifier.manifest_valid and verifier.manifest_complete)
             self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
@@ -244,7 +244,7 @@ class PhysicalTransportTests(unittest.TestCase):
                        dict(runner_bundle=None), dict(device="Personal iPhone"),
                        dict(runner_bundle=evidence.RUNNER_BUNDLE),
                        dict(runner_bundle="com.example.application.uitests.xctrunner"),
-                       dict(runner_bundle="com.locklark.acceptance.uitests.xctrunner"),
+                       dict(runner_bundle="com.passme.acceptance.uitests.xctrunner"),
                        dict(runner_bundle=self.runner + ".extra"),
                        dict(device=None, simulator=self.simulator, owned_simulator=True, runner_bundle=self.runner)]
             for change in changes:
@@ -261,7 +261,7 @@ class PhysicalTransportTests(unittest.TestCase):
             source.write_text(json.dumps(EvidenceIntegrityTests.manifest()))
             source.chmod(0o600)
             inventory, path = pathlib.Path(root) / "devices.json", pathlib.Path(root) / "container.txt"
-            inventory.write_text(json.dumps({"devices": {"runtime": [{"udid": self.simulator, "name": "Locklark-CI-unit",
+            inventory.write_text(json.dumps({"devices": {"runtime": [{"udid": self.simulator, "name": "Passme-CI-unit",
                 "state": "Booted", "isAvailable": True}]}}))
             path.write_text(str(container) + "\n")
             args = self.arguments(root, device=None, simulator=self.simulator, owned_simulator=True, runner_bundle=None)

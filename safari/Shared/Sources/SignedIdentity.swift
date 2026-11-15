@@ -12,18 +12,18 @@ public enum IdentityError: Error, Equatable {
 }
 
 public enum InfoKeys {
-    public static let teamID = "LocklarkTeamID"
-    public static let appGroupID = "LocklarkAppGroupID"
-    public static let extensionBundleID = "LocklarkExtensionBundleID"
-    public static let containingAppBundleID = "LocklarkAppBundleID"
+    public static let teamID = "PassmeTeamID"
+    public static let appGroupID = "PassmeAppGroupID"
+    public static let extensionBundleID = "PassmeExtensionBundleID"
+    public static let containingAppBundleID = "PassmeAppBundleID"
 }
 
 /// Identity values are read from the signed Info.plist of whichever target is
 /// asking. Placeholders, blanks and unresolved build settings fail closed.
 public struct ConfiguredIdentity: Equatable {
-    public static let fixedContainingAppBundleID = "org.locklark.browser.safari"
-    public static let fixedExtensionBundleID = "org.locklark.browser.safari.Extension"
-    public static let fixedAppGroupID = "group.org.locklark.browser.safari"
+    public static let fixedContainingAppBundleID = "org.passme.browser.safari"
+    public static let fixedExtensionBundleID = "org.passme.browser.safari.Extension"
+    public static let fixedAppGroupID = "group.org.passme.browser.safari"
 
     public let teamID: String
     public let appGroupID: String

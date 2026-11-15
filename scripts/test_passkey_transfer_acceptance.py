@@ -39,7 +39,7 @@ class PureHelperTests(unittest.TestCase):
     def test_format_secret(self):
         raw = bytes(range(16))
         text = MODULE.format_secret(raw)
-        self.assertTrue(text.startswith("LL1-"))
+        self.assertTrue(text.startswith("PM1-"))
         self.assertEqual(base64.b32decode(text[4:] + "=" * (-len(text[4:]) % 8)), raw)
         with self.assertRaises(MODULE.Refusal):
             MODULE.format_secret(b"short")

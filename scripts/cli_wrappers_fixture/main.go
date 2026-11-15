@@ -32,18 +32,18 @@ type report struct {
 }
 
 var secretEnvironmentNames = map[string]bool{
-	"GH_TOKEN":                    true,
-	"GITHUB_TOKEN":                true,
-	"AWS_ACCESS_KEY_ID":           true,
-	"AWS_SECRET_ACCESS_KEY":       true,
-	"AWS_SESSION_TOKEN":           true,
-	"TF_TOKEN_app_terraform_io":   true,
-	"OPENAI_API_KEY":              true,
-	"ANTHROPIC_API_KEY":           true,
-	"STRIPE_API_KEY":              true,
-	"FLY_API_TOKEN":               true,
-	"VERCEL_TOKEN":                true,
-	"LOCKLARK_TEST_SECRET_CANARY": true,
+	"GH_TOKEN":                  true,
+	"GITHUB_TOKEN":              true,
+	"AWS_ACCESS_KEY_ID":         true,
+	"AWS_SECRET_ACCESS_KEY":     true,
+	"AWS_SESSION_TOKEN":         true,
+	"TF_TOKEN_app_terraform_io": true,
+	"OPENAI_API_KEY":            true,
+	"ANTHROPIC_API_KEY":         true,
+	"STRIPE_API_KEY":            true,
+	"FLY_API_TOKEN":             true,
+	"VERCEL_TOKEN":              true,
+	"PASSME_TEST_SECRET_CANARY": true,
 }
 
 func isSecretEnvironmentName(name string) bool {
@@ -125,7 +125,7 @@ func buildReport(tool string) report {
 		result.EnvSHA256[name] = hex.EncodeToString(sum[:])
 	}
 
-	for _, name := range []string{"KUBECONFIG", "DOCKER_CONFIG", "NPM_CONFIG_USERCONFIG", "PGPASSFILE", "GIT_ASKPASS", "NETRC", "LOCKLARK_GIT_SECRET_FILE", "GIT_CONFIG_GLOBAL"} {
+	for _, name := range []string{"KUBECONFIG", "DOCKER_CONFIG", "NPM_CONFIG_USERCONFIG", "PGPASSFILE", "GIT_ASKPASS", "NETRC", "PASSME_GIT_SECRET_FILE", "GIT_CONFIG_GLOBAL"} {
 		path, key, wantMode, present := environmentPath(name)
 		if !present {
 			continue

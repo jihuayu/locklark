@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 func TestFileAnchorCreateInitializationFailureNeverPublishes(t *testing.T) {

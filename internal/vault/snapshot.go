@@ -13,8 +13,8 @@ import (
 	"io"
 
 	"filippo.io/age"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 type Snapshot struct {
@@ -29,7 +29,7 @@ var ErrSnapshot = errors.New("invalid or unexpected snapshot")
 // The signature binds both exact artifacts and their epoch before any KDBX
 // header is parsed. The caller supplies the independently pinned public key.
 func (s Snapshot) signed() []byte {
-	b := []byte("locklark/m0/vault-snapshot/v1\x00")
+	b := []byte("passme/m0/vault-snapshot/v1\x00")
 	b = binary.BigEndian.AppendUint64(b, s.Epoch)
 	for _, p := range [][]byte{s.Database, s.Envelope} {
 		h := sha256.Sum256(p)
@@ -72,7 +72,7 @@ func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Re
 	}
 	if items == nil {
 		group := kdbx.NewGroup()
-		group.Name = "Locklark"
+		group.Name = "Passme"
 		e := kdbx.NewEntry()
 		e.Values = []kdbx.ValueData{{Key: "Title", Value: kdbx.V{Content: "Preview"}}, {Key: "Notes", Value: kdbx.V{Content: base64.StdEncoding.EncodeToString(payload), Protected: wrappers.NewBoolWrapper(true)}}}
 		group.Entries = []kdbx.Entry{e}
@@ -170,7 +170,7 @@ func OpenItems(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, 
 	if g.Name == itemGroup {
 		return readItems(db, g)
 	}
-	if g.Name != "Locklark" || len(g.Entries) != 1 || g.Entries[0].GetContent("Title") != "Preview" {
+	if g.Name != "Passme" || len(g.Entries) != 1 || g.Entries[0].GetContent("Title") != "Preview" {
 		return nil, nil, ErrSnapshot
 	}
 	data, err := base64.StdEncoding.DecodeString(g.Entries[0].GetContent("Notes"))

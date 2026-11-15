@@ -11,7 +11,7 @@ secret = "synthetic-run-secret-密钥"
 os.write(1, secret.encode("utf-8"))
 os.write(2, secret.encode("utf-8"))
 if os.environ.get("TEST_TOKEN") != secret: sys.exit(81)
-if "LOCKLARK_PARENT_ONLY" in os.environ: sys.exit(82)
+if "PASSME_PARENT_ONLY" in os.environ: sys.exit(82)
 if set(os.environ) - {"TEST_TOKEN", "SystemRoot", "SYSTEMROOT", "LC_CTYPE"}: sys.exit(83)
 if sys.stdin.read() != "": sys.exit(84)
 if sys.argv[2:] != ["", "two words", "$(echo hidden)", "a;b"]: sys.exit(85)
@@ -24,7 +24,7 @@ sys.exit(7 if mode == "exit" else 0)
 def check(binary):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path, proof = str(root / "owner.ll"), root / "child-proof"
+        path, proof = str(root / "owner.pm"), root / "child-proof"
         script = root / "trusted child.py"
         script.write_text(CHILD, encoding="utf-8")
         pw, secret = "synthetic-master-password", "synthetic-run-secret-密钥"
@@ -63,5 +63,5 @@ def check(binary):
     print("PASS: confirmed environment injection, real child, exact args, null stdio, timeout and durable intent")
 
 if __name__ == "__main__":
-    os.environ["LOCKLARK_PARENT_ONLY"] = "must-not-inherit"
+    os.environ["PASSME_PARENT_ONLY"] = "must-not-inherit"
     check(str(pathlib.Path(sys.argv[1]).resolve(strict=True)))

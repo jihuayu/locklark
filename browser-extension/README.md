@@ -1,4 +1,4 @@
-# Locklark browser login fill
+# Passme browser login fill
 
 This slice connects an extension to a **separate MyGo native process**. Unlocking
 the ordinary desktop application does not unlock this process. Next.js management
@@ -9,27 +9,27 @@ Build with Node 24 and the Go version in `go.mod`:
 ```sh
 node browser-extension/build.js chromium
 node browser-extension/build.js firefox
-go build -o /absolute/path/locklark-browser-chromium ./cmd/locklark-browser-chromium
-go build -o /absolute/path/locklark-browser-firefox ./cmd/locklark-browser-firefox
-go build -o /absolute/path/locklark-browser-register ./cmd/locklark-browser-register
+go build -o /absolute/path/passme-browser-chromium ./cmd/passme-browser-chromium
+go build -o /absolute/path/passme-browser-firefox ./cmd/passme-browser-firefox
+go build -o /absolute/path/passme-browser-register ./cmd/passme-browser-register
 ```
 
 Load `browser-extension/dist/chromium` as an unpacked Chrome/Edge extension. Its
 public manifest key fixes the development ID to
 `geldnhjapnackobgknocomedmjgphnpe`; it is not a release signature. The Firefox
-package fixes its addon ID to `browser@locklark.local`. Firefox can be loaded as a
+package fixes its addon ID to `browser@passme.local`. Firefox can be loaded as a
 temporary addon for development; release packaging/signing is separate.
 
 Register the matching binary; this writes a manifest to the selected browser's
 per-user directory and refuses overwrite unless `--replace` is explicit:
 
 ```sh
-/absolute/path/locklark-browser-register --browser chrome --host /absolute/path/locklark-browser-chromium
-/absolute/path/locklark-browser-register --browser edge --host /absolute/path/locklark-browser-chromium
-/absolute/path/locklark-browser-register --browser firefox --host /absolute/path/locklark-browser-firefox
+/absolute/path/passme-browser-register --browser chrome --host /absolute/path/passme-browser-chromium
+/absolute/path/passme-browser-register --browser edge --host /absolute/path/passme-browser-chromium
+/absolute/path/passme-browser-register --browser firefox --host /absolute/path/passme-browser-firefox
 ```
 
-`--output /absolute/directory/org.locklark.browser.json` selects an isolated
+`--output /absolute/directory/org.passme.browser.json` selects an isolated
 profile directory. Chromium profiles use `<user-data-dir>/NativeMessagingHosts`.
 Default Linux directories are `~/.config/google-chrome/NativeMessagingHosts`,
 `~/.config/microsoft-edge/NativeMessagingHosts`, and
@@ -40,11 +40,11 @@ Default Linux directories are `~/.config/google-chrome/NativeMessagingHosts`,
 
 On Windows, use absolute `.exe` paths and add `--register-user` to the relevant
 registration command. This writes the absolute manifest path to the default
-value of the corresponding `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.locklark.browser`,
-`HKCU\Software\Microsoft\Edge\NativeMessagingHosts\org.locklark.browser`, or
-`HKCU\Software\Mozilla\NativeMessagingHosts\org.locklark.browser` key using Go's
+value of the corresponding `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.passme.browser`,
+`HKCU\Software\Microsoft\Edge\NativeMessagingHosts\org.passme.browser`, or
+`HKCU\Software\Mozilla\NativeMessagingHosts\org.passme.browser` key using Go's
 registry API. No elevation or shell is used. The default manifest is under
-`%APPDATA%\Locklark\NativeMessagingHosts\<browser>`. Existing registry entries
+`%APPDATA%\Passme\NativeMessagingHosts\<browser>`. Existing registry entries
 also require explicit `--replace`. Windows registration/native messaging and
 macOS native messaging remain untested here.
 
@@ -113,8 +113,8 @@ the exact verification status and limitations.
 **Paste protection** is on by default and can be turned off in the extension
 options. Pasting into a current-password field on a page whose last candidate
 lookup explicitly reported no saved login shows a confirmation panel first;
-cancelling blocks the paste. Pasting text shaped like a Locklark Secret Key
-(`LL1-`, `LLR2-`, or the 110-character recovery material) is always confirmed,
+cancelling blocks the paste. Pasting text shaped like a Passme Secret Key
+(`PM1-`, `PMR2-`, or the 110-character recovery material) is always confirmed,
 even on a linked page. An unknown site state (locked vault, disconnected host,
 or an expired observation) never blocks a paste, and signup/confirm-password
 fields are excluded so generated passwords can still be pasted. The pasted text
@@ -126,7 +126,7 @@ the reference behaviour, decision table and limits.
 If the native host is missing, rejected by the browser, exits before pairing,
 times out waiting for desktop unlock, or is too old, the popup shows a guidance
 card with the matching fix and a reconnect action; the options page has a
-native-connection section with refresh/connect/unlock. “Unlock in Locklark”
+native-connection section with refresh/connect/unlock. “Unlock in Passme”
 sends the bounded `unlock-request` frame so the desktop or standalone window is
 raised; it never grants a capability or bypasses approval.
 
@@ -202,7 +202,7 @@ tab, document ID and browser-provided URL. Page-provided origin fields have no
 authority. Password injection targets the original document, and password values
 never pass through the MAIN-world message bridge.
 
-Passkey create/get calls offer Locklark or the browser's other authenticators.
+Passkey create/get calls offer Passme or the browser's other authenticators.
 The native window shows the authoritative origin/RP ID and offers a new login,
 an eligible existing login, or a matching saved Passkey. It never silently
 replaces an existing Passkey. Requests requiring user verification need fresh
@@ -260,9 +260,9 @@ Checks:
 node --test browser-extension/test/*.test.js
 go test -race ./internal/browserhost
 go test ./internal/personal ./internal/desktop
-LOCKLARK_TEST_PLAYWRIGHT=/absolute/path/to/playwright node scripts/browser_extension_dom.cjs
+PASSME_TEST_PLAYWRIGHT=/absolute/path/to/playwright node scripts/browser_extension_dom.cjs
 # Requires real DBus/X11, native host, and Playwright; no approval bypasses:
-LOCKLARK_TEST_BROWSER_PARITY=1 node scripts/browser_native_acceptance.mjs
+PASSME_TEST_BROWSER_PARITY=1 node scripts/browser_native_acceptance.mjs
 ```
 
 Node tests use a simulated browser API only for worker races and policy checks.

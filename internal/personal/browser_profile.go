@@ -65,13 +65,13 @@ func (t BrowserProfileTarget) binding(key []byte) (string, error) {
 		return "", e
 	}
 	defer clear(raw)
-	derived, e := hkdf.Key(sha256.New, key, nil, "locklark/personal/browser-profile-fill/key/v1", 32)
+	derived, e := hkdf.Key(sha256.New, key, nil, "passme/personal/browser-profile-fill/key/v1", 32)
 	if e != nil {
 		return "", ErrBrowserProfileFill
 	}
 	defer clear(derived)
 	m := hmac.New(sha256.New, derived)
-	m.Write([]byte("locklark/browser-profile-fill/v1\x00"))
+	m.Write([]byte("passme/browser-profile-fill/v1\x00"))
 	m.Write(raw)
 	return hex.EncodeToString(m.Sum(nil)), nil
 }

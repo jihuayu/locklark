@@ -5,7 +5,7 @@ package desktop
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
 )
 
 // TestDarwinDesktopDoesNotCreateNativeClipboardManager keeps the App factory

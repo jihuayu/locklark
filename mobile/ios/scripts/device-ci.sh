@@ -30,7 +30,7 @@ runtime_log="$run_dir/device-runtime-private.log"
 test_exit=0
 # Uses only the host's already configured Xcode account/certificates/profiles.
 # No provisioning-update, credential-import, app-delete or device-reset action.
-xcodebuild test -project "$ios_dir/Locklark.xcodeproj" -scheme Locklark -destination "platform=iOS,id=$device_id" -derivedDataPath "$ios_dir/Build/DeviceDerivedData" -resultBundlePath "$result_bundle" DEVELOPMENT_TEAM="$signing_team" LOCKLARK_BUNDLE_BASE="$bundle_base" CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES >"$runtime_log" 2>&1 || test_exit=$?
+xcodebuild test -project "$ios_dir/Passme.xcodeproj" -scheme Passme -destination "platform=iOS,id=$device_id" -derivedDataPath "$ios_dir/Build/DeviceDerivedData" -resultBundlePath "$result_bundle" DEVELOPMENT_TEAM="$signing_team" PASSME_BUNDLE_BASE="$bundle_base" CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES >"$runtime_log" 2>&1 || test_exit=$?
 privacy_exit=0
 python3 "$ios_dir/scripts/verify-ui-evidence.py" --device "$device_id" --runner-bundle "$bundle_base.uitests.xctrunner" --runtime-log "$runtime_log" --xcresult "$result_bundle" --test-exit-code "$test_exit" --artifacts "$run_dir/DeviceUIEvidence" || privacy_exit=$?
 if [[ "$test_exit" -eq 0 && "$privacy_exit" -eq 0 ]]; then

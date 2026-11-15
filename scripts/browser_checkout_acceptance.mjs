@@ -1,12 +1,12 @@
 // Explicit cross-origin checkout acceptance: same-site top page plus an
-// embedded card form served from checkout.locklark.test. The caller supplies
+// embedded card form served from checkout.passme.test. The caller supplies
 // the real browser page, popup adapter, native X11 input helper and the
 // private synthetic fixture. This module never dispatches extension runtime
 // messages, never asks for a Session approval directly and never submits a
 // form. It only performs trusted pointer/click and native-label actions.
 import assert from "node:assert/strict";
 
-const CHECKOUT_DEFAULT_HOST = "checkout.locklark.test";
+const CHECKOUT_DEFAULT_HOST = "checkout.passme.test";
 const CHECKOUT_CROSS_SITE_HOST = "checkout.other.test";
 const CHECKOUT_HOSTS = new Set([
   CHECKOUT_DEFAULT_HOST,
@@ -74,7 +74,7 @@ export function checkoutTopHTML(port, options = {}) {
   const sandboxAttribute = sandbox ? ' sandbox="allow-scripts"' : "";
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
-    "<title>Locklark acceptance · checkout</title>" +
+    "<title>Passme acceptance · checkout</title>" +
     "<style>body{font-family:sans-serif;margin:1rem}" +
     "label{display:block;margin:.5rem 0}" +
     "input,select{display:block;width:20rem;padding:.3rem}" +
@@ -111,7 +111,7 @@ export function checkoutTopHTML(port, options = {}) {
 export function checkoutCardHTML() {
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
-    "<title>Locklark checkout card frame</title>" +
+    "<title>Passme checkout card frame</title>" +
     "<style>body{font-family:sans-serif;margin:1rem}" +
     "label{display:block;margin:.5rem 0}" +
     "input,select{display:block;width:18rem;padding:.3rem}</style></head><body>" +

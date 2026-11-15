@@ -1,7 +1,7 @@
 #if canImport(Darwin)
 import Darwin
 import Foundation
-import LocklarkSafariShared
+import PassmeSafariShared
 
 /// Standalone macOS probe for the relay's SIGPIPE policy.
 ///

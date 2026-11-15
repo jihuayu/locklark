@@ -34,7 +34,7 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         if index == len(answers)-1 and any(value not in screen[:offset] for value in required_before_last_prompt):
             raise RuntimeError("required scope notice missing before confirmation")
         if value is None:
-            match = re.search(r"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", screen)
+            match = re.search(r"(?:PM1-[A-Z2-7]{26}|PMR2-[A-Z2-7]{52}-[A-Z2-7]{52}|PMR1-[A-Z2-7]{52})", screen)
             if not issue or match is None:
                 raise RuntimeError("Secret Key not displayed at initialization")
             issued = value = match.group()
@@ -93,7 +93,7 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         raise RuntimeError("disclosure missing or repeated")
     if any(value in screen for value in forbidden):
         raise RuntimeError("unselected or refused field disclosed")
-    if deny_issue and re.search(r"LL1-[A-Z2-7]{26}|重新输入新 Secret Key", screen):
+    if deny_issue and re.search(r"PM1-[A-Z2-7]{26}|重新输入新 Secret Key", screen):
         raise RuntimeError("failed restore issued a new Secret Key")
     if expect_error and expect_error not in screen:
         raise RuntimeError(f"{action}: expected error category missing")

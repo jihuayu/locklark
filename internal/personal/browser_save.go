@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const browserNewAction = "item.browser.save.new"
@@ -70,7 +70,7 @@ func (r *browserSaveRequest) valid() bool {
 	return idOK(r.target.ID) && digestOK(r.target.Revision) && r.target.Title == ""
 }
 func (r *browserSaveRequest) binding(key []byte) (string, error) {
-	derived, e := hkdf.Key(sha256.New, key, nil, "locklark/personal/browser-save/key/v1", 32)
+	derived, e := hkdf.Key(sha256.New, key, nil, "passme/personal/browser-save/key/v1", 32)
 	if e != nil {
 		return "", e
 	}
@@ -89,7 +89,7 @@ func (r *browserSaveRequest) binding(key []byte) (string, error) {
 	}
 	defer clear(raw)
 	m := hmac.New(sha256.New, derived)
-	m.Write([]byte("locklark/browser-save/v1\x00"))
+	m.Write([]byte("passme/browser-save/v1\x00"))
 	m.Write(raw)
 	return hex.EncodeToString(m.Sum(nil)), nil
 }

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	pwgen "github.com/jihuayu/locklark/internal/password"
+	pwgen "github.com/jihuayu/passme/internal/password"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -361,5 +361,3 @@ func (a *App) generatorView(c *ui.Context) {
 		})
 	})
 }
-
-

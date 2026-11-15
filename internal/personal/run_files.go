@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/cliprofile"
 )
 
 // writeRunBundleFiles materializes rendered files without following symlinks at

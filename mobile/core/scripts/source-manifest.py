@@ -15,7 +15,7 @@ phase.add_argument("--after-build", action="store_true")
 args = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parents[3]
 output = root / "mobile/core/build"
-go_bin = os.environ.get("GO_BIN", os.environ.get("LOCKLARK_GO", "go"))
+go_bin = os.environ.get("GO_BIN", os.environ.get("PASSME_GO", "go"))
 decoder = json.JSONDecoder()
 file_fields = ("GoFiles", "CgoFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
                "FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles", "EmbedFiles")

@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 	"github.com/oneo-me/onevra/source/theme"
 )
 
@@ -106,9 +106,9 @@ func TestOnevraVaultLockClearsSelectionButKeepsLayoutPreferences(t *testing.T) {
 }
 
 func TestOnevraVaultHeadlessSnapshot(t *testing.T) {
-	target := os.Getenv("LOCKLARK_UI_SNAPSHOT")
+	target := os.Getenv("PASSME_UI_SNAPSHOT")
 	if target == "" {
-		t.Skip("set LOCKLARK_UI_SNAPSHOT to write a headless PNG")
+		t.Skip("set PASSME_UI_SNAPSHOT to write a headless PNG")
 	}
 	tester := newOnevraTestTester(newOnevraTestApp())
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -341,4 +341,3 @@ func TestOnevraEditorGeneratorSettingsAndWatchtowerViews(t *testing.T) {
 		t.Fatalf("打开条目 did not switch from Watchtower to item detail: nav=%q selected=%q", a.v2.nav, a.v2.selectedID)
 	}
 }
-

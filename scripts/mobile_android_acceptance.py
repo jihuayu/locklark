@@ -27,7 +27,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 
 
-PACKAGE = "org.locklark.android"
+PACKAGE = "org.passme.android"
 COMPONENT = PACKAGE + "/.MainActivity"
 STAGES = {"prerequisites", "install", "create", "manual-login", "disclosure",
           "edit-password", "otp", "generated-login", "search", "background-lock",
@@ -122,7 +122,7 @@ def is_unlock_refusal(nodes):
 
 def app_activity_records(raw):
     text = raw.decode("utf-8", errors="replace")
-    component = re.compile(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b")
+    component = re.compile(r"\borg\.passme\.android/(?:\.MainActivity|org\.passme\.android\.MainActivity)\b")
     headers = list(re.finditer(r"(?m)^[ \t]*\*[ \t]*Hist[ \t]+#\d+:[ \t]*ActivityRecord\{[^\n]*\}", text))
     records = []
     for index, header in enumerate(headers):
@@ -163,7 +163,7 @@ def top_resumed_record(raw):
 
 def top_activity_identity(raw):
     record, _ = top_resumed_record(raw)
-    if record is None or not re.search(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b", record):
+    if record is None or not re.search(r"\borg\.passme\.android/(?:\.MainActivity|org\.passme\.android\.MainActivity)\b", record):
         return None
     token = re.search(r"ActivityRecord\{([0-9a-fA-F]{1,16})[ \t]", record)
     task = re.search(r"\bt([0-9]+)\b", record)
@@ -171,7 +171,7 @@ def top_activity_identity(raw):
 
 
 def lifecycle_state(raw):
-    component = re.compile(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b")
+    component = re.compile(r"\borg\.passme\.android/(?:\.MainActivity|org\.passme\.android\.MainActivity)\b")
     states = [record["state"] for record in app_activity_records(raw)]
     activity = "unknown"
     if states and "stopped" in states and set(states) <= {"stopped", "destroyed"}:
@@ -205,7 +205,7 @@ def background_is_stopped(state):
 def ui_control_state(nodes):
     own = [node for node in nodes if node.get("package") == PACKAGE]
     texts = {node.get("text") for node in own}
-    for label, value in (("正在完成锁定…", "lock-cleanup"), ("Locklark 已锁定", "locked-cover"),
+    for label, value in (("正在完成锁定…", "lock-cleanup"), ("Passme 已锁定", "locked-cover"),
                          ("正在打开此设备的本地金库…", "opening")):
         if label in texts:
             return value
@@ -381,7 +381,7 @@ class AndroidAcceptance:
         self.logger = None
         self.log_thread = None
         self.log_failed = threading.Event()
-        self.remote = "/data/local/tmp/locklark-host-ui-" + os.urandom(8).hex()
+        self.remote = "/data/local/tmp/passme-host-ui-" + os.urandom(8).hex()
         self.adb = [str(pathlib.Path(args.adb).resolve()), "-s", args.serial]
         self.started = False
         self.remote_owned = False
@@ -870,9 +870,9 @@ class AndroidAcceptance:
         self.visible("生成新的 Secret Key", class_name="android.widget.Button")
         self.tap("生成新的 Secret Key", class_name="android.widget.Button")
         self.diagnosis["step"] = "read-account-key"
-        key = self.wait(lambda nodes: next((n.get("text") for n in nodes if re.fullmatch(r"LL1-[A-Z2-7]{26}", n.get("text", ""))), None))
+        key = self.wait(lambda nodes: next((n.get("text") for n in nodes if re.fullmatch(r"PM1-[A-Z2-7]{26}", n.get("text", ""))), None))
         self.record(key)
-        wrong_key = self.record("LL1-" + base64.b32encode(os.urandom(16)).decode().rstrip("="))
+        wrong_key = self.record("PM1-" + base64.b32encode(os.urandom(16)).decode().rstrip("="))
         self.diagnosis["step"] = "enter-master"
         self.enter("新的主密码", master)
         self.diagnosis["step"] = "repeat-master"
@@ -981,7 +981,7 @@ class AndroidAcceptance:
                       {"id": generated_identity[0], "revision": generated_identity[1], "title": generated_title, "username": second_user, "password": generated, "otp": ""}]}
         self.write_private("expected-private.json", self.private_values)
         self.set_stage("copy-vault")
-        result = self.command(["exec-out", "run-as", PACKAGE, "cat", "no_backup/personal.ll"], oracle="personal.ll", timeout=90)
+        result = self.command(["exec-out", "run-as", PACKAGE, "cat", "no_backup/personal.pm"], oracle="personal.pm", timeout=90)
         require(len(result.stdout) > 4096)
         scan_public(result.stdout, self.canaries)
         self.done("force_stopped_app_database_copied_privately_without_plaintext_canaries")
@@ -999,7 +999,7 @@ class AndroidAcceptance:
         prefix = f"cli-{self.counter:04d}-{action}"
         try:
             process = subprocess.Popen([str(pathlib.Path(self.args.cli).resolve()), "personal", action,
-                                        "--file", str(self.root / "personal.ll"), *map(str, options)],
+                                        "--file", str(self.root / "personal.pm"), *map(str, options)],
                                        stdin=slave, stdout=subprocess.PIPE, stderr=slave, start_new_session=True)
             offset = 0
             for prompt, value in answers:
@@ -1072,7 +1072,7 @@ from pykeepass.exceptions import CredentialsError
 p=json.load(sys.stdin)
 db=PyKeePass(sys.argv[1],password=p['password'])
 assert db.version==(4,1) and len(db.entries)==len(p['items'])
-entries={e.get_custom_property('Locklark.ID'):e for e in db.entries}
+entries={e.get_custom_property('Passme.ID'):e for e in db.entries}
 for item in p['items']:
  e=entries[item['id']]
  assert (e.title,e.username,e.password)==(item['title'],item['username'],item['password'])
@@ -1136,11 +1136,11 @@ def parser():
     result.add_argument("--adb", required=True)
     result.add_argument("--serial", required=True)
     result.add_argument("--apk", required=True)
-    result.add_argument("--reset-test-app", action="store_true", help="explicitly authorize clearing only org.locklark.android on a verified emulator")
+    result.add_argument("--reset-test-app", action="store_true", help="explicitly authorize clearing only org.passme.android on a verified emulator")
     result.add_argument("--cli", help="optional independently fixed personal CLI for signed audit checks")
     result.add_argument("--peer", help="optional Python executable with pykeepass for encrypted KDBX verification; requires --cli")
     result.add_argument("--timeout", type=int, default=180, help="per UI state wait in seconds")
-    result.add_argument("--artifacts", default="/tmp/locklark-validation")
+    result.add_argument("--artifacts", default="/tmp/passme-validation")
     return result
 
 

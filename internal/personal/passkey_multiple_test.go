@@ -10,8 +10,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func useReadAuthenticatedItems(t *testing.T, s *Session) []vault.Item {

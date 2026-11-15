@@ -5,11 +5,11 @@
 # launch time.
 set -euo pipefail
 
-source_path="${LOCKLARK_SAFARI_HELPER:-${SRCROOT:-.}/../dist/locklark-browser-safari}"
+source_path="${PASSME_SAFARI_HELPER:-${SRCROOT:-.}/../dist/passme-browser-safari}"
 dest_dir="${BUILT_PRODUCTS_DIR:?}/${CONTENTS_FOLDER_PATH:?}/MacOS"
-dest_path="${dest_dir}/locklark-browser-safari"
+dest_path="${dest_dir}/passme-browser-safari"
 
-if [[ "${LOCKLARK_ALLOW_MISSING_HELPER:-0}" == "1" && "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
+if [[ "${PASSME_ALLOW_MISSING_HELPER:-0}" == "1" && "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
   if [[ ! -f "$source_path" ]]; then
     echo "warning: unsigned CI build has no Safari helper; runtime will report unavailable" >&2
     exit 0
@@ -20,8 +20,8 @@ if [[ ! -f "$source_path" || ! -x "$source_path" ]]; then
   echo "error: fixed Safari helper is missing or not executable" >&2
   exit 1
 fi
-if [[ "$(basename "$source_path")" != "locklark-browser-safari" ]]; then
-  echo "error: Safari helper basename must be locklark-browser-safari" >&2
+if [[ "$(basename "$source_path")" != "passme-browser-safari" ]]; then
+  echo "error: Safari helper basename must be passme-browser-safari" >&2
   exit 1
 fi
 
@@ -36,6 +36,6 @@ if [[ "${CODE_SIGNING_ALLOWED:-YES}" != "NO" ]]; then
   fi
   codesign --force --options runtime --timestamp \
     --sign "$identity" \
-    --identifier "org.locklark.browser.safari.Helper" \
+    --identifier "org.passme.browser.safari.Helper" \
     "$dest_path"
 fi

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
 	bolt "go.etcd.io/bbolt"
 )
 

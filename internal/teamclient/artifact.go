@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 const MaxBootstrapArtifactBytes = 16 << 20
@@ -40,7 +40,7 @@ func DecodeBootstrapArtifact(raw []byte) (BootstrapArtifact, error) {
 	return a, nil
 }
 func artifactDigest(raw []byte) string {
-	h := sha256.Sum256(append([]byte("locklark/teamclient/initial-artifact/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/teamclient/initial-artifact/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func artifactMatchesOwner(a BootstrapArtifact, d OwnerDescriptor) bool {

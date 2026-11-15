@@ -1,6 +1,6 @@
 package desktop
 
-import "github.com/jihuayu/locklark/internal/personal"
+import "github.com/jihuayu/passme/internal/personal"
 
 // SSH keys have their own management surface and must not acquire legacy
 // login field disclosure/edit controls through a generic metadata list.

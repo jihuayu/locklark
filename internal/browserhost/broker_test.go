@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/localpath"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/localpath"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func brokerTestSocket(t *testing.T) string {
@@ -30,13 +30,13 @@ func brokerTestSocket(t *testing.T) string {
 		t.Cleanup(func() { trustedBrokerParent = old })
 	}
 	sock := filepath.Join(dir, "b.sock")
-	t.Setenv("LOCKLARK_BROWSER_SOCKET", sock)
+	t.Setenv("PASSME_BROWSER_SOCKET", sock)
 	return sock
 }
 
 func brokerTestSession(t *testing.T) (*personal.Session, personal.Row) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "broker.ll")
+	path := filepath.Join(t.TempDir(), "broker.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

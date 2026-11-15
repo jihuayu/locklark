@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/origin"
+	"github.com/jihuayu/passme/internal/origin"
 )
 
 // FieldType defines the semantic type of a custom or structured field.
@@ -156,7 +156,7 @@ type VaultMeta struct {
 	CreatedAt   int64  `json:"created_at,omitempty"`
 }
 
-// itemV2Envelope is the protected Locklark.V2 KDBX slot payload.
+// itemV2Envelope is the protected Passme.V2 KDBX slot payload.
 type itemV2Envelope struct {
 	Version     int                `json:"v"` // always 2
 	Category    ItemCategory       `json:"category,omitempty"`
@@ -175,7 +175,7 @@ type itemV2Envelope struct {
 	UpdatedAt   int64              `json:"updated_at,omitempty"`
 }
 
-const itemV2Slot = "Locklark.V2"
+const itemV2Slot = "Passme.V2"
 const attachmentRefPrefix = "att/"
 
 // EffectiveCategory returns the canonical ItemCategory for both v1 and v2 items.
@@ -297,7 +297,7 @@ func (it Item) NormalizedIdentity() *IdentityDetails {
 }
 
 // HasV2Extension reports whether an item must be encoded with the
-// "Locklark.V2" KDBX envelope. Pure v1 items remain byte-compatible.
+// "Passme.V2" KDBX envelope. Pure v1 items remain byte-compatible.
 func HasV2Extension(it Item) bool { return hasV2Extension(it) }
 
 func hasV2Extension(it Item) bool {

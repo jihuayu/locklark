@@ -1,4 +1,4 @@
-# Locklark M5 Opaque-Box E2E Test Infrastructure
+# Passme M5 Opaque-Box E2E Test Infrastructure
 
 This document defines the architecture, runtime contract, and operating
 instructions for the repository-wide opaque-box end-to-end (E2E) suite. The
@@ -44,7 +44,7 @@ F18 is the E2E test track itself; F19 is the final M6 hardening gate.
 | **F13** | Watchtower checks: weak, reused, unsecured HTTP, and opt-in k-anonymity HIBP breach lookup. | M3 |
 | **F14** | `internal/cliprofile` registry: `gh`, `aws`, `kubectl`, `docker`, `npm`, `terraform`, `git`, `psql`, and `token`. | M4 |
 | **F15** | `personal.RunBundle`: multi-secret `item.run.bundle` intent, `0600` files in the run root, and cryptographic spec-digest binding. | M4 |
-| **F16** | `internal/clibinding` and `locklark cli init|run|list|show|remove|shell-init`, including shell functions, `--help` bypass, and recursion guard. | M4 |
+| **F16** | `internal/clibinding` and `passme cli init|run|list|show|remove|shell-init`, including shell functions, `--help` bypass, and recursion guard. | M4 |
 | **F17** | Desktop broker for CLI runs: unlock once over local IPC with native approval and terminal-scoped leases. | M4 |
 
 ### 1.2 The four tiers
@@ -96,10 +96,10 @@ registration cannot silently disappear from the report.
 
 ## 2. The Four User-Facing Entry Points
 
-### 2.1 Entry point 1: `locklark` CLI
+### 2.1 Entry point 1: `passme` CLI
 
-- Binaries: `cmd/locklark` (`locklark`) and, when the branch provides it,
-  `cmd/locklark-team-sync` (`locklark-team-sync`).
+- Binaries: `cmd/passme` (`passme`) and, when the branch provides it,
+  `cmd/passme-team-sync` (`passme-team-sync`).
 - Interactive commands (`personal init`, `add-login`, `list`, `reveal-login`,
   `otp`, `search`, `health`, import/export, `run-cli`, and the M4 CLI wrappers)
   are driven through a **real POSIX PTY**:
@@ -113,7 +113,7 @@ registration cannot silently disappear from the report.
   - Prompt answers are written to the PTY master. The harness checks that
     `termios.ECHO` is disabled while a secret is being entered and that echo is
     restored after the process exits.
-  - Issued `LL1-…` Secret Keys and `LLR2-…`/`LLR1-…` recovery kits are parsed
+  - Issued `PM1-…` Secret Keys and `PMR2-…`/`PMR1-…` recovery kits are parsed
     from the terminal transcript by `ISSUED_TOKEN_RE`; a prompt with
     `answer=None` re-uses the issued value, exercising the real confirmation
     prompt instead of assuming it.
@@ -124,8 +124,8 @@ registration cannot silently disappear from the report.
 
 ### 2.2 Entry point 2: browser native-messaging hosts
 
-- Binaries: `locklark-browser-chromium`, `locklark-browser-firefox`, and
-  `locklark-browser-register`.
+- Binaries: `passme-browser-chromium`, `passme-browser-firefox`, and
+  `passme-browser-register`.
 - Protocol: `internal/browserhost/protocol.go` uses a 4-byte **native-endian**
   unsigned length (`struct.pack("=I", ...)`) followed by UTF-8 JSON, with a
   256 KiB input/output bound. The harness implements both directions:
@@ -135,13 +135,13 @@ registration cannot silently disappear from the report.
     `chrome-extension://geldnhjapnackobgknocomedmjgphnpe/` (and an optional
     Windows parent-window argument).
   - Firefox accepts an absolute canonical
-    `org.locklark.browser.json` path plus `browser@locklark.local`.
+    `org.passme.browser.json` path plus `browser@passme.local`.
 - The native host is a native GUI process. On a headless VM the harness wraps
   it in `xvfb-run -a -s "-screen 0 1280x900x24"` when `DISPLAY` is absent and
   `xvfb-run` is installed. `probe_native_host_frame(...)` sends one or more
   frames over stdin, closes stdin, collects framed stdout, and records timeout
   and stderr evidence.
-- `locklark-browser-register` is tested through its real CLI flags (`--browser`,
+- `passme-browser-register` is tested through its real CLI flags (`--browser`,
   `--host`, `--output`, `--replace`, `--register-user`) and the manifest
   artifact it creates.
 
@@ -164,10 +164,10 @@ registration cannot silently disappear from the report.
 
 ### 2.4 Entry point 4: desktop application
 
-- Binary: `locklark-desktop` (`cmd/locklark-desktop`).
+- Binary: `passme-desktop` (`cmd/passme-desktop`).
 - The desktop process is launched inside an isolated display and D-Bus session,
   typically:
-  `dbus-run-session -- xvfb-run -a -s "-screen 0 1280x900x24" ./locklark-desktop`.
+  `dbus-run-session -- xvfb-run -a -s "-screen 0 1280x900x24" ./passme-desktop`.
 - UI interaction is performed through AT-SPI accessibility and XTest input
   helpers (for example `scripts/browser_native_x11.py`,
   `scripts/desktop_native_acceptance.py`, and `scripts/ssh_native_x11.py`).
@@ -267,10 +267,10 @@ All commands are run from the repository root
 
 ### 4.1 Execution and progress
 
-Before running tests the runner builds `locklark`,
-`locklark-browser-chromium`, `locklark-browser-firefox`,
-`locklark-browser-register`, `locklark-desktop`, and (when
-`cmd/locklark-team-sync` exists) `locklark-team-sync`. Each test then gets a
+Before running tests the runner builds `passme`,
+`passme-browser-chromium`, `passme-browser-firefox`,
+`passme-browser-register`, `passme-desktop`, and (when
+`cmd/passme-team-sync` exists) `passme-team-sync`. Each test then gets a
 fresh `E2EContext` with a random per-test directory under
 `$HOME/.cache/lltmp/e2e-runs/<safe-id>-<rand8>` (mode `0700`), which is always
 removed in `finally`.
@@ -344,7 +344,7 @@ A final summary shows totals, per-tier counts, and per-feature counts. A
 - `add_login` and the subsequent `personal list` revision lookup.
 - `run_pty_cli` hidden prompts, no echo during secrets, and echo restoration.
 - Native framing round-trips and a live `probe_native_host_frame` against
-  `locklark-browser-chromium` under Xvfb.
+  `passme-browser-chromium` under Xvfb.
 - `ensure_extension_built` for both Chromium and Firefox, including manifest
   checks.
 - `assert_no_canary_leak` positive/negative cases and idempotent cleanup.

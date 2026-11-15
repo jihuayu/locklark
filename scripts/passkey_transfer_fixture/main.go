@@ -25,8 +25,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 const (
@@ -184,8 +184,8 @@ func setup(root string) error {
 	}
 	defer clear(receiverKey)
 
-	sourcePath := filepath.Join(root, "source.ll")
-	receiverPath := filepath.Join(root, "receiver.ll")
+	sourcePath := filepath.Join(root, "source.pm")
+	receiverPath := filepath.Join(root, "receiver.pm")
 	for _, path := range []string{sourcePath, receiverPath} {
 		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
 			return errFixtureRefused

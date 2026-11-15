@@ -11,7 +11,7 @@ import (
 // refused decode that already assigned Identity before the offending field: the
 // partial identity bytes must be zeroed and the value must never be interpreted.
 func TestDecodeSystemPasskeyCapsuleClearsPartialIdentity(t *testing.T) {
-	capsule := systemCapsule{Version: 1, Path: "/vault.ll", Slot: [32]byte{1}, Identity: []byte("partial-identity"), Created: time.Now(), Expires: time.Now().Add(24 * time.Hour)}
+	capsule := systemCapsule{Version: 1, Path: "/vault.pm", Slot: [32]byte{1}, Identity: []byte("partial-identity"), Created: time.Now(), Expires: time.Now().Add(24 * time.Hour)}
 	valid, e := json.Marshal(capsule)
 	if e != nil {
 		t.Fatal(e)

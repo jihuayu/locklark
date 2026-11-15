@@ -27,18 +27,18 @@ import {
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
 
-const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+const checkoutFrames = process.env.PASSME_TEST_CHECKOUT_FRAMES === "1";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
-const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
-  ? require(process.env.LOCKLARK_TEST_PLAYWRIGHT)
+const { chromium } = process.env.PASSME_TEST_PLAYWRIGHT
+  ? require(process.env.PASSME_TEST_PLAYWRIGHT)
   : require("playwright");
-const go = process.env.LOCKLARK_GO || "go";
-const host = process.env.LOCKLARK_BROWSER_HOST;
-const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chromium";
-const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
+const go = process.env.PASSME_GO || "go";
+const host = process.env.PASSME_BROWSER_HOST;
+const browserName = process.env.PASSME_TEST_BROWSER === "edge" ? "edge" : "chromium";
+const browserExecutable = process.env.PASSME_TEST_BROWSER_EXECUTABLE;
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
 assert(
@@ -46,18 +46,18 @@ assert(
   "A built native host and real X display are required",
 );
 assert(
-  !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
+  !process.env.PASSME_TEST_FAILURE_STAGE ||
     ["after-pair", "page-arguments", "otp-page-arguments"].includes(
-      process.env.LOCKLARK_TEST_FAILURE_STAGE,
+      process.env.PASSME_TEST_FAILURE_STAGE,
     ),
   "Unsupported acceptance failure stage",
 );
-const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
+const state = mkdtempSync("/tmp/passme-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
 const sharedEnvironment =
-  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
+  process.env.PASSME_TEST_SHARED_CLIPBOARD === "1"
     ? prepareSharedEnvironment(state, env)
     : null;
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
@@ -106,11 +106,11 @@ execFileSync(
     "-out",
     cert,
     "-subj",
-    "/CN=login.locklark.test",
+    "/CN=login.passme.test",
     "-addext",
     checkoutFrames
-      ? "subjectAltName=DNS:login.locklark.test,DNS:checkout.locklark.test,DNS:checkout.other.test"
-      : "subjectAltName=DNS:login.locklark.test",
+      ? "subjectAltName=DNS:login.passme.test,DNS:checkout.passme.test,DNS:checkout.other.test"
+      : "subjectAltName=DNS:login.passme.test",
   ],
   { stdio: "ignore" },
 );
@@ -123,7 +123,7 @@ const spki = createHash("sha256")
     }),
   )
   .digest("base64");
-const html = `<!doctype html><html><title>Locklark acceptance</title><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});</script></body></html>`;
+const html = `<!doctype html><html><title>Passme acceptance</title><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});</script></body></html>`;
 const server = createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },
   (req, res) => {
@@ -149,15 +149,15 @@ const server = createServer(
     res.end(
       req.url.startsWith("/otp")
         ? otpHTML.replace(
-            "Locklark OTP acceptance",
-            "Locklark acceptance · OTP",
+            "Passme OTP acceptance",
+            "Passme acceptance · OTP",
           )
         : html,
     );
   },
 );
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
-const origin = "https://login.locklark.test:" + server.address().port;
+const origin = "https://login.passme.test:" + server.address().port;
 let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -192,13 +192,13 @@ try {
     go,
     [
       "run",
-      "./cmd/locklark-browser-register",
+      "./cmd/passme-browser-register",
       "--browser",
       browserName === "edge" ? "edge" : "chrome",
       "--host",
       resolve(host),
       "--output",
-      join(profile, "NativeMessagingHosts/org.locklark.browser.json"),
+      join(profile, "NativeMessagingHosts/org.passme.browser.json"),
     ],
     { cwd: root, env, stdio: "inherit" },
   );
@@ -217,8 +217,8 @@ try {
       "--disable-extensions-except=" + extension,
       "--load-extension=" + extension,
       checkoutFrames
-        ? "--host-resolver-rules=MAP login.locklark.test 127.0.0.1,MAP checkout.locklark.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
-        : "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
+        ? "--host-resolver-rules=MAP login.passme.test 127.0.0.1,MAP checkout.passme.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
+        : "--host-resolver-rules=MAP login.passme.test 127.0.0.1",
       "--no-proxy-server",
       "--ignore-certificate-errors-spki-list=" + spki,
       "--window-size=1200,850",
@@ -240,12 +240,12 @@ try {
     const options = typeof inspect === "object" ? inspect : { inspect };
     const request = native
       ? {
-          title: "Locklark · 浏览器原生确认",
+          title: "Passme · 浏览器原生确认",
           executable: resolve(host),
           actions,
           ...options,
         }
-      : { title_prefix: "Locklark acceptance", actions };
+      : { title_prefix: "Passme acceptance", actions };
     return JSON.parse(
       execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
         input: JSON.stringify(request),
@@ -530,7 +530,7 @@ try {
     phase(scenario + ":native-confirmation");
     return popup;
   }
-  if (process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1") {
+  if (process.env.PASSME_TEST_SHARED_CLIPBOARD === "1") {
     // Explicit external test mode: the actual desktop app is the shared
     // broker and sole clipboard owner; the extension uses its normal port.
     await acceptSharedClipboard({
@@ -567,7 +567,7 @@ try {
     popup = await openPopup();
     await popup.click("#disconnect");
   } else {
-  if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
+  if (process.env.PASSME_TEST_POPUP_VAULT) {
     const downloadDirectory = join(state, "attachment-downloads");
     mkdirSync(downloadDirectory, { recursive: true });
     const fileName = "popup-attachment.bin";
@@ -601,14 +601,14 @@ try {
   await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.
 
   if (
-    !process.env.LOCKLARK_TEST_BROWSER_PARITY &&
-    process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments"
+    !process.env.PASSME_TEST_BROWSER_PARITY &&
+    process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments"
   ) {
     await select("approved-fill");
     await blank(); // No field is released before native approval.
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
+    if (process.env.PASSME_TEST_FAILURE_STAGE === "after-pair")
       throw Error(fixtureCanaries(fixture).join("\n"));
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+    if (process.env.PASSME_TEST_FAILURE_STAGE === "page-arguments") {
       phase("driver-arguments-failure");
       await page.evaluate(
         ([username, password]) => {
@@ -742,8 +742,8 @@ try {
     env,
     pageEval: (fn, arg) => page.evaluate(fn, arg),
   };
-  if (!process.env.LOCKLARK_TEST_BROWSER_PARITY) {
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+  if (!process.env.PASSME_TEST_BROWSER_PARITY) {
+    if (process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments")
       await acceptBrowserSave(acceptanceDriver);
     await acceptBrowserOTP(acceptanceDriver);
   }
@@ -887,11 +887,11 @@ try {
   }
 }
 console.log(
-  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
+  process.env.PASSME_TEST_SHARED_CLIPBOARD === "1"
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Passme desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
     : checkoutFrames
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout approval/refusal, cross-site, opaque sandbox and changed-document rejection`
-    : process.env.LOCKLARK_TEST_BROWSER_PARITY
+    : process.env.PASSME_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );

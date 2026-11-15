@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/vault"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/vault"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 type privateDevice struct {
@@ -107,7 +107,7 @@ func checkPrivateDir(root string) {
 func makeCertificate(root string) {
 	caKey, serverKey := generateSigner(), generateSigner()
 	now := time.Now()
-	ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Locklark acceptance root"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
+	ca := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Passme acceptance root"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature}
 	caDER, e := x509.CreateCertificate(rand.Reader, ca, ca, caKey.Public(), caKey)
 	must(e)
 	cert := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
@@ -175,7 +175,7 @@ func fixtureInit(root string) {
 
 func snapshotHash(s vault.Snapshot) string {
 	h := sha256.New()
-	h.Write([]byte("locklark/team-directory/snapshot/v1\x00"))
+	h.Write([]byte("passme/team-directory/snapshot/v1\x00"))
 	h.Write(binary.BigEndian.AppendUint64(nil, s.Epoch))
 	for _, part := range [][]byte{s.Database, s.Envelope, s.Signature} {
 		h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part))))
@@ -218,12 +218,12 @@ func fixturePrepare(root, viewPath, kind, variant, out string) {
 				recipients = append(recipients, r)
 			}
 		}
-		s, e = vault.SealItems([]byte("locklark/team/items/v1/"+parent.Scope), itemsFor(f, variant), parent.Version+1, recipients, f.Devices[2].Signing)
+		s, e = vault.SealItems([]byte("passme/team/items/v1/"+parent.Scope), itemsFor(f, variant), parent.Version+1, recipients, f.Devices[2].Signing)
 		must(e)
 		p = directory.Proposal{Scope: parent.Scope, Parent: parent, Epoch: parent.Version + 1, Mode: "active", Members: members, SnapshotDigest: snapshotHash(s), AuthorDevice: f.Devices[2].Device.ID}
 		raw, err := json.Marshal(p)
 		must(err)
-		p.Signature = ed25519.Sign(f.Devices[2].Signing, append([]byte("locklark/team-directory/proposal/v1\x00"), raw...))
+		p.Signature = ed25519.Sign(f.Devices[2].Signing, append([]byte("passme/team-directory/proposal/v1\x00"), raw...))
 	default:
 		panic("unknown fixture kind")
 	}
@@ -260,7 +260,7 @@ func fixtureOracle(root, viewPath, variant string, index int, shouldDecrypt bool
 	p.Signature = nil
 	raw, e := json.Marshal(p)
 	must(e)
-	if !ed25519.Verify(author, append([]byte("locklark/team-directory/proposal/v1\x00"), raw...), proposalSignature) {
+	if !ed25519.Verify(author, append([]byte("passme/team-directory/proposal/v1\x00"), raw...), proposalSignature) {
 		panic("independent proposal signature failed")
 	}
 	receipt := view.Receipt
@@ -268,12 +268,12 @@ func fixtureOracle(root, viewPath, variant string, index int, shouldDecrypt bool
 	receipt.Signature = nil
 	raw, e = json.Marshal(receipt)
 	must(e)
-	if !ed25519.Verify(f.Sequencer.Public().(ed25519.PublicKey), append([]byte("locklark/team-directory/receipt/v1\x00"), raw...), receiptSignature) {
+	if !ed25519.Verify(f.Sequencer.Public().(ed25519.PublicKey), append([]byte("passme/team-directory/receipt/v1\x00"), raw...), receiptSignature) {
 		panic("independent receipt signature failed")
 	}
 	// Independently verify the snapshot signature framing, unwrap age, and
 	// decode KDBX without calling vault.OpenItems or the network client's API.
-	proof := binary.BigEndian.AppendUint64([]byte("locklark/m0/vault-snapshot/v1\x00"), s.Epoch)
+	proof := binary.BigEndian.AppendUint64([]byte("passme/m0/vault-snapshot/v1\x00"), s.Epoch)
 	for _, part := range [][]byte{s.Database, s.Envelope} {
 		h := sha256.Sum256(part)
 		proof = append(proof, h[:]...)
@@ -314,7 +314,7 @@ func fixtureOracle(root, viewPath, variant string, index int, shouldDecrypt bool
 	found := false
 	for _, g := range db.Content.Root.Groups {
 		for _, entry := range g.Entries {
-			if entry.GetContent("Locklark.ID") == want.ID {
+			if entry.GetContent("Passme.ID") == want.ID {
 				if found || entry.GetContent("Password") != want.Password || entry.GetContent("UserName") != want.Username || entry.GetContent("Notes") != want.Notes {
 					panic("oracle plaintext mismatch")
 				}

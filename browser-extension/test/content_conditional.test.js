@@ -471,7 +471,7 @@ function makeHarness(options = {}) {
     results() {
       return pageMessages
         .map((message) => message.data)
-        .filter((data) => data.source === "locklark-result-v1");
+        .filter((data) => data.source === "passme-result-v1");
     },
     setSupported(value) {
       conditionalSupported = value;
@@ -490,7 +490,7 @@ function makeHarness(options = {}) {
     },
     conditionalBox() {
       const box = harness.box();
-      return box && box.getAttribute("data-locklark-conditional") === "passkey"
+      return box && box.getAttribute("data-passme-conditional") === "passkey"
         ? box
         : null;
     },
@@ -508,14 +508,14 @@ function makeHarness(options = {}) {
       return found;
     },
     choices() {
-      return harness.all("[data-locklark-passkey-choice]");
+      return harness.all("[data-passme-passkey-choice]");
     },
     buttons() {
       return harness.all("button");
     },
     async postConditional(id = REQUEST_ID) {
       await harness.pageMessage({
-        source: "locklark-request-v1",
+        source: "passme-request-v1",
         type: "get",
         id,
         options: JSON.stringify({
@@ -564,15 +564,15 @@ test("no conditional panel appears before a qualified input is focused", async (
   assert.match(h.text(), /Passkey 账号/);
   const choices = h.choices();
   assert.equal(choices.length, 1);
-  assert.equal(choices[0].getAttribute("data-locklark-passkey-choice"), entry(1).item_id);
+  assert.equal(choices[0].getAttribute("data-passme-passkey-choice"), entry(1).item_id);
   assert.equal(
-    choices[0].getAttribute("data-locklark-passkey-credential"),
+    choices[0].getAttribute("data-passme-passkey-credential"),
     entry(1).credential_id,
   );
   assert.match(choices[0].textContent, /User 1/);
   assert.match(choices[0].textContent, /user1@example\.test/);
   assert.equal(
-    h.choices()[0].getAttribute("data-locklark-passkey-choice"),
+    h.choices()[0].getAttribute("data-passme-passkey-choice"),
     entry(1).item_id,
   );
 });
@@ -582,7 +582,7 @@ test("untrusted, ignored, unqualified or hidden focus never opens the account li
   const webauthn = h.input({ autocomplete: "webauthn" });
   const ignored = h.input({
     autocomplete: "webauthn",
-    "data-locklark-ignore": "",
+    "data-passme-ignore": "",
   });
   const password = h.input({ autocomplete: "current-password", type: "password" });
   const username = h.input({ autocomplete: "username" });
@@ -642,7 +642,7 @@ test("selection requires a trusted click and sends the exact selector", async ()
   assert.equal(select.credential_id, entry(2).credential_id);
   const result = h.pageMessages
     .map((message) => message.data)
-    .find((data) => data.source === "locklark-result-v1");
+    .find((data) => data.source === "passme-result-v1");
   assert.deepEqual(Object.keys(result).sort(), ["credential", "id", "source"]);
   assert.equal(result.id, REQUEST_ID);
   assert.equal(result.credential.id, "signed-credential");
@@ -652,7 +652,7 @@ test("selection requires a trusted click and sends the exact selector", async ()
 const pageResult = (h) =>
   h.pageMessages
     .map((message) => message.data)
-    .find((data) => data.source === "locklark-result-v1");
+    .find((data) => data.source === "passme-result-v1");
 
 test("使用其他验证器 falls back to the browser and a truncated list offers the native picker", async () => {
   const h = makeHarness({
@@ -667,7 +667,7 @@ test("使用其他验证器 falls back to the browser and a truncated list offer
   assert.ok(labels.includes("使用系统 Passkey 选择器"));
   const native = h
     .buttons()
-    .find((node) => node.getAttribute("data-locklark-passkey-native") === "true");
+    .find((node) => node.getAttribute("data-passme-passkey-native") === "true");
   await h.click(native, true);
   const select = h.sent.find(
     (message) => message.type === "passkey-conditional-select",
@@ -703,25 +703,25 @@ test("使用其他验证器 falls back to the browser and a truncated list offer
 test("only a boolean capability crosses the page bridge", async () => {
   const h = makeHarness();
   await h.pageMessage({
-    source: "locklark-capability-v1",
+    source: "passme-capability-v1",
     id: "11111111-2222-3333-4444-555555555555",
   });
   const reply = h.pageMessages
     .map((message) => message.data)
-    .find((data) => data.source === "locklark-capability-v1" && data.conditional !== undefined);
+    .find((data) => data.source === "passme-capability-v1" && data.conditional !== undefined);
   assert.deepEqual(Object.keys(reply).sort(), ["conditional", "id", "source"]);
   assert.equal(reply.conditional, true);
   assert.equal(reply.id, "11111111-2222-3333-4444-555555555555");
   const unsupported = makeHarness({ supported: false });
   await unsupported.pageMessage({
-    source: "locklark-capability-v1",
+    source: "passme-capability-v1",
     id: "11111111-2222-3333-4444-555555555556",
   });
   const denied = unsupported.pageMessages
     .map((message) => message.data)
     .find(
       (data) =>
-        data.source === "locklark-capability-v1" &&
+        data.source === "passme-capability-v1" &&
         data.id === "11111111-2222-3333-4444-555555555556",
     );
   assert.equal(denied.conditional, false);
@@ -779,7 +779,7 @@ test("pagehide, navigation abort and MAIN cancellation tear the conditional UI d
   await second.settle();
   assert.ok(second.conditionalBox());
   await second.pageMessage({
-    source: "locklark-request-v1",
+    source: "passme-request-v1",
     type: "cancel",
     id: REQUEST_ID,
   });
@@ -793,7 +793,7 @@ test("pagehide, navigation abort and MAIN cancellation tear the conditional UI d
 test("non-conditional passkey controls keep their baseline inline flow", async () => {
   const h = makeHarness();
   await h.pageMessage({
-    source: "locklark-request-v1",
+    source: "passme-request-v1",
     type: "get",
     id: REQUEST_ID,
     options: JSON.stringify({ challenge: "AAAA", rpId: "example.test" }),
@@ -802,11 +802,11 @@ test("non-conditional passkey controls keep their baseline inline flow", async (
   assert.ok(h.host());
   assert.match(h.text(), /使用 Passkey/);
   const labels = h.buttons().map((node) => node.textContent);
-  assert.ok(labels.includes("使用 Locklark 登录"));
+  assert.ok(labels.includes("使用 Passme 登录"));
   assert.ok(labels.includes("使用其他验证器"));
   const primary = h
     .buttons()
-    .find((node) => node.textContent === "使用 Locklark 登录");
+    .find((node) => node.textContent === "使用 Passme 登录");
   await h.click(primary, true);
   const request = h.sent.find((message) => message.type === "passkey");
   assert.deepEqual(Object.keys(request).sort(), [
@@ -835,7 +835,7 @@ test("worker invalidation clears the exact pending conditional call with NotAllo
   await renderConditional(h);
   assert.ok(h.conditionalBox());
   const reply = await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: INVALIDATION_ID,
   });
   assert.equal(reply.handled, true);
@@ -856,26 +856,26 @@ test("foreign, malformed or mismatched invalidation ids leave the panel intact",
   const h = makeHarness({ list: { passkeys: [entry(8)], truncated: false } });
   await renderConditional(h);
   const foreign = await h.runtimeMessage(
-    { type: "locklark:conditional-passkey-cancel", id: INVALIDATION_ID },
+    { type: "passme:conditional-passkey-cancel", id: INVALIDATION_ID },
     { id: "other-extension" },
   );
   assert.equal(foreign.handled, false);
   assert.ok(h.conditionalBox());
   const malformed = await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: "not-a-uuid",
   });
   assert.equal(malformed.reply.cancelled, false);
   assert.ok(h.conditionalBox());
   const mismatched = await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: OTHER_ID,
   });
   assert.equal(mismatched.reply.cancelled, false);
   assert.ok(h.conditionalBox());
   assert.equal(h.results().length, 0);
   const exact = await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: INVALIDATION_ID,
   });
   assert.equal(exact.reply.cancelled, true);
@@ -890,14 +890,14 @@ test("a late invalidation for an old call cannot clobber the next conditional re
   });
   await renderConditional(h, INVALIDATION_ID);
   await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: INVALIDATION_ID,
   });
   assert.equal(h.conditionalBox(), null);
   await renderConditional(h, OTHER_ID);
   assert.ok(h.conditionalBox());
   const stale = await h.runtimeMessage({
-    type: "locklark:conditional-passkey-cancel",
+    type: "passme:conditional-passkey-cancel",
     id: INVALIDATION_ID,
   });
   assert.equal(stale.reply.cancelled, false);
@@ -974,11 +974,11 @@ test("a focused input inside an open shadow root renders the conditional list", 
   const choices = h.choices();
   assert.equal(choices.length, 1);
   assert.equal(
-    choices[0].getAttribute("data-locklark-passkey-choice"),
+    choices[0].getAttribute("data-passme-passkey-choice"),
     entry(11).item_id,
   );
   assert.equal(
-    choices[0].getAttribute("data-locklark-passkey-credential"),
+    choices[0].getAttribute("data-passme-passkey-credential"),
     entry(11).credential_id,
   );
   assert.match(choices[0].textContent, /User 11/);
@@ -1008,7 +1008,7 @@ test("a request arriving while an open shadow input is focused renders immediate
     "initial request focus handling must resolve the shadow input",
   );
   assert.equal(
-    h.choices()[0].getAttribute("data-locklark-passkey-choice"),
+    h.choices()[0].getAttribute("data-passme-passkey-choice"),
     entry(12).item_id,
   );
   assert.equal(
@@ -1064,7 +1064,7 @@ test("switching shadow focus while the account list is pending refuses the stale
   assert.ok(box);
   assert.equal(h.choices().length, 1);
   assert.equal(
-    h.choices()[0].getAttribute("data-locklark-passkey-choice"),
+    h.choices()[0].getAttribute("data-passme-passkey-choice"),
     entry(13).item_id,
   );
 });
@@ -1111,15 +1111,15 @@ test("sibling credentials under one parent are distinct options and forward the 
   assert.equal(choices.length, 2, "both credentials stay separate choices");
   assert.notEqual(choices[0].textContent, choices[1].textContent);
   assert.equal(
-    choices[1].getAttribute("data-locklark-passkey-credential"),
+    choices[1].getAttribute("data-passme-passkey-credential"),
     second.credential_id,
   );
   assert.equal(
-    choices[1].getAttribute("data-locklark-passkey-credential-revision"),
+    choices[1].getAttribute("data-passme-passkey-credential-revision"),
     second.credential_revision,
   );
   assert.equal(
-    choices[0].getAttribute("data-locklark-passkey-credential-revision"),
+    choices[0].getAttribute("data-passme-passkey-credential-revision"),
     first.credential_revision,
   );
   await h.click(choices[1], true);

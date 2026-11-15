@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -23,7 +23,7 @@ func (a *App) onevraHeaderLeading(c *ui.Context) {
 		mark.Children(func() {
 			oneui.Icon(c, lucide.KeyRound()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.AccentText)
 		})
-		oneui.Text(c, "Locklark").Bold().SingleLine()
+		oneui.Text(c, "Passme").Bold().SingleLine()
 		ui.Box(c).Width(1).Height(t.Space(4)).Background(t.Border)
 		label := "本地金库"
 		if a.session != nil {

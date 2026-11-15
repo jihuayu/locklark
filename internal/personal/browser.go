@@ -9,8 +9,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const browserFillAction = "item.browser.fill"
@@ -68,13 +68,13 @@ func (t BrowserFillTarget) binding(key []byte) (string, error) {
 		return "", e
 	}
 	defer clear(raw)
-	derived, e := hkdf.Key(sha256.New, key, nil, "locklark/personal/browser-fill/key/v1", 32)
+	derived, e := hkdf.Key(sha256.New, key, nil, "passme/personal/browser-fill/key/v1", 32)
 	if e != nil {
 		return "", ErrBrowserFill
 	}
 	defer clear(derived)
 	m := hmac.New(sha256.New, derived)
-	m.Write([]byte("locklark/browser-fill/v1\x00"))
+	m.Write([]byte("passme/browser-fill/v1\x00"))
 	m.Write(raw)
 	return hex.EncodeToString(m.Sum(nil)), nil
 }

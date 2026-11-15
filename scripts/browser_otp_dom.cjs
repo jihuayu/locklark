@@ -17,7 +17,7 @@ module.exports = async function checkOTP(page) {
       path: path.resolve(__dirname, "../browser-extension/core.js"),
     });
     const result = await page.evaluate((variant) => {
-      if (typeof LocklarkCore.otpDocument !== "function")
+      if (typeof PassmeCore.otpDocument !== "function")
         return { missing: true };
       let submits = 0,
         inputs = 0;
@@ -27,7 +27,7 @@ module.exports = async function checkOTP(page) {
       });
       document.addEventListener("input", () => inputs++);
       for (const input of document.querySelectorAll("input")) input.value = "";
-      const fn = LocklarkCore.otpDocument;
+      const fn = PassmeCore.otpDocument;
       const probe = fn("https://example.test", "probe");
       const cleanProbe =
         !!probe &&
@@ -143,7 +143,7 @@ module.exports = async function checkOTP(page) {
   });
   assert.equal(
     await frame.evaluate(() =>
-      LocklarkCore.otpDocument(location.origin, "probe"),
+      PassmeCore.otpDocument(location.origin, "probe"),
     ),
     false,
     "OTP iframe accepted",

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const notesBoundaryBodyMarker = "notes-boundary-current-canary"
@@ -39,7 +39,7 @@ func notesBoundaryOTPConfig(digits int) string {
 
 func newNotesBoundaryFixture(t *testing.T) *notesBoundaryFixture {
 	t.Helper()
-	f := &notesBoundaryFixture{path: filepath.Join(t.TempDir(), "boundary.ll"), key: bytes.Repeat([]byte{23}, 16)}
+	f := &notesBoundaryFixture{path: filepath.Join(t.TempDir(), "boundary.pm"), key: bytes.Repeat([]byte{23}, 16)}
 	t.Cleanup(func() { clear(f.key) })
 	if Create(f.path, "boundary-fixture", f.key) != nil {
 		t.Fatal("boundary vault creation failed")
@@ -152,7 +152,7 @@ func notesBoundaryRunRequest(t *testing.T) RunRequest {
 	if err != nil {
 		t.Fatal("test executable unavailable")
 	}
-	return RunRequest{Program: program, Directory: t.TempDir(), Name: "LOCKLARK_NOTES_BOUNDARY", TimeoutSeconds: 5}
+	return RunRequest{Program: program, Directory: t.TempDir(), Name: "PASSME_NOTES_BOUNDARY", TimeoutSeconds: 5}
 }
 
 func TestNotesBoundarySharedScopeGuards(t *testing.T) {
@@ -258,7 +258,7 @@ func TestNotesBoundaryAuthenticatedSharedAPIsRejectNotes(t *testing.T) {
 // RunEnv connects child output to the null device. A side effect proves that
 // a regression actually started the process without printing its environment.
 func TestNotesBoundaryUnexpectedRunChild(t *testing.T) {
-	if os.Getenv("LOCKLARK_NOTES_BOUNDARY") == "" || len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" {
+	if os.Getenv("PASSME_NOTES_BOUNDARY") == "" || len(os.Args) < 2 || os.Args[len(os.Args)-2] != "--" {
 		return
 	}
 	if os.WriteFile(os.Args[len(os.Args)-1], []byte("executed"), 0600) != nil {

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func cliRequest(t *testing.T) RunCLIRequest {
@@ -24,15 +24,15 @@ func cliRequest(t *testing.T) RunCLIRequest {
 	if e != nil {
 		t.Fatal("executable unavailable")
 	}
-	return RunCLIRequest{Program: exe, Args: []string{"-test.run=^TestRunCLIChild$", "--", "probe", "", "two words", "a;b"}, Directory: t.TempDir(), Name: "LOCKLARK_TEST_TOKEN", TimeoutSeconds: 10, Profile: RunCLIProfileToken, HelperPath: []string{filepath.Dir(exe)}}
+	return RunCLIRequest{Program: exe, Args: []string{"-test.run=^TestRunCLIChild$", "--", "probe", "", "two words", "a;b"}, Directory: t.TempDir(), Name: "PASSME_TEST_TOKEN", TimeoutSeconds: 10, Profile: RunCLIProfileToken, HelperPath: []string{filepath.Dir(exe)}}
 }
 
 func TestRunCLIChild(t *testing.T) {
-	value, present := os.LookupEnv("LOCKLARK_TEST_TOKEN")
+	value, present := os.LookupEnv("PASSME_TEST_TOKEN")
 	if !present {
 		return
 	}
-	allowed := map[string]bool{"LOCKLARK_TEST_TOKEN": true, "PATH": true, "HOME": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "GH_CONFIG_DIR": true, "TMPDIR": true, "TMP": true, "TEMP": true}
+	allowed := map[string]bool{"PASSME_TEST_TOKEN": true, "PATH": true, "HOME": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "GH_CONFIG_DIR": true, "TMPDIR": true, "TMP": true, "TEMP": true}
 	if runtime.GOOS == "windows" {
 		allowed["SystemRoot"] = true
 		allowed["USERPROFILE"], allowed["APPDATA"], allowed["LOCALAPPDATA"] = true, true, true

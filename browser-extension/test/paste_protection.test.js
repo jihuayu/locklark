@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const ORIGIN = "https://example.test";
-const SECRET = "LL1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
+const SECRET = "PM1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
 const flush = async (count = 12) => {
   for (let index = 0; index < count; index++)
     await new Promise((resolve) => setImmediate(resolve));
@@ -537,7 +537,7 @@ test("a locked or disconnected host stays unknown", async () => {
   assert.equal(event.defaultPrevented, false);
 });
 
-test("a Locklark Secret Key is refused even on a linked site", async () => {
+test("a Passme Secret Key is refused even on a linked site", async () => {
   const h = makeHarness({
     match: {
       connected: true,
@@ -606,7 +606,7 @@ test("a cancelled warning leaves nothing behind in the worker or the field", asy
   await h.paste(input, SECRET);
   await h.click("取消粘贴");
   assert.equal(input.value, "");
-  assert.equal(JSON.stringify(h.sent).includes("LL1-"), false);
+  assert.equal(JSON.stringify(h.sent).includes("PM1-"), false);
   assert.equal(h.host(), null);
 });
 

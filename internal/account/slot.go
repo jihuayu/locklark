@@ -1,4 +1,4 @@
-// Package account implements the local preview's Locklark 2SKD profile. The device slot
+// Package account implements the local preview's Passme 2SKD profile. The device slot
 // is never part of a shared snapshot. It is not a 1Password wire format.
 package account
 
@@ -33,7 +33,7 @@ func derive(password string, secret, id, salt []byte) ([]byte, error) {
 	if password == "" {
 		return nil, errSlot
 	}
-	ps, err := hkdf.Key(sha256.New, salt, id, "locklark/m0/password-salt", 32)
+	ps, err := hkdf.Key(sha256.New, salt, id, "passme/m0/password-salt", 32)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func derive(password string, secret, id, salt []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err := hkdf.Key(sha256.New, secret, id, "locklark/m0/secret-key", 32)
+	s, err := hkdf.Key(sha256.New, secret, id, "passme/m0/secret-key", 32)
 	if err != nil {
 		clear(p)
 		return nil, err
@@ -68,7 +68,7 @@ func aead(password string, secret []byte, s Slot) (cipher.AEAD, error) {
 	return cipher.NewGCMWithRandomNonce(block)
 }
 
-const domain = "locklark/m0/device-slot/v1"
+const domain = "passme/m0/device-slot/v1"
 
 func Wrap(password string, secret, id, data []byte) (Slot, error) {
 	s := Slot{Version: 1, Account: append([]byte(nil), id...), Salt: make([]byte, 16)}

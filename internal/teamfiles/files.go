@@ -151,7 +151,7 @@ func writeNew(path string, raw []byte, publish func(string, string) error) error
 	if _, err := rand.Read(token[:]); err != nil {
 		return ErrFile
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".locklark-team-transfer-"+hex.EncodeToString(token[:]))
+	tmp := filepath.Join(filepath.Dir(path), ".passme-team-transfer-"+hex.EncodeToString(token[:]))
 	f, err := createLocalFile(tmp)
 	if err != nil {
 		return ErrFile

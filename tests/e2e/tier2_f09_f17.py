@@ -385,8 +385,8 @@ def t2_f13_01(ctx):
             extra=[("输入 SCAN 确认本地体检", "SCAN")],
             env={
                 "HIBP_ENDPOINT": trap.url,
-                "LOCKLARK_HIBP_ENDPOINT": trap.url,
-                "LOCKLARK_CHECK_BREACHED": "false",
+                "PASSME_HIBP_ENDPOINT": trap.url,
+                "PASSME_CHECK_BREACHED": "false",
             },
         )
         assert result.returncode == 0, result.transcript[-800:]
@@ -680,7 +680,7 @@ def t2_f15_05(ctx):
             "--field",
             "password",
             "--name",
-            "LL_TEST",
+            "PM_TEST",
             "--cwd",
             str(ctx.temp_dir),
             "--timeout",
@@ -710,7 +710,7 @@ def t2_f16_01(ctx):
     assert f16_cli_shell_ready(ctx)
 
 
-@e2e_test("T2_F16_02", 2, ["F16"], "LOCKLARK_CLI_ACTIVE recursion guard blocks wrapper loops")
+@e2e_test("T2_F16_02", 2, ["F16"], "PASSME_CLI_ACTIVE recursion guard blocks wrapper loops")
 def t2_f16_02(ctx):
     ready = f16_cli_shell_ready(ctx)
     gate(ctx, "F16", ready, "recursion guard is absent")

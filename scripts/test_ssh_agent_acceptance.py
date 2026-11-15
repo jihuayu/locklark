@@ -409,7 +409,7 @@ class RuntimeAndDiagnosticTests(unittest.TestCase):
                                       fixture_bin=None, window_manager=None)
             runner = acceptance.Acceptance(args)
             try:
-                old_endpoint = runner.root / "desktop-runtime" / ("locklark-ssh-" + str(os.geteuid())) / "agent.sock"
+                old_endpoint = runner.root / "desktop-runtime" / ("passme-ssh-" + str(os.geteuid())) / "agent.sock"
                 self.assertGreater(len(os.fsencode(old_endpoint)), 100)
                 self.assertLessEqual(runner.runtime_endpoint_bytes, 100)
                 self.assertNotEqual(runner.runtime.parent, runner.root)

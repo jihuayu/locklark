@@ -38,7 +38,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                 if index == len(answers)-1 and any(value.encode() not in transcript[:offset] for value in required_before_last_prompt):
                     raise RuntimeError("required scope notice missing before confirmation")
                 if value is None:
-                    match = re.search(rb"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", transcript[:offset])
+                    match = re.search(rb"(?:PM1-[A-Z2-7]{26}|PMR2-[A-Z2-7]{52}-[A-Z2-7]{52}|PMR1-[A-Z2-7]{52})", transcript[:offset])
                     if not issue or match is None:
                         raise RuntimeError("no new Secret Key issued to terminal")
                     issued = match.group().decode()
@@ -56,7 +56,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                 while proc.poll() is None:
                     if select.select([master], [], [], 0.1)[0]:
                         transcript.extend(os.read(master, 4096))
-                    if re.search(rb"LL1-[A-Z2-7]{26}", transcript):
+                    if re.search(rb"PM1-[A-Z2-7]{26}", transcript):
                         raise RuntimeError("failed restore issued a new Secret Key")
                     if time.monotonic() >= deadline:
                         raise RuntimeError("failed restore did not exit before issuing a key")
@@ -71,7 +71,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                     raise RuntimeError("expected a revision conflict")
             if (proc.returncode == 0) != ok or (not ok and data):
                 raise RuntimeError(f"{action}: unexpected exit or output")
-            if deny_issue and (re.search(rb"LL1-[A-Z2-7]{26}", transcript) or "重新输入新 Secret Key".encode() in transcript):
+            if deny_issue and (re.search(rb"PM1-[A-Z2-7]{26}", transcript) or "重新输入新 Secret Key".encode() in transcript):
                 raise RuntimeError("failed restore issued a new Secret Key")
             if expect_error and expect_error.encode() not in transcript:
                 raise RuntimeError(f"{action}: expected error category missing")
@@ -110,7 +110,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
 def check(binary, legacy=None):
     creator = legacy or binary
     with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "owner.ll")
+        path = str(pathlib.Path(tmp) / "owner.pm")
         pw = "synthetic-master-" + os.urandom(8).hex()
         login = "synthetic-login-" + os.urandom(8).hex()
         result, key = invoke(creator, "init", path, [("主密码", pw), ("再次输入主密码", pw),
@@ -123,7 +123,7 @@ def check(binary, legacy=None):
         added, _ = invoke(creator, "add-login", path, factors + [
             ("登录标题", "开发账号"), ("用户名（可留空）", "local-fixture-user"), ("登录密码", login)], paste=os.name != "nt")
         for creds in ([("主密码", pw + "x"), factors[1]],
-                      [factors[0], ("Secret Key", "LL1-" + "A" * 26)]):
+                      [factors[0], ("Secret Key", "PM1-" + "A" * 26)]):
             invoke(binary, "list", path, creds, ok=False)
         rows, _ = invoke(binary, "list", path, factors)
         assert len(rows)==1 and rows[0]["id"]==added["id"] and rows[0]["title"]=="开发账号"
@@ -144,11 +144,11 @@ def check(binary, legacy=None):
         assert [e["result"] for e in events[-3:-1]]==["succeeded","conflict"]
         assert events[2]["item_id"] == added["id"]
         assert all(s not in json.dumps(events) for s in (key, pw, login, "local-fixture-user","rotated-private-fixture","stale-private-fixture"))
-        archive = os.path.join(tmp, "standalone.llb")
+        archive = os.path.join(tmp, "standalone.pmb")
         backup, kit = invoke(binary, "backup", path, factors+[("重新输入恢复码",None)], issue=True, options=("--out",archive))
-        assert backup["status"]=="backed-up" and kit.startswith("LLR2-") and len(kit)==110
+        assert backup["status"]=="backed-up" and kit.startswith("PMR2-") and len(kit)==110
         os.rename(path,path+".offline")
-        restored = os.path.join(tmp, "new-directory", "restored.ll")
+        restored = os.path.join(tmp, "new-directory", "restored.pm")
         os.mkdir(os.path.dirname(restored))
         corrupt = archive + ".corrupt"
         pathlib.Path(corrupt).write_bytes(b"damaged synthetic backup")
@@ -163,7 +163,7 @@ def check(binary, legacy=None):
             (archive, restored, kit[:5] + ("A" if kit[5] != "A" else "B") + kit[6:], "invalid"),
             (corrupt, restored, kit, "invalid"),
             (archive, existing, kit, "exist"),
-            (archive, restored, "LLR1-"+kit[5:57], "legacy recovery format"),
+            (archive, restored, "PMR1-"+kit[5:57], "legacy recovery format"),
             (legacy_archive, restored, kit, "legacy recovery format"),
         ]
         if os.name != "nt":

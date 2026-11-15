@@ -6,15 +6,15 @@ import Foundation
 ///
 /// Only three keys exist and there is deliberately no API to add one:
 ///   * HOME   – the current user's home directory, so the Go helper resolves
-///              the existing Locklark runtime and config exactly where an
-///              ordinary `locklark` invocation already finds it.
+///              the existing Passme runtime and config exactly where an
+///              ordinary `passme` invocation already finds it.
 ///   * TMPDIR – the OS-provided temporary directory used for local IPC.
 ///   * PATH   – fixed system directories only; no user or package-manager
 ///              entries.
 ///
 /// Never inherited: tokens and API keys, DYLD_* injection variables, proxy
 /// settings (HTTP(S)_PROXY, ALL_PROXY, NO_PROXY), SSH_AUTH_SOCK, locale
-/// variables, LOCKLARK_* overrides (including LOCKLARK_BROWSER_SOCKET) or any
+/// variables, PASSME_* overrides (including PASSME_BROWSER_SOCKET) or any
 /// other ambient variable. The function takes its values as arguments and reads
 /// nothing from `ProcessInfo`, so the policy is pure and testable.
 public enum HelperEnvironment {

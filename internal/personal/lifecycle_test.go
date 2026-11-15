@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"errors"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"path/filepath"
 	"sync"
@@ -40,12 +40,12 @@ func TestArchiveLifecycle(t *testing.T) {
 	if _, err := RevealLogin(path, "fixture", key, target, &value); err != nil {
 		t.Fatal("explicit archived read", err)
 	}
-	kitPath := filepath.Join(t.TempDir(), "backup.llb")
+	kitPath := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, err := Backup(path, kitPath, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	fresh := bytes.Repeat([]byte{9}, 16)
 	if err = Restore(kitPath, restored, "fixture", key, kit, fresh); err != nil {
 		t.Fatal(err)

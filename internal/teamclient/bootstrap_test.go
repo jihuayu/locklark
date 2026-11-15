@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 func TestBootstrapProtectedProducerInitializesAndFetches(t *testing.T) {

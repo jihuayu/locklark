@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
 )
 
 // TestBrowserBrokerClipboardFactoryIsPerConnectionAndSharesAppOwner proves the

@@ -4,7 +4,7 @@
 
 ## 可用入口和事务边界
 
-`personal inspect-1pux --file owner.ll --source export.1pux` 要求交互 stdin/stderr、隐藏双因素和 `SCAN` 确认。先验证个人库因素、快照、全部审计及恢复历史，之后才调用源文件 reader；错误因素和损坏账本不会访问源路径。源路径不进入提示、错误、审计或 JSON 回执。
+`personal inspect-1pux --file owner.pm --source export.1pux` 要求交互 stdin/stderr、隐藏双因素和 `SCAN` 确认。先验证个人库因素、快照、全部审计及恢复历史，之后才调用源文件 reader；错误因素和损坏账本不会访问源路径。源路径不进入提示、错误、审计或 JSON 回执。
 
 源文件以只读方式打开，针对打开的句柄验证普通文件和大小，再限读 MaxArchive+1（当前 64 MiB+1）。检查初始大小和读后长度，拒绝增长越界。Stat/Read/Close/非普通文件失败统一固定 source-error，ZIP/JSON 核心的 invalid/unsupported/limit 保留固定分类。原始缓冲返回时清除；不保证 Go 字符串副本、操作系统缓存或原明文导出文件被擦除。
 
@@ -22,7 +22,7 @@ ReportDigest 仅允许出现在该动作的成功事件，并须为规范 SHA-25
 
 ## 验证
 
-失败先行：新增 `TestInspection*` 在缺失产品接口和事件字段时编译失败（`/tmp/locklark-validation/inspection-red.log`）。实现后测试真实加密库报告摘要/事件关联、源文件不变、备份恢复历史；错误因素/损坏账本零 reader 调用；完整事务后注入回滚零报告/零事件；源 Stat/Read/Close、增长、初始超限、目录和 Linux idle FIFO/链接/设备；数据库 close 失败零结果；签名事件的摘要/动作/结果串用拒绝。
+失败先行：新增 `TestInspection*` 在缺失产品接口和事件字段时编译失败（`/tmp/passme-validation/inspection-red.log`）。实现后测试真实加密库报告摘要/事件关联、源文件不变、备份恢复历史；错误因素/损坏账本零 reader 调用；完整事务后注入回滚零报告/零事件；源 Stat/Read/Close、增长、初始超限、目录和 Linux idle FIFO/链接/设备；数据库 close 失败零结果；签名事件的摘要/动作/结果串用拒绝。
 
 真实 PTY/ConPTY 覆盖确认/取消、错误因素、正常预检、非法归档/目录拒绝、无值报告、源文件不变以及旧读取器拒绝。Python 独立对 JSON 报告和签名事件计算摘要核对回执；测试不打印转录或源密码。源码共用路径另运行既有个人/披露/生成/OTP/引用/MCP 验收、全仓 Go/Bun/PyKeePass、定向 race、vet/模块、终端驱动测试和 macOS arm64 编译；最终证据以 PR 为准。
 

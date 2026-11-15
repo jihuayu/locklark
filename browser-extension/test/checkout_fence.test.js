@@ -4,7 +4,7 @@ const { element, makeContentHarness } = require("./checkout_content_harness.js")
 
 test("fence installs before the frameAllowed early return as a frozen global", () => {
   const harness = makeContentHarness();
-  const fence = harness.context.LocklarkCheckoutFence;
+  const fence = harness.context.PassmeCheckoutFence;
   assert.equal(typeof fence, "function");
   const descriptor = harness.descriptor();
   assert.equal(descriptor.writable, false);

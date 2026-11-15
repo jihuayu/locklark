@@ -1,6 +1,6 @@
 # 浏览器逐次原生批准的验证码填充
 
-基线 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`，分支 `codex/browser-native-otp`。前批桌面 [PR #28](https://github.com/jihuayu/locklark/pull/28) 已经主代理独立GUI、Luna/max及精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的四项 [CI 42120014509](https://github.com/jihuayu/locklark/actions/runs/42120014509) 合入。主代理负责架构、功能设计及验收，Sol xhigh实现，Luna max独立审阅。本文记录本批实现契约，实际验收与合并状态见 [验收记录](browser-otp-validation.md)。
+基线 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`，分支 `codex/browser-native-otp`。前批桌面 [PR #28](https://github.com/jihuayu/passme/pull/28) 已经主代理独立GUI、Luna/max及精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的四项 [CI 42120014509](https://github.com/jihuayu/passme/actions/runs/42120014509) 合入。主代理负责架构、功能设计及验收，Sol xhigh实现，Luna max独立审阅。本文记录本批实现契约，实际验收与合并状态见 [验收记录](browser-otp-validation.md)。
 
 ## 用户流程与边界
 

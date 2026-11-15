@@ -4,7 +4,7 @@
 
 ## 截图与交互审计
 
-目标是现有扩展的日常查找、详情操作、锁定和设置，不另建产品或复制参考品牌。直接运行当前 HTML/CSS/JS，用普通浏览器 DOM 和受控 runtime 回复呈现合成账号，不接触真实金库。原始截图 8 张、最终 Chromium/Firefox 的 320/390px 明暗界面截图保存在 /workspace/ui-perf-audit-tasks；CI 上传 locklark-synthetic-popup-ui artifact。截图只含合成元数据。
+目标是现有扩展的日常查找、详情操作、锁定和设置，不另建产品或复制参考品牌。直接运行当前 HTML/CSS/JS，用普通浏览器 DOM 和受控 runtime 回复呈现合成账号，不接触真实金库。原始截图 8 张、最终 Chromium/Firefox 的 320/390px 明暗界面截图保存在 /workspace/ui-perf-audit-tasks；CI 上传 passme-synthetic-popup-ui artifact。截图只含合成元数据。
 
 | 步骤 | 截图发现 | 修改与实际结果 |
 | --- | --- | --- |

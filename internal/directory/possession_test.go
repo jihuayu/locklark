@@ -33,7 +33,7 @@ type possessionReadRequest struct {
 }
 
 func TestPossessionReopenSubprocess(t *testing.T) {
-	path := os.Getenv("LOCKLARK_POSSESSION_READ_REQUEST")
+	path := os.Getenv("PASSME_POSSESSION_READ_REQUEST")
 	if path == "" {
 		return
 	}
@@ -144,7 +144,7 @@ func TestPossessionNewDeviceAtomicAdmissionAndHistory(t *testing.T) {
 		t.Fatal(e)
 	}
 	cmd := exec.Command(testExecutable, "-test.run=^TestPossessionReopenSubprocess$")
-	cmd.Env = append(os.Environ(), "LOCKLARK_POSSESSION_READ_REQUEST="+requestPath)
+	cmd.Env = append(os.Environ(), "PASSME_POSSESSION_READ_REQUEST="+requestPath)
 	if output, e := cmd.CombinedOutput(); e != nil {
 		t.Fatalf("fresh verifier failed: %v %s", e, output)
 	}

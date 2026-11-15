@@ -7,7 +7,7 @@ implementation lands.
 ## `personal add-item`
 
 ```
-locklark personal add-item --file VAULT --input ITEM.json
+passme personal add-item --file VAULT --input ITEM.json
 ```
 
 Sensitive values are read only from an explicit local JSON file; they are never

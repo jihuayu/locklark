@@ -3,7 +3,7 @@ package personal
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func inputSectionsFixture() []vault.ItemSection {

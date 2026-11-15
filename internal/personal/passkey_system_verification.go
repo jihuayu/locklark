@@ -9,7 +9,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 	bolt "go.etcd.io/bbolt"
 )
 

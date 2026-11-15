@@ -14,7 +14,7 @@ func TestTwoSecretVector(t *testing.T) {
 		secret[i] = byte(i + 32)
 	}
 	auk, err := derive(" Démo ", secret, id, salt)
-	if err != nil || hex.EncodeToString(auk) != "18d44f59923d636edb535987c9facf02447ff4c343fd83054a956db1033b7e44" {
+	if err != nil || hex.EncodeToString(auk) != "96dc4f96708480e58fdce70e234f81e33ed92a3162c2296db509ce8a5a36d348" {
 		t.Fatalf("independent vector mismatch (%v)", err)
 	}
 }

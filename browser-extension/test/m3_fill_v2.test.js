@@ -1105,7 +1105,7 @@ function harness(options = {}) {
 
   const context = {
     chrome: api,
-    LocklarkCore: core,
+    PassmeCore: core,
     crypto: webcrypto,
     setTimeout: (fn, milliseconds) => {
       const handle = setTimeout(fn, milliseconds);

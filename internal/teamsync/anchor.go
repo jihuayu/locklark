@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -19,7 +19,7 @@ type AnchorStore interface {
 
 type FileAnchorStore struct{ path string }
 
-var anchorBucket = []byte("locklark.team-sync.anchor/v1")
+var anchorBucket = []byte("passme.team-sync.anchor/v1")
 var anchorKey = []byte("checkpoint")
 
 func validAnchor(cp directory.Checkpoint) bool {
@@ -42,7 +42,7 @@ func createFileAnchorStore(path string, initial directory.Checkpoint, initialize
 	if _, e := rand.Read(random[:]); e != nil {
 		return nil, ErrAnchor
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".locklark-anchor-"+hex.EncodeToString(random[:]))
+	tmp := filepath.Join(filepath.Dir(path), ".passme-anchor-"+hex.EncodeToString(random[:]))
 	f, e := createAnchorFile(tmp)
 	if e != nil {
 		return nil, ErrAnchor

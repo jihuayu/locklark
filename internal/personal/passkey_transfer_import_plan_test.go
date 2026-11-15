@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -305,7 +305,7 @@ func TestPasskeyTransferPlanRestoredOldChainRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := t.TempDir() + "/restored.ll"
+	restored := t.TempDir() + "/restored.pm"
 	if err := Restore(archive, restored, "fixture", transferPlanKey(9), kit, transferPlanKey(8)); err != nil {
 		t.Fatal(err)
 	}

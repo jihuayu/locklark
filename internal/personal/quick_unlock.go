@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Fixed, user-safe failures for the system quick-unlock path. They are
@@ -49,7 +49,7 @@ func systemStoreID(path string) (string, string, error) {
 	if e != nil {
 		return "", "", ErrSessionLocked
 	}
-	hash := sha256.Sum256([]byte("locklark/system-unlock/v1\x00" + absolute))
+	hash := sha256.Sum256([]byte("passme/system-unlock/v1\x00" + absolute))
 	return hex.EncodeToString(hash[:]), absolute, nil
 }
 

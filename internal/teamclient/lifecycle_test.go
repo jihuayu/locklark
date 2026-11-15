@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 type functionalStore struct {

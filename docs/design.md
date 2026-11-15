@@ -1,8 +1,8 @@
-# Locklark：个人与小团队的本地密码管理器
+# Passme：个人与小团队的本地密码管理器
 
 **Keep the keys. Grant the action.** 钥匙留在你手里，Agent 得到的是执行这件事的许可。
 
-产品名统一为 Locklark，仓库名和 CLI 均用 `locklark`。托盘图标方向是一只收起翅膀的云雀，翅膀的留白形成钥匙孔。
+产品名统一为 Passme，仓库名和 CLI 均用 `passme`。托盘图标方向是一只收起翅膀的云雀，翅膀的留白形成钥匙孔。
 
 设计提案 · 2026-11-04。你的决定：新建独立 GitHub 项目；以现用 1Password 8 桌面日常体验为验收基准；金库本地持有；开发者继续使用 op 风格的字段引用；Agent 取用要写原因、关联会话，可以由 AI 拦下。产品形态参考 Magpie：桌面常驻、统一接入 Agent。范围包含完整 iOS/Android、本地 MCP 插件系统和两类独立部署的 server token（代执行、原值交付）；这两类机器协议不要求兼容 1Password。
 
@@ -158,20 +158,20 @@ Passkey 单独办理：桌面 1PUX 不能导出已有 Passkey。移动端 Creden
 
 ## 两个命令入口，共用一个本地金库
 
-人工模式：CLI 以 locklark 安装，提供可选 op 兼容入口。首先对照 vault/item/document 的日常操作，以及 read、run、inject 的输入、stdout 字节、JSON、退出状态、锁定行为；再按官方命令清单列差。可在隔离的终端显式切换，不覆盖现用 op。人工按需读取明文；人类入口只接受配对的可信本地客户端和相应解锁/交互，Agent 不能通过换个命令名成为人类。[op 命令参考](https://developer.1password.com/docs/cli/reference/)。
+人工模式：CLI 以 passme 安装，提供可选 op 兼容入口。首先对照 vault/item/document 的日常操作，以及 read、run、inject 的输入、stdout 字节、JSON、退出状态、锁定行为；再按官方命令清单列差。可在隔离的终端显式切换，不覆盖现用 op。人工按需读取明文；人类入口只接受配对的可信本地客户端和相应解锁/交互，Agent 不能通过换个命令名成为人类。[op 命令参考](https://developer.1password.com/docs/cli/reference/)。
 
-Agent 模式：使用 locklark CLI 提交用钥请求。每次请求都绑定会话、原因、字段、动作和目标。默认执行动作，只返回业务结果。人类 op read / op run 的披露语义不能偷偷改成「返回请求号」；兼容命令与新 Agent 命令的退出协议分开。首个通路做 github.pulls.get；第二个用会话专属 SSH 连接器访问指定 NAS，核验主机密钥，只允许本次会话使用指定钥匙，不转发通用 SSH agent。受管 Agent 没有 raw read、--reveal 或任意 shell 注入权限。需要原值的旧程序使用独立部署的机器 deliver 授权，不能用 Agent 会话或 MCP 工具替代。人工 op read 保持其明确的披露语义。
+Agent 模式：使用 passme CLI 提交用钥请求。每次请求都绑定会话、原因、字段、动作和目标。默认执行动作，只返回业务结果。人类 op read / op run 的披露语义不能偷偷改成「返回请求号」；兼容命令与新 Agent 命令的退出协议分开。首个通路做 github.pulls.get；第二个用会话专属 SSH 连接器访问指定 NAS，核验主机密钥，只允许本次会话使用指定钥匙，不转发通用 SSH agent。受管 Agent 没有 raw read、--reveal 或任意 shell 注入权限。需要原值的旧程序使用独立部署的机器 deliver 授权，不能用 Agent 会话或 MCP 工具替代。人工 op read 保持其明确的披露语义。
 
 ## 一个远程请求，从提交到用完
 
 ```sh
 # Agent：由受信启动器登记的会话；命令和 ID 均为示例
-locklark use "op://工作/GitHub/token" --session s_42 --reason "确认 PR 363 的合并状态" --action github.pulls.get --repo jihuayu/home-service --pr 363
+passme use "op://工作/GitHub/token" --session s_42 --reason "确认 PR 363 的合并状态" --action github.pulls.get --repo jihuayu/home-service --pr 363
 # 需要你决定时：{"status":"pending","request_id":"r_73","expires_in":86400}
 # 重连或重开 CLI，使用原会话的身份：
-locklark request resume r_73 --session s_42
+passme request resume r_73 --session s_42
 # 本人查看会话用钥记录（无秘密值）：
-locklark audit list --session s_42
+passme audit list --session s_42
 ```
 
 请求先持久化再通知。手机或第二台电脑的已配对审批器显示：哪台机器、哪个 Agent/会话、哪个库/字段、它自己写的理由、系统验证的目标、会做什么、是否给出原值、有效期。可批准一次、拒绝或撤销；通知不带原因/密钥，也不包含一键批准凭证。错过通知仍在待办，原 Agent 退出后可恢复；到期只能重提，不默许。建议待办 24 小时，批准只给短窗口（例如 2 分钟）、一个动作、一次兑换。
@@ -253,8 +253,8 @@ SSH 插件从本地签名到远端执行都限定为 NAS 上独立低权账号�
 
 ```text
 # 本人签发（命令示意，凭证写入已配对工作负载，不上屏）
-locklark machine grant create --mode invoke --workload ci-reader --tool github_pulls_get --repo team/app --expires 7d
-locklark machine grant create --mode deliver --workload old-db-client --field-id fld_db --recipient db-host --expires 1d
+passme machine grant create --mode invoke --workload ci-reader --tool github_pulls_get --repo team/app --expires 7d
+passme machine grant create --mode deliver --workload old-db-client --field-id fld_db --recipient db-host --expires 1d
 # 不同主机和 audience，调用均需 token + 配对身份
 POST invoke-host/v1/operations           -> 业务结果 / pending(request_id)
 POST deliver-host/v1/deliveries          -> 指定收件人可解密的信封
@@ -292,9 +292,9 @@ POST deliver-host/v1/deliveries/:id/ack  -> 绑定该次交付的签名回执
 桌面提供「活动」入口；每个条目可看它的使用历史，每条 Agent 会话可看它申请过的已受理的字段，并能对照启动器的未送达申请。列表按时间、设备、Agent、外部会话、稳定条目/字段 ID、动作和结局筛选。请求详情明确分列「Agent 自述」「系统核实」「规则/AI 的决定」「本人批准」「持库端实际执行」。被拒绝、只批准未执行、已向人工/业务进程披露原值和执行结果未知都可单独筛选；条目改名、轮换或删除后，仍能追到当时版本。
 
 ```text
-locklark audit list --session s_42
-locklark audit list --field-id fld_gh --outcome denied
-locklark audit show r_73
+passme audit list --session s_42
+passme audit list --field-id fld_gh --outcome denied
+passme audit show r_73
 # 合成时间线（香港时间）；同一个请求，未向 Agent 披露原值
 09:12  Agent 请求：会话 s_42；原因「确认 PR 363 的合并状态」
 09:12  持库端核实：github.pulls.get；目标 jihuayu/home-service#363；字段 fld_gh 版本 7
@@ -328,5 +328,5 @@ locklark audit show r_73
 | M5 插件 Gateway | 插件安装/签名、能力沙箱、工具集、接入 CLI 与 Agent 活动页。 | 恶意插件和同名工具无法取值/改目标；插件升级、撤销、挂起和恢复都有记录。 |
 | M6 两类机器授权 | invoke 与 deliver 两套可信执行器、受众、接收身份和发布包。 | 分别断网、撤销、交叉冒用、重放、原值交付回执与单环境失陷均验收；普通 Agent 无读值路径。 |
 
-本稿基于公开文档、仓库源码和合成示例；时间、租期与角色规则是待实现的建议默认值。Locklark 已在独立仓库开始实现。当前可运行范围与 Windows 验收见 [README](../README.md)；未修改 CIVault，未读取或迁移真实金库。
+本稿基于公开文档、仓库源码和合成示例；时间、租期与角色规则是待实现的建议默认值。Passme 已在独立仓库开始实现。当前可运行范围与 Windows 验收见 [README](../README.md)；未修改 CIVault，未读取或迁移真实金库。
 

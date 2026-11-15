@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 func TestRoundTripPreservesCredential(t *testing.T) {

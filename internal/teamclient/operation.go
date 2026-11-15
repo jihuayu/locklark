@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 type DeviceOperation struct{ inner *deviceOperation }

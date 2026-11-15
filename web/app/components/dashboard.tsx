@@ -167,7 +167,7 @@ export function Dashboard({
           <span className="brand-mark" aria-hidden="true">
             L
           </span>
-          <span>Locklark</span>
+          <span>Passme</span>
         </div>
         <div className="workspace">
           <span className="workspace-icon" aria-hidden="true">
@@ -594,7 +594,7 @@ export function Dashboard({
           </>
         )}
         <footer className="page-footer">
-          Locklark · 金库加密操作、成员变更与系统解锁均在原生应用中完成
+          Passme · 金库加密操作、成员变更与系统解锁均在原生应用中完成
         </footer>
       </main>
     </div>

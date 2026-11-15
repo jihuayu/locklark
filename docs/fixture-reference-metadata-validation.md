@@ -4,7 +4,7 @@
 
 本轮成功 fetch `origin/main`、PR #1 原分支与 `refs/pull/1/head`。main 为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`；PR 开放、未合并，三个预览 head 都为 `3a0184bad879043528c8c5a3d6a857eb436cf8f0`，工作树干净，未见其他开发测试进程。已读取 design、progress、development-goal，未依赖 Ryugi。累计差异是已有第一版代码，未从只有 README 的 main 重做。
 
-工作分支仍为 `codex/first-preview`，新增实现 head 为 `12612b113d92fba24a813530175a20acff702b37`，已普通快进推送到 [PR #1](https://github.com/jihuayu/locklark/pull/1)。提交前重读远端，原 head 未变。本轮终端 Git/gh 访问恢复；未更改凭据、强推或修改 main。文档提交的最终 head 由本文件所在提交及 PR head 确定，精确远端检查见 [PR checks](https://github.com/jihuayu/locklark/pull/1/checks)。
+工作分支仍为 `codex/first-preview`，新增实现 head 为 `12612b113d92fba24a813530175a20acff702b37`，已普通快进推送到 [PR #1](https://github.com/jihuayu/passme/pull/1)。提交前重读远端，原 head 未变。本轮终端 Git/gh 访问恢复；未更改凭据、强推或修改 main。文档提交的最终 head 由本文件所在提交及 PR head 确定，精确远端检查见 [PR checks](https://github.com/jihuayu/passme/pull/1/checks)。
 
 ## 范围与安全边界
 
@@ -20,7 +20,7 @@
 
 ## 失败先行与审计
 
-先写新增 API 空实现和合成测试，实际执行 `go test -count=1 ./internal/preview -run '^TestFixtureReference'` 失败：有效源投影、值/次序独立性、同名文档、真实快照审计正例失败；未知版本和容量未正确分类。之后实现并跑通。这是新能力的失败先行，不能称为空实现揭示了已有生产漏洞。日志在临时目录 `/tmp/locklark-validation/import-reference/red.log`，临时文件不保证长期保存。
+先写新增 API 空实现和合成测试，实际执行 `go test -count=1 ./internal/preview -run '^TestFixtureReference'` 失败：有效源投影、值/次序独立性、同名文档、真实快照审计正例失败；未知版本和容量未正确分类。之后实现并跑通。这是新能力的失败先行，不能称为空实现揭示了已有生产漏洞。日志在临时目录 `/tmp/passme-validation/import-reference/red.log`，临时文件不保证长期保存。
 
 负例覆盖槽位交换/重复/缺失、字段 ID 替换、重复源 UUID 键、额外私有字段、归档、缺失/重复原生条目、类别串用、无效签名格式、控制字符标题、未知元数据键、大小写重复版本、尾随 JSON 和容量。错误无部分目录、无源标记回显。改变私有值不影响投影，文档同名仍拒绝。
 
@@ -28,25 +28,25 @@
 
 ## 实跑检查
 
-Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。下表 go 为 `/tmp/locklark-tools/go/bin/go`，输出目录为 `/tmp/locklark-validation/import-reference`。
+Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。下表 go 为 `/tmp/passme-tools/go/bin/go`，输出目录为 `/tmp/passme-validation/import-reference`。
 
 | 检查 | 实际命令与结果 |
 | --- | --- |
 | 新切片 | `go test -count=1 ./internal/preview -run '^TestFixtureReference'` 通过 |
-| 全仓 Go | 设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含独立 KDBX 互操作与 Bun 子进程；preview 87.703 秒 |
+| 全仓 Go | 设置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun`、`PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含独立 KDBX 互操作与 Bun 子进程；preview 87.703 秒 |
 | 定向 race | `go test -race -count=1 -timeout=5m ./internal/preview -run '^TestFixtureReference'` 通过，21.651 秒；只覆盖新切片 |
 | 模糊测试 | `go test ./internal/preview -run '^$' -fuzz=FuzzFixtureReferenceMetadata -fuzztime=15s -parallel=2` 通过，911 次执行，3 个新增 interesting 输入，未发现崩溃或身份漂移 |
 | 静态与依赖 | `go mod verify`、`go vet ./...`、`git diff --check` 通过 |
-| 真实终端 | 构建 `locklark` 后，`python3 scripts/personal_acceptance.py /tmp/locklark-validation/import-reference/locklark` 通过：错误恢复材料、损坏备份、已有目标均无新钥/恢复库；FIFO、旧格式、迟到目标及建库/重开回归通过 |
-| 插件/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后 `python3 scripts/mcp_acceptance.py /tmp/locklark-validation/import-reference/locklark` 通过 |
-| Windows 编译 | `GOOS=windows GOARCH=amd64 go test -c -o /tmp/locklark-validation/import-reference/preview-windows.test.exe ./internal/preview` 通过，仅编译 |
-| macOS 编译 | `GOOS=darwin GOARCH=arm64 go test -c -o /tmp/locklark-validation/import-reference/preview-macos.test ./internal/preview` 通过，仅编译 |
+| 真实终端 | 构建 `passme` 后，`python3 scripts/personal_acceptance.py /tmp/passme-validation/import-reference/passme` 通过：错误恢复材料、损坏备份、已有目标均无新钥/恢复库；FIFO、旧格式、迟到目标及建库/重开回归通过 |
+| 插件/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后 `python3 scripts/mcp_acceptance.py /tmp/passme-validation/import-reference/passme` 通过 |
+| Windows 编译 | `GOOS=windows GOARCH=amd64 go test -c -o /tmp/passme-validation/import-reference/preview-windows.test.exe ./internal/preview` 通过，仅编译 |
+| macOS 编译 | `GOOS=darwin GOARCH=arm64 go test -c -o /tmp/passme-validation/import-reference/preview-macos.test ./internal/preview` 通过，仅编译 |
 
 原生 Windows/macOS、移动真机、硬件断电、真实 1Password/op 对照和外部密码评审未验收。此前 preview 全包 race 超时仍未解决为完整通过；本轮定向 race 不替代它。
 
 ## 合并门槛与下一项
 
-实现提交的 [run 41891994871](https://github.com/jihuayu/locklark/actions/runs/41891994871) 失败；[Ubuntu job 126791527200](https://github.com/jihuayu/locklark/actions/runs/41891994871/job/126791527200) 和 [Windows job 126791527657](https://github.com/jihuayu/locklark/actions/runs/41891994871/job/126791527657) 均无测试步骤。通过本轮恢复的 gh 读取两个 check 的 annotations，均明确写明 `The job was not started because recent account payments have failed or your spending limit needs to be increased.` 这是当前 run 的实际原因，无远端测试通过证据。未绕过规则合并。
+实现提交的 [run 41891994871](https://github.com/jihuayu/passme/actions/runs/41891994871) 失败；[Ubuntu job 126791527200](https://github.com/jihuayu/passme/actions/runs/41891994871/job/126791527200) 和 [Windows job 126791527657](https://github.com/jihuayu/passme/actions/runs/41891994871/job/126791527657) 均无测试步骤。通过本轮恢复的 gh 读取两个 check 的 annotations，均明确写明 `The job was not started because recent account payments have failed or your spending limit needs to be increased.` 这是当前 run 的实际原因，无远端测试通过证据。未绕过规则合并。
 
 本轮已自行检查类型/索引边界、槽位绑定、输入上限与秘密流向，未发现新增问题；这不是独立复核。本切片、先前恢复/投影切片及 `4932c8d..a0d8ab1` 的独立代码复核仍待完成。PR 保留，未 squash；全部设计及逐平台验收远未完成，持续目标保持进行。
 

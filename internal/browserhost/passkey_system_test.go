@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // systemFactorStore is a component-contract fake for the trusted native OS
@@ -137,7 +137,7 @@ type systemPasskeyHarness struct {
 
 func newSystemPasskeyHarness(t *testing.T) *systemPasskeyHarness {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "system.ll")
+	path := filepath.Join(t.TempDir(), "system.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

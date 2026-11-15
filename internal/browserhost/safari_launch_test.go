@@ -101,8 +101,8 @@ func TestSafariBrokerHelloPolicy(t *testing.T) {
 		{V: 1, Browser: Safari},
 		{V: 1, Browser: Safari, Origin: "chrome-extension://" + ChromiumID + "/"},
 		{V: 1, Browser: Safari, Origin: FirefoxID},
-		{V: 1, Browser: Safari, Origin: "org.locklark.browser.safari.extension"},
-		{V: 1, Browser: Safari, Origin: "org.locklark.browser"},
+		{V: 1, Browser: Safari, Origin: "org.passme.browser.safari.extension"},
+		{V: 1, Browser: Safari, Origin: "org.passme.browser"},
 		{V: 1, Browser: Safari, Origin: SafariID + "/"},
 		{V: 2, Browser: Safari, Origin: SafariID},
 	} {
@@ -128,7 +128,7 @@ func TestSafariFixedIdentity(t *testing.T) {
 	if Safari != "safari" {
 		t.Fatalf("unexpected Safari browser value %q", Safari)
 	}
-	if SafariID != "org.locklark.browser.safari.Extension" {
+	if SafariID != "org.passme.browser.safari.Extension" {
 		t.Fatalf("unexpected Safari extension identity %q", SafariID)
 	}
 	if SafariID == HostName || SafariID == FirefoxID || SafariID == ChromiumID {

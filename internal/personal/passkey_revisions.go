@@ -8,14 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 	bolt "go.etcd.io/bbolt"
 )
 
 // credentialRevisionDomain separates credential content revisions from every
 // other keyed digest in the vault. A credential revision is an opaque content
 // HMAC, never a monotonic counter and never the parent item revision.
-const credentialRevisionDomain = "locklark/passkey/credential-revision/v1\x00"
+const credentialRevisionDomain = "passme/passkey/credential-revision/v1\x00"
 
 // ManagedPasskeyMetadata is the explicit managed-passkey projection. It does
 // not embed passkey.Metadata: that type has a custom MarshalJSON that would

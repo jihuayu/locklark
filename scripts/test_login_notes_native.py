@@ -73,7 +73,7 @@ class NotesOracleTests(unittest.TestCase):
             def is_custom_property_protected(self, key):
                 return self.source_protected
             def get_custom_property(self, key):
-                return fixture["IDs"]["notes"] if key == "Locklark.ID" else base64.b64encode(json.dumps({"item": self.source}).encode()).decode()
+                return fixture["IDs"]["notes"] if key == "Passme.ID" else base64.b64encode(json.dumps({"item": self.source}).encode()).decode()
         entry = Entry()
         module = types.SimpleNamespace(PyKeePass=lambda *_args, **_kwargs: types.SimpleNamespace(entries=[entry]))
         with tempfile.TemporaryDirectory() as directory:

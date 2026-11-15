@@ -37,7 +37,7 @@ function syntheticFixture() {
 // Builds a throwaway diagnostic tree with the authenticated fixture path
 // excluded, exactly as the real scanner expects. Each call gets a fresh state.
 function withArtifacts(contents, run) {
-  const state = mkdtempSync(join(tmpdir(), "locklark-privacy-"));
+  const state = mkdtempSync(join(tmpdir(), "passme-privacy-"));
   try {
     mkdirSync(join(state, "vault"));
     writeFileSync(join(state, "vault", "fixture.json"), "{}");
@@ -165,10 +165,10 @@ test("checkout top page carries the accepted X11 title prefix", async () => {
   const { checkoutTopHTML, checkoutCardHTML } =
     await loadCheckoutAcceptance();
   const top = checkoutTopHTML(8443);
-  assert.match(top, /<title>Locklark acceptance \u00b7 checkout<\/title>/);
-  assert.ok(!top.includes("<title>Locklark checkout acceptance</title>"));
+  assert.match(top, /<title>Passme acceptance \u00b7 checkout<\/title>/);
+  assert.ok(!top.includes("<title>Passme checkout acceptance</title>"));
   assert.match(
     checkoutCardHTML(),
-    /<title>Locklark checkout card frame<\/title>/,
+    /<title>Passme checkout card frame<\/title>/,
   );
 });

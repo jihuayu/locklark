@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 type bootstrapFixture struct {
@@ -336,7 +336,7 @@ func TestBootstrapCancellationWhileBoundStoreIsBlocked(t *testing.T) {
 	childCtx, childCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer childCancel()
 	cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestBootstrapIdentityLeaseChild$")
-	cmd.Env = append(os.Environ(), "LOCKLARK_TEST_PROFILE_LEASE="+f.path)
+	cmd.Env = append(os.Environ(), "PASSME_TEST_PROFILE_LEASE="+f.path)
 	if output, e := cmd.CombinedOutput(); e != nil || string(output) != "PASS\n" {
 		t.Fatal("cross-process identity exclusion failed")
 	}
@@ -351,7 +351,7 @@ func TestBootstrapCancellationWhileBoundStoreIsBlocked(t *testing.T) {
 	}
 }
 func TestBootstrapIdentityLeaseChild(t *testing.T) {
-	if path := os.Getenv("LOCKLARK_TEST_PROFILE_LEASE"); path != "" {
+	if path := os.Getenv("PASSME_TEST_PROFILE_LEASE"); path != "" {
 		if _, e := ReadBootstrapStatus(path); e != ErrProfile {
 			t.Fatal("identity lease was not exclusive")
 		}

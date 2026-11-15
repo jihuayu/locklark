@@ -6,9 +6,9 @@ import (
 	"crypto/ed25519"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -58,7 +58,7 @@ func TestHTTPSPasskeyAndSSHItemsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal("team passkey snapshot did not open", err)
 	}
-	if string(metadata) != "locklark/team/items/v1/"+view.Receipt.Proposal.Scope {
+	if string(metadata) != "passme/team/items/v1/"+view.Receipt.Proposal.Scope {
 		t.Fatal("team passkey snapshot metadata changed")
 	}
 	byID := map[string]vault.Item{}

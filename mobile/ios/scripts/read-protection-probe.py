@@ -46,7 +46,7 @@ def sanitize(value):
 if __name__ == "__main__":
     try:
         lines = Path(sys.argv[1]).read_text(errors="replace").splitlines()
-        payload = next(line.split("LOCKLARK_PROTECTION_PROBE ", 1)[1] for line in reversed(lines) if "LOCKLARK_PROTECTION_PROBE " in line)
+        payload = next(line.split("PASSME_PROTECTION_PROBE ", 1)[1] for line in reversed(lines) if "PASSME_PROTECTION_PROBE " in line)
         print("ios protection metadata " + json.dumps(sanitize(json.loads(payload)), separators=(",", ":")))
     except Exception:
         print("ios protection metadata unavailable")

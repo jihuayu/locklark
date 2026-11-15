@@ -11,7 +11,7 @@ import (
 	"testing"
 	"unicode"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -123,7 +123,7 @@ func TestTitleSearchAuditAndPrivateBinding(t *testing.T) {
 	if got, e := Search(path, "wrong", key, "private-value", "all"); e == nil || !reflect.DeepEqual(got, SearchReceipt{}) {
 		t.Fatal("wrong factors released results")
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, e := Backup(path, archive, "fixture", key)
 	if e != nil {
 		t.Fatal(e)
@@ -133,7 +133,7 @@ func TestTitleSearchAuditAndPrivateBinding(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer clear(fresh)
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	if e = Restore(archive, restored, "fixture", key, kit, fresh); e != nil {
 		t.Fatal("search history restore", e)
 	}

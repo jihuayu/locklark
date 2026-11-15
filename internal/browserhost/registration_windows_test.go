@@ -111,7 +111,7 @@ func newRegistrationTestRoot(t *testing.T) string {
 		if _, err = rand.Read(suffix[:]); err != nil {
 			t.Fatal("private test name unavailable:", err)
 		}
-		path := filepath.Join(parent, "locklark-registration-test-"+hex.EncodeToString(suffix[:]))
+		path := filepath.Join(parent, "passme-registration-test-"+hex.EncodeToString(suffix[:]))
 		wide, e := windows.UTF16PtrFromString(path)
 		if e != nil {
 			t.Fatal("private test path unavailable:", e)

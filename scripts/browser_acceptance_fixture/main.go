@@ -12,8 +12,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type fixture struct {
@@ -65,7 +65,7 @@ func run() error {
 		return err
 	}
 	f := fixture{
-		Path:     filepath.Join(*out, "synthetic.ll"),
+		Path:     filepath.Join(*out, "synthetic.pm"),
 		Password: "Acceptance-" + hex.EncodeToString(entropy[:8]),
 		Secret:   personal.FormatSecret(key),
 		Username: "synthetic-browser-user",

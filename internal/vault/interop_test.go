@@ -15,9 +15,9 @@ import (
 // The independent implementation receives only a fresh synthetic key via stdin.
 // No product command or on-disk keyfile is introduced for this test.
 func TestKDBXIndependentPeer(t *testing.T) {
-	python := os.Getenv("LOCKLARK_TEST_PYKEEPASS")
+	python := os.Getenv("PASSME_TEST_PYKEEPASS")
 	if python == "" {
-		t.Skip("set LOCKLARK_TEST_PYKEEPASS to a Python interpreter with pykeepass==4.2.0")
+		t.Skip("set PASSME_TEST_PYKEEPASS to a Python interpreter with pykeepass==4.2.0")
 	}
 	pub, signer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

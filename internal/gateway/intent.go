@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/jihuayu/locklark/plugins/github-pull-reader"
+	"github.com/jihuayu/passme/plugins/github-pull-reader"
 	"io"
 	"net/http"
 )
@@ -34,7 +34,7 @@ func RecordedScope(r Repository) (PullScope, error) {
 	if !r.valid() {
 		return PullScope{}, errRejected
 	}
-	return PullScope{r, "locklark.builtin/github-pull-reader", "1", pullreader.Digest(), PullSlot, "recorded-response/v1"}, nil
+	return PullScope{r, "passme.builtin/github-pull-reader", "1", pullreader.Digest(), PullSlot, "recorded-response/v1"}, nil
 }
 
 // Known identifies an enrollment understood for reading historical results.

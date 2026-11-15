@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
 )
 
 func transferTestPublic(t *testing.T, s *Session) publicTransferIdentity {

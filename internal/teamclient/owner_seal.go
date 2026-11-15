@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 )
 
-const ownerSealDomain = "locklark/teamclient/protected-owner/v1\x00"
+const ownerSealDomain = "passme/teamclient/protected-owner/v1\x00"
 
 type ownerMarker struct {
 	Version        int    `json:"version"`

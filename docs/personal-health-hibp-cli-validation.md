@@ -41,12 +41,12 @@
 - `go test ./internal/watchtower/ -count=1`
 - `go test ./internal/watchtower/ -race -count=1`
 - `go test ./internal/personal/ -run 'HIBP|Watchtower|LookupCandidates' -count=1`
-- `go test ./cmd/locklark/ -run 'PersonalHealthHIBP|PersonalHIBPConsent|PersonalHIBPProjection|HealthNeedsTerminal' -count=1`
+- `go test ./cmd/passme/ -run 'PersonalHealthHIBP|PersonalHIBPConsent|PersonalHIBPProjection|HealthNeedsTerminal' -count=1`
 - `go vet ./internal/watchtower/ ./internal/personal/`
 - `go test -run '^$' ./internal/browserhost ./internal/desktop`（编译既有 `Watchtower` 调用方）
 
 覆盖：默认离线零外部调用、旧 `Watchtower` API 保持、nil/预取消上下文固定拒绝且零调用零事务、取消中的 fake 传输被前后守卫截断且不产生最终报告、锁请求阻止迟到最终报告、同一取消上下文重放不再次联网、前缀仅 5 位且审计不含密码/完整哈希/前缀/后缀、CLI 严格选项与错误同意不触碰库、投影不泄漏原生标题/来源/provider 错误。
 
-主代理独立 race 检查通过：`go test -race ./internal/personal ./internal/watchtower ./cmd/locklark -run 'Watchtower|HIBP|Health' -count=1`，三个包分别 57.157、1.189、1.023 秒。实际 PTY 已执行默认离线体检、错误 NETWORK 同意后不增加联网意图、空库显式同意完整路径（checked=0）。私有合成夹具已删除，回执 `health-cli-pty-receipt.json`。
+主代理独立 race 检查通过：`go test -race ./internal/personal ./internal/watchtower ./cmd/passme -run 'Watchtower|HIBP|Health' -count=1`，三个包分别 57.157、1.189、1.023 秒。实际 PTY 已执行默认离线体检、错误 NETWORK 同意后不增加联网意图、空库显式同意完整路径（checked=0）。私有合成夹具已删除，回执 `health-cli-pty-receipt.json`。
 
 未执行的外部检查：真实非空密码的外部 HIBP 请求及其 IP/端点行为、信号下的实际终端恢复。本轮未使用用户真实库或真实密码发起外部查询；合成本地 TLS 传输用于客户端隐私/失败测试。

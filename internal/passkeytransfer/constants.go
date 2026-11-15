@@ -14,7 +14,7 @@ const (
 
 	// Domain separators for fingerprints and signatures. They are not secret;
 	// they prevent cross-protocol reuse of the same keys.
-	fingerprintDomain = "locklark/passkey-transfer/v1/fingerprint\x00"
-	invitationDomain  = "locklark/passkey-transfer/v1/invitation\x00"
-	packetDomain      = "locklark/passkey-transfer/v1/packet\x00"
+	fingerprintDomain = "passme/passkey-transfer/v1/fingerprint\x00"
+	invitationDomain  = "passme/passkey-transfer/v1/invitation\x00"
+	packetDomain      = "passme/passkey-transfer/v1/packet\x00"
 )

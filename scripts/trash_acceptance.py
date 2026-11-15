@@ -10,7 +10,7 @@ def check(binary, legacy=None):
     for prior in ("active", "archived"):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
-            path = str(root / "owner.ll")
+            path = str(root / "owner.pm")
             pw, secret = "synthetic-master-password", "synthetic-private-password"
             creator = legacy or binary
             _, key = invoke(creator, "init", path, [("主密码", pw), ("再次输入主密码", pw), ("重新输入刚保存的 Secret Key", None)], issue=True)
@@ -18,9 +18,9 @@ def check(binary, legacy=None):
             invoke(creator, "add-login", path, factors + [("登录标题", "synthetic-title"), ("用户名（可留空）", "synthetic-user"), ("登录密码", secret)])
             row = invoke(binary, "list", path, factors)[0][0]
             if legacy and prior == "active":
-                old_backup = str(root / "old.llb")
+                old_backup = str(root / "old.pmb")
                 _, old_kit = invoke(legacy, "backup", path, factors + [("重新输入恢复码", None)], issue=True, options=("--out", old_backup))
-                old_dest = str(root / "old-restored.ll")
+                old_dest = str(root / "old-restored.pm")
                 _, old_key = invoke(binary, "restore", old_backup, factors + [("此备份的恢复码", old_kit), ("重新输入新 Secret Key", None)], issue=True, options=("--out", old_dest))
                 assert len(invoke(binary, "list", old_dest, [("主密码", pw), ("Secret Key", old_key)])[0]) == 1
             if prior == "archived":
@@ -43,11 +43,11 @@ def check(binary, legacy=None):
             export_pw = "synthetic-export-password"
             invoke(binary, "export-kdbx", path, factors + [("新导出密码（至少 12 字符）", export_pw), ("再次输入导出密码", export_pw), ("输入 SAVE 确认加密导出", "SAVE")], options=("--out", portable), forbidden=(secret,), required_before_last_prompt=("归档与回收站", "未必区分归档或回收站"))
             entry = PyKeePass(portable, password=export_pw).entries[0]
-            assert entry.password == secret and entry.get_custom_property("Locklark.State") == "trashed"
-            assert (entry.get_custom_property("Locklark.PreviousState") or "active") == prior
-            backup = str(root / "backup.llb")
+            assert entry.password == secret and entry.get_custom_property("Passme.State") == "trashed"
+            assert (entry.get_custom_property("Passme.PreviousState") or "active") == prior
+            backup = str(root / "backup.pmb")
             _, kit = invoke(binary, "backup", path, factors + [("重新输入恢复码", None)], issue=True, options=("--out", backup))
-            dest = str(root / "restored.ll")
+            dest = str(root / "restored.pm")
             if legacy:
                 invoke(legacy, "restore", backup, factors + [("此备份的恢复码", kit)], options=("--out", dest), ok=False, deny_issue=True)
             _, fresh = invoke(binary, "restore", backup, factors + [("此备份的恢复码", kit), ("重新输入新 Secret Key", None)], issue=True, options=("--out", dest))

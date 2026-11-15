@@ -316,7 +316,7 @@ function makeHarness(options = {}) {
       href: ORIGIN + "/login",
     },
     isSecureContext: options.insecure !== true,
-    LocklarkCore: core,
+    PassmeCore: core,
     Element,
     HTMLInputElement,
     HTMLSelectElement,
@@ -368,7 +368,7 @@ function makeHarness(options = {}) {
     },
     hint(extra = {}) {
       return {
-        source: "locklark-signal-v1",
+        source: "passme-signal-v1",
         id: HINT_ID,
         options: JSON.stringify({
           kind: "unknown",
@@ -384,7 +384,7 @@ function makeHarness(options = {}) {
     results() {
       return pageMessages
         .map((message) => message.data)
-        .filter((data) => data.source === "locklark-result-v1");
+        .filter((data) => data.source === "passme-result-v1");
     },
     signalMessages() {
       return pageMessages
@@ -470,7 +470,7 @@ test("a hint with extra keys, a bad id or an unknown source name is refused", as
   await h.pageMessage({ ...base, origin: "https://evil.test" });
   await h.pageMessage({ ...base, credentialId: CREDENTIAL_ID });
   await h.pageMessage({ ...base, id: "not-a-uuid" });
-  await h.pageMessage({ ...base, source: "locklark-signal-v2" });
+  await h.pageMessage({ ...base, source: "passme-signal-v2" });
   assert.equal(h.hints().length, 0);
 });
 
@@ -557,7 +557,7 @@ test("a hint never occupies or cancels the conditional Passkey slot", async () =
   const h = makeHarness();
   const requestID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   await h.pageMessage({
-    source: "locklark-request-v1",
+    source: "passme-request-v1",
     type: "get",
     id: requestID,
     conditional: true,

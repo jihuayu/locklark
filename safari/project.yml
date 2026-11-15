@@ -1,4 +1,4 @@
-name: LocklarkSafari
+name: PassmeSafari
 options:
   minimumXcodeGenVersion: "2.38.0"
   createIntermediateGroups: true
@@ -18,75 +18,75 @@ settings:
     ONLY_ACTIVE_ARCH: NO
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "Apple Development"
-    DEVELOPMENT_TEAM: "$(LOCKLARK_TEAM_ID)"
+    DEVELOPMENT_TEAM: "$(PASSME_TEAM_ID)"
     ENABLE_HARDENED_RUNTIME: YES
     OTHER_CODE_SIGN_FLAGS: "--timestamp"
     CLANG_ENABLE_MODULES: YES
     SWIFT_STRICT_CONCURRENCY: minimal
 targets:
-  LocklarkSafari:
+  PassmeSafari:
     type: application
     platform: macOS
     sources:
-      - path: LocklarkSafari/Sources
+      - path: PassmeSafari/Sources
       - path: Shared/Sources
-      - path: LocklarkSafari/Resources
+      - path: PassmeSafari/Resources
         buildPhase: resources
         optional: true
     settings:
       base:
-        PRODUCT_NAME: Locklark
-        PRODUCT_BUNDLE_IDENTIFIER: org.locklark.browser.safari
-        INFOPLIST_FILE: LocklarkSafari/Info.plist
-        CODE_SIGN_ENTITLEMENTS: LocklarkSafari/LocklarkSafari.entitlements
-        LOCKLARK_APP_BUNDLE_ID: org.locklark.browser.safari
-        LOCKLARK_EXTENSION_BUNDLE_ID: org.locklark.browser.safari.Extension
+        PRODUCT_NAME: Passme
+        PRODUCT_BUNDLE_IDENTIFIER: org.passme.browser.safari
+        INFOPLIST_FILE: PassmeSafari/Info.plist
+        CODE_SIGN_ENTITLEMENTS: PassmeSafari/PassmeSafari.entitlements
+        PASSME_APP_BUNDLE_ID: org.passme.browser.safari
+        PASSME_EXTENSION_BUNDLE_ID: org.passme.browser.safari.Extension
         ENABLE_APP_SANDBOX: YES
         ENABLE_HARDENED_RUNTIME: YES
     dependencies:
-      - target: LocklarkSafariExtension
+      - target: PassmeSafariExtension
         embed: true
         codeSign: true
     postBuildScripts:
       - name: Embed fixed native helper
         basedOnDependencyAnalysis: false
         inputFiles:
-          - "$(SRCROOT)/../dist/locklark-browser-safari"
+          - "$(SRCROOT)/../dist/passme-browser-safari"
         outputFiles:
-          - "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/locklark-browser-safari"
+          - "$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/passme-browser-safari"
         script: |
           set -euo pipefail
-          if [[ -n "${LOCKLARK_SAFARI_HELPER:-}" ]]; then
-            export LOCKLARK_SAFARI_HELPER
+          if [[ -n "${PASSME_SAFARI_HELPER:-}" ]]; then
+            export PASSME_SAFARI_HELPER
           fi
           exec "$SRCROOT/scripts/embed_helper.sh"
-  LocklarkSafariExtension:
+  PassmeSafariExtension:
     type: app-extension
     platform: macOS
     sources:
-      - path: LocklarkSafariExtension/Sources
+      - path: PassmeSafariExtension/Sources
       - path: Shared/Sources
       - path: ../browser-extension/dist/safari
         buildPhase: resources
-      - path: LocklarkSafariExtension/Resources
+      - path: PassmeSafariExtension/Resources
         buildPhase: resources
         optional: true
     settings:
       base:
-        PRODUCT_NAME: LocklarkSafariExtension
-        PRODUCT_BUNDLE_IDENTIFIER: org.locklark.browser.safari.Extension
-        INFOPLIST_FILE: LocklarkSafariExtension/Info.plist
-        CODE_SIGN_ENTITLEMENTS: LocklarkSafariExtension/LocklarkSafariExtension.entitlements
-        LOCKLARK_APP_BUNDLE_ID: org.locklark.browser.safari
-        LOCKLARK_EXTENSION_BUNDLE_ID: org.locklark.browser.safari.Extension
+        PRODUCT_NAME: PassmeSafariExtension
+        PRODUCT_BUNDLE_IDENTIFIER: org.passme.browser.safari.Extension
+        INFOPLIST_FILE: PassmeSafariExtension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: PassmeSafariExtension/PassmeSafariExtension.entitlements
+        PASSME_APP_BUNDLE_ID: org.passme.browser.safari
+        PASSME_EXTENSION_BUNDLE_ID: org.passme.browser.safari.Extension
         ENABLE_APP_SANDBOX: YES
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
 schemes:
-  LocklarkSafari:
+  PassmeSafari:
     build:
       targets:
-        LocklarkSafari: all
+        PassmeSafari: all
     run:
       config: Debug
     archive:

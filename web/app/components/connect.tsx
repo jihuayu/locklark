@@ -43,7 +43,7 @@ export function Connect() {
             <span className="brand-mark" aria-hidden="true">
               L
             </span>
-            <span>Locklark</span>
+            <span>Passme</span>
             <span className="brand-tag">Local Console</span>
           </div>
           <p className="eyebrow">团队目录与设备审阅</p>

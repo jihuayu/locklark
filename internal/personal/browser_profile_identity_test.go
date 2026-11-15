@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Identity fills disclose only the approved profile fields. SSN, passport and

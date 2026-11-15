@@ -4,7 +4,7 @@
 
 已 fetch 最新 main、原分支和 PR ref；main 为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`，工作分支为 `codex/first-preview`，接手 head 为 `1c191e799f05b5559cc97f54fb571aa9401626b5`。本地/远端/PR 一致，工作树干净，未见其他开发测试进程。已重读 design/progress/development-goal 并核对远端差异，无新增 AGENTS 指令，不依赖 Ryugi。
 
-[PR #1](https://github.com/jihuayu/locklark/pull/1) 开放、未合并；实现 `b2347ac8c0d637f653c271944232e433ce2f60f9` 已普通快进推送原分支。提交前重新 fetch 未发现并发新 head，未覆盖后续提交、从空 main 重做、强推或修改 main。文档最终 head 由本文件所在提交与 PR 实际 head 确定，最终远端状态见 [PR checks](https://github.com/jihuayu/locklark/pull/1/checks)。
+[PR #1](https://github.com/jihuayu/passme/pull/1) 开放、未合并；实现 `b2347ac8c0d637f653c271944232e433ce2f60f9` 已普通快进推送原分支。提交前重新 fetch 未发现并发新 head，未覆盖后续提交、从空 main 重做、强推或修改 main。文档最终 head 由本文件所在提交与 PR 实际 head 确定，最终远端状态见 [PR checks](https://github.com/jihuayu/passme/pull/1/checks)。
 
 ## 本轮支持的关联子集
 
@@ -29,7 +29,7 @@ MappingVerified 始终 false，UnmappedItems 仍等于 Items，file-linkage-unve
 
 ## 失败先行和审计验收
 
-先新增报告类型和合成测试，运行 `go test -count=1 ./internal/onepux -run '^TestFileReferences'` 实际失败：旧清点返回零关联计数，匹配/缺失/重复/大小统计及声明拒绝尚未满足。随后实现并转绿。该失败属于新增能力，不声称旧版曾错误猜中关联或已经实施迁移。临时日志为 `/tmp/locklark-validation/attachments/red.log`，不保证跨环境保留。
+先新增报告类型和合成测试，运行 `go test -count=1 ./internal/onepux -run '^TestFileReferences'` 实际失败：旧清点返回零关联计数，匹配/缺失/重复/大小统计及声明拒绝尚未满足。随后实现并转绿。该失败属于新增能力，不声称旧版曾错误猜中关联或已经实施迁移。临时日志为 `/tmp/passme-validation/attachments/red.log`，不保证跨环境保留。
 
 回归覆盖零长度文件、缺失目标、重复引用/大小差异、跨库重用条目 ID、缺少路径、仅有文档属性、大小写/百分号/Unicode 字节差异、非法目标、空/错误类型、非规范数值和 uint64 边界。源字节不变，Report 的 JSON/fmt 不回显合成私有标记。ZIP/JSON fuzz 加入显式引用种子；JSON 变异重新封装有效 CRC 和固定附件，检查引用/文件计数关系、零部分结果和不授予迁移。
 
@@ -37,18 +37,18 @@ MappingVerified 始终 false，UnmappedItems 仍等于 Items，file-linkage-unve
 
 ## 实跑检查
 
-环境 Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。下表 go 为 `/tmp/locklark-tools/go/bin/go`，产物目录 `/tmp/locklark-validation/attachments`。
+环境 Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。下表 go 为 `/tmp/passme-tools/go/bin/go`，产物目录 `/tmp/passme-validation/attachments`。
 
 | 检查 | 实际命令与结果 |
 | --- | --- |
 | 切片与原边界 | `go test -count=1 ./internal/onepux ./internal/preview -run 'TestInventory\|TestDirectory\|TestFileReferences\|TestOnepux'` 通过 |
-| 全仓 Go | 设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含 KDBX 独立实现互操作和 Bun 子进程；preview 85.525 秒 |
+| 全仓 Go | 设置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun`、`PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含 KDBX 独立实现互操作和 Bun 子进程；preview 85.525 秒 |
 | 定向 race | `go test -race -count=1 -timeout=5m ./internal/onepux ./internal/preview -run 'TestInventory\|TestDirectory\|TestFileReferences\|TestOnepux'` 通过，分别 2.170 秒、14.946 秒 |
 | ZIP fuzz | `go test ./internal/onepux -run '^$' -fuzz='^FuzzInventory$' -fuzztime=20s -parallel=2` 通过，650560 次执行 |
 | JSON fuzz | `go test ./internal/onepux -run '^$' -fuzz='^FuzzInventoryJSON$' -fuzztime=20s -parallel=2` 通过，115570 次执行 |
 | 静态/模块 | `go mod verify`、`go vet ./...`、`git diff --check` 通过 |
-| 个人真实 PTY | 构建 locklark 后，`python3 scripts/personal_acceptance.py /tmp/locklark-validation/attachments/locklark` 通过：错误恢复材料、损坏备份、已有目标不发钥/不留库，FIFO/旧格式/迟到目标及建库/重开回归通过 |
-| Bun/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后 `python3 scripts/mcp_acceptance.py /tmp/locklark-validation/attachments/locklark` 通过 |
+| 个人真实 PTY | 构建 passme 后，`python3 scripts/personal_acceptance.py /tmp/passme-validation/attachments/passme` 通过：错误恢复材料、损坏备份、已有目标不发钥/不留库，FIFO/旧格式/迟到目标及建库/重开回归通过 |
+| Bun/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后 `python3 scripts/mcp_acceptance.py /tmp/passme-validation/attachments/passme` 通过 |
 | Windows 编译 | 对 `./internal/onepux`、`./internal/preview` 分别运行 `GOOS=windows GOARCH=amd64 go test -c -o ...`，通过，仅编译 |
 | macOS 编译 | 对上述两包分别运行 `GOOS=darwin GOARCH=arm64 go test -c -o ...`，通过，仅编译 |
 
@@ -56,7 +56,7 @@ MappingVerified 始终 false，UnmappedItems 仍等于 Items，file-linkage-unve
 
 ## 远端、复核与下一项
 
-实现 [run 41937243743](https://github.com/jihuayu/locklark/actions/runs/41937243743) 的 [Windows job 126948691199](https://github.com/jihuayu/locklark/actions/runs/41937243743/job/126948691199) failure，[Ubuntu job 126948691562](https://github.com/jihuayu/locklark/actions/runs/41937243743/job/126948691562) cancelled，均零 steps。本轮 annotations 确认 Windows 因近期付款失败或需提高 spending limit 未启动，Ubuntu 因矩阵失败取消。没有远端测试通过证据；保留 PR，不绕过保护合并。
+实现 [run 41937243743](https://github.com/jihuayu/passme/actions/runs/41937243743) 的 [Windows job 126948691199](https://github.com/jihuayu/passme/actions/runs/41937243743/job/126948691199) failure，[Ubuntu job 126948691562](https://github.com/jihuayu/passme/actions/runs/41937243743/job/126948691562) cancelled，均零 steps。本轮 annotations 确认 Windows 因近期付款失败或需提高 spending limit 未启动，Ubuntu 因矩阵失败取消。没有远端测试通过证据；保留 PR，不绕过保护合并。
 
 已自查精确匹配、作用域、零长度/缺失区分、计数与整数边界、私有数据流向，未发现新增问题；自查不是独立复核。PR reviews/review comments 无新意见。本切片及此前恢复/引用/生成/清点核心、`4932c8d..a0d8ab1` 等已标待复核范围均继续保留。main 未动，未 squash；全部设计和逐平台验收未完成，持续目标保持进行。
 

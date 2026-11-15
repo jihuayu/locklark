@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/clibinding"
+	"github.com/jihuayu/passme/internal/clibinding"
 )
 
 const (
@@ -36,7 +36,7 @@ func testProgram(t *testing.T) string {
 
 func testVaultPath(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "owner.ll")
+	return filepath.Join(t.TempDir(), "owner.pm")
 }
 
 func privateDir(t *testing.T) string {
@@ -90,12 +90,12 @@ func TestNewStoreAndDefaultPath(t *testing.T) {
 		t.Fatal("new store is not empty at the current schema version")
 	}
 	absolute := filepath.Join(t.TempDir(), "absolute.json")
-	t.Setenv("LOCKLARK_CLI_BINDING", absolute+string(filepath.Separator)+"."+string(filepath.Separator))
+	t.Setenv("PASSME_CLI_BINDING", absolute+string(filepath.Separator)+"."+string(filepath.Separator))
 	path, err := clibinding.DefaultPath()
 	if err != nil || path != filepath.Clean(absolute) {
 		t.Fatalf("absolute environment binding not honored: %q %v", path, err)
 	}
-	t.Setenv("LOCKLARK_CLI_BINDING", "relative.json")
+	t.Setenv("PASSME_CLI_BINDING", "relative.json")
 	path, err = clibinding.DefaultPath()
 	if err != nil {
 		t.Fatal("default path unavailable")
@@ -104,7 +104,7 @@ func TestNewStoreAndDefaultPath(t *testing.T) {
 	if err != nil || path != filepath.Join(wd, clibinding.DefaultFileName) {
 		t.Fatalf("relative environment binding must be ignored: %q", path)
 	}
-	t.Setenv("LOCKLARK_CLI_BINDING", "")
+	t.Setenv("PASSME_CLI_BINDING", "")
 	path, err = clibinding.DefaultPath()
 	if err != nil || path != filepath.Join(wd, clibinding.DefaultFileName) {
 		t.Fatalf("working-directory binding path wrong: %q", path)
@@ -140,11 +140,11 @@ func TestToolBindingValidate(t *testing.T) {
 	cases := map[string]func(*clibinding.ToolBinding){
 		"unknown profile":       func(b *clibinding.ToolBinding) { b.Profile = "unknown" },
 		"empty vault":           func(b *clibinding.ToolBinding) { b.VaultPath = "" },
-		"relative vault":        func(b *clibinding.ToolBinding) { b.VaultPath = "owner.ll" },
-		"unclean vault":         func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/x/../vault.ll" },
-		"nul vault":             func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\x00.ll" },
-		"newline vault":         func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\n.ll" },
-		"invalid utf8 vault":    func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\xff.ll" },
+		"relative vault":        func(b *clibinding.ToolBinding) { b.VaultPath = "owner.pm" },
+		"unclean vault":         func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/x/../vault.pm" },
+		"nul vault":             func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\x00.pm" },
+		"newline vault":         func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\n.pm" },
+		"invalid utf8 vault":    func(b *clibinding.ToolBinding) { b.VaultPath = dir + "/vault\xff.pm" },
 		"long vault":            func(b *clibinding.ToolBinding) { b.VaultPath = longPath },
 		"empty program":         func(b *clibinding.ToolBinding) { b.Program = "" },
 		"relative program":      func(b *clibinding.ToolBinding) { b.Program = "tool" },

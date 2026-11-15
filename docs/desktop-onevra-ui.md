@@ -2,7 +2,7 @@
 
 ## 目标
 
-Locklark 继续保持本地金库与安全授权边界，桌面主界面以 1Password 8 的高频工作流为参照，用 Onevra 原生组件形成可识别、可维护的产品界面。第一阶段只实现并验证主工作区，不把视觉接近写成完整 1Password 兼容。
+Passme 继续保持本地金库与安全授权边界，桌面主界面以 1Password 8 的高频工作流为参照，用 Onevra 原生组件形成可识别、可维护的产品界面。第一阶段只实现并验证主工作区，不把视觉接近写成完整 1Password 兼容。
 
 验收目标是让用户在同一个窗口内连续完成：
 
@@ -34,7 +34,7 @@ Locklark 继续保持本地金库与安全授权边界，桌面主界面以 1Pas
 
 ### 标题栏
 
-- 左侧显示 Locklark 标记、产品名、当前保险库与解锁上下文。
+- 左侧显示 Passme 标记、产品名、当前保险库与解锁上下文。
 - 右侧固定提供快捷搜索、安全设置和立即锁定。
 - Windows 使用 Onevra 自绘标题栏和原生控制按钮，保留拖动、最大化与关闭行为。
 - 锁定、审批、浏览器确认等安全流程仍由现有窗口逻辑接管，不把主界面装饰放进授权范围。
@@ -75,7 +75,7 @@ Locklark 继续保持本地金库与安全授权边界，桌面主界面以 1Pas
 ## 状态与代码布局
 
 ```text
-cmd/locklark-desktop
+cmd/passme-desktop
   └─ internal/desktop.Run
       ├─ Onevra plain Shell（窗口、标题栏、主题）
       ├─ App.View（锁定、审批、浏览器、主工作区分流）
@@ -104,7 +104,7 @@ Onevra 视图是全同步 UI 线程执行器：可启动既有异步方法，但
 
 ## 验证要求
 
-- `go test ./...`、`go vet ./...` 和 `go build ./cmd/locklark-desktop` 在 Windows 通过。
+- `go test ./...`、`go vet ./...` 和 `go build ./cmd/passme-desktop` 在 Windows 通过。
 - Headless UI 测试覆盖三栏可见、导航文本、搜索、空状态和详情动作存在性；普通测试不得弹出窗口。
 - Windows 原生 smoke test 使用隐藏窗口和私有合成金库抓取界面；演示截图不包含真实用户数据。
 - 键盘必须覆盖 Tab、Enter/Space、分隔线方向键与搜索输入；指针必须覆盖导航、行选择、显示/复制与锁定。

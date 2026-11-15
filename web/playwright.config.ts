@@ -1,6 +1,6 @@
 import { defineConfig } from "@playwright/test";
 const browser =
-  process.env.LOCKLARK_TEST_BROWSER === "firefox" ? "firefox" : "chromium";
+  process.env.PASSME_TEST_BROWSER === "firefox" ? "firefox" : "chromium";
 export default defineConfig({
   testDir: "./tests/browser",
   fullyParallel: false,

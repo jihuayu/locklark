@@ -184,7 +184,7 @@ def t4_04(ctx):
     "T4_05",
     4,
     ["F6", "F14", "F15", "F16", "F17"],
-    "Multi-cloud DevOps pipeline through locklark cli with zero plaintext files left",
+    "Multi-cloud DevOps pipeline through passme cli with zero plaintext files left",
 )
 def t4_05(ctx):
     vault = make_vault(ctx, ["AWS", "Terraform", "Kubernetes", "Docker", "Postgres"])

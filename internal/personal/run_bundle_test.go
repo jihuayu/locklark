@@ -15,15 +15,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const (
 	bundleTestUsername   = "deploy-user"
 	bundleTestPassword   = "s3cret"
 	bundleTestAttachment = "apiVersion: v1\nkind: Config\nclusters: []\n"
-	bundleAskpassScript  = "#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\nesac\n"
+	bundleAskpassScript  = "#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$PASSME_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$PASSME_GIT_SECRET_FILE\" ;;\nesac\n"
 )
 
 type bundleTestFixture struct {
@@ -37,7 +37,7 @@ type bundleTestFixture struct {
 
 func newBundleTestFixture(t *testing.T) *bundleTestFixture {
 	t.Helper()
-	f := &bundleTestFixture{path: filepath.Join(t.TempDir(), "owner.ll"), key: bytes.Repeat([]byte{5}, 16)}
+	f := &bundleTestFixture{path: filepath.Join(t.TempDir(), "owner.pm"), key: bytes.Repeat([]byte{5}, 16)}
 	if err := Create(f.path, "fixture", f.key); err != nil {
 		t.Fatal("create vault", err)
 	}
@@ -95,13 +95,13 @@ func bundleTestSpec() cliprofile.Spec {
 			{Name: "kubeconfig", Kind: "document", Field: cliprofile.FieldAttachment, RequireNonBlank: true},
 		},
 		Env: map[string]string{
-			"GH_TOKEN":                 "slot:token",
-			"DOCKER_CONFIG":            "root:docker",
-			"NPM_CONFIG_USERCONFIG":    "file:npm/npmrc",
-			"PGPASSFILE":               "file:pg/pgpass",
-			"GIT_ASKPASS":              "file:git/askpass.sh",
-			"LOCKLARK_GIT_SECRET_FILE": "file:git/askpass_secret",
-			"NETRC":                    "file:git/netrc",
+			"GH_TOKEN":               "slot:token",
+			"DOCKER_CONFIG":          "root:docker",
+			"NPM_CONFIG_USERCONFIG":  "file:npm/npmrc",
+			"PGPASSFILE":             "file:pg/pgpass",
+			"GIT_ASKPASS":            "file:git/askpass.sh",
+			"PASSME_GIT_SECRET_FILE": "file:git/askpass_secret",
+			"NETRC":                  "file:git/netrc",
 		},
 		Files: []cliprofile.FileSpec{
 			{RelPath: "kube/config", Format: "raw-slot:kubeconfig", Mode: 0600},
@@ -234,7 +234,7 @@ func TestRunCLIBundleChild(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		"GH_TOKEN": true, "DOCKER_CONFIG": true, "NPM_CONFIG_USERCONFIG": true,
-		"PGPASSFILE": true, "GIT_ASKPASS": true, "LOCKLARK_GIT_SECRET_FILE": true,
+		"PGPASSFILE": true, "GIT_ASKPASS": true, "PASSME_GIT_SECRET_FILE": true,
 		"NETRC": true, "BUNDLE_TEST_REGION": true, "NO_COLOR": true,
 		"PATH": true, "HOME": true, "GH_CONFIG_DIR": true,
 		"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true,
