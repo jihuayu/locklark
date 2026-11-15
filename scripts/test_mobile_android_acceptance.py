@@ -268,6 +268,52 @@ class CommandFailureOriginTests(unittest.TestCase):
                 safe = self.assert_origin(stdout=stdout, stderr=stderr, expected="remote-other", secret="opaque")
                 self.assertEqual(safe["stderr_class"], stderr_class)
 
+    def test_success_clears_previous_failure_without_classifying_output(self):
+        for stdout, stderr in ((b"", b""), (b"Can't find service: input_method\n", b"error: device offline\n")):
+            with self.subTest(output_present=bool(stdout)), tempfile.TemporaryDirectory() as root:
+                controller = self.controller(root)
+                try:
+                    controller.diagnosis.update({"command_exit": "nonzero", "failure_origin": "service"})
+                    completed = subprocess.CompletedProcess([], 0, stdout, stderr)
+                    with mock.patch.object(acceptance.subprocess, "run", return_value=completed) as run:
+                        controller.shell("dumpsys", "input_method")
+                    self.assertEqual(run.call_count, 1)
+                    safe = acceptance.safe_host_diagnosis(controller.diagnosis)
+                    self.assertEqual((safe["command_exit"], safe["failure_origin"]), ("ok", "unknown"))
+                finally:
+                    controller.close()
+
+    def test_successful_diagnostic_query_restores_original_failure_origin(self):
+        with tempfile.TemporaryDirectory() as root:
+            controller = self.controller(root)
+            controller.args.timeout = 180
+            controller.started = True
+            controller.diagnosis.update({"command": "text", "command_exit": "nonzero", "exit_code": 1,
+                                         "stderr_class": "permission", "failure_origin": "permission"})
+            observed = []
+            original_shell = controller.shell
+
+            def query(*args, **kwargs):
+                result = original_shell(*args, **kwargs)
+                observed.append(controller.diagnosis["failure_origin"])
+                return result
+
+            try:
+                completed = subprocess.CompletedProcess([], 0, b"mInputShown=false\n", b"")
+                with mock.patch.object(controller, "observe_activity_state"), \
+                     mock.patch.object(controller, "snapshot"), \
+                     mock.patch.object(controller, "shell", side_effect=query), \
+                     mock.patch.object(acceptance.subprocess, "run", return_value=completed) as run:
+                    controller.capture_failure_diagnosis()
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(observed, ["unknown"])
+                safe = acceptance.safe_host_diagnosis(controller.diagnosis)
+                self.assertEqual((safe["command"], safe["command_exit"], safe["failure_origin"]),
+                                 ("text", "nonzero", "permission"))
+            finally:
+                controller.started = False
+                controller.close()
+
     def test_large_streams_are_bounded_and_not_projected(self):
         secret = "PrivateLargeOutputSentinel998877"
         padding = b"x" * (acceptance.FAILURE_OUTPUT_LIMIT + 16)
@@ -316,8 +362,8 @@ class CommandFailureOriginTests(unittest.TestCase):
         for origin in sorted(acceptance.FAILURE_ORIGINS):
             with self.subTest(origin=origin):
                 self.assertEqual(acceptance.safe_host_diagnosis({"failure_origin": origin})["failure_origin"], origin)
-        self.assertEqual(acceptance.safe_host_diagnosis({"failure_origin": "PrivateOriginFixture"})["failure_origin"], "remote-other")
-        self.assertEqual(acceptance.safe_host_diagnosis({})["failure_origin"], "remote-other")
+        self.assertEqual(acceptance.safe_host_diagnosis({"failure_origin": "PrivateOriginFixture"})["failure_origin"], "unknown")
+        self.assertEqual(acceptance.safe_host_diagnosis({})["failure_origin"], "unknown")
 
 
 class IndependentOracleTests(unittest.TestCase):
@@ -641,7 +687,8 @@ class ActionableControlTests(unittest.TestCase):
         controller.observe_activity_state = mock.Mock(side_effect=acceptance.AcceptanceFailure)
         controller.snapshot = mock.Mock(side_effect=lambda _: controller.diagnosis.update({"control": "create-form", "create_form": True}))
         def query_keyboard(*_, **__):
-            controller.diagnosis.update({"command": "ime", "command_exit": "ok", "exit_code": 0, "stderr_class": "empty"})
+            controller.diagnosis.update({"command": "ime", "command_exit": "ok", "exit_code": 0,
+                                         "stderr_class": "empty", "failure_origin": "unknown"})
             return subprocess.CompletedProcess([], 0, b"mInputShown=true\n", b"")
         controller.shell = mock.Mock(side_effect=query_keyboard)
         controller.capture_failure_diagnosis()

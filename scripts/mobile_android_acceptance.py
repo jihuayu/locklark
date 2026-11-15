@@ -43,7 +43,7 @@ OPERATIONS = {"unknown", "wait", "locate", "tap", "type-text", "keyboard-check",
 COMMANDS = {"unknown", "properties", "display", "install", "app-reset", "private-dir", "launch", "force-stop", "ui-dump",
             "ui-read", "ui-cleanup", "tap", "text", "scroll", "key", "ime", "lifecycle", "db-copy"}
 STDERR_CLASSES = {"unknown", "empty", "offline", "service-missing", "permission", "timeout", "spawn-error", "other"}
-FAILURE_ORIGINS = {"transport", "service", "permission", "remote-other", "timeout", "spawn"}
+FAILURE_ORIGINS = {"unknown", "transport", "service", "permission", "remote-other", "timeout", "spawn"}
 FAILURE_OUTPUT_LIMIT = 8192
 TARGETS = {"unknown", "row", "field-picker", "generate-key", "new-master", "repeat-master", "backup-ack", "create-vault",
            "new-login", "login-title", "username", "login-password", "generate-password", "save-login", "show-username",
@@ -235,7 +235,7 @@ def safe_host_diagnosis(value):
                "exception": EXCEPTIONS, "helper": HELPERS,
                "reason": {"unknown", "assertion", "python-contract", "xml", "deadline", "wait-expired", "control-not-actionable", "command-failed"}}
     result = {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed
-              else ("remote-other" if key == "failure_origin" else "unknown")
+              else "unknown"
               for key, allowed in choices.items()}
     for key, lower, upper in (("exit_code", -255, 255), ("source_line", 1, 100000)):
         number = value.get(key)
@@ -445,7 +445,7 @@ class AndroidAcceptance:
         self.counter += 1
         result = None
         self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None,
-                               "stderr_class": "unknown", "failure_origin": "remote-other"})
+                               "stderr_class": "unknown", "failure_origin": "unknown"})
         try:
             result = subprocess.run(self.adb + list(map(str, arguments)),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
