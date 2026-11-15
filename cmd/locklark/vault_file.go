@@ -27,6 +27,7 @@ import (
 const vaultFileUsage = `USAGE
   locklark vault-file track-existing --config ABS_CONFIG
   locklark vault-file status --config ABS_CONFIG
+  locklark vault-file open-baseline --config ABS_CONFIG
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
@@ -37,6 +38,12 @@ Missing, corrupt or unsafe local records are refused. Status never opens the
 backend store or reads its contents; it checks backend path metadata only to
 reject journal or config paths inside its managed namespace. It never verifies
 a remote or grant, decrypts, re-signs, merges or edits.
+
+Open-baseline authenticates and decrypts only the existing journal's saved
+baseline with the same fully unlocked local personal device and the supplied
+checkpoint. It prints bounded title/category summaries, LOCAL_BASELINE and
+remote_freshness UNVERIFIED. It does not read backend data or establish a
+current grant, remote freshness or complete content history.
 
 Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
@@ -53,13 +60,14 @@ transactions: LOCAL_REVIEW or LOCAL_UNKNOWN may leave saved working/prepared
 state. Retry the same exact input; different local edits are preserved.
 
 The independently supplied private JSON configuration requires version=1,
-backend_root, name, journal and checkpoint. The complete checkpoint requires
+backend_root, name, journal and checkpoint; open-baseline also requires the
+explicit absolute personal_file. The complete checkpoint requires
 vault_id, owner_root_key_id, owner_root_public_key (64 lowercase hex),
 policy_seq (explicitly present; zero is valid) and policy_digest (64 lowercase hex).
 
 The operator configuration supplies local trust. No default configuration is
-created, migrated or inferred from a backend response. This command does not
-decrypt, re-sign, merge, or establish current SaaS grants or remote freshness.
+created, migrated or inferred from a backend response. No command establishes
+current SaaS grants or remote freshness.
 `
 
 var (
@@ -87,11 +95,12 @@ type vaultFileCheckpointConfig struct {
 }
 
 type vaultFileResumeConfig struct {
-	Version     int                        `json:"version"`
-	BackendRoot string                     `json:"backend_root"`
-	Name        string                     `json:"name"`
-	Journal     string                     `json:"journal"`
-	Checkpoint  *vaultFileCheckpointConfig `json:"checkpoint"`
+	Version      int                        `json:"version"`
+	BackendRoot  string                     `json:"backend_root"`
+	Name         string                     `json:"name"`
+	Journal      string                     `json:"journal"`
+	PersonalFile string                     `json:"personal_file,omitempty"`
+	Checkpoint   *vaultFileCheckpointConfig `json:"checkpoint"`
 }
 
 func decodeVaultFileResumeConfig(raw []byte) (vaultFileResumeConfig, vaultfile.PolicyCheckpoint, error) {
@@ -99,6 +108,7 @@ func decodeVaultFileResumeConfig(raw []byte) (vaultFileResumeConfig, vaultfile.P
 	var pin vaultfile.PolicyCheckpoint
 	if teamfiles.JSON(raw, &cfg) != nil || cfg.Version != 1 ||
 		!teamfiles.ValidPath(cfg.BackendRoot) || !teamfiles.ValidPath(cfg.Journal) ||
+		cfg.PersonalFile != "" && !teamfiles.ValidPath(cfg.PersonalFile) ||
 		!vaultfilebackend.ValidName(cfg.Name) || cfg.Checkpoint == nil {
 		return cfg, pin, errVaultFileConfig
 	}
@@ -132,7 +142,7 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 
 func runVaultFile(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
-		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing" || args[0] == "status") && (args[1] == "--help" || args[1] == "-h") {
+		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing" || args[0] == "status" || args[0] == "open-baseline") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
 			return errVaultFileUnconfirmed
 		}
@@ -141,7 +151,7 @@ func runVaultFile(args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return errVaultFileUnsupported
 	}
-	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" && args[0] != "status" {
+	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" && args[0] != "status" && args[0] != "open-baseline" {
 		return errVaultFileConfig
 	}
 	importing := args[0] == "import-prepared"
@@ -170,11 +180,27 @@ func runVaultFile(args []string, out io.Writer) error {
 		return errVaultFileConfig
 	}
 	paths := []string{*configPath, cfg.Journal}
+	if cfg.PersonalFile != "" {
+		paths = append(paths, cfg.PersonalFile)
+	}
 	if importing {
 		paths = append(paths, inputPath)
 	}
 	if !teamfiles.Distinct(paths...) {
 		return errVaultFileConfig
+	}
+	if args[0] == "open-baseline" {
+		if cfg.PersonalFile == "" {
+			return errVaultFileConfig
+		}
+		info, err := os.Lstat(cfg.PersonalFile)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return errVaultFileConfig
+		}
+		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
+			return err
+		}
+		return openBaselineVaultFile(out, cfg, pin)
 	}
 	if args[0] == "status" {
 		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {

@@ -48,6 +48,21 @@ func TestVaultFileConfigSequencePresence(t *testing.T) {
 	}
 }
 
+func TestVaultFileConfigOptionalPersonalFile(t *testing.T) {
+	document := resumeConfigDocument(t)
+	if cfg, _, err := decodeVaultFileResumeConfig(encodeResumeConfigTest(t, document)); err != nil || cfg.PersonalFile != "" {
+		t.Fatal("EXISTING_CONFIG_CHANGED")
+	}
+	document["personal_file"] = filepath.Join(t.TempDir(), "personal.ll")
+	if cfg, _, err := decodeVaultFileResumeConfig(encodeResumeConfigTest(t, document)); err != nil || cfg.PersonalFile != document["personal_file"] {
+		t.Fatal("ABSOLUTE_PERSONAL_FILE_REJECTED")
+	}
+	document["personal_file"] = "personal.ll"
+	if _, _, err := decodeVaultFileResumeConfig(encodeResumeConfigTest(t, document)); err != errVaultFileConfig {
+		t.Fatal("RELATIVE_PERSONAL_FILE_ACCEPTED")
+	}
+}
+
 func TestVaultFileConfigStrictSchema(t *testing.T) {
 	for _, name := range []string{"UNKNOWN", "MISSING_ROOT", "MISSING_NAME", "MISSING_JOURNAL", "MISSING_CHECKPOINT", "MISSING_VAULT", "MISSING_ROOT_ID", "UPPER_PUBLIC", "SHORT_DIGEST", "RELATIVE_ROOT"} {
 		t.Run(name, func(t *testing.T) {
