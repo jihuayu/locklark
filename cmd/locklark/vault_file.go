@@ -171,14 +171,20 @@ func runVaultFile(args []string, out io.Writer) error {
 	if importing {
 		paths = append(paths, inputPath)
 	}
+	// Status reports local journal state even when the backend is unavailable.
+	// Keep its namespace guard purely lexical; resolving or statting the
+	// backend here would turn an offline backend into a status refusal.
+	if args[0] == "status" && !separateVaultFileStatusState(cfg.BackendRoot, paths...) {
+		return errVaultFileConfig
+	}
 	if !teamfiles.Distinct(paths...) {
 		return errVaultFileConfig
 	}
-	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
-		return err
-	}
 	if args[0] == "status" {
 		return statusVaultFile(out, cfg)
+	}
+	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
+		return err
 	}
 	var input []byte
 	if importing {
@@ -215,6 +221,20 @@ func runVaultFile(args []string, out io.Writer) error {
 		return errVaultFileUnconfirmed
 	}
 	return nil
+}
+
+// Status must not inspect the backend, including its directory metadata. The
+// configured absolute paths are already clean and valid; this rejects direct
+// placement in its managed namespace without requiring that namespace to
+// exist. The mutating commands retain the identity-aware scope check below.
+func separateVaultFileStatusState(backendRoot string, paths ...string) bool {
+	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+	for _, path := range paths {
+		if path == namespace || strings.HasPrefix(path, namespace+string(os.PathSeparator)) {
+			return false
+		}
+	}
+	return true
 }
 
 // The backend owns its whole documented vaultfile-backend subtree, including

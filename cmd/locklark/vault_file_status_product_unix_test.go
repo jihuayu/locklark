@@ -211,12 +211,10 @@ func TestVaultFileStatusProductMatrix(t *testing.T) {
 				moveResumeScopeJournal(t, &c, filepath.Join(c.cfg.BackendRoot, "vaultfile-backend", "v1", "tmp", "op-00112233445566778899aabbccddeeff"))
 				writeResumeScopeConfig(t, c)
 			case "MISSING_BACKEND":
-				want = "BACKEND_REJECTED"
 				if os.RemoveAll(c.cfg.BackendRoot) != nil {
 					t.Fatal("STATUS_MISSING_BACKEND_FIXTURE_FAILED")
 				}
 			case "MISSING_BACKEND_NAMESPACE":
-				want = "BACKEND_REJECTED"
 				if os.RemoveAll(filepath.Join(c.cfg.BackendRoot, "vaultfile-backend")) != nil {
 					t.Fatal("STATUS_MISSING_BACKEND_NAMESPACE_FIXTURE_FAILED")
 				}
@@ -234,6 +232,47 @@ func TestVaultFileStatusProductMatrix(t *testing.T) {
 			}
 			if !maps.Equal(before, resumeDisk(t, c.root)) {
 				t.Fatal("STATUS_PRODUCT_CHANGED_DISK")
+			}
+		})
+	}
+}
+
+// A backend root with a self-referential symlink makes even EvalSymlinks fail.
+// All four valid local journal states must still be reported by the real CLI,
+// with no backend repair and no change to the configured journal.
+func TestVaultFileStatusProductBackendIndependent(t *testing.T) {
+	product := vaultFileProductBinary(t)
+	material := newResumeProductMaterial(t)
+	for _, name := range []string{"CLEAN", "DIRTY", "PREPARED", "REVIEW"} {
+		t.Run(name, func(t *testing.T) {
+			var c resumeProductCase
+			switch name {
+			case "DIRTY":
+				c = newResumeProductCase(t, material, false)
+			case "PREPARED":
+				c = newResumeProductCase(t, material, true)
+			default:
+				c = newBaselineProductCase(t, material)
+			}
+			if name == "REVIEW" {
+				journal, err := vaultfilejournal.OpenExisting(c.cfg.Journal)
+				if err != nil {
+					t.Fatal("STATUS_OFFLINE_REVIEW_OPEN_FAILED")
+				}
+				err = journal.Save(vaultfilejournal.Proposal{Generation: 1, OperationID: "legacy-operation", ExpectedRevision: c.initial.Revision, Bytes: material.p})
+				if err != nil || journal.Close() != nil {
+					t.Fatal("STATUS_OFFLINE_REVIEW_FIXTURE_FAILED")
+				}
+			}
+			if os.RemoveAll(c.cfg.BackendRoot) != nil || os.Symlink(c.cfg.BackendRoot, c.cfg.BackendRoot) != nil {
+				t.Fatal("STATUS_OFFLINE_BACKEND_FIXTURE_FAILED")
+			}
+			before := resumeDisk(t, c.root)
+			if got := runStatusProduct(product, c.configPath); got != name {
+				t.Fatal("STATUS_OFFLINE_BACKEND_LOCAL_STATE_FAILED")
+			}
+			if !maps.Equal(before, resumeDisk(t, c.root)) {
+				t.Fatal("STATUS_OFFLINE_BACKEND_CHANGED_DISK")
 			}
 		})
 	}
