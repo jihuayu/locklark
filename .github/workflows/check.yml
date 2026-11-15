@@ -186,7 +186,7 @@ jobs:
           go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
           LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
           echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'
-      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes' -count=1
+      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux ./internal/terminalpeer -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes|^TestDarwinPeer(SnapshotOwnedPTY|ServerDuplicate|ClientInheritance)$' -count=1
       - name: Test full browser host on macOS
         timeout-minutes: 10
         env:
