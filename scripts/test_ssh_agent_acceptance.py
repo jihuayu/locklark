@@ -1,9 +1,11 @@
 """Independent signature/audit/privacy negatives for the host controller."""
 import contextlib
+import ast
 import copy
 import ctypes
 import argparse
 import io
+import inspect
 import json
 import os
 import pathlib
@@ -14,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import textwrap
+import types
 import unittest
 from unittest import mock
 
@@ -21,6 +25,78 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import ssh_agent_acceptance as acceptance
 import ssh_native_x11 as native
 from run_cli_acceptance import scan
+from test_desktop_native_acceptance import NativeUnlockInputBoundary
+
+
+class ExplicitSSHUnlockTests(unittest.TestCase):
+    def boundary_code(self, method):
+        # Execute the caller's actual UI-only unlock statements, leaving CLI
+        # creation, process launch, signatures and network traffic outside this
+        # unit boundary. Internal fill/click/wait/helper methods are never mocked.
+        body = ast.parse(textwrap.dedent(inspect.getsource(method))).body[0].body
+
+        def call(node, name, value=None):
+            return (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and isinstance(node.value.func.value, ast.Name)
+                    and node.value.func.value.id == "self" and node.value.func.attr == name
+                    and (value is None or (node.value.args and isinstance(node.value.args[0], ast.Constant)
+                                           and node.value.args[0].value == value)))
+
+        if method is acceptance.Acceptance.create:
+            start = next(index for index, node in enumerate(body)
+                         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                         and node.value.value == "unlock")
+            stop = next(index for index in range(start, len(body))
+                        if call(body[index], "_unlock") or call(body[index], "click", "ssh"))
+        else:
+            self.assertIs(method, acceptance.Acceptance.deadlines_lock)
+            start = next(index for index, node in enumerate(body) if call(node, "wait", "unlock"))
+            stop = next(index for index in range(start, len(body))
+                        if call(body[index], "mark", "lock_cancels_pending_signature_and_unlock_does_not_restart_agent"))
+        return compile(ast.Module(body=body[start:stop + 1], type_ignores=[]), inspect.getsourcefile(method), "exec")
+
+    def subject(self, directory):
+        subject = acceptance.Acceptance.__new__(acceptance.Acceptance)
+        subject.cli = types.SimpleNamespace(master="synthetic-master", key="synthetic-key", vault=directory / "vault.ll")
+        subject.endpoint, subject.checks = str(directory / "absent-agent.sock"), []
+        boundary = NativeUnlockInputBoundary(subject.cli.master, subject.cli.key, failure_type=acceptance.AcceptanceFailure)
+        subject.native = boundary
+        return subject, boundary
+
+    def execute(self, method, subject):
+        exec(self.boundary_code(method), {"self": subject, "require": acceptance.require, "pathlib": pathlib})
+
+    def test_create_and_real_lock_call_boundaries_each_open_emergency_entry(self):
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
+            subject, boundary = self.subject(pathlib.Path(directory))
+            self.execute(acceptance.Acceptance.create, subject)
+            self.assertTrue(boundary.fields["金库文件"] == str(subject.cli.vault))
+            subject.click("locked")
+            self.assertFalse(boundary.expanded)
+            self.execute(acceptance.Acceptance.deadlines_lock, subject)
+            self.assertEqual(boundary.events.count(("click", boundary.ENTRY)), 2)
+            self.assertEqual(boundary.events.count(("text", "主密码")), 2)
+            self.assertEqual(boundary.events.count(("text", "Secret Key")), 2)
+            self.assertEqual(boundary.events.count(("wait", "SSH 密钥")), 2)
+            self.assertIn(("wait", "开启本地 SSH agent"), boundary.events)
+            self.assertIn("lock_cancels_pending_signature_and_unlock_does_not_restart_agent", subject.checks)
+            self.assertTrue(all(value not in output.getvalue() for value in (subject.cli.master, subject.cli.key)))
+
+    def test_each_call_boundary_fails_closed_when_emergency_entry_is_unavailable(self):
+        for method in (acceptance.Acceptance.create, acceptance.Acceptance.deadlines_lock):
+            for reason in ("missing", "ambiguous", "timeout"):
+                with self.subTest(caller=method.__name__, reason=reason), tempfile.TemporaryDirectory() as directory:
+                    subject, boundary = self.subject(pathlib.Path(directory))
+                    failure = acceptance.AcceptanceFailure()
+                    failure.native_reason = reason
+                    boundary.failure = failure
+                    with self.assertRaises(acceptance.AcceptanceFailure) as caught:
+                        self.execute(method, subject)
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(boundary.events.count(("click", boundary.ENTRY)), 1)
+                    self.assertNotIn(("text", "Secret Key"), boundary.events)
+                    self.assertNotIn(("click", "解锁"), boundary.events)
 
 
 class ProtocolOracleTests(unittest.TestCase):
