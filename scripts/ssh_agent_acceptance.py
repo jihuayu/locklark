@@ -30,7 +30,7 @@ TITLE = "Locklark · 本地金库"
 STAGES = {"prerequisites", "create", "unlock", "generate", "import", "agent-start", "servers", "identities", "approve", "deny",
           "malformed", "concurrency", "disconnect", "expired", "slow-frame", "openssh", "forwarding", "lock",
           "export", "audit", "privacy", "cleanup", "complete"}
-LABELS = {"vault": "金库文件", "master": "主密码", "key": "Secret Key", "unlock": "解锁", "locked": "立即锁定",
+LABELS = {"vault": "金库文件", "master": "主密码", "emergency": "使用应急资料…", "key": "Secret Key", "unlock": "解锁", "locked": "立即锁定",
           "ssh": "SSH 密钥", "title": "SSH 密钥标题", "generate": "生成 Ed25519 密钥", "import-file": "选择未加密 OpenSSH 私钥…",
           "import-confirm": "确认导入未加密 Ed25519 私钥", "copy-key": "复制 SSH 公钥", "start": "开启本地 SSH agent",
           "copy-endpoint": "复制 SSH_AUTH_SOCK 端点", "stop": "停止本地 SSH agent", "approve": "仅批准本次 SSH 签名",
@@ -618,6 +618,14 @@ class Acceptance:
                             "-in", str(paths[1]), "-sigfile", str(paths[2])])
         require(b"Signature Verified Successfully" in out)
 
+    def _unlock(self):
+        self.fill("master", self.cli.master)
+        self.click("emergency")
+        self.fill("key", self.cli.key)
+        self.click("unlock")
+        self.wait("ssh")
+        self.click("ssh")
+
     def create(self):
         require(bool(os.environ.get("DISPLAY")) and bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS")))
         self.cli.build_fixture()
@@ -632,11 +640,7 @@ class Acceptance:
         self.stage = "unlock"
         self.native([{"key": "Alt_L+F10"}])
         self.fill("vault", str(self.cli.vault))
-        self.fill("master", self.cli.master)
-        self.fill("key", self.cli.key)
-        self.click("unlock")
-        self.wait("ssh")
-        self.click("ssh")
+        self._unlock()
 
     def manage(self):
         self.stage = "generate"
@@ -863,11 +867,7 @@ class Acceptance:
         pending.close()
         self.wait("unlock")
         require(not pathlib.Path(self.endpoint).exists())
-        self.fill("master", self.cli.master)
-        self.fill("key", self.cli.key)
-        self.click("unlock")
-        self.wait("ssh")
-        self.click("ssh")
+        self._unlock()
         self.wait("start")
         require(not pathlib.Path(self.endpoint).exists())
         self.mark("lock_cancels_pending_signature_and_unlock_does_not_restart_agent")

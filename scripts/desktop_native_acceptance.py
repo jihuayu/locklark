@@ -442,6 +442,7 @@ class Acceptance:
         self.phase("unlock")
         self.input([{"click_label":"金库文件"}, {"key":"Control_L+a"}, {"text":self.fixture["Path"]},
                     {"click_label":"主密码"}, {"text":self.fixture["Password"]},
+                    {"click_label":"使用应急资料…"},
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]}, {"click_label":"解锁"},
                     {"wait_label":"新建登录"}])
 

@@ -1,7 +1,9 @@
 """Secret scanning checks for persistent desktop acceptance artifacts."""
 import json
 import ast
+import contextlib
 import inspect
+import io
 import pathlib
 import tempfile
 import textwrap
@@ -11,6 +13,118 @@ from unittest.mock import Mock, call, patch
 
 import desktop_native_acceptance as desktop
 from desktop_native_acceptance import Acceptance, AcceptanceFailure
+from desktop_quick_search_acceptance import QuickSearchAcceptance
+from desktop_login_notes_acceptance import NotesAcceptance
+
+
+class NativeUnlockInputBoundary:
+    """Public native-control boundary: the key field starts hidden after every lock."""
+    ENTRY = "使用应急资料…"
+
+    def __init__(self, password, secret, failure=None, failure_type=AcceptanceFailure):
+        self.password, self.secret, self.failure = password, secret, failure
+        self.hidden_failure = failure_type()
+        self.events, self.calls = [], 0
+        self.fields = {"金库文件": "existing-default-vault"}
+        self.lock()
+
+    def lock(self):
+        self.fields = {"金库文件": self.fields["金库文件"]}
+        self.expanded, self.unlocked, self.ssh_page, self.focus = False, False, False, None
+
+    def __call__(self, actions=(), **options):
+        assert not options
+        self.calls += 1
+        for action in actions:
+            if "click_label" in action:
+                label = action["click_label"]
+                self.events.append(("click", label))
+                if label == self.ENTRY:
+                    if self.failure is not None:
+                        raise self.failure
+                    assert not self.expanded
+                    self.expanded, self.focus = True, None
+                elif label in ("金库文件", "主密码", "Secret Key"):
+                    if label == "Secret Key" and not self.expanded:
+                        raise self.hidden_failure
+                    self.focus = label
+                elif label == "解锁":
+                    assert self.fields.get("主密码") == self.password
+                    assert self.fields.get("Secret Key") == self.secret
+                    self.unlocked, self.expanded, self.focus = True, False, None
+                elif label == "SSH 密钥":
+                    assert self.unlocked
+                    self.ssh_page = True
+                elif label == "立即锁定":
+                    self.lock()
+                else:
+                    raise AssertionError("unexpected native control")
+            elif "wait_label" in action:
+                label = action["wait_label"]
+                self.events.append(("wait", label))
+                assert ((label == "解锁" and not self.unlocked)
+                        or (label in ("新建登录", "SSH 密钥") and self.unlocked)
+                        or (label == "开启本地 SSH agent" and self.ssh_page))
+            elif "key" in action:
+                self.events.append(("key", action["key"]))
+                if action["key"] == "Control_L+a":
+                    assert self.focus is not None
+                    self.fields[self.focus] = ""
+                else:
+                    assert action["key"] == "Alt_L+F10"
+            elif "text" in action:
+                assert self.focus is not None
+                self.events.append(("text", self.focus))
+                self.fields[self.focus] = self.fields.get(self.focus, "") + action["text"]
+            else:
+                raise AssertionError("unexpected native input")
+        return {}
+
+
+class ExplicitNativeUnlockTests(unittest.TestCase):
+    CLASSES = (Acceptance, QuickSearchAcceptance, NotesAcceptance)
+    FIXTURE = {"Path": "owned-fixture-vault", "Password": "synthetic-master", "Secret": "synthetic-key"}
+
+    def subject(self, cls, failure=None):
+        subject = cls.__new__(cls)
+        subject.fixture, subject.output_lines = dict(self.FIXTURE), []
+        boundary = NativeUnlockInputBoundary(self.FIXTURE["Password"], self.FIXTURE["Secret"], failure)
+        subject.input = boundary
+        return subject, boundary
+
+    def test_inherited_unlock_explicitly_opens_key_field_on_every_locked_window(self):
+        for cls in self.CLASSES:
+            with self.subTest(controller=cls.__name__):
+                subject, boundary = self.subject(cls)
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    for _ in range(2):
+                        boundary.lock()
+                        start = len(boundary.events)
+                        subject.unlock()
+                        events = boundary.events[start:]
+                        self.assertEqual(events.count(("click", boundary.ENTRY)), 1)
+                        self.assertLess(events.index(("click", boundary.ENTRY)), events.index(("text", "Secret Key")))
+                        self.assertEqual(events[-2:], [("click", "解锁"), ("wait", "新建登录")])
+                        self.assertTrue(boundary.fields["金库文件"] == self.FIXTURE["Path"])
+                        self.assertTrue(boundary.fields["主密码"] == self.FIXTURE["Password"])
+                        self.assertTrue(boundary.fields["Secret Key"] == self.FIXTURE["Secret"])
+                self.assertEqual(boundary.calls, 2)
+                self.assertTrue(all(value not in output.getvalue() for value in self.FIXTURE.values()))
+
+    def test_unavailable_entry_propagates_without_key_input_submit_or_retry(self):
+        for cls in self.CLASSES:
+            for reason in ("missing", "ambiguous", "timeout"):
+                with self.subTest(controller=cls.__name__, reason=reason):
+                    failure = AcceptanceFailure()
+                    failure.native_reason = reason
+                    subject, boundary = self.subject(cls, failure)
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(AcceptanceFailure) as caught:
+                        subject.unlock()
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(boundary.calls, 1)
+                    self.assertEqual(boundary.events.count(("click", boundary.ENTRY)), 1)
+                    self.assertNotIn(("text", "Secret Key"), boundary.events)
+                    self.assertNotIn(("click", "解锁"), boundary.events)
 
 
 class ArtifactPrivacyTests(unittest.TestCase):

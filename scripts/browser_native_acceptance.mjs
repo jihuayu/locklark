@@ -112,7 +112,7 @@ const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"]
 function popupClosed(error) {
   return POPUP_CLOSED.includes(error?.message);
 }
-// The idle route row click is the one popup click whose own successful action
+// A route-opening row click is a popup click whose own successful action
 // can destroy the popup before its final CDP response arrives: the release
 // opens the persistent route tab, Chrome closes the action popup, and the
 // release response is lost. Accept only that exact pending-close error, for
@@ -2285,7 +2285,9 @@ try {
     );
     mark("route:row-click");
     // Exactly one real CDP mouse press/release through the popup wrapper.
-    await action.click(rowSelector);
+    // Opening the route may close this popup before the release response;
+    // the new-route and popup-absence gates below must still prove the action.
+    await action.click(rowSelector, { expectedRouteClose: true });
     mark("route:page-opened");
     let opened;
     await wait(async () => {
@@ -3025,7 +3027,7 @@ try {
     phase("post-repair:route-click");
     // The physical row click starts the actual normal QuickFill=false route
     // path: one persistent route tab, never a popup item-get.
-    await popup.click(target);
+    await popup.click(target, { expectedRouteClose: true });
     let opened;
     await eventually(async () => {
       const candidates = (await routeTargets()).filter(

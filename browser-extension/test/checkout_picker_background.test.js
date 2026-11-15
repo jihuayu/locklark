@@ -21,6 +21,7 @@ const CARD_NUMBER = "4242424242424242";
 
 const RealDate = Date;
 let CLOCK = 1_700_000_000_000;
+test.afterEach(() => { CLOCK = 1_700_000_000_000; });
 class ClockDate extends RealDate {
   constructor(...args) {
     if (args.length) super(...args);
@@ -73,12 +74,14 @@ function harness(options = {}) {
         frame(3, FRAME_DOC, FRAME_ORIGIN, false),
       ];
   let tabUrl = options.tabUrl || TOP_ORIGIN + "/checkout";
+  let tabId = 1, windowId = 1;
   const timers = new Set();
   const messageListeners = [];
   const sent = [];
   const probes = [];
   const injections = [];
-  const hooks = { onCheckoutProbe: null };
+  const deliveries = [], badgeWrites = [];
+  const hooks = { onCheckoutProbe: null, finishFill: null };
   let portMessage, portDisconnect;
 
   const reply = (request, message) =>
@@ -98,6 +101,12 @@ function harness(options = {}) {
         });
       else if (request.type === "item-get")
         reply(request, { type: "item-detail", item: cardItem() });
+      else if (request.type === "match" && options.loginCandidate)
+        reply(request, { type: "candidates", candidates: [{
+          id: CARD_ID, revision: CARD_REV, title: "Login", state: "active", category: "login",
+        }] });
+      else if (request.type === "fill" && options.loginCandidate)
+        hooks.finishFill = () => reply(request, { type: "error", error: "refused" });
       else if (request.type === "match-profiles") {
         if (options.matchRefusal) reply(request, { type: "error", error: "refused" });
         else
@@ -130,6 +139,11 @@ function harness(options = {}) {
   };
 
   const api = {
+    action: {
+      setBadgeText: (value) => badgeWrites.push(value),
+      setBadgeBackgroundColor: (value) => badgeWrites.push(value),
+      setTitle: (value) => badgeWrites.push(value),
+    },
     storage: {
       onChanged: { addListener() {} },
       local: {
@@ -144,7 +158,7 @@ function harness(options = {}) {
       onMessage: { addListener: (fn) => messageListeners.push(fn) },
     },
     tabs: {
-      query: async () => [{ id: 1, url: tabUrl, windowId: 1 }],
+      query: async () => [{ id: tabId, url: tabUrl, windowId }],
       sendMessage: async () => {},
       onActivated: { addListener() {} },
       onUpdated: { addListener() {} },
@@ -171,7 +185,7 @@ function harness(options = {}) {
         }
         if (scriptOptions.func === core.checkoutProbe) {
           probes.push({ target });
-          hooks.onCheckoutProbe?.();
+          await hooks.onCheckoutProbe?.();
           return frames.map((entry) => ({
             frameId: entry.frameId,
             documentId: entry.documentId,
@@ -248,6 +262,10 @@ function harness(options = {}) {
     sent,
     probes,
     injections,
+    deliveries,
+    badgeWrites,
+    finishFill: () => hooks.finishFill?.(),
+    setTab: (nextTab, nextWindow = windowId) => { tabId = nextTab; windowId = nextWindow; },
     setFrames: (next) => {
       frames = next;
     },
@@ -259,10 +277,14 @@ function harness(options = {}) {
     },
     send: (message, from = sender) =>
       new Promise((resolve) => {
-        let handled = false;
+        const delivery = { type: message?.type, handlers: 0, replies: [] };
+        deliveries.push(delivery);
+        const respond = (value) => { delivery.replies.push(value); resolve(value); };
+        // Invoke every listener, just as runtime messaging does. A second
+        // listener must not compete with the dedicated read-only responder.
         for (const listener of messageListeners)
-          if (listener(message, from, resolve) === true) handled = true;
-        if (!handled) resolve(undefined);
+          if (listener(message, from, respond) === true) delivery.handlers++;
+        if (!delivery.handlers) resolve(undefined);
       }),
   };
 }
@@ -315,6 +337,190 @@ const select = (h, picker, choice) =>
     id: CARD_ID,
     revision: CARD_REV,
   });
+
+const checkPicker = (h, picker, overrides = {}, sender) => h.send({
+  type: "checkout-picker-current", nonce: picker.nonce,
+  id: CARD_ID, revision: CARD_REV, ...overrides,
+}, sender);
+
+async function assertCheck(h, picker, valid, overrides = {}) {
+  const before = h.sent.length, badges = h.badgeWrites.length;
+  const status = (await h.send({ type: "state" })).status;
+  const reply = await checkPicker(h, picker, overrides);
+  await settle();
+  assert.equal(json(reply), json({ type: "checkout-picker-current", valid }));
+  const delivery = h.deliveries.filter((entry) => entry.type === "checkout-picker-current").at(-1);
+  assert.equal(delivery.handlers, 1);
+  assert.equal(delivery.replies.length, 1);
+  assert.equal(h.sent.length, before, "verification sends no native requests");
+  assert.equal(h.badgeWrites.length, badges, "verification changes no badge");
+  assert.equal((await h.send({ type: "state" })).status, status);
+  assert.equal(h.injections.length, 0);
+}
+
+test("read-only picker checks keep the original nonce, choice and deadline", async () => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  const expiry = picker.expiresAt;
+  CLOCK += 4000;
+  await assertCheck(h, picker, true);
+  CLOCK += 4000;
+  await assertCheck(h, picker, true);
+  assert.equal(picker.expiresAt, expiry);
+  const selected = await select(h, picker, choiceFor(picker, false));
+  await settle();
+  assert.equal(selected.checkoutStarted, true);
+  assert.equal(h.sent.filter((request) => request.type === "fill-profile").length, 1);
+  const replay = await select(h, picker, choiceFor(picker, false));
+  assert.equal(replay.checkoutStarted, undefined);
+  assert.equal(h.sent.filter((request) => request.type === "fill-profile").length, 1);
+});
+
+test("read-only checks never renew the original picker TTL", async () => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  CLOCK = picker.expiresAt - 4000;
+  await assertCheck(h, picker, true);
+  CLOCK = picker.expiresAt - 1;
+  await assertCheck(h, picker, true);
+  CLOCK = picker.expiresAt;
+  await assertCheck(h, picker, false);
+});
+
+test("read-only checks reject malformed identity without consuming a live picker", async (t) => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  const requests = [
+    { nonce: "invalid" }, { nonce: "d".repeat(32) },
+    { id: "e".repeat(32) }, { revision: "f".repeat(64) },
+    { extra: true }, { nonce: null }, { revision: {} },
+  ];
+  for (const [index, request] of requests.entries()) {
+    await t.test("identity shape " + index, () => assertCheck(h, picker, false, request));
+  }
+  await assertCheck(h, picker, true);
+});
+
+test("only the exact popup sender can query the current picker", async () => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  const before = h.sent.length;
+  for (const sender of [
+    { id: "other", url: "chrome-extension://fixed/popup.html" },
+    { id: "fixed", url: "chrome-extension://fixed/options.html" },
+    { id: "fixed", url: "chrome-extension://fixed/popup.html#route=x", tab: { id: 1 } },
+    { id: "fixed", url: "https://shop.test/checkout", tab: { id: 1 } },
+  ]) {
+    assert.equal(await checkPicker(h, picker, {}, sender), undefined);
+    const delivery = h.deliveries.at(-1);
+    assert.equal(delivery.handlers, 0);
+    assert.equal(delivery.replies.length, 0);
+  }
+  assert.equal(h.sent.length, before);
+  await assertCheck(h, picker, true);
+});
+
+test("read-only checks compare the full active tab and frame document signature", async (t) => {
+  const changes = [
+    ["same-origin top replacement", (h) => h.setFrames([
+      frame(0, "top-doc-2", TOP_ORIGIN, true), frame(3, FRAME_DOC, FRAME_ORIGIN, false),
+    ])],
+    ["same-origin child replacement", (h) => h.setFrames([
+      frame(0, TOP_DOC, TOP_ORIGIN, true), frame(3, "sub-doc-2", FRAME_ORIGIN, false),
+    ])],
+    ["child origin changed", (h) => h.setFrames([
+      frame(0, TOP_DOC, TOP_ORIGIN, true), frame(3, FRAME_DOC, "https://other.test", false),
+    ])],
+    ["top origin changed", (h) => h.setTabUrl("https://other.test/checkout")],
+    ["active tab changed", (h) => h.setTab(2)],
+    ["active window changed", (h) => h.setTab(1, 2)],
+    ["missing frame", (h) => h.setFrames([frame(0, TOP_DOC, TOP_ORIGIN, true)])],
+    ["invalid probe", (h) => h.setFrames([{
+      ...frame(0, TOP_DOC, TOP_ORIGIN, true), result: { secure: false },
+    }])],
+  ];
+  for (const [name, change] of changes) {
+    await t.test(name, async () => {
+      const h = harness();
+      await connect(h);
+      const picker = await openPicker(h);
+      change(h);
+      await assertCheck(h, picker, false);
+    });
+  }
+});
+
+test("read-only checks recheck picker ownership, lock and TTL after their probe await", async (t) => {
+  for (const change of ["top", "child", "lock", "disconnect", "replacement picker", "expiry"]) {
+    await t.test(change, async () => {
+      const h = harness();
+      await connect(h);
+      const picker = await openPicker(h);
+      let release;
+      h.onCheckoutProbe(() => new Promise((resolve) => { release = resolve; }));
+      const checking = checkPicker(h, picker);
+      await settle();
+      assert.equal(typeof release, "function");
+      h.onCheckoutProbe(null);
+      let replacement;
+      if (change === "top") h.setFrames([
+        frame(0, "top-doc-2", TOP_ORIGIN, true), frame(3, FRAME_DOC, FRAME_ORIGIN, false),
+      ]);
+      else if (change === "child") h.setFrames([
+        frame(0, TOP_DOC, TOP_ORIGIN, true), frame(3, "sub-doc-2", FRAME_ORIGIN, false),
+      ]);
+      else if (change === "lock" || change === "disconnect") await h.send({ type: change });
+      else if (change === "replacement picker") replacement = await openPicker(h);
+      else CLOCK = picker.expiresAt;
+      const before = h.sent.length, badges = h.badgeWrites.length;
+      release();
+      assert.equal((await checking).valid, false);
+      await settle();
+      const delivery = h.deliveries.filter((entry) => entry.type === "checkout-picker-current").at(-1);
+      assert.equal(delivery.handlers, 1);
+      assert.equal(delivery.replies.length, 1);
+      assert.equal(h.sent.length, before);
+      assert.equal(h.badgeWrites.length, badges);
+      assert.equal(h.injections.length, 0);
+      if (replacement) await assertCheck(h, replacement, true);
+    });
+  }
+});
+
+test("read-only checks refuse another pending native action before and after their probe await", async (t) => {
+  for (const boundary of ["before query", "during probe"]) {
+    await t.test(boundary, async () => {
+      const h = harness({ loginCandidate: true });
+      await connect(h);
+      await h.send({ type: "match" });
+      const picker = await openPicker(h);
+      let checking, release;
+      if (boundary === "during probe") {
+        h.onCheckoutProbe(() => new Promise((resolve) => { release = resolve; }));
+        checking = checkPicker(h, picker);
+        await settle();
+        h.onCheckoutProbe(null);
+      }
+      await h.send({ type: "fill", id: CARD_ID, revision: CARD_REV });
+      await settle();
+      assert.equal((await h.send({ type: "state" })).pending, true);
+      const before = h.sent.length;
+      if (checking) {
+        release();
+        assert.equal((await checking).valid, false);
+      } else await assertCheck(h, picker, false);
+      await settle();
+      assert.equal(h.sent.length, before);
+      assert.equal(h.injections.length, 0);
+      h.finishFill();
+      await settle();
+    });
+  }
+});
 
 test("picker exposes only public same-site origins and opaque keys", async () => {
   const h = harness();
