@@ -668,15 +668,149 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
   assert.doesNotMatch(body, /bringToFront[^\n]*\n(?:[^\n]*\n){0,3}[^\n]*input\(/);
 });
 
-test("the idle row click accepts only its one final-release popup close", () => {
-  // The opt-in exists exactly once, on the idle row click.
-  assert.equal(
-    countMatches(
-      SOURCE,
-      /action\.click\(rowSelector, \{ expectedRouteClose: true \}\);/g,
-    ),
-    1,
+// Execute the actual click wrapper and each actual route-opening call boundary.
+// Only the external CDP results and browser target list are substitutes; the
+// opt-in, dispatch, exception handling, and unique-route gates come from SOURCE.
+function routeOpeningClickHarness(journey, {
+  faultAt = "mouseReleased",
+  faultMessage = "Popup closed",
+  routeCount = 1,
+} = {}) {
+  const fixture = { SeedID: "a".repeat(32), Title: "Synthetic route title" };
+  const rowSelector = journey === "main"
+    ? '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]'
+    : '#vault-list [data-item-id="' + fixture.SeedID + '"]';
+  const state = { inputEvents: [], phases: [], optedIn: undefined, lifecycleClosed: 0 };
+  const fault = Error(faultMessage);
+  const boundary = Error("Unique route boundary reached");
+  let currentSelector = "", rowReleased = false, faultInjected = false;
+  const clickContext = vm.createContext({
+    assert,
+    evaluate: async () => {
+      if (currentSelector === rowSelector && faultAt === "inspection") throw fault;
+      return { x: 0, y: 0 };
+    },
+    call: async (method, params) => {
+      assert.equal(method, "Input.dispatchMouseEvent");
+      if (currentSelector !== rowSelector) return {};
+      state.inputEvents.push(params.type);
+      if (params.type === "mouseReleased") rowReleased = true;
+      if (!faultInjected && params.type === faultAt) {
+        faultInjected = true;
+        throw fault;
+      }
+      return {};
+    },
+  });
+  const helperStart = SOURCE.indexOf("function expectedRouteClickClose(");
+  const helperStop = SOURCE.indexOf("\n}", helperStart) + 2;
+  const clickStart = SOURCE.indexOf("      click: async (selector");
+  const clickStop = SOURCE.indexOf("\n      },", clickStart) + "\n      }".length;
+  assert.ok(helperStart > 0 && helperStop > helperStart && clickStart > 0 && clickStop > clickStart);
+  const click = vm.runInContext(
+    SOURCE.slice(helperStart, helperStop) +
+      "\n({" + SOURCE.slice(clickStart, clickStop) + "}).click;",
+    clickContext,
   );
+  const action = {
+    click: (selector, options) => {
+      currentSelector = selector;
+      if (selector === rowSelector) state.optedIn = options?.expectedRouteClose;
+      return click(selector, options);
+    },
+    disabled: async () => false,
+    text: async () => "1 个当前网站",
+    count: async () => 1,
+    evaluate: async (expression) => expression === "document.readyState"
+      ? "complete"
+      : [{ id: fixture.SeedID, title: fixture.Title, visible: true }],
+  };
+  const targets = async () => rowReleased ? Array.from({ length: routeCount }, (_, index) => ({
+    id: "synthetic-route-" + index,
+    type: "page",
+    url: "chrome-extension://" + "a".repeat(32) + "/popup.html#route=" + "b".repeat(64),
+  })) : [];
+  const phase = (value) => state.phases.push(value);
+  const eventually = async (check, message) => {
+    if (!(await check())) throw Error(message);
+  };
+  let run;
+  if (journey === "main") {
+    const context = vm.createContext({
+      assert,
+      VAULT_ROWS: "synthetic rows probe",
+      closeRouteLifecycle: () => state.lifecycleClosed++,
+      // Stop only after both original target-discovery and uniqueness gates.
+      observeRouteLifecycle: () => { throw boundary; },
+    });
+    const routePattern = SOURCE.match(/^const ROUTE_PAGE = .+;$/m)?.[0];
+    assert.ok(routePattern);
+    vm.runInContext(routePattern + "\n" + routeDriver() + "\nthis.runRoute = acceptRouteDetailRead;", context);
+    run = () => context.runRoute({
+      browser: { pages: () => [{ url: () => "https://example.test/login" }] },
+      fixture,
+      phase,
+      eventually,
+      openPopup: async () => action,
+      extensionTargets: targets,
+    });
+  } else {
+    assert.equal(journey, "post-repair");
+    const start = SOURCE.indexOf('    phase("post-repair:route-click");');
+    const stop = SOURCE.indexOf('    phase("post-repair:route-popup-closed");', start);
+    assert.ok(start > 0 && stop > start);
+    const context = vm.createContext({
+      assert, popup: action, target: rowSelector, routeIdsBefore: new Set(),
+      routeTargets: targets, eventually, phase, boundary,
+    });
+    run = () => vm.runInContext(
+      "(async () => {\n" + SOURCE.slice(start, stop) + "\nthrow boundary;\n})();",
+      context,
+    );
+  }
+  return { run, action, rowSelector, state, fault, boundary };
+}
+
+for (const journey of ["main", "post-repair"]) {
+  test(`${journey} route opening survives only its final-release popup close once`, async () => {
+    const h = routeOpeningClickHarness(journey);
+    await assert.rejects(h.run(), (error) => error === h.boundary);
+    assert.equal(h.state.optedIn, true);
+    assert.deepEqual(h.state.inputEvents, ["mousePressed", "mouseReleased"]);
+    if (journey === "main") assert.equal(h.state.lifecycleClosed, 1);
+  });
+
+  test(`${journey} route opening still requires one real new route after popup close`, async () => {
+    for (const [routeCount, message] of [[0, "Route page did not open"], [2, "Route page must be unique"]]) {
+      const h = routeOpeningClickHarness(journey, { routeCount });
+      await assert.rejects(h.run(), (error) => error.message === message);
+      assert.deepEqual(h.state.inputEvents, ["mousePressed", "mouseReleased"]);
+    }
+  });
+
+  test(`${journey} route opening rejects inspection, press, timeout and other CDP failures`, async () => {
+    for (const [faultAt, faultMessage, events] of [
+      ["inspection", "Popup closed", []],
+      ["mousePressed", "Popup closed", ["mousePressed"]],
+      ["mouseReleased", "Popup CDP timed out", ["mousePressed", "mouseReleased"]],
+      ["mouseReleased", "Popup CDP closed", ["mousePressed", "mouseReleased"]],
+      ["mouseReleased", "Popup CDP failed", ["mousePressed", "mouseReleased"]],
+    ]) {
+      const h = routeOpeningClickHarness(journey, { faultAt, faultMessage });
+      await assert.rejects(h.run(), (error) => error === h.fault);
+      assert.deepEqual(h.state.inputEvents, events);
+    }
+  });
+}
+
+test("an ordinary popup click still rejects its final-release popup close", async () => {
+  const h = routeOpeningClickHarness("main");
+  await assert.rejects(h.action.click(h.rowSelector), (error) => error === h.fault);
+  assert.equal(h.state.optedIn, undefined);
+  assert.deepEqual(h.state.inputEvents, ["mousePressed", "mouseReleased"]);
+});
+
+test("route-opening clicks accept only an opted-in final-release popup close", () => {
   // Execute the real predicate: only a pending "Popup closed" on the final
   // release, for the explicitly opted-in click, is expected. A press close,
   // a timeout, another CDP failure or an absent opt-in all stay fatal.
