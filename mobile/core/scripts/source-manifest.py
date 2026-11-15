@@ -19,11 +19,28 @@ parser = argparse.ArgumentParser()
 phase = parser.add_mutually_exclusive_group(required=True)
 phase.add_argument("--prepare", action="store_true")
 phase.add_argument("--after-build", action="store_true")
+phase.add_argument("--check-tool-paths", action="store_true")
 parser.add_argument("--tools-dir", type=pathlib.Path, required=True)
 args = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parents[3]
 output = root / "mobile/core/build"
 go_bin = os.environ.get("GO_BIN", os.environ.get("LOCKLARK_GO", "go"))
+# gomobile invokes Go through PATH. Require the same file as the caller's
+# selected Go, then use that explicit file for every manifest subprocess.
+# Go symlink/hardlink aliases are accepted only for that same executable file.
+selected_go = shutil.which("go")
+try:
+    explicit_go = shutil.which(go_bin)
+    if explicit_go is None:
+        raise OSError()
+    explicit_go = pathlib.Path(explicit_go).resolve(strict=True)
+    go_matches = (selected_go is not None and explicit_go.is_file()
+                  and os.access(explicit_go, os.X_OK) and explicit_go.samefile(selected_go))
+except OSError:
+    go_matches = False
+if not go_matches:
+    raise SystemExit("Binding Go PATH mismatch")
+go_bin = str(explicit_go)
 # Bind metadata to the exact installed tools used by the caller. Symlink and
 # hardlink aliases are intentional only when they name the same installed file;
 # a different PATH executable is refused before any Go or tool process starts.
@@ -45,6 +62,9 @@ for name in ("gobind", "gomobile"):
     if not matches:
         raise SystemExit("Binding tool PATH mismatch: " + name)
     installed_tools[name] = str(executable)
+if args.check_tool_paths:
+    print("Binding executable paths matched")
+    raise SystemExit(0)
 decoder = json.JSONDecoder()
 file_fields = ("GoFiles", "CgoFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
                "FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles", "EmbedFiles")

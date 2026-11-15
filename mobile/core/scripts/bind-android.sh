@@ -16,6 +16,7 @@ for tool in gobind gomobile; do
   # go.mod tool directive: builds the exact golang.org/x/mobile require version.
   GOBIN="$mobile_tools/bin" "$go_bin" install "golang.org/x/mobile/cmd/$tool"
 done
+GO_BIN="$go_bin" python3 mobile/core/scripts/source-manifest.py --check-tool-paths --tools-dir "$mobile_tools/bin"
 "$mobile_tools/bin/gomobile" init
 GO_BIN="$go_bin" python3 mobile/core/scripts/source-manifest.py --prepare --tools-dir "$mobile_tools/bin"
 "$mobile_tools/bin/gomobile" bind -target=android/arm64,android/amd64 -androidapi 30 \
