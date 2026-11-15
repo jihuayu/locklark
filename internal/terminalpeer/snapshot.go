@@ -6,7 +6,7 @@ import (
 	"math"
 	"net"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -287,12 +287,13 @@ func validateObserved(o observed, expectedEUID uint32) error {
 
 // validTokenPath checks only the shape of a kernel-returned pathname. It is
 // not image trust: it does not stat, hash, sign, or resolve the path.
-func validTokenPath(path string) bool {
-	if path == "" || len(path) > maxTokenPath {
+// The pathname uses Darwin's Unix semantics, regardless of the build host.
+func validTokenPath(pathname string) bool {
+	if pathname == "" || len(pathname) > maxTokenPath {
 		return false
 	}
-	if strings.ContainsAny(path, "\x00\r\n") {
+	if strings.ContainsAny(pathname, "\x00\r\n") {
 		return false
 	}
-	return filepath.IsAbs(path) && filepath.Clean(path) == path
+	return path.IsAbs(pathname) && path.Clean(pathname) == pathname
 }
