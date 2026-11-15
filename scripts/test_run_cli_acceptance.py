@@ -1,17 +1,125 @@
 """Independent negative oracles for the external RunCLI controller."""
 import base64
 import contextlib
+import copy
 import io
 import json
 import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import run_cli_acceptance as acceptance
+
+
+class RevisionAuditTests(unittest.TestCase):
+    ITEM, OLD, NEW = "a" * 32, "b" * 64, "c" * 64
+
+    def events(self):
+        return [
+            {"action": "desktop.unlock"},
+            {"action": "item.edit.password", "result": "succeeded", "item_id": self.ITEM, "base_revision": self.OLD},
+            {"action": "item.list"},
+            {"action": "item.run.password", "result": "conflict", "item_id": self.ITEM, "base_revision": self.OLD},
+            {"action": "item.run.password", "result": "intent", "item_id": self.ITEM, "base_revision": self.NEW},
+        ]
+
+    def test_audit_projection_contains_only_fixed_flags(self):
+        flags = acceptance.revision_audit_flags([], self.events(), self.ITEM, self.OLD, self.NEW)
+        self.assertEqual(flags, {"same_item_edit": True, "old_revision_conflict": True, "new_revision_intent": True})
+        self.assertTrue(all(value not in json.dumps(flags) for value in (self.ITEM, self.OLD, self.NEW)))
+
+    def test_wrong_target_revision_result_order_or_extra_effect_is_refused(self):
+        for index, key, value in ((1, "item_id", "d" * 32), (1, "base_revision", self.NEW),
+                                  (1, "result", "intent"), (3, "result", "intent"),
+                                  (4, "base_revision", self.OLD)):
+            events = self.events()
+            events[index][key] = value
+            with self.subTest(index=index, key=key), self.assertRaises(acceptance.AcceptanceFailure) as error:
+                acceptance.revision_audit_flags([], events, self.ITEM, self.OLD, self.NEW)
+            self.assertEqual(error.exception.code, "revision-audit-mismatch")
+        for events in (list(reversed(self.events())), self.events()[:-1],
+                       self.events() + [{"action": "item.reveal.password"}]):
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.revision_audit_flags([], events, self.ITEM, self.OLD, self.NEW)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.revision_audit_flags([{"action": "prior"}], self.events(), self.ITEM, self.OLD, self.NEW)
+
+
+class RevisionOracleTests(unittest.TestCase):
+    def oracle(self):
+        oracle = acceptance.TLSOracle.__new__(acceptance.TLSOracle)
+        oracle.mutex, oracle.token, oracle.token_generation = threading.Lock(), "private-old", "initial"
+        oracle.requests = [{"selected_token_matches": True, "credential_generation": "initial"}]
+        return oracle
+
+    def test_rotation_rejects_old_value_and_keeps_historical_expectation(self):
+        oracle = self.oracle()
+        self.assertEqual(oracle.authorization("token private-old"), (True, "initial"))
+        previous = copy.deepcopy(oracle.requests)
+        oracle.expect_rotated_token("private-new")
+        for prefix in ("token ", "Bearer "):
+            self.assertEqual(oracle.authorization(prefix + "private-old"), (False, "rotated"))
+            self.assertEqual(oracle.authorization(prefix + "private-new"), (True, "rotated"))
+        self.assertEqual(oracle.requests, previous)
+
+    def test_empty_reused_or_repeated_rotation_cannot_broaden_oracle(self):
+        for value in ("", "private-old"):
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                self.oracle().expect_rotated_token(value)
+        oracle = self.oracle()
+        oracle.expect_rotated_token("private-new")
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            oracle.expect_rotated_token("private-old")
+        self.assertEqual(oracle.authorization("token private-old"), (False, "rotated"))
+
+
+class RealRevisionNegativeBoundaryTests(unittest.TestCase):
+    def test_arbitrary_nonzero_stdout_child_tls_or_missing_authorization_is_not_conflict_proof(self):
+        # These are rejection tests at the external CLI boundary. Only the
+        # separate actual-product run may provide a positive journey receipt.
+        for fault in ("reason", "stdout", "child", "tls", "authorization"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                subject = acceptance.Acceptance.__new__(acceptance.Acceptance)
+                subject.root = pathlib.Path(directory)
+                subject.master, subject.key, subject.token = "private-master", "private-key", "private-old"
+                subject.values = [subject.master, subject.key, subject.token]
+                subject.item = {"id": "a" * 32, "revision": "b" * 64}
+                subject.server = RevisionOracleTests().oracle()
+                subject.failure_metadata, subject.checks = {}, []
+                new = {**subject.item, "revision": "c" * 64}
+                subject.invoke = mock.Mock(side_effect=[(b"[]", None, b""),
+                    (json.dumps(new).encode(), None, b""), (json.dumps([new]).encode(), None, b"")])
+                record = subject.root / "must-not-start.json"
+                if fault == "child":
+                    record.write_text("{}")
+
+                def stale_request(*args, **kwargs):
+                    self.assertEqual(kwargs, {"revision": "b" * 64, "expected": 1})
+                    subject.failure_metadata = {"prompts_observed": 2 if fault == "authorization" else 3}
+                    reason = b"unrelated failure" if fault == "reason" else b"login changed; list again and review before retrying"
+                    return (b"unexpected" if fault == "stdout" else b"", reason, record, 1 if fault == "tls" else 0)
+
+                subject.request = mock.Mock(side_effect=stale_request)
+                with self.assertRaises(acceptance.AcceptanceFailure) as error:
+                    subject.real_revision_chain()
+                self.assertEqual(error.exception.code, "revision-stale-refusal-mismatch")
+                subject.request.assert_called_once()
+                self.assertFalse((subject.root / "revision-result.json").exists())
+                self.assertIn("private-old", subject.values)
+                self.assertIn(subject.token, subject.values)
+                self.assertNotEqual(subject.token, "private-old")
+                edit = subject.invoke.call_args_list[1]
+                self.assertEqual(edit.args[0], "edit-login")
+                self.assertEqual(edit.kwargs["options"], ("--id", "a" * 32, "--revision", "b" * 64, "--field", "password"))
+                self.assertEqual(edit.args[1], [("主密码", subject.master), ("Secret Key", subject.key), ("新登录密码", subject.token)])
+                for token in ("private-old", subject.token):
+                    with self.assertRaises(acceptance.AcceptanceFailure):
+                        acceptance.scan(token.encode(), subject.values)
 
 
 class Connection:
