@@ -510,6 +510,7 @@ jobs:
         env:
           LOCKLARK_TEST_BROWSER: firefox
       - name: Install native GUI acceptance tools
+        id: native_gui_ready
         timeout-minutes: 10
         run: |
           sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
@@ -532,6 +533,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Test native desktop daily tools and clipboard ownership
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
         env:
@@ -539,6 +541,7 @@ jobs:
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
       - name: Test native desktop global quick search
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_quick_search_acceptance.py
         env:
@@ -546,11 +549,14 @@ jobs:
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
       - name: Install independent notes KDBX reader
+        id: notes_peer_ready
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 3
         run: |
           python3 -m venv "$RUNNER_TEMP/locklark-notes-peer"
           "$RUNNER_TEMP/locklark-notes-peer/bin/python" -m pip install 'pykeepass==4.2.0'
       - name: Test native imported multiline login notes and failure privacy
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' && steps.notes_peer_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_login_notes_acceptance.py
@@ -562,6 +568,7 @@ jobs:
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
           LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
       - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' && steps.notes_peer_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 -m unittest discover -s scripts -p test_ssh_agent_acceptance.py
@@ -570,6 +577,8 @@ jobs:
             --peer "$RUNNER_TEMP/locklark-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
             --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
       - name: Test browser extension DOM
+        id: chromium_dom
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           node scripts/browser_extension_dom.cjs
@@ -579,6 +588,8 @@ jobs:
           LOCKLARK_TEST_UI_ARTIFACTS: ${{ runner.temp }}/locklark-ui-acceptance
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
       - name: Test Firefox browser extension DOM
+        id: firefox_dom
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           node scripts/browser_extension_dom.cjs
@@ -589,6 +600,7 @@ jobs:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_BROWSER: firefox
       - name: Preserve synthetic popup UI screenshots
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' && steps.chromium_dom.outcome == 'success' && steps.firefox_dom.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: locklark-synthetic-popup-ui

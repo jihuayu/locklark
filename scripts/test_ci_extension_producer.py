@@ -86,6 +86,46 @@ def step_commands(job_name: str, step_name: str) -> list[str]:
     return commands
 
 
+def step_fields(job_name: str, step_name: str) -> dict[str, str]:
+    fields = {}
+    for line in step_text(job_name, step_name).splitlines():
+        match = re.fullmatch(r" {8}([a-z][a-z0-9-]*):(?: (.*))?", line)
+        if match:
+            key, value = match.groups()
+            if key in fields:
+                raise AssertionError("step field is not unique")
+            fields[key] = value or ""
+    return fields
+
+
+def web_core_step_enabled(
+    name: str, *, previous_failure: bool = False, cancelled: bool = False,
+    outcomes: dict[str, str] | None = None,
+) -> bool:
+    """Project the actual step's restricted if grammar, including implicit success()."""
+    expression = step_fields("web-core", name).get("if")
+    if expression is None:
+        return not previous_failure and not cancelled
+    wrapped = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", expression)
+    if not wrapped:
+        raise AssertionError("independent condition must be an expression")
+    status_function = False
+    values = []
+    for clause in wrapped[1].split("&&"):
+        clause = clause.strip()
+        if clause == "!cancelled()":
+            status_function = True
+            values.append(not cancelled)
+            continue
+        comparison = re.fullmatch(r"steps\.([a-z][a-z0-9_]*)\.outcome == 'success'", clause)
+        if not comparison:
+            raise AssertionError("unsupported independent condition")
+        values.append((outcomes or {}).get(comparison[1], "") == "success")
+    # GitHub adds success() unless the expression contains a status function.
+    # Reading only ready.outcome would still suppress steps after a failure.
+    return all(values) and (status_function or (not previous_failure and not cancelled))
+
+
 def ci_required_shell() -> str:
     source = block("ci-required")
     marker = "        run: |\n"
@@ -254,6 +294,128 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0, value)
             self.assertIn("extension-producer=", result.stderr)
+
+
+class WebCoreIndependentAcceptanceContract(unittest.TestCase):
+    READY = "Install native GUI acceptance tools"
+    PEER = "Install independent notes KDBX reader"
+    GATE = "Test reconciled E2E gates and component contracts"
+    CHROMIUM = "Test browser extension DOM"
+    FIREFOX = "Test Firefox browser extension DOM"
+    UPLOAD = "Preserve synthetic popup UI screenshots"
+    READY_STEPS = (
+        "Test native desktop daily tools and clipboard ownership",
+        "Test native desktop global quick search",
+        PEER, CHROMIUM, FIREFOX,
+    )
+    PEER_STEPS = (
+        "Test native imported multiline login notes and failure privacy",
+        "Test native SSH approvals, real OpenSSH forwarding and encrypted export",
+    )
+    FOLLOWUPS = READY_STEPS + PEER_STEPS + (UPLOAD,)
+
+    @staticmethod
+    def ready_outcomes() -> dict[str, str]:
+        return {name: "success" for name in (
+            "native_gui_ready", "notes_peer_ready", "chromium_dom", "firefox_dom",
+        )}
+
+    def test_ready_keeps_bootstrap_failure_gate_and_prebuilt_smoke_order(self):
+        source = block("web-core")
+        ids = {
+            self.READY: "native_gui_ready", self.PEER: "notes_peer_ready",
+            self.CHROMIUM: "chromium_dom", self.FIREFOX: "firefox_dom",
+        }
+        for name, identifier in ids.items():
+            self.assertEqual(step_fields("web-core", name).get("id"), identifier)
+        self.assertNotIn("if", step_fields("web-core", self.READY))
+        self.assertNotIn("if", step_fields("web-core", self.GATE))
+        self.assertNotIn("continue-on-error:", source)
+        self.assertNotRegex(source, r"(?m)^\s*go build\b")
+        self.assertIn('--skip-build --bin-dir "$RUNNER_TEMP/locklark-bin"', step_text("web-core", self.GATE))
+        order = [
+            "Download Linux primary binaries", "Make Linux binaries executable",
+            "Smoke test downloaded CLI before acceptance", "Test browser extension",
+            self.READY, self.GATE,
+        ]
+        positions = [source.index(f"      - name: {name}\n") for name in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertFalse(web_core_step_enabled(self.READY, previous_failure=True))
+        self.assertFalse(web_core_step_enabled(self.READY, cancelled=True))
+
+    def test_failed_gate_does_not_block_independent_steps(self):
+        for previous_failure in (False, True):
+            for name in self.FOLLOWUPS:
+                with self.subTest(step=name, previous_failure=previous_failure):
+                    self.assertTrue(web_core_step_enabled(
+                        name, previous_failure=previous_failure, outcomes=self.ready_outcomes(),
+                    ))
+
+    def test_unready_or_cancelled_blocks_every_independent_step(self):
+        for status in ("failure", "skipped", "cancelled", ""):
+            outcomes = {**self.ready_outcomes(), "native_gui_ready": status}
+            for name in self.FOLLOWUPS:
+                with self.subTest(step=name, ready=status):
+                    self.assertFalse(web_core_step_enabled(name, previous_failure=True, outcomes=outcomes))
+        for name in self.FOLLOWUPS:
+            self.assertFalse(web_core_step_enabled(
+                name, cancelled=True, outcomes=self.ready_outcomes(),
+            ))
+
+    def test_peer_failure_blocks_only_notes_and_ssh(self):
+        for status in ("failure", "skipped", "cancelled", ""):
+            outcomes = {**self.ready_outcomes(), "notes_peer_ready": status}
+            for name in self.PEER_STEPS:
+                self.assertFalse(web_core_step_enabled(name, previous_failure=True, outcomes=outcomes))
+            for name in self.READY_STEPS + (self.UPLOAD,):
+                self.assertTrue(web_core_step_enabled(name, previous_failure=True, outcomes=outcomes))
+        # A notes assertion failure is not a prerequisite failure for SSH.
+        self.assertTrue(web_core_step_enabled(
+            self.PEER_STEPS[1], previous_failure=True, outcomes=self.ready_outcomes(),
+        ))
+
+    def test_dom_failures_do_not_block_each_other_or_upload_failed_screenshots(self):
+        for identifier in ("chromium_dom", "firefox_dom"):
+            for status in ("failure", "skipped", "cancelled", ""):
+                outcomes = {**self.ready_outcomes(), identifier: status}
+                for name in (self.CHROMIUM, self.FIREFOX):
+                    self.assertTrue(web_core_step_enabled(name, previous_failure=True, outcomes=outcomes))
+                self.assertFalse(web_core_step_enabled(self.UPLOAD, previous_failure=True, outcomes=outcomes))
+
+    def test_projection_preserves_implicit_success_and_refuses_broader_grammar(self):
+        name = self.READY_STEPS[0]
+        source = text()
+        original = step_text("web-core", name)
+        condition = step_fields("web-core", name)["if"]
+        without_status = condition.replace("!cancelled() && ", "")
+        changed = original.replace(condition, without_status)
+        with mock.patch("scripts.test_ci_extension_producer.text", return_value=source.replace(original, changed)):
+            self.assertTrue(web_core_step_enabled(name, outcomes=self.ready_outcomes()))
+            self.assertFalse(web_core_step_enabled(name, previous_failure=True, outcomes=self.ready_outcomes()))
+        for expression in ("${{ always() }}", "${{ !cancelled() || true }}"):
+            changed = original.replace(condition, expression)
+            with mock.patch("scripts.test_ci_extension_producer.text", return_value=source.replace(original, changed)):
+                with self.assertRaisesRegex(AssertionError, "unsupported independent condition"):
+                    web_core_step_enabled(name, outcomes=self.ready_outcomes())
+
+    def test_actual_aggregates_never_turn_a_failed_web_core_green(self):
+        shells = (
+            "\n".join(step_commands("web", "Require every Web check to succeed")),
+            ci_required_shell(),
+        )
+        base = {f"{job.upper().replace('-', '_')}_RESULT": "success" for job in JOBS}
+        for shell in shells:
+            passed = subprocess.run(
+                ["bash", "-c", shell], env={**os.environ, **base},
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(passed.returncode, 0)
+            for status in ("failure", "skipped", "cancelled", ""):
+                failed = subprocess.run(
+                    ["bash", "-c", shell], env={**os.environ, **base, "WEB_CORE_RESULT": status},
+                    text=True, capture_output=True, check=False,
+                )
+                self.assertNotEqual(failed.returncode, 0, status)
 
 
 if __name__ == "__main__":
