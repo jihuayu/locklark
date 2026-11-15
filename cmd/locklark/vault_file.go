@@ -25,6 +25,7 @@ import (
 )
 
 const vaultFileUsage = `USAGE
+  locklark vault-file track-existing --config ABS_CONFIG
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
@@ -32,7 +33,13 @@ Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
 Import reads a private input file of at most 32 MiB; it never reads or writes the
 backend. Config, input and journal must be distinct and outside its namespace.
-No paths or baseline are created. Import saves working and prepares in separate
+Track reads one existing remote sealed file, verifies its signatures against
+the external checkpoint, then exclusively creates only the configured journal.
+Its operator-owned private parent must already exist. Every existing target is
+refused. TRACKED proves a signed sealed baseline, not decryptability, payload
+correctness, content history or freshness. LOCAL_UNKNOWN leaves the target for
+review; tracking never deletes or repairs it and cannot retry an existing path.
+Import saves working and prepares in separate
 transactions: LOCAL_REVIEW or LOCAL_UNKNOWN may leave saved working/prepared
 state. Retry the same exact input; different local edits are preserved.
 
@@ -59,6 +66,7 @@ var (
 	errVaultFileInput        = errors.New("INPUT_REJECTED")
 	errVaultFileLocalReview  = errors.New("LOCAL_REVIEW")
 	errVaultFileLocalUnknown = errors.New("LOCAL_UNKNOWN")
+	errVaultFileTargetExists = errors.New("TARGET_EXISTS")
 )
 
 type vaultFileCheckpointConfig struct {
@@ -115,7 +123,7 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 
 func runVaultFile(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
-		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared") && (args[1] == "--help" || args[1] == "-h") {
+		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
 			return errVaultFileUnconfirmed
 		}
@@ -124,7 +132,7 @@ func runVaultFile(args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return errVaultFileUnsupported
 	}
-	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" {
+	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" {
 		return errVaultFileConfig
 	}
 	importing := args[0] == "import-prepared"
@@ -172,6 +180,15 @@ func runVaultFile(args []string, out io.Writer) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if args[0] == "track-existing" {
+		if err := trackExistingVaultFile(ctx, cfg, pin); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(out, `{"status":"TRACKED"}`); err != nil {
+			return errVaultFileLocalUnknown
+		}
+		return nil
+	}
 	if importing {
 		if err := importPreparedVaultFile(ctx, cfg, pin, input); err != nil {
 			return err

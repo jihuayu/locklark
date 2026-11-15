@@ -8,8 +8,10 @@ import (
 )
 
 func TestVaultFileUnsupported(t *testing.T) {
-	var out bytes.Buffer
-	if err := run([]string{"vault-file", "resume-prepared", "--config", "unopened"}, &out, &out); err != errVaultFileUnsupported || out.Len() != 0 {
-		t.Fatal("UNSUPPORTED_PLATFORM_NOT_REFUSED")
+	for _, command := range []string{"track-existing", "import-prepared", "resume-prepared"} {
+		var out bytes.Buffer
+		if err := run([]string{"vault-file", command, "--config", "unopened"}, &out, &out); err != errVaultFileUnsupported || out.Len() != 0 {
+			t.Fatal("UNSUPPORTED_PLATFORM_NOT_REFUSED")
+		}
 	}
 }

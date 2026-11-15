@@ -169,6 +169,24 @@ func newResumeProductCase(t *testing.T, material resumeProductMaterial, prepare 
 
 func newBaselineProductCase(t *testing.T, material resumeProductMaterial) resumeProductCase {
 	t.Helper()
+	c := newRemoteProductCase(t, material)
+	journal, err := vaultfilejournal.Open(c.cfg.Journal)
+	if err != nil {
+		t.Fatal("FIXTURE_JOURNAL_CREATE_FAILED")
+	}
+	state := vaultfilejournal.State{BaseBytes: material.r, WorkingBytes: material.r, RemoteRevision: c.initial.Revision}
+	if journal.InitializeEmptyState(state) != nil {
+		journal.Close()
+		t.Fatal("FIXTURE_JOURNAL_STATE_FAILED")
+	}
+	if journal.Close() != nil {
+		t.Fatal("FIXTURE_JOURNAL_CLOSE_FAILED")
+	}
+	return c
+}
+
+func newRemoteProductCase(t *testing.T, material resumeProductMaterial) resumeProductCase {
+	t.Helper()
 	root := t.TempDir()
 	cfg := vaultFileResumeConfig{Version: 1, BackendRoot: filepath.Join(root, "backend"), Name: "owned.locklark",
 		Journal: filepath.Join(root, "journal.db"), Checkpoint: &material.config}
@@ -187,18 +205,6 @@ func newBaselineProductCase(t *testing.T, material resumeProductMaterial) resume
 	read, err := backend.Read(context.Background(), cfg.Name)
 	if err != nil || backend.Close() != nil {
 		t.Fatal("FIXTURE_BASE_READ_FAILED")
-	}
-	journal, err := vaultfilejournal.Open(cfg.Journal)
-	if err != nil {
-		t.Fatal("FIXTURE_JOURNAL_CREATE_FAILED")
-	}
-	state := vaultfilejournal.State{BaseBytes: material.r, WorkingBytes: material.r, RemoteRevision: read.Revision}
-	if journal.InitializeEmptyState(state) != nil {
-		journal.Close()
-		t.Fatal("FIXTURE_JOURNAL_STATE_FAILED")
-	}
-	if journal.Close() != nil {
-		t.Fatal("FIXTURE_JOURNAL_CLOSE_FAILED")
 	}
 	return resumeProductCase{root: root, configPath: configPath, cfg: cfg, initial: read}
 }
