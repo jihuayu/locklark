@@ -333,10 +333,25 @@ func TestVaultFileOwnedChildRejectsUnboundCustodyBeforeRegister(t *testing.T) {
 
 	t.Run("cross-pin", func(t *testing.T) {
 		b := fx.addVault(t, "b-cross-pin")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		// B's checkpoint names another VaultID but points at A's journal path.
+		// The current owner for A is unchanged, so A must survive intact.
 		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileBaselineVerification) {
 			t.Fatal("OWNED_CHILD_CROSS_PIN_ACCEPTED")
 		}
-		assertOwnedChildRejectedNoCandidate(t, fx.session, fx.a.journal, 0)
+		if ownedChildAt(fx.session, fx.a.journal) != childA || ownedChildAllCount(fx.session) != 2 {
+			t.Fatal("OWNED_CHILD_CROSS_PIN_KILLED_CURRENT_CHILD")
+		}
+		assertOwnedChildRead(t, fx.session, tokenA)
+		assertOwnedChildRead(t, fx.session, tokenB)
+		if err := fx.session.RevalidateVaultFileChildOwnership(tokenA); err != nil {
+			t.Fatal("OWNED_CHILD_CROSS_PIN_REVALIDATE_A_FAILED")
+		}
+		if err := fx.session.RevalidateVaultFileChildOwnership(tokenB); err != nil {
+			t.Fatal("OWNED_CHILD_CROSS_PIN_REVALIDATE_B_FAILED")
+		}
 	})
 }
 
@@ -401,7 +416,9 @@ func TestVaultFileOwnedChildCandidateFinalGateRejects(t *testing.T) {
 	t.Run("owner-missing", func(t *testing.T) {
 		fx := newOwnedChildFixture(t)
 		b := fx.addVault(t, "b-owner-missing")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
 		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
 		recordB := testVaultFileOwnerRecord(t, fx.session, fx.session.path, b.checkpoint.VaultID)
 		defer clearVaultFileOwners([]vaultFileOwnerRecord{recordB})
 		var candidate *vaultfile.ScopedUnlock
@@ -417,16 +434,61 @@ func TestVaultFileOwnedChildCandidateFinalGateRejects(t *testing.T) {
 			t.Fatal("OWNED_CHILD_FINAL_CANDIDATE_NOT_REAL")
 		}
 		assertScopedChildHandleClosed(t, candidate)
-		if ownedChildAt(fx.session, fx.a.journal) != nil {
-			t.Fatal("OWNED_CHILD_FINAL_OWNER_MISSING_REGISTERED")
+		assertScopedChildHandleClosed(t, childA.handle)
+		if ownedChildAt(fx.session, fx.a.journal) != nil || ownedChildAllCount(fx.session) != 1 {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_MISSING_OLD_A_NOT_RETIRED")
 		}
 		if !fx.session.Unlocked() {
 			t.Fatal("OWNED_CHILD_FINAL_TARGET_SCOPE_LOCKED_PARENT")
+		}
+		if _, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_MISSING_OLD_TOKEN_REVIVED")
 		}
 		assertOwnedChildRead(t, fx.session, tokenB)
 		if err := fx.session.RevalidateVaultFileChildOwnership(tokenB); err != nil {
 			t.Fatal("OWNED_CHILD_FINAL_TARGET_SCOPE_LOCKED_B")
 		}
+	})
+
+	t.Run("owner-changed", func(t *testing.T) {
+		fx := newOwnedChildFixture(t)
+		b := fx.addVault(t, "b-owner-changed")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		recordA := testVaultFileOwnerRecord(t, fx.session, fx.session.path, fx.a.checkpoint.VaultID)
+		recordB := testVaultFileOwnerRecord(t, fx.session, fx.session.path, b.checkpoint.VaultID)
+		foreignA := newForeignOwnedChildRecord(t, fx.a.checkpoint.VaultID)
+		defer clearVaultFileOwners([]vaultFileOwnerRecord{recordA, recordB, foreignA})
+		var candidate *vaultfile.ScopedUnlock
+		vaultFileChildCandidateReady = func(handle *vaultfile.ScopedUnlock) {
+			candidate = handle
+			rewriteOwnedOwnerRecords(t, fx.session, []vaultFileOwnerRecord{foreignA, recordB})
+		}
+		t.Cleanup(func() { vaultFileChildCandidateReady = nil })
+		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileOwnership) {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_CHANGED_ACCEPTED")
+		}
+		if candidate == nil {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_CHANGED_CANDIDATE_NOT_REAL")
+		}
+		assertScopedChildHandleClosed(t, candidate)
+		assertScopedChildHandleClosed(t, childA.handle)
+		if ownedChildAt(fx.session, fx.a.journal) != nil || ownedChildAllCount(fx.session) != 1 {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_CHANGED_OLD_A_NOT_RETIRED")
+		}
+		assertOwnedChildRead(t, fx.session, tokenB)
+
+		// Restoring the legitimate owner record must not revive the retired
+		// token; only a fresh owned open may create a new generation.
+		rewriteOwnedOwnerRecords(t, fx.session, []vaultFileOwnerRecord{recordA, recordB})
+		if _, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_RESTORED_OLD_TOKEN_REVIVED")
+		}
+		if ownedChildAt(fx.session, fx.a.journal) != nil {
+			t.Fatal("OWNED_CHILD_FINAL_OWNER_RESTORED_OLD_CHILD_REVIVED")
+		}
+		assertOwnedChildRead(t, fx.session, tokenB)
 	})
 
 	t.Run("slot-change", func(t *testing.T) {
@@ -471,6 +533,106 @@ func TestVaultFileOwnedChildCandidateFinalGateRejects(t *testing.T) {
 		if ownedChildAllCount(fx.session) != 0 || fx.session.Unlocked() {
 			t.Fatal("OWNED_CHILD_FINAL_REQUEST_LOCK_DID_NOT_DRAIN")
 		}
+	})
+}
+
+func TestVaultFileOwnedChildInitialAuthCleansStaleTarget(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		fx := newOwnedChildFixture(t)
+		b := fx.addVault(t, "b-initial-missing")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		recordB := testVaultFileOwnerRecord(t, fx.session, fx.session.path, b.checkpoint.VaultID)
+		defer clearVaultFileOwners([]vaultFileOwnerRecord{recordB})
+		rewriteOwnedOwnerRecords(t, fx.session, []vaultFileOwnerRecord{recordB})
+
+		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileOwnership) {
+			t.Fatal("OWNED_CHILD_INITIAL_MISSING_ACCEPTED")
+		}
+		assertScopedChildHandleClosed(t, childA.handle)
+		if ownedChildAt(fx.session, fx.a.journal) != nil || ownedChildAllCount(fx.session) != 1 {
+			t.Fatal("OWNED_CHILD_INITIAL_MISSING_OLD_A_NOT_RETIRED")
+		}
+		if _, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+			t.Fatal("OWNED_CHILD_INITIAL_MISSING_OLD_TOKEN_REVIVED")
+		}
+		assertOwnedChildRead(t, fx.session, tokenB)
+	})
+
+	t.Run("changed", func(t *testing.T) {
+		fx := newOwnedChildFixture(t)
+		b := fx.addVault(t, "b-initial-changed")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		recordB := testVaultFileOwnerRecord(t, fx.session, fx.session.path, b.checkpoint.VaultID)
+		foreignA := newForeignOwnedChildRecord(t, fx.a.checkpoint.VaultID)
+		defer clearVaultFileOwners([]vaultFileOwnerRecord{recordB, foreignA})
+		rewriteOwnedOwnerRecords(t, fx.session, []vaultFileOwnerRecord{foreignA, recordB})
+
+		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileOwnership) {
+			t.Fatal("OWNED_CHILD_INITIAL_CHANGED_ACCEPTED")
+		}
+		assertScopedChildHandleClosed(t, childA.handle)
+		if ownedChildAt(fx.session, fx.a.journal) != nil || ownedChildAllCount(fx.session) != 1 {
+			t.Fatal("OWNED_CHILD_INITIAL_CHANGED_OLD_A_NOT_RETIRED")
+		}
+		if _, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+			t.Fatal("OWNED_CHILD_INITIAL_CHANGED_OLD_TOKEN_REVIVED")
+		}
+		assertOwnedChildRead(t, fx.session, tokenB)
+	})
+}
+
+func TestVaultFileOwnedChildCandidateErrorsLeaveCurrentOwner(t *testing.T) {
+	t.Run("wrong-pin", func(t *testing.T) {
+		fx := newOwnedChildFixture(t)
+		b := fx.addVault(t, "b-wrong-pin")
+		tokenA, _ := openOwnedChild(t, fx.session, fx.a, fx.password, fx.key)
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		childB := ownedChildAt(fx.session, b.journal)
+		bad := *fx.a.checkpoint
+		bad.PolicyDigest = bytes.Clone(fx.a.checkpoint.PolicyDigest)
+		bad.PolicyDigest[0] ^= 0xff
+		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, &bad, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileBaselineVerification) {
+			t.Fatal("OWNED_CHILD_WRONG_PIN_ACCEPTED")
+		}
+		if ownedChildAt(fx.session, fx.a.journal) != childA || ownedChildAt(fx.session, b.journal) != childB {
+			t.Fatal("OWNED_CHILD_WRONG_PIN_KILLED_CURRENT_OWNER")
+		}
+		assertOwnedChildRead(t, fx.session, tokenA)
+		assertOwnedChildRead(t, fx.session, tokenB)
+		if err := fx.session.RevalidateVaultFileChildOwnership(tokenA); err != nil {
+			t.Fatal("OWNED_CHILD_WRONG_PIN_REVALIDATE_A_FAILED")
+		}
+	})
+
+	t.Run("generic-old-child", func(t *testing.T) {
+		fx := newOwnedChildFixture(t)
+		b := fx.addVault(t, "b-generic-old")
+		tokenA, items, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{IncludeItemIDs: true})
+		if err != nil || len(items) != 1 || items[0].ID != ownedChildItemID {
+			t.Fatal("OWNED_CHILD_GENERIC_OLD_OPEN_FAILED")
+		}
+		tokenB, _ := openOwnedChild(t, fx.session, b, fx.password, fx.key)
+		childA := ownedChildAt(fx.session, fx.a.journal)
+		recordB := testVaultFileOwnerRecord(t, fx.session, fx.session.path, b.checkpoint.VaultID)
+		defer clearVaultFileOwners([]vaultFileOwnerRecord{recordB})
+		rewriteOwnedOwnerRecords(t, fx.session, []vaultFileOwnerRecord{recordB})
+
+		if _, _, err := fx.session.OpenOwnedVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileOwnership) {
+			t.Fatal("OWNED_CHILD_GENERIC_OLD_TARGET_MISSING_ACCEPTED")
+		}
+		if ownedChildAt(fx.session, fx.a.journal) != childA || childA.owned != nil {
+			t.Fatal("OWNED_CHILD_GENERIC_OLD_REVOKED_OR_PROMOTED")
+		}
+		assertOwnedChildRead(t, fx.session, tokenA)
+		if err := fx.session.RevalidateVaultFileChildOwnership(tokenA); !errors.Is(err, ErrVaultFileScopedChild) {
+			t.Fatal("OWNED_CHILD_GENERIC_OLD_PROMOTED_BY_REVALIDATE")
+		}
+		assertOwnedChildRead(t, fx.session, tokenB)
 	})
 }
 

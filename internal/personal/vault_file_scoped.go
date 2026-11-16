@@ -287,9 +287,22 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		case ownedErr != nil && !errors.Is(ownedErr, ErrVaultFileOwnership):
 			s.lockVaultFileParent()
 			return VaultFileChildToken{}, nil, ErrSessionLocked
-		case ownedErr != nil:
+		case errors.Is(ownedErr, ErrVaultFileOwnership):
+			// The authenticated target is now missing. The candidate cannot be
+			// registered, but a same-parent, same-journal, same-VaultID owned
+			// child whose bound snapshot can no longer be the current owner
+			// must not keep its VUK alive.
+			s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
+				VaultFileOwnershipPublic{}, false, parentOwner, parentPath, parentSlot, parentMaterial)
 			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
 		}
+		// A real current target was authenticated. If an existing owned child
+		// for this journal/VaultID carries a different custody snapshot, close
+		// that exact child now. The candidate checkpoint is not the owner truth,
+		// so a merely wrong caller pin with an unchanged owner leaves the old
+		// child alone.
+		s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
+			snapshot, true, parentOwner, parentPath, parentSlot, parentMaterial)
 		if !vaultFileOwnedSnapshotMatchesCheckpoint(snapshot, checkpoint) {
 			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
 		}
@@ -407,13 +420,29 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
 	if ownedSnapshot != nil {
-		ownedErr := s.verifyOwnedVaultFileTargetLocked(parentCheck, ownedSnapshot.owner)
-		if ownedErr != nil {
+		current, present, resolveErr := s.resolveOwnedVaultFileTargetLocked(parentCheck, checkpoint.VaultID)
+		if resolveErr != nil {
+			s.mu.Unlock()
+			clearVaultFileChildItems(initialItems)
+			_ = parentCheck.close()
+			_ = handle.Close()
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		if !present || current != ownedSnapshot.owner {
+			// The final real owner read no longer matches the candidate
+			// snapshot. Remove only an owned child for this journal and
+			// VaultID whose bound snapshot differs from what was just
+			// authenticated; a concurrent replacement is left untouched.
+			stale := s.captureStaleOwnedVaultFileChildLocked(journalPath, checkpoint.VaultID, current, present)
 			s.mu.Unlock()
 			clearVaultFileChildItems(initialItems)
 			closeErr := parentCheck.close()
 			_ = handle.Close()
-			if closeErr != nil || errors.Is(ownedErr, errVaultFileChildInvalidSlot) {
+			if stale != nil {
+				s.retireVaultFileChild(stale)
+			}
+			if closeErr != nil {
 				s.lockVaultFileParent()
 				return VaultFileChildToken{}, nil, ErrSessionLocked
 			}
@@ -1009,27 +1038,90 @@ func (s *Session) authenticateVaultFileOwnedTarget(path string, password, key []
 // with the target-only creation snapshot. The caller holds Session.mu; this
 // function must be called before saveMu is taken.
 func (s *Session) verifyOwnedVaultFileTargetLocked(check *vaultFileParentCheck, expected VaultFileOwnershipPublic) error {
-	if check == nil || check.tx == nil || expected.VaultID == "" {
-		return errVaultFileChildInvalidSlot
+	current, present, err := s.resolveOwnedVaultFileTargetLocked(check, expected.VaultID)
+	if err != nil {
+		return err
+	}
+	if !present || current != expected {
+		return ErrVaultFileOwnership
+	}
+	return nil
+}
+
+// resolveOwnedVaultFileTargetLocked returns the authenticated current public
+// projection for vaultID under an already-held parent RO transaction. A missing
+// target is a target-scope observation, not an account failure; invalid records
+// remain an account failure. The caller holds Session.mu and must close the RO
+// transaction before taking parent.mu.
+func (s *Session) resolveOwnedVaultFileTargetLocked(check *vaultFileParentCheck, vaultID string) (VaultFileOwnershipPublic, bool, error) {
+	if check == nil || check.tx == nil || vaultID == "" {
+		return VaultFileOwnershipPublic{}, false, errVaultFileChildInvalidSlot
 	}
 	auth, err := authenticateStateItems(check.tx, "", nil, vaultFileOwnerListAction, s, false)
 	if err != nil {
-		return errVaultFileChildInvalidSlot
+		return VaultFileOwnershipPublic{}, false, errVaultFileChildInvalidSlot
 	}
 	defer auth.clear()
 	records, err := loadVaultFileOwners(check.tx.Bucket(bucket), auth.identity, auth.rows)
 	if err != nil {
-		return errVaultFileChildInvalidSlot
+		return VaultFileOwnershipPublic{}, false, errVaultFileChildInvalidSlot
 	}
 	defer clearVaultFileOwners(records)
-	current, err := vaultFileOwnedProjection(records, expected.VaultID)
+	current, err := vaultFileOwnedProjection(records, vaultID)
+	if errors.Is(err, ErrVaultFileOwnership) {
+		return VaultFileOwnershipPublic{}, false, nil
+	}
 	if err != nil {
-		return err
+		return VaultFileOwnershipPublic{}, false, err
 	}
-	if current != expected {
-		return ErrVaultFileOwnership
+	return current, true, nil
+}
+
+// retireStaleOwnedVaultFileChildForOpen is the initial-auth cleanup path. It
+// first proves the parent identity is still the one snapshotted before the
+// factor proof, then removes at most one exact current owned child. Close/wait
+// runs with Session.mu and the registry released.
+func (s *Session) retireStaleOwnedVaultFileChildForOpen(journalPath, vaultID string, current VaultFileOwnershipPublic, present bool, parentOwner *vaultFileChildOwner, parentPath string, parentSlot [32]byte, parentMaterial []byte) {
+	s.mu.Lock()
+	sameParent := s.vaultFileOwner == parentOwner && s.path == parentPath &&
+		s.slotDigest == parentSlot && !s.lockRequested.Load() && len(s.material) != 0 &&
+		subtle.ConstantTimeCompare(s.material, parentMaterial) == 1
+	var stale *vaultFileChild
+	if sameParent {
+		stale = s.captureStaleOwnedVaultFileChildLocked(journalPath, vaultID, current, present)
 	}
-	return nil
+	s.mu.Unlock()
+	if stale != nil {
+		s.retireVaultFileChild(stale)
+	}
+}
+
+// captureStaleOwnedVaultFileChildLocked removes one current child only when it
+// is an owned child for the same journal and VaultID and its bound public
+// snapshot no longer matches the authenticated current owner (or the owner is
+// missing). The caller holds Session.mu. The returned child must be retired
+// only after all Session/registry/saveMu locks and any RO transaction are
+// released. Generic caller-trusted children are never selected.
+func (s *Session) captureStaleOwnedVaultFileChildLocked(journalPath, vaultID string, current VaultFileOwnershipPublic, present bool) *vaultFileChild {
+	s.vaultFileMu.Lock()
+	child := s.vaultFileChildren[journalPath]
+	if child == nil || child.owned == nil || child.owned.owner.VaultID != vaultID ||
+		child.token.path != journalPath {
+		s.vaultFileMu.Unlock()
+		return nil
+	}
+	if present && child.owned.owner == current {
+		s.vaultFileMu.Unlock()
+		return nil
+	}
+	token := child.token
+	if s.vaultFileChildren[journalPath] != child || child.token != token {
+		s.vaultFileMu.Unlock()
+		return nil
+	}
+	delete(s.vaultFileChildren, journalPath)
+	s.vaultFileMu.Unlock()
+	return child
 }
 
 // vaultFileOwnedProjection selects exactly one record for the target vault and
