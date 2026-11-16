@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -195,6 +196,7 @@ func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest,
 		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
+		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
 		!teamfiles.Distinct(path, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
 	}
@@ -217,4 +219,9 @@ func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest,
 		return false
 	}
 	return true
+}
+
+func privateVaultFileCreateParent(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.IsDir() && info.Mode().Perm()&0077 == 0
 }
