@@ -197,9 +197,9 @@ jobs:
             $vaultFileProduct = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark'
             if (-not [System.IO.Path]::IsPathFullyQualified($vaultFileProduct) -or -not (Test-Path -LiteralPath $vaultFileProduct -PathType Leaf)) { throw 'VAULTFILE_PRODUCT_UNAVAILABLE' }
             $env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct
-            go test -count=1 -run '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum)$' ./cmd/locklark
+            go test -count=1 -run '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./cmd/locklark
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            go test -count=1 -skip '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum)$' ./...
+            go test -count=1 -skip '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./...
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - if: runner.os == 'Linux'

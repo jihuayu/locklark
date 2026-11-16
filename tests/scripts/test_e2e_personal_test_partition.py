@@ -45,11 +45,13 @@ class PersonalTestPartitionWorkflowContract(unittest.TestCase):
             "TestVaultFileStatusProductAbsentBackendMinimum",
             "TestVaultFileDevicePublicProductMinimum",
             "TestVaultFileOpenBaselineProductMinimum",
+            "TestVaultFileOpenBaselineProductItemReferencesMinimum",
+            "TestVaultFileTitleEditProductMinimum",
         )
         selector = "^(" + "|".join(minimum_parents) + ")$"
         minimum = f"go test -count=1 -run '{selector}' ./cmd/locklark"
         remaining = f"go test -count=1 -skip '{selector}' ./..."
-        # All packages/cases remain covered: the five exact minimum parents run
+        # All packages/cases remain covered: the seven exact minimum parents run
         # first, and only those parents are excluded from the following suite.
         self.assertEqual(
             [line.strip() for line in linux.splitlines() if line.strip().startswith("go test ")],
