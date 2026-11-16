@@ -326,6 +326,7 @@ test("rotation row readiness projects bounded metadata without retaining identif
     sameIDCount: 1, exactRevisionCount: 1, fillCount: 1, updateCount: 1, statusClass: "UNKNOWN", failure: "none" });
   const knownStatuses = [
     ["0 个当前网站登录", "EMPTY_MATCH"],
+    ["原生宿主拒绝读取候选", "NATIVE_REFUSED"],
     ["操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面", "REFUSED"],
     ["页面或活动标签已变化，请重新读取候选", "CONTEXT_CHANGED"],
   ];
