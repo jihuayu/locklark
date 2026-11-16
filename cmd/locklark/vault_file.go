@@ -28,6 +28,8 @@ const vaultFileUsage = `USAGE
   locklark vault-file track-existing --config ABS_CONFIG
   locklark vault-file status --config ABS_CONFIG
   locklark vault-file open-baseline --config ABS_CONFIG
+  locklark vault-file open-baseline --include-item-ids --config ABS_CONFIG
+  locklark vault-file edit-prepared --config ABS_CONFIG --input ABS_PRIVATE_EDIT
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
@@ -44,6 +46,15 @@ baseline with the same fully unlocked local personal device and the supplied
 checkpoint. It prints bounded title/category summaries, LOCAL_BASELINE and
 remote_freshness UNVERIFIED. It does not read backend data or establish a
 current grant, remote freshness or complete content history.
+The explicit --include-item-ids mode adds only existing item IDs to those
+summaries for later selection. An item ID is not authority; the default output
+never includes IDs.
+
+Edit-prepared reads a private JSON request with item_id, expected_old_title and
+new_title. It requires fresh full-factor local writer authority, saves only a
+sealed direct child of the existing local base and prepares that exact proposal.
+It does not read backend data; resume-prepared performs the remote read and CAS.
+An offline edit is not evidence of remote freshness or a current SaaS grant.
 
 Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
@@ -60,8 +71,8 @@ transactions: LOCAL_REVIEW or LOCAL_UNKNOWN may leave saved working/prepared
 state. Retry the same exact input; different local edits are preserved.
 
 The independently supplied private JSON configuration requires version=1,
-backend_root, name, journal and checkpoint; open-baseline also requires the
-explicit absolute personal_file. The complete checkpoint requires
+backend_root, name, journal and checkpoint; open-baseline and edit-prepared
+also require the explicit absolute personal_file. The complete checkpoint requires
 vault_id, owner_root_key_id, owner_root_public_key (64 lowercase hex),
 policy_seq (explicitly present; zero is valid) and policy_digest (64 lowercase hex).
 
@@ -142,7 +153,7 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 
 func runVaultFile(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
-		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "track-existing" || args[0] == "status" || args[0] == "open-baseline") && (args[1] == "--help" || args[1] == "-h") {
+		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "edit-prepared" || args[0] == "track-existing" || args[0] == "status" || args[0] == "open-baseline") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
 			return errVaultFileUnconfirmed
 		}
@@ -151,21 +162,28 @@ func runVaultFile(args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return errVaultFileUnsupported
 	}
-	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "track-existing" && args[0] != "status" && args[0] != "open-baseline" {
+	if len(args) == 0 || args[0] != "resume-prepared" && args[0] != "import-prepared" && args[0] != "edit-prepared" && args[0] != "track-existing" && args[0] != "status" && args[0] != "open-baseline" {
 		return errVaultFileConfig
 	}
 	importing := args[0] == "import-prepared"
+	editing := args[0] == "edit-prepared"
 	flags := flag.NewFlagSet("vault-file "+args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "independent operator configuration")
 	var inputPath string
+	var includeItemIDs bool
+	if args[0] == "open-baseline" {
+		flags.BoolVar(&includeItemIDs, "include-item-ids", false, "include item selectors in the verified local baseline summary")
+	}
 	if importing {
 		flags.StringVar(&inputPath, "input", "", "existing signed sealed content successor")
+	} else if editing {
+		flags.StringVar(&inputPath, "input", "", "private title edit request")
 	}
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !teamfiles.ValidPath(*configPath) {
 		return errVaultFileConfig
 	}
-	if importing && !teamfiles.ValidPath(inputPath) {
+	if (importing || editing) && !teamfiles.ValidPath(inputPath) {
 		return errVaultFileInput
 	}
 	// Read only this explicit operator-owned-or-root-owned private regular
@@ -183,7 +201,7 @@ func runVaultFile(args []string, out io.Writer) error {
 	if cfg.PersonalFile != "" {
 		paths = append(paths, cfg.PersonalFile)
 	}
-	if importing {
+	if importing || editing {
 		paths = append(paths, inputPath)
 	}
 	if !teamfiles.Distinct(paths...) {
@@ -200,13 +218,31 @@ func runVaultFile(args []string, out io.Writer) error {
 		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
 			return err
 		}
-		return openBaselineVaultFile(out, cfg, pin)
+		return openBaselineVaultFile(out, cfg, pin, includeItemIDs)
 	}
 	if args[0] == "status" {
 		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
 			return err
 		}
 		return statusVaultFile(out, cfg)
+	}
+	if editing {
+		if cfg.PersonalFile == "" {
+			return errVaultFileConfig
+		}
+		info, err := os.Lstat(cfg.PersonalFile)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return errVaultFileConfig
+		}
+		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
+			return err
+		}
+		input, err := teamfiles.Read(inputPath, 4096, true)
+		if err != nil {
+			return errVaultFileInput
+		}
+		defer clear(input)
+		return editPreparedVaultFile(out, cfg, pin, input)
 	}
 	if err := separateVaultFileResumeState(cfg.BackendRoot, paths...); err != nil {
 		return err

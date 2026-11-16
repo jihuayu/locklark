@@ -24,7 +24,7 @@ def unique_fields(pairs):
     return result
 
 
-def opened_items(transcript):
+def opened_items(transcript, include_item_ids):
     prefix = MASTER_PROMPT + b"\n" + SECRET_PROMPT + b"\n"
     if not transcript.startswith(prefix):
         return None
@@ -39,9 +39,12 @@ def opened_items(transcript):
             value["status"] != "LOCAL_BASELINE" or value["remote_freshness"] != "UNVERIFIED" or
             not isinstance(value["items"], list) or len(value["items"]) > 1024):
         return None
+    item_fields = {"title", "category", "id"} if include_item_ids else {"title", "category"}
     for item in value["items"]:
-        if (not isinstance(item, dict) or set(item) != {"title", "category"} or
+        if (not isinstance(item, dict) or set(item) != item_fields or
                 not isinstance(item["title"], str) or not isinstance(item["category"], str)):
+            return None
+        if include_item_ids and (not isinstance(item["id"], str) or not item["id"]):
             return None
     return value["items"]
 
@@ -59,13 +62,18 @@ def main():
         secret = request["secret"].encode("ascii")
         missing = request["missing_secret"]
         expected_refusal = request["expected_refusal"]
+        include_item_ids = request["include_item_ids"]
         if (not os.path.isabs(product) or not os.path.isabs(config) or
-                expected_refusal not in REFUSALS | {""}):
+                expected_refusal not in REFUSALS | {""} or
+                not isinstance(include_item_ids, bool)):
             verdict("HARNESS_ERROR")
             return
         pid, master = pty.fork()
         if pid == 0:
-            os.execv(product, [product, "vault-file", "open-baseline", "--config", config])
+            arguments = [product, "vault-file", "open-baseline"]
+            if include_item_ids:
+                arguments.append("--include-item-ids")
+            os.execv(product, arguments + ["--config", config])
         output = bytearray()
         phase = 0
         deadline = time.monotonic() + 20
@@ -100,7 +108,7 @@ def main():
             return
         echoed = password in output or secret in output
         normalized = bytes(output).replace(b"\r\n", b"\n")
-        items = opened_items(normalized)
+        items = opened_items(normalized, include_item_ids)
         if (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and
                 phase == 2 and not echoed and items is not None and expected_refusal == ""):
             verdict("LOCAL_BASELINE", items=items)

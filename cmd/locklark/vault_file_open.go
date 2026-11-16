@@ -25,7 +25,7 @@ type vaultFileBaselineOutput struct {
 
 // openBaselineVaultFile reads both factors only from the controlling terminal.
 // No factor or item value is accepted from argv, environment or configuration.
-func openBaselineVaultFile(out io.Writer, cfg vaultFileResumeConfig, pin vaultfile.PolicyCheckpoint) (retErr error) {
+func openBaselineVaultFile(out io.Writer, cfg vaultFileResumeConfig, pin vaultfile.PolicyCheckpoint, includeItemIDs bool) (retErr error) {
 	controlInput, controlOutput, err := openRunCLIConsole()
 	if err != nil {
 		return errVaultFileCancelled
@@ -82,7 +82,12 @@ func openBaselineVaultFile(out io.Writer, cfg vaultFileResumeConfig, pin vaultfi
 		return errVaultFileVerification
 	}
 	defer session.Lock()
-	items, err := session.OpenVaultFileBaseline(cfg.Journal, &pin)
+	var items []personal.VaultFileBaselineItem
+	if includeItemIDs {
+		items, err = session.OpenVaultFileBaselineWithItemIDs(cfg.Journal, &pin)
+	} else {
+		items, err = session.OpenVaultFileBaseline(cfg.Journal, &pin)
+	}
 	if err != nil {
 		if errors.Is(err, personal.ErrVaultFileBaselineJournal) {
 			return errVaultFileJournal
