@@ -230,7 +230,18 @@ func (g *IntentJournal) Load() (GenesisIntent, error) {
 // AckGenesis is local bookkeeping only. The caller must independently verify
 // that readback is authoritative, cryptographically valid and exactly this G.
 // It rechecks the full intent and exact readback in one Bolt transaction.
+// A storage or commit-result error does not prove whether that transaction
+// committed. Close and reopen: only the exact original single-intent record,
+// or the exact single generation-0 State with BaseBytes = WorkingBytes = G and
+// the supplied revision, can resolve the local outcome. Any other shape needs
+// review. Neither shape proves a remote write or the readback's authority.
 func (g *IntentJournal) AckGenesis(expected GenesisIntent, readback []byte, revision vaultfilebackend.Revision) error {
+	return g.ackGenesisWithUpdate(expected, readback, revision, nil)
+}
+
+// update is a private test seam: tests can cause a real Bolt callback to roll
+// back or discard its committed result. Production always uses db.Update.
+func (g *IntentJournal) ackGenesisWithUpdate(expected GenesisIntent, readback []byte, revision vaultfilebackend.Revision, update func(func(*bolt.Tx) error) error) error {
 	if g == nil || g.journal == nil {
 		return ErrClosed
 	}
@@ -247,7 +258,10 @@ func (g *IntentJournal) AckGenesis(expected GenesisIntent, readback []byte, revi
 	if j.closed {
 		return ErrClosed
 	}
-	return j.db.Update(func(tx *bolt.Tx) error {
+	if update == nil {
+		update = j.db.Update
+	}
+	return update(func(tx *bolt.Tx) error {
 		stored, err := readGenesisIntentOnly(tx)
 		if err != nil {
 			return err
