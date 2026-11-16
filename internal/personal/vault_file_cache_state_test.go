@@ -170,3 +170,63 @@ func TestVaultFileCacheStateParentLockGate(t *testing.T) {
 	}
 	assertScopedChildHandleClosed(t, handleA)
 }
+
+func TestVaultFileCacheSnapshotBoundaries(t *testing.T) {
+	now := time.Now()
+	requestLocked := &Session{path: "routing-metadata", material: []byte{1}, last: now, idle: time.Hour}
+	requestLocked.lockRequested.Store(true)
+	vaultRevoked := &Session{path: "routing-metadata", material: []byte{1}, last: now, idle: time.Hour}
+	vaultRevoked.vaultFileRevoked.Store(true)
+	for _, tc := range []struct {
+		name    string
+		session *Session
+	}{
+		{name: "nil", session: nil},
+		{name: "zero", session: &Session{path: "routing-metadata"}},
+		{name: "empty-material", session: &Session{path: "routing-metadata", last: now, idle: time.Hour}},
+		{name: "idle-expired", session: &Session{path: "routing-metadata", material: []byte{1}, last: now.Add(-2 * time.Second), idle: time.Second}},
+		{name: "request-locked", session: requestLocked},
+		{name: "vault-revoked", session: vaultRevoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, path := tc.session.VaultFileCacheSnapshot()
+			if state != VaultFileCacheRevoked || path != "" {
+				t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_REVOKED_BOUNDARY_FAILED")
+			}
+			if got := tc.session.VaultFileCacheState(); got != VaultFileCacheRevoked {
+				t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_STATE_DIVERGED")
+			}
+		})
+	}
+
+	fx := newScopedChildFixture(t)
+	wantPath := fx.session.path
+	if state, path := fx.session.VaultFileCacheSnapshot(); state != VaultFileCacheActive || path != wantPath {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_ACTIVE_PATH_FAILED")
+	}
+	if got := fx.session.VaultFileCacheState(); got != VaultFileCacheActive {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_ACTIVE_STATE_FAILED")
+	}
+
+	fx.session.mu.Lock()
+	busy, busyPath := fx.session.VaultFileCacheSnapshot()
+	fx.session.lockRequested.Store(true)
+	locked, lockedPath := fx.session.VaultFileCacheSnapshot()
+	fx.session.lockRequested.Store(false)
+	fx.session.vaultFileRevoked.Store(true)
+	revoked, revokedPath := fx.session.VaultFileCacheSnapshot()
+	fx.session.vaultFileRevoked.Store(false)
+	fx.session.mu.Unlock()
+	if busy != VaultFileCacheBusy || busyPath != "" {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_BUSY_PATH_NOT_EMPTY")
+	}
+	if locked != VaultFileCacheRevoked || lockedPath != "" {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_LOCK_REQUESTED_NOT_REVOKED")
+	}
+	if revoked != VaultFileCacheRevoked || revokedPath != "" {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_VAULT_REVOKED_NOT_REVOKED")
+	}
+	if state, path := fx.session.VaultFileCacheSnapshot(); state != VaultFileCacheActive || path != wantPath {
+		t.Fatal("VAULT_FILE_CACHE_SNAPSHOT_RESTORED_ACTIVE_FAILED")
+	}
+}
