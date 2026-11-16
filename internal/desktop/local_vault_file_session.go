@@ -34,6 +34,11 @@ const (
 	localVaultFileSessionOutcomeOpened
 	localVaultFileSessionOutcomeFailed
 	localVaultFileSessionOutcomeCancelled
+	// localVaultFileSessionOutcomeWithheld is a private finite outcome for an
+	// otherwise exact opened candidate whose delivery was blocked only by a
+	// transient VaultFileCacheBusy parent. It is not a factor failure and never
+	// adopts the candidate.
+	localVaultFileSessionOutcomeWithheld
 )
 
 // localVaultFileSessionResult is the single result handed from the launched
@@ -855,46 +860,61 @@ func (a *App) takeAndCompleteLocalVaultFileSessionResult(op *localVaultFileSessi
 	return true
 }
 
+// localVaultFileSessionResultIdentityValid checks the exact result, slot,
+// operation, scope, sequence, parent, App generation and workspace binding of
+// an otherwise valid opened candidate without requiring the cache to be Active.
+// Workspace identity uses only the operation's frozen parentPath and the
+// current settings path metadata; it reads no new authority and never blocks on
+// the parent.
+func (a *App) localVaultFileSessionResultIdentityValid(op *localVaultFileSessionOperation, result localVaultFileSessionResult) bool {
+	if op == nil || result.outcome != localVaultFileSessionOutcomeOpened ||
+		result.candidate == nil || op.slot == nil ||
+		op.slot.operation != op || op.slot.sequence != op.sequence ||
+		op.slot.scope != op.scope || op.slot.parent != op.parent ||
+		op.slot.appGeneration != op.generation ||
+		a.session != op.parent || a.generation != op.generation ||
+		a.localVaultFiles.sessionSlots[op.scope] != op.slot ||
+		result.summary.VaultID != op.scope.vaultID || op.parentPath == "" {
+		return false
+	}
+	_, currentRoot := localVaultFilePaths(a.settingsPath, op.parentPath)
+	return currentRoot == op.scope.backendRoot
+}
+
 // completeLocalVaultFileSessionResult accepts a candidate only when the exact
-// slot, operation, sequence, parent, App generation, workspace, ref path,
-// VaultID and finite opened outcome still match. Every stale, failed, Busy or
-// replaced candidate is closed exactly and its summary dropped; the current
-// operation is then ended with a finite outcome.
+// slot, operation, sequence, parent, App generation, workspace, ref path and
+// VaultID still match. A valid opened candidate blocked only by a transient
+// Busy parent becomes the private finite Withheld outcome and is still closed
+// through the normal pre-adoption cleanup. Invalid, stale, failed and revoked
+// results keep the existing finite failure mapping. Every candidate is closed
+// exactly once and its summary dropped; the operation then ends with a finite
+// outcome.
 func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult) {
 	cache := a.syncLocalVaultFileSessions()
-	valid := result.outcome == localVaultFileSessionOutcomeOpened &&
-		cache == personal.VaultFileCacheActive && result.candidate != nil && op != nil &&
-		op.slot != nil && op.slot.operation == op && op.slot.sequence == op.sequence &&
-		op.slot.scope == op.scope && op.slot.parent == op.parent &&
-		op.slot.appGeneration == op.generation &&
-		a.session == op.parent && a.generation == op.generation &&
-		a.localVaultFiles.sessionSlots[op.scope] == op.slot &&
-		result.summary.VaultID == op.scope.vaultID
-	if valid {
-		personalPath, cache := a.localVaultFileRoutingPath()
-		valid = cache == personal.VaultFileCacheActive && personalPath != "" &&
-			personalPath == op.parentPath
-		if valid {
-			_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
-			valid = currentRoot == op.scope.backendRoot
+	identityValid := a.localVaultFileSessionResultIdentityValid(op, result)
+	withheld := identityValid && cache == personal.VaultFileCacheBusy
+	if identityValid && cache == personal.VaultFileCacheActive {
+		personalPath, finalCache := a.localVaultFileRoutingPath()
+		if finalCache == personal.VaultFileCacheActive && personalPath != "" &&
+			personalPath == op.parentPath {
+			slot := op.slot
+			// Adoption replaces the slot's exact wrapper; any borrowed
+			// projection read for the prior wrapper ends with that wrapper.
+			a.cancelLocalVaultFileRefreshExact(slot.refresh)
+			a.invalidateLocalVaultFileRefreshFresh(slot.scope)
+			if old := slot.session; old != nil && old != result.candidate {
+				a.detachLocalVaultFileSessionWrapper(slot)
+			}
+			slot.session = result.candidate
+			slot.summary = localVaultFileSessionSummaryClone(result.summary)
+			// The slot now owns the capability. The operation settles only
+			// after this legal transfer; a later slot close is the slot's
+			// responsibility.
+			op.markCandidateResolved()
+			a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeOpened)
+			return
 		}
-	}
-	if valid {
-		slot := op.slot
-		// Adoption replaces the slot's exact wrapper; any borrowed projection
-		// read for the prior wrapper ends with that wrapper.
-		a.cancelLocalVaultFileRefreshExact(slot.refresh)
-		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
-		if old := slot.session; old != nil && old != result.candidate {
-			a.detachLocalVaultFileSessionWrapper(slot)
-		}
-		slot.session = result.candidate
-		slot.summary = localVaultFileSessionSummaryClone(result.summary)
-		// The slot now owns the capability. The operation settles only after
-		// this legal transfer; a later slot close is the slot's responsibility.
-		op.markCandidateResolved()
-		a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeOpened)
-		return
+		withheld = finalCache == personal.VaultFileCacheBusy
 	}
 	clearLocalVaultFileSessionSummary(&result.summary)
 	if result.candidate != nil {
@@ -904,7 +924,9 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 		op.markCandidateResolved()
 	}
 	outcome := result.outcome
-	if outcome != localVaultFileSessionOutcomeFailed {
+	if withheld {
+		outcome = localVaultFileSessionOutcomeWithheld
+	} else if outcome != localVaultFileSessionOutcomeFailed {
 		outcome = localVaultFileSessionOutcomeFailed
 	}
 	a.finishLocalVaultFileSessionOperation(op, outcome)

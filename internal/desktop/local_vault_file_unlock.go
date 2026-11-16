@@ -14,6 +14,7 @@ const (
 	localVaultFileUnlockStatusPrompt            = "请输入主密码与 Secret Key 进行完整验证"
 	localVaultFileUnlockStatusBusy              = "正在完整验证本地文件库"
 	localVaultFileUnlockStatusFailed            = "完整验证失败；请重新输入"
+	localVaultFileUnlockStatusWithheld          = "本地文件库暂不可用，请稍后重试"
 	localVaultFileUnlockStatusAlreadyOpen       = "本地文件库已打开"
 	localVaultFileUnlockStatusUnavailable       = "无法打开本地文件库；请核查当前目标"
 	localVaultFileUnlockStatusStale             = "完整验证已失效；请重新打开"
@@ -250,6 +251,13 @@ func (a *App) finishLocalVaultFileUnlock(sequence uint64, target localVaultFileU
 		} else {
 			state.status = localVaultFileUnlockStatusOpenedUnavailable
 		}
+	case localVaultFileSessionOutcomeWithheld:
+		// The exact candidate was valid but a transient Busy parent withheld
+		// delivery. Keep the frozen target and dialog open for explicit manual
+		// re-entry; never present this as a factor failure or retry factors.
+		state.open = true
+		state.status = localVaultFileUnlockStatusWithheld
+		state.password, state.secret = "", ""
 	case localVaultFileSessionOutcomeCancelled:
 		a.dismissLocalVaultFileUnlock(state, localVaultFileUnlockStatusStale)
 	default:

@@ -831,7 +831,7 @@ func TestDesktopLocalVaultSessionBusyAdoptFinishesOperation(t *testing.T) {
 	}
 	release := holdDesktopParentDBBusy(t, f)
 	q.runDispatch(t)
-	assertLocalVaultSessionCompleted(t, op, localVaultFileSessionOutcomeFailed)
+	assertLocalVaultSessionCompleted(t, op, localVaultFileSessionOutcomeWithheld)
 	slot := f.app.localVaultFiles.sessionSlots[aScope]
 	if slot == nil || slot.operation != nil || slot.session != nil {
 		t.Fatal("LOCAL_SESSION_BUSY_ADOPT_OPERATION_RETAINED")
