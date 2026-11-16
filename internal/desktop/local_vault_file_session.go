@@ -189,52 +189,40 @@ func (op *localVaultFileSessionOperation) take() (localVaultFileSessionResult, b
 	return result, true
 }
 
-// takeCancelled makes an unsettled operation terminal and returns any
-// undelivered result to the caller for exact cleanup. A settled Opened
-// operation is preserved exactly: its finite outcome is not rewritten, its
-// adopted child is not closed here, and its observer is not repeated.
+// takeCancelled makes a non-UI-completed operation terminal and returns any
+// undelivered result to the caller for exact cleanup. A UI-completed finite
+// outcome is protected at the start: handoffTerminal with a non-None outcome
+// means the UI already consumed and observed the result (Opened, Failed, or a
+// prior Cancelled). A late cancellation returns without rewriting that outcome,
+// closing a child, or notifying a second observer. take() alone sets terminal
+// while the outcome is still None; that is material handoff, not a completed
+// finite UI outcome, and must not block cancellation.
 //
-// A settled non-Opened operation may still hold a no-candidate result that was
-// staged before markProcessingFinished settled it and before the UI take ran.
-// Cancellation must terminalize that pending handoff and clear the undelivered
-// projection so a stale callback takes nothing and cannot turn the final
-// Cancelled outcome back into Failed. A settled operation has no outstanding
-// candidate by definition; the defensive candidate return below exists only so
-// an impossible inconsistent result would use the existing cleanup caller
-// contract rather than being silently dropped.
+// For every other state cancellation records Cancelled, terminalizes the
+// handoff, and returns any ready undelivered result for the existing outside-mu
+// cleanup. Settlement is not the protection boundary: a no-candidate failure can
+// settle before its UI take, and that pending projection must be consumed so a
+// stale callback cannot later finish Failed. A defensive candidate in an
+// already settled state still follows the same cleanup caller contract.
 func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSessionResult, bool, bool) {
 	if op == nil {
 		return localVaultFileSessionResult{}, false, false
 	}
 	op.handoffMu.Lock()
 	defer op.handoffMu.Unlock()
-	if op.settled {
-		if op.outcome == localVaultFileSessionOutcomeOpened {
-			return localVaultFileSessionResult{}, false, false
-		}
-		op.outcome = localVaultFileSessionOutcomeCancelled
-		op.handoffTerminal = true
-		if !op.handoffReady {
-			return localVaultFileSessionResult{}, false, false
-		}
-		result := op.handoffResult
-		op.handoffResult = localVaultFileSessionResult{}
-		op.handoffReady = false
-		if result.candidate == nil {
-			clearLocalVaultFileSessionSummary(&result.summary)
-			return localVaultFileSessionResult{}, false, false
-		}
-		return result, true, false
+	if op.handoffTerminal && op.outcome != localVaultFileSessionOutcomeNone {
+		return localVaultFileSessionResult{}, false, false
 	}
+	active := !op.settled
 	op.handoffTerminal = true
 	op.outcome = localVaultFileSessionOutcomeCancelled
 	if !op.handoffReady {
-		return localVaultFileSessionResult{}, false, true
+		return localVaultFileSessionResult{}, false, active
 	}
 	result := op.handoffResult
 	op.handoffResult = localVaultFileSessionResult{}
 	op.handoffReady = false
-	return result, true, true
+	return result, true, active
 }
 
 func (op *localVaultFileSessionOperation) finish(outcome localVaultFileSessionOutcome) {
@@ -822,10 +810,12 @@ func (a *App) cancelLocalVaultFileSessionOperation(slot *localVaultFileSessionSl
 // cancelLocalVaultFileSessionOperationExact cancels this exact operation, never
 // whatever operation the slot may hold later. It closes only an undelivered
 // staged candidate; an already adopted wrapper is left for explicit close or
-// replacement so a stale callback cannot close a valid current child. A settled
-// non-Opened operation has already cleared its no-candidate handoff in
-// takeCancelled; an impossible inconsistent candidate result still follows the
-// same exact cleanup launch instead of being retained.
+// replacement so a stale callback cannot close a valid current child. A
+// UI-completed finite operation is left untouched by takeCancelled. For a
+// non-UI-completed operation, any ready result is returned for this existing
+// outside-mu cleanup: a no-candidate projection is cleared here and an
+// impossible inconsistent candidate still follows the same exact cleanup
+// launch instead of being retained.
 func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessionOperation) {
 	if op == nil {
 		return
