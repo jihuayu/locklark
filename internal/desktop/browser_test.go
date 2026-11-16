@@ -25,6 +25,31 @@ func (p *browserPipe) Write(b []byte) (int, error) {
 	return p.Buffer.Write(b)
 }
 func (p *browserPipe) Close() error { return nil }
+
+func TestBrowserV2StageAndCommitReviewControlsAreDistinct(t *testing.T) {
+	for _, test := range []struct {
+		kind, heading, detail, approve, reject, absent string
+	}{
+		{"stage-save", "确认暂存浏览器登录", "仅暂存这次登录信息供后续确认；不会提交金库变更。", "批准本次暂存", "拒绝本次暂存", "批准本次保存"},
+		{"commit-staged-save", "确认浏览器保存登录", "仅在本窗口批准后，才会提交这次登录保存。", "批准本次保存", "拒绝本次保存", "批准本次暂存"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			a := &App{}
+			tester := ui.NewTester(func(c *ui.Context) {
+				a.browserV2ApprovalView(c, nil, browserhost.V2ApprovalView{Type: test.kind})
+			}, 1000, 780)
+			for _, text := range []string{test.heading, test.detail, test.approve, test.reject} {
+				if !tester.HasText(text) {
+					t.Fatal("typed browser save review omitted its fixed presentation")
+				}
+			}
+			if tester.HasText(test.absent) {
+				t.Fatal("staging and commit must not offer the other operation's approval")
+			}
+		})
+	}
+}
+
 func TestNativeBrowserLockDropsLateApproval(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "browser.ll")
 	key := bytes.Repeat([]byte{4}, 16)

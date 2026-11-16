@@ -219,6 +219,15 @@ class ClickMetadataTests(unittest.TestCase):
 
 
 class AllowlistTests(unittest.TestCase):
+    def test_staged_and_committed_save_controls_are_distinct_exact_literals(self):
+        labels = ("批准本次暂存", "拒绝本次暂存", "批准本次保存", "拒绝本次保存")
+        self.assertEqual(len(set(labels)), 4)
+        for label in labels:
+            self.assertIn(label, native.CONTROL_LABELS)
+            self.assertTrue(native.control_label_allowed(label))
+            for variant in (label + " ", " " + label, label + "。", label + "private"):
+                self.assertFalse(native.control_label_allowed(variant))
+
     def test_v2_approval_labels_are_exact_literals(self):
         for label in ("批准本次操作", "拒绝本次操作"):
             self.assertIn(label, native.CONTROL_LABELS)
