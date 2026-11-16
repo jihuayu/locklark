@@ -371,8 +371,8 @@ func TestLocalVaultObserverModesRequireExactCount(t *testing.T) {
 	}
 }
 
-// TestLocalVaultPairReadObserverRejectsMutations applies each static change to
-// a fresh pair and restores it before the next case. No case may reach the
+// TestLocalVaultPairReadObserverRejectsMutations reuses one real pair and
+// restores each static change before the next case. No case may reach the
 // all-true pair projection, and structural cases must return an error.
 func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
 	first, second := newPublishedLocalPair(t)
@@ -400,7 +400,9 @@ func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
 	if err != nil || !secondExists {
 		t.Fatal("OBSERVER_PAIR_MUTATION_SECOND_MANIFEST_FAILED")
 	}
-	dataDir := filepath.Join(first.backendRoot, "vaultfile-backend", "v1", "data")
+	namespaceDir := filepath.Join(first.backendRoot, "vaultfile-backend")
+	versionDir := filepath.Join(namespaceDir, "v1")
+	dataDir := filepath.Join(versionDir, "data")
 
 	cases := []struct {
 		name    string
@@ -439,7 +441,85 @@ func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
 			},
 		},
 		{
-			name: "extra backend object", wantErr: false,
+			name: "unknown backend root entry", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(first.backendRoot, "unknown")
+				if err := os.WriteFile(path, []byte("unknown"), 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_BACKEND_ROOT_WRITE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "wide namespace unknown entry", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(namespaceDir, "unknown")
+				if err := os.WriteFile(path, []byte("unknown"), 0644); err != nil {
+					t.Fatal("OBSERVER_PAIR_NAMESPACE_WRITE_FAILED")
+				}
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal("OBSERVER_PAIR_NAMESPACE_MODE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "unknown version entry", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				lock := filepath.Join(versionDir, localBackendLockName)
+				original := readRaw(t, lock)
+				if err := os.Remove(lock); err != nil {
+					t.Fatal("OBSERVER_PAIR_VERSION_LOCK_REMOVE_FAILED")
+				}
+				path := filepath.Join(versionDir, "unknown")
+				if err := os.WriteFile(path, []byte("unknown"), 0600); err != nil {
+					os.WriteFile(lock, original, 0600)
+					t.Fatal("OBSERVER_PAIR_VERSION_UNKNOWN_WRITE_FAILED")
+				}
+				return func() {
+					os.Remove(path)
+					if err := os.WriteFile(lock, original, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_VERSION_LOCK_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+		{
+			name: "symlink backend lockfile", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				lock := filepath.Join(versionDir, localBackendLockName)
+				original := readRaw(t, lock)
+				if err := os.Remove(lock); err != nil {
+					t.Fatal("OBSERVER_PAIR_LOCK_REMOVE_FAILED")
+				}
+				if err := os.Symlink(first.journal, lock); err != nil {
+					os.WriteFile(lock, original, 0600)
+					t.Fatal("OBSERVER_PAIR_LOCK_SYMLINK_FAILED")
+				}
+				return func() {
+					os.Remove(lock)
+					if err := os.WriteFile(lock, original, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_LOCK_SYMLINK_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+		{
+			name: "wide backend lockfile", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(versionDir, localBackendLockName)
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal("OBSERVER_PAIR_LOCKFILE_MODE_FAILED")
+				}
+				return func() {
+					if err := os.Chmod(path, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_LOCKFILE_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+		{
+			name: "extra backend object", wantErr: true,
 			mutate: func(t *testing.T) func() {
 				path := filepath.Join(dataDir, "extra-object")
 				if err := os.WriteFile(path, []byte("extra"), 0600); err != nil {
@@ -564,7 +644,12 @@ func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cleanup := tc.mutate(t)
 			t.Cleanup(cleanup)
+			before := snapshotPersistent(t, first.root)
 			report, err := verifyLocalPairWorkspace(first.fixture, first.workspace)
+			after := snapshotPersistent(t, first.root)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("OBSERVER_PAIR_MUTATION_MUTATED_PERSISTENT_FILES")
+			}
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("OBSERVER_PAIR_MUTATION_ERROR_EXPECTED")
@@ -578,9 +663,9 @@ func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
 				t.Fatal("OBSERVER_PAIR_MUTATION_ACCEPTED")
 			}
 			switch tc.name {
-			case "extra backend object":
-				if report.BackendHashMatches {
-					t.Fatal("OBSERVER_PAIR_EXTRA_BACKEND_ACCEPTED")
+			case "wide backend lockfile":
+				if report.PrivateModes {
+					t.Fatal("OBSERVER_PAIR_WIDE_LOCKFILE_ACCEPTED")
 				}
 			case "swapped companions":
 				if report.CompanionPresent || report.ManifestDigest {

@@ -43,7 +43,8 @@ type observation struct {
 }
 
 // localProjection is deliberately limited to bounded local byte/mode facts.
-// It carries no path, manifest, ciphertext, recovery kit, identity or factor.
+// It carries no path, manifest, ciphertext, recovery kit, identity or known
+// fixture factor value.
 type localProjection struct {
 	ManifestCount      int  `json:"manifest_count"`
 	ManifestPersonal   bool `json:"manifest_personal"`
@@ -269,6 +270,10 @@ func localBackendRoot(workspace string) string {
 	return filepath.Join(workspace, "backend")
 }
 
+// localBackendLockName is the one known version-level lock file documented by
+// the local directory backend. It is optional for a read-only observation.
+const localBackendLockName = ".locklark-vaultfile.lock"
+
 // realDirectory accepts only an existing real directory. A missing path is
 // reported as absent so the caller can emit bounded false facts instead of
 // exploring any other directory.
@@ -309,6 +314,25 @@ func boundedRegularFile(path string, limit int64) ([]byte, bool, error) {
 		return nil, false, errors.New("local workspace file exceeds bound")
 	}
 	return raw, true, nil
+}
+
+// readBoundedDir reads at most limit entries and one sentinel, so a directory
+// with unexpected extra children is rejected without an unbounded allocation.
+// A missing directory is reported by the caller's prior realDirectory check.
+func readBoundedDir(path string, limit int) ([]os.DirEntry, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(limit + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if len(entries) > limit {
+		return nil, errors.New("local backend directory exceeds bound")
+	}
+	return entries, nil
 }
 
 type localBackendRecord struct {
@@ -394,6 +418,65 @@ func readBackendObject(backendRoot, name string) (localBackendRecord, bool, erro
 	return record, true, nil
 }
 
+// verifyPairBackendLayout enforces a closed-world backend directory shape:
+// root -> vaultfile-backend -> v1 -> {data, tmp, optional known lock file}.
+// Any unknown child, symlink, wrong entry type or over-count is rejected
+// before records are read, so an extra item can never be silently skipped.
+func verifyPairBackendLayout(backendRoot string) error {
+	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+	version := filepath.Join(namespace, "v1")
+	levels := []struct {
+		path     string
+		allowed  map[string]bool // true means directory, false means regular file
+		required []string
+	}{
+		{backendRoot, map[string]bool{"vaultfile-backend": true}, []string{"vaultfile-backend"}},
+		{namespace, map[string]bool{"v1": true}, []string{"v1"}},
+		{version, map[string]bool{"data": true, "tmp": true, localBackendLockName: false}, []string{"data", "tmp"}},
+	}
+	for _, level := range levels {
+		exists, err := realDirectory(level.path)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errors.New("incomplete local backend layout")
+		}
+		entries, err := readBoundedDir(level.path, len(level.allowed))
+		if err != nil {
+			return err
+		}
+		found := make(map[string]bool, len(entries))
+		for _, entry := range entries {
+			wantDir, known := level.allowed[entry.Name()]
+			if !known {
+				return errors.New("unknown local backend entry")
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("local backend contains a symlink")
+			}
+			if wantDir {
+				if !info.IsDir() {
+					return errors.New("invalid local backend directory")
+				}
+			} else if !info.Mode().IsRegular() {
+				return errors.New("invalid local backend file")
+			}
+			found[entry.Name()] = true
+		}
+		for _, name := range level.required {
+			if !found[name] {
+				return errors.New("incomplete local backend layout")
+			}
+		}
+	}
+	return nil
+}
+
 // readLocalPairBackendRecords accepts only the exact, deduplicated set of
 // hashed names for two completed vaults. It does not relax the single-object
 // uniqueness rule in readBackendObject: any missing, extra or duplicate object
@@ -420,7 +503,7 @@ func readLocalPairBackendRecords(backendRoot string, names []string) (map[string
 		}
 		wanted[hash] = name
 	}
-	entries, err := os.ReadDir(data)
+	entries, err := readBoundedDir(data, len(wanted))
 	if err != nil {
 		return nil, err
 	}
@@ -467,11 +550,10 @@ func backendTmpState(backendRoot string) (present, empty bool, err error) {
 			return false, false, nil
 		}
 	}
-	entries, err := os.ReadDir(tmp)
-	if err != nil {
+	if _, err := readBoundedDir(tmp, 0); err != nil {
 		return true, false, err
 	}
-	return true, len(entries) == 0, nil
+	return true, true, nil
 }
 
 func localPrivateModes(f fixture, workspace, profiles, profileDir, backendRoot, config, companion, journal, archive, objectPath string, objectFound bool, entries []os.DirEntry) bool {
@@ -512,7 +594,7 @@ func localPrivateModes(f fixture, workspace, profiles, profileDir, backendRoot, 
 			ok = false
 		}
 	}
-	if info, err := os.Lstat(filepath.Join(version, ".locklark-vaultfile.lock")); err == nil {
+	if info, err := os.Lstat(filepath.Join(version, localBackendLockName)); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
 			ok = false
 		}
@@ -520,6 +602,10 @@ func localPrivateModes(f fixture, workspace, profiles, profileDir, backendRoot, 
 	return ok
 }
 
+// factorsAbsent reports only that the known fixture values above do not occur
+// in these observed bytes. It does not inspect dynamic recovery kits or every
+// channel, and it does not establish that no other secret was persisted. A
+// separate transcript barrier covers the unknown LLR2 channel.
 func factorsAbsent(f fixture, raws ...[]byte) bool {
 	values := []string{f.Password, f.Secret, f.Username, f.Value, f.OTPSeed, f.OTPConfig, f.ProviderCanary, f.ProviderValue}
 	for _, raw := range raws {
@@ -738,6 +824,9 @@ func verifyLocalPairWorkspace(f fixture, workspace string) (localProjection, err
 		return report, err
 	}
 	if _, err := realDirectory(backendRoot); err != nil {
+		return report, err
+	}
+	if err := verifyPairBackendLayout(backendRoot); err != nil {
 		return report, err
 	}
 	personalInfo, personalErr := os.Lstat(f.Path)
