@@ -38,9 +38,10 @@ type localVaultFileState struct {
 	sessionSlots      map[localVaultFileSessionScope]*localVaultFileSessionSlot
 	sessionParent     *personal.Session
 	sessionGeneration uint64
-	// sessionCandidateForTest observes a real candidate after the production
-	// factory returned. Production leaves it nil.
-	sessionCandidateForTest func(*localVaultFileSessionOperation, *vaultfileclient.LocalGenesisSession)
+	// sessionCandidateForTest observes the staged operation after the
+	// production factory result has been handed off and before dispatch. The
+	// worker captures it before launch; production leaves it nil.
+	sessionCandidateForTest func(*localVaultFileSessionOperation)
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {

@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"sync"
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
@@ -22,6 +23,24 @@ type localVaultFileSessionScope struct {
 	backendRoot string
 }
 
+type localVaultFileSessionOutcome uint8
+
+const (
+	localVaultFileSessionOutcomeNone localVaultFileSessionOutcome = iota
+	localVaultFileSessionOutcomeOpened
+	localVaultFileSessionOutcomeFailed
+	localVaultFileSessionOutcomeCancelled
+)
+
+// localVaultFileSessionResult is the single result handed from the launched
+// worker to the serial dispatch path. Ownership transfers on stage and then to
+// the one successful take (or to cancellation).
+type localVaultFileSessionResult struct {
+	candidate *vaultfileclient.LocalGenesisSession
+	summary   vaultfileclient.LocalGenesisBaseline
+	outcome   localVaultFileSessionOutcome
+}
+
 type localVaultFileSessionOperation struct {
 	slot       *localVaultFileSessionSlot
 	parent     *personal.Session
@@ -30,9 +49,87 @@ type localVaultFileSessionOperation struct {
 	scope      localVaultFileSessionScope
 	ctx        context.Context
 	cancel     context.CancelFunc
-	// canceled is mutated only on the App dispatch path. The launched worker
-	// never reads it; adopt rechecks it after being dispatched.
-	canceled bool
+
+	// handoffMu guards the one result slot plus its ready/terminal transition.
+	// It is never held across dispatch, launch, validation, Close or IO.
+	handoffMu       sync.Mutex
+	handoffReady    bool
+	handoffResult   localVaultFileSessionResult
+	handoffTerminal bool
+	outcome         localVaultFileSessionOutcome
+}
+
+// stage transfers ownership of result to the operation. It refuses after
+// cancellation/terminal, in which case the caller still owns and closes any
+// returned candidate.
+func (op *localVaultFileSessionOperation) stage(result localVaultFileSessionResult) bool {
+	if op == nil {
+		return false
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	if op.handoffTerminal || op.handoffReady {
+		return false
+	}
+	op.handoffResult = result
+	op.handoffReady = true
+	return true
+}
+
+// take is the unique dispatch-side ownership transfer. It becomes terminal
+// exactly once and returns no result after cancellation already took it.
+func (op *localVaultFileSessionOperation) take() (localVaultFileSessionResult, bool) {
+	if op == nil {
+		return localVaultFileSessionResult{}, false
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	if !op.handoffReady {
+		return localVaultFileSessionResult{}, false
+	}
+	result := op.handoffResult
+	op.handoffResult = localVaultFileSessionResult{}
+	op.handoffReady = false
+	op.handoffTerminal = true
+	return result, true
+}
+
+// takeCancelled makes the operation terminal and returns any undelivered
+// result to the caller for exact cleanup.
+func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSessionResult, bool) {
+	if op == nil {
+		return localVaultFileSessionResult{}, false
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	op.handoffTerminal = true
+	op.outcome = localVaultFileSessionOutcomeCancelled
+	if !op.handoffReady {
+		return localVaultFileSessionResult{}, false
+	}
+	result := op.handoffResult
+	op.handoffResult = localVaultFileSessionResult{}
+	op.handoffReady = false
+	return result, true
+}
+
+func (op *localVaultFileSessionOperation) finish(outcome localVaultFileSessionOutcome) {
+	if op == nil {
+		return
+	}
+	op.handoffMu.Lock()
+	op.outcome = outcome
+	op.handoffTerminal = true
+	op.handoffMu.Unlock()
+}
+
+func (op *localVaultFileSessionOperation) finiteOutcome() localVaultFileSessionOutcome {
+	if op == nil {
+		return localVaultFileSessionOutcomeNone
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	return op.outcome
 }
 
 type localVaultFileSessionSlot struct {
@@ -149,6 +246,8 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 	slot.operation = op
 	ownedPassword := append([]byte(nil), password...)
 	ownedKey := append([]byte(nil), key...)
+	dispatch := a.dispatch
+	hook := a.localVaultFiles.sessionCandidateForTest
 	a.launch(func() {
 		defer clear(ownedPassword)
 		defer clear(ownedKey)
@@ -156,14 +255,24 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 			return
 		}
 		candidate, summary, err := a.openLocalVaultFileSessionCandidate(op, ownedPassword, ownedKey)
+		outcome := localVaultFileSessionOutcomeOpened
 		if err != nil {
-			a.dispatch(func() { a.adoptLocalVaultFileSessionCandidate(op, nil, vaultfileclient.LocalGenesisBaseline{}) })
+			outcome = localVaultFileSessionOutcomeFailed
+		}
+		result := localVaultFileSessionResult{candidate: candidate, summary: summary, outcome: outcome}
+		if !op.stage(result) {
+			// Cancellation already became terminal and owns no result. This
+			// worker still owns the exact candidate returned by the factory.
+			clearLocalVaultFileSessionSummary(&summary)
+			if candidate != nil {
+				_ = candidate.Close()
+			}
 			return
 		}
-		if hook := a.localVaultFiles.sessionCandidateForTest; hook != nil {
-			hook(op, candidate)
+		if hook != nil {
+			hook(op)
 		}
-		a.dispatch(func() { a.adoptLocalVaultFileSessionCandidate(op, candidate, summary) })
+		dispatch(func() { a.takeAndCompleteLocalVaultFileSessionResult(op) })
 	})
 	return op
 }
@@ -178,42 +287,67 @@ func (a *App) openLocalVaultFileSessionCandidate(op *localVaultFileSessionOperat
 	return vaultfileclient.OpenLocalGenesisSession(op.parent, op.scope.configPath, op.scope.backendRoot, op.scope.vaultID, password, key)
 }
 
-// adoptLocalVaultFileSessionCandidate accepts a candidate only when the exact
-// slot, operation, sequence, parent, App generation, workspace, ref path and
-// VaultID still match. Every stale, failed or replaced candidate is closed and
-// its summary dropped; it can never remove or revive a later generation.
-func (a *App) adoptLocalVaultFileSessionCandidate(op *localVaultFileSessionOperation, candidate *vaultfileclient.LocalGenesisSession, summary vaultfileclient.LocalGenesisBaseline) {
-	// Busy preserves the slot, its summary and its pending operation. Only the
-	// returned candidate is rejected and closed here; pending completion/handoff
-	// remains a separate checkpoint.
+// takeAndCompleteLocalVaultFileSessionResult is the serial dispatch owner of
+// the single staged result. take is terminal, so a late or repeated callback
+// cannot affect a later operation or child.
+func (a *App) takeAndCompleteLocalVaultFileSessionResult(op *localVaultFileSessionOperation) {
+	result, ok := op.take()
+	if !ok {
+		return
+	}
+	a.completeLocalVaultFileSessionResult(op, result)
+}
+
+// completeLocalVaultFileSessionResult accepts a candidate only when the exact
+// slot, operation, sequence, parent, App generation, workspace, ref path,
+// VaultID and finite opened outcome still match. Every stale, failed, Busy or
+// replaced candidate is closed exactly and its summary dropped; the current
+// operation is then ended with a finite outcome.
+func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult) {
 	cache := a.syncLocalVaultFileSessions()
-	valid := cache == personal.VaultFileCacheActive && candidate != nil && op != nil && !op.canceled && op.slot != nil &&
-		op.slot.operation == op && op.slot.sequence == op.sequence &&
+	valid := result.outcome == localVaultFileSessionOutcomeOpened &&
+		cache == personal.VaultFileCacheActive && result.candidate != nil && op != nil &&
+		op.slot != nil && op.slot.operation == op && op.slot.sequence == op.sequence &&
 		op.slot.scope == op.scope && op.slot.parent == op.parent &&
 		op.slot.appGeneration == op.generation &&
 		a.session == op.parent && a.generation == op.generation &&
 		a.localVaultFiles.sessionSlots[op.scope] == op.slot &&
-		summary.VaultID == op.scope.vaultID
+		result.summary.VaultID == op.scope.vaultID
 	if valid {
 		_, currentRoot := localVaultFilePaths(a.settingsPath, op.parent.VaultPath())
 		valid = currentRoot == op.scope.backendRoot
 	}
-	if !valid {
-		clearLocalVaultFileSessionSummary(&summary)
-		if candidate != nil {
-			a.launch(func() { _ = candidate.Close() })
+	if valid {
+		slot := op.slot
+		if old := slot.session; old != nil && old != result.candidate {
+			a.launch(func() { _ = old.Close() })
 		}
+		slot.session = result.candidate
+		slot.summary = localVaultFileSessionSummaryClone(result.summary)
+		a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeOpened)
 		return
 	}
-	slot := op.slot
-	if old := slot.session; old != nil && old != candidate {
-		a.launch(func() { _ = old.Close() })
+	clearLocalVaultFileSessionSummary(&result.summary)
+	if result.candidate != nil {
+		a.launch(func() { _ = result.candidate.Close() })
 	}
-	slot.session = candidate
-	slot.summary = localVaultFileSessionSummaryClone(summary)
-	if op.cancel != nil {
-		op.cancel()
-		op.cancel = nil
+	outcome := result.outcome
+	if outcome != localVaultFileSessionOutcomeFailed {
+		outcome = localVaultFileSessionOutcomeFailed
+	}
+	a.finishLocalVaultFileSessionOperation(op, outcome)
+}
+
+// finishLocalVaultFileSessionOperation records the finite outcome and ends the
+// pending operation only if it is still the exact current operation.
+func (a *App) finishLocalVaultFileSessionOperation(op *localVaultFileSessionOperation, outcome localVaultFileSessionOutcome) {
+	op.finish(outcome)
+	if op.slot != nil && op.slot.operation == op {
+		if op.cancel != nil {
+			op.cancel()
+			op.cancel = nil
+		}
+		op.slot.operation = nil
 	}
 }
 
@@ -225,12 +359,15 @@ func (a *App) cancelLocalVaultFileSessionOperation(slot *localVaultFileSessionSl
 		return
 	}
 	op := slot.operation
-	op.canceled = true
-	if op.cancel != nil {
-		op.cancel()
-		op.cancel = nil
+	result, pending := op.takeCancelled()
+	a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeCancelled)
+	if !pending {
+		return
 	}
-	slot.operation = nil
+	clearLocalVaultFileSessionSummary(&result.summary)
+	if result.candidate != nil {
+		a.launch(func() { _ = result.candidate.Close() })
+	}
 }
 
 // cancelLocalVaultFileSession is the narrow cancel entry for one exact ref.
