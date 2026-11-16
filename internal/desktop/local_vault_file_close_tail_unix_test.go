@@ -178,8 +178,8 @@ func TestDesktopLocalVaultSessionAdoptedCloseTailChainsPriorClose(t *testing.T) 
 
 	f.app.closeLocalVaultFileSession(scope)
 	secondTail := slot.closeTail
-	if secondTail == nil || secondTail.prior != firstTail {
-		t.Fatal("LOCAL_CLOSE_CHAIN_PRIOR_TAIL_NOT_CAPTURED")
+	if secondTail == nil || secondTail == firstTail {
+		t.Fatal("LOCAL_CLOSE_CHAIN_SECOND_TAIL_NOT_INSTALLED")
 	}
 	secondCloseWorker := startLocalVaultLaunchAsync(t, q)
 	awaitLocalVaultWrapperClosed(t, secondWrapper, "LOCAL_CLOSE_CHAIN_SECOND_REAL_CLOSE_STUCK")

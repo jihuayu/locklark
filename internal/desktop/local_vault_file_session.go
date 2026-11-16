@@ -414,12 +414,12 @@ const (
 )
 
 // localVaultFileCloseTail is the immutable completion record for one adopted
-// wrapper's real Close. The prior tail captured at detach must finish before
-// this node publishes its cumulative finite result and closes done. Only the
-// launched worker writes result; readers first wait for done. The node retains
-// no wrapper, factor, key, kit, token, handle, App or slot pointer.
+// wrapper's real Close. The previous close is held only by the launched worker
+// closure while it waits for that close's actual done and folds its finite
+// result; the worker then releases it. This node retains only the done channel
+// and finite enum: no prior pointer, wrapper, factor, key, kit, token, handle,
+// App or slot pointer.
 type localVaultFileCloseTail struct {
-	prior  *localVaultFileCloseTail
 	done   chan struct{}
 	result localVaultFileCloseResult
 }
@@ -458,8 +458,11 @@ func (a *App) detachLocalVaultFileSessionWrapper(slot *localVaultFileSessionSlot
 	}
 	slot.session = nil
 	clearLocalVaultFileSessionSummary(&slot.summary)
+	// prior is captured only by this worker closure. The published tail node
+	// does not retain it, so a completed chain cannot keep every previous node
+	// alive through the active slot's latest closeTail.
 	prior := slot.closeTail
-	tail := &localVaultFileCloseTail{prior: prior, done: make(chan struct{})}
+	tail := &localVaultFileCloseTail{done: make(chan struct{})}
 	slot.closeTail = tail
 	pause := a.localVaultFiles.sessionAdoptedClosePauseForTest
 	a.launch(func() {
