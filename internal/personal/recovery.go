@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
@@ -660,6 +661,13 @@ type Restoration struct {
 	dest, pw string
 	oldKey   []byte
 	p        *payload
+}
+
+// Format prevents ordinary fmt verbs from walking the recovery factors or
+// decoded backup payload through either a value or a pointer. Go handles
+// special type and pointer verbs itself; those do not include these fields.
+func (Restoration) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, "[redacted restoration]")
 }
 
 // PrepareRestore validates all old factors and probes the destination before
