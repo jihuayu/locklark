@@ -435,3 +435,65 @@ func TestDesktopLocalVaultSessionConcurrentLateDrop(t *testing.T) {
 		t.Fatal("LOCAL_SESSION_CONCURRENT_NEW_CANDIDATE_LOST")
 	}
 }
+
+func TestDesktopLocalVaultSessionParentLockStopsCachedMetadata(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	f.openVault(t, q, bScope)
+	generation := f.app.generation
+	aSlot := f.app.localVaultFiles.sessionSlots[aScope]
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if aSlot == nil || bSlot == nil || aSlot.session == nil || bSlot.session == nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_SETUP_FAILED")
+	}
+	aSession, bSession := aSlot.session, bSlot.session
+	pending := f.app.beginLocalVaultFileSession(bScope, []byte(f.password), f.key)
+	if pending == nil || pending.slot != bSlot {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_PENDING_MISSING")
+	}
+
+	f.parent.Lock()
+	if f.parent.Unlocked() {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_NOT_REAL")
+	}
+	if f.app.session != f.parent || f.app.generation != generation {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_BOUNDARY_CHANGED")
+	}
+	if _, ok := f.app.readLocalVaultFileSession(aScope); ok {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CACHE_DELIVERED")
+	}
+	if len(f.app.localVaultFiles.sessionSlots) != 0 ||
+		f.app.localVaultFiles.sessionParent != nil ||
+		f.app.localVaultFiles.sessionGeneration != 0 {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_REGISTRY_RETAINED")
+	}
+	if !pending.canceled || pending.slot.operation != nil || pending.slot.session != nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_PENDING_RETAINED")
+	}
+	if aSlot.session != nil || aSlot.summary.VaultID != "" || len(aSlot.summary.Items) != 0 {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_SUMMARY_RETAINED")
+	}
+	if _, ok := f.app.readLocalVaultFileSession(bScope); ok {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_SIBLING_CACHE_DELIVERED")
+	}
+	if f.app.localVaultFiles.sessionParent != nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_REBOUND")
+	}
+	if _, err := aSession.Summary(); err == nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CHILD_READABLE")
+	}
+	if _, err := bSession.Summary(); err == nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_SIBLING_READABLE")
+	}
+	q.drain(t)
+	if _, ok := f.app.readLocalVaultFileSession(aScope); ok ||
+		len(f.app.localVaultFiles.sessionSlots) != 0 ||
+		f.app.localVaultFiles.sessionParent != nil {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CACHE_REVIVED")
+	}
+}

@@ -58,18 +58,31 @@ func (a *App) localVaultFileSessionScopeFor(ref localVaultFileRef) (localVaultFi
 	return localVaultFileSessionScope{configPath: ref.path, vaultID: ref.vaultID, backendRoot: backendRoot}, true
 }
 
+// localVaultFileSessionParentCurrent uses the existing Session boundary. It
+// does not create a separate authority flag, take App state locks or attempt a
+// reverse parent lock; a busy Session.mu keeps Unlocked's established
+// non-blocking behavior.
+func (a *App) localVaultFileSessionParentCurrent() bool {
+	return a.session != nil && a.session.Unlocked()
+}
+
 // syncLocalVaultFileSessions is the lazy generation/parent boundary. It keeps
 // the registry from surviving an App generation or parent change even when the
 // caller is not App.Lock; App.Lock also calls clearLocalVaultFileSessions
-// explicitly at its own established boundary.
+// explicitly at its own established boundary. A parent that has locked itself
+// without changing its pointer or the App generation is not rebound as a valid
+// sessionParent.
 func (a *App) syncLocalVaultFileSessions() {
 	state := &a.localVaultFiles
-	if state.sessionParent == a.session && state.sessionGeneration == a.generation {
+	usable := a.localVaultFileSessionParentCurrent()
+	if usable && state.sessionParent == a.session && state.sessionGeneration == a.generation {
 		return
 	}
 	a.clearLocalVaultFileSessions()
-	state.sessionParent = a.session
-	state.sessionGeneration = a.generation
+	if usable {
+		state.sessionParent = a.session
+		state.sessionGeneration = a.generation
+	}
 }
 
 // clearLocalVaultFileSessions cancels every pending operation, detaches every
@@ -92,15 +105,16 @@ func (a *App) clearLocalVaultFileSessions() {
 // into the launched worker and cleared there; they are not stored in the slot
 // or the operation.
 func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, password, key []byte) *localVaultFileSessionOperation {
-	if a.session == nil || !a.session.Unlocked() || scope.configPath == "" ||
+	a.syncLocalVaultFileSessions()
+	if !a.localVaultFileSessionParentCurrent() || scope.configPath == "" ||
 		scope.vaultID == "" || scope.backendRoot == "" {
+		a.clearLocalVaultFileSessions()
 		return nil
 	}
 	_, currentRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
 	if currentRoot != scope.backendRoot {
 		return nil
 	}
-	a.syncLocalVaultFileSessions()
 	state := &a.localVaultFiles
 	slot := state.sessionSlots[scope]
 	if slot != nil && (slot.parent != a.session || slot.appGeneration != a.generation) {
@@ -170,7 +184,7 @@ func (a *App) openLocalVaultFileSessionCandidate(op *localVaultFileSessionOperat
 // its summary dropped; it can never remove or revive a later generation.
 func (a *App) adoptLocalVaultFileSessionCandidate(op *localVaultFileSessionOperation, candidate *vaultfileclient.LocalGenesisSession, summary vaultfileclient.LocalGenesisBaseline) {
 	a.syncLocalVaultFileSessions()
-	valid := candidate != nil && op != nil && !op.canceled && op.slot != nil &&
+	valid := a.localVaultFileSessionParentCurrent() && candidate != nil && op != nil && !op.canceled && op.slot != nil &&
 		op.slot.operation == op && op.slot.sequence == op.sequence &&
 		op.slot.scope == op.scope && op.slot.parent == op.parent &&
 		op.slot.appGeneration == op.generation &&
@@ -249,9 +263,17 @@ func (a *App) retireLocalVaultFileSessionSlot(slot *localVaultFileSessionSlot) {
 }
 
 // readLocalVaultFileSession returns only the bounded summary retained for the
-// current slot. It does not hand out a token, handle, identity or database.
+// current slot. It is a cache getter: it does not re-read the frozen manifest
+// or key material and does not call the opaque wrapper's Summary. Fresh
+// verification remains wrapper.Summary. It does not hand out a token, handle,
+// identity or database, and it stops delivery once the current parent Session
+// reports itself locked.
 func (a *App) readLocalVaultFileSession(scope localVaultFileSessionScope) (vaultfileclient.LocalGenesisBaseline, bool) {
 	a.syncLocalVaultFileSessions()
+	if !a.localVaultFileSessionParentCurrent() {
+		a.clearLocalVaultFileSessions()
+		return vaultfileclient.LocalGenesisBaseline{}, false
+	}
 	slot := a.localVaultFiles.sessionSlots[scope]
 	if slot == nil || slot.session == nil || slot.parent != a.session ||
 		slot.appGeneration != a.generation {
@@ -261,7 +283,12 @@ func (a *App) readLocalVaultFileSession(scope localVaultFileSessionScope) (vault
 	if currentRoot != scope.backendRoot {
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
-	return localVaultFileSessionSummaryClone(slot.summary), true
+	summary := localVaultFileSessionSummaryClone(slot.summary)
+	if !a.localVaultFileSessionParentCurrent() {
+		a.clearLocalVaultFileSessions()
+		return vaultfileclient.LocalGenesisBaseline{}, false
+	}
+	return summary, true
 }
 
 func localVaultFileSessionSummaryClone(summary vaultfileclient.LocalGenesisBaseline) vaultfileclient.LocalGenesisBaseline {
