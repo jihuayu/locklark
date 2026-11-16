@@ -30,9 +30,15 @@ const CodePolicyCheckpointFailed = "policy_checkpoint_failed"
 
 // PolicyCheckpoint is the caller's already-trusted policy state: the policy
 // sequence and its digest (PolicyDigest) together with the owner root that
-// owns it. A checkpoint is derived out of band, from a trusted sharing or
-// pairing exchange or from recovery; this package neither creates nor infers
-// one. A PolicyCheckpoint is caller-owned: VerifyPolicyCheckpoint reads its
+// owns it. A checkpoint can come from a trusted sharing, pairing or recovery
+// exchange, or from VerifyGenesis given an independently pinned genesis owner
+// root. VerifyPolicyCheckpoint requires a caller-trusted checkpoint; it does
+// not infer one from the file it checks. VerifyGenesis authenticates the
+// genesis root policy proof and current content signature against that pin,
+// without proving remote freshness, VUK or KDBX readability, recovery or a
+// server-side grant.
+//
+// A PolicyCheckpoint is caller-owned: VerifyPolicyCheckpoint reads its
 // fields and the bytes of OwnerRootPublicKey and PolicyDigest during the
 // call and does not retain a pointer or slices to it after the call returns;
 // the verifier clones PolicyDigest internally, so that clone is the only
