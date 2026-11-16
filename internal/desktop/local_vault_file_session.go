@@ -2,7 +2,6 @@ package desktop
 
 import (
 	"context"
-	"errors"
 	"sync"
 
 	"github.com/jihuayu/locklark/internal/personal"
@@ -404,15 +403,25 @@ type localVaultFileSessionSlot struct {
 	closeTail *localVaultFileCloseTail
 }
 
+// localVaultFileCloseResult is the finite cumulative outcome of a tracked
+// adopted-wrapper Close chain. No raw error string or object is retained.
+type localVaultFileCloseResult uint8
+
+const (
+	localVaultFileCloseResultUnknown localVaultFileCloseResult = iota
+	localVaultFileCloseResultSucceeded
+	localVaultFileCloseResultFailed
+)
+
 // localVaultFileCloseTail is the immutable completion record for one adopted
 // wrapper's real Close. The prior tail captured at detach must finish before
 // this node publishes its cumulative finite result and closes done. Only the
-// launched worker writes err; readers first wait for done. The node retains no
-// wrapper, factor, key, kit, token, handle, App or slot pointer.
+// launched worker writes result; readers first wait for done. The node retains
+// no wrapper, factor, key, kit, token, handle, App or slot pointer.
 type localVaultFileCloseTail struct {
-	prior *localVaultFileCloseTail
-	done  chan struct{}
-	err   error
+	prior  *localVaultFileCloseTail
+	done   chan struct{}
+	result localVaultFileCloseResult
 }
 
 // localVaultFileCloseTailFinished reports whether this tail and therefore every
@@ -458,12 +467,17 @@ func (a *App) detachLocalVaultFileSessionWrapper(slot *localVaultFileSessionSlot
 			pause()
 		}
 		closeErr := wrapper.Close()
-		var priorErr error
+		result := localVaultFileCloseResultSucceeded
+		if closeErr != nil {
+			result = localVaultFileCloseResultFailed
+		}
 		if prior != nil {
 			<-prior.done
-			priorErr = prior.err
+			if prior.result != localVaultFileCloseResultSucceeded {
+				result = localVaultFileCloseResultFailed
+			}
 		}
-		tail.err = errors.Join(priorErr, closeErr)
+		tail.result = result
 		close(tail.done)
 	})
 	return tail

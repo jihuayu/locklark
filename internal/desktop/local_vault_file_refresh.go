@@ -313,12 +313,13 @@ func (a *App) completeLocalVaultFileRefresh(op *localVaultFileRefreshOperation, 
 	case localVaultFileRefreshOutcomeFailed:
 		clearLocalVaultFileSessionSummary(&result.summary)
 		if current {
-			// The client contract already terminally closed this exact wrapper.
-			// Only while it is still the current exact wrapper may its cache be
-			// cleared and a finite failure recorded.
-			op.slot.session = nil
-			clearLocalVaultFileSessionSummary(&op.slot.summary)
-			op.slot.refresh = nil
+			// Summary failure may set the wrapper terminal while an earlier
+			// internal closer is still waiting for the real child Close. While
+			// this is still the current exact adopted wrapper, detach it through
+			// the tracked helper so the slot retains a joinable close tail.
+			// Only this exact current wrapper is detached; stale or cancelled
+			// borrowed reads never reach this branch and never Close a child.
+			a.detachLocalVaultFileSessionWrapper(op.slot)
 			if viewCurrent {
 				state.items = nil
 				state.viewVerification = localVaultFileViewFailed

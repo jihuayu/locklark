@@ -117,7 +117,7 @@ func TestDesktopLocalVaultSessionAdoptedCloseTailInheritedAcrossAppGeneration(t 
 	close(closeRelease)
 	awaitLocalVaultSignal(t, closeWorker, "LOCAL_CLOSE_TAIL_CLOSE_WORKER_STUCK")
 	waitLocalVaultFileCloseTail(t, tail)
-	if tail.err != nil {
+	if tail.result != localVaultFileCloseResultSucceeded {
 		t.Fatal("LOCAL_CLOSE_TAIL_UNCLEAN_PHYSICAL_CLOSE")
 	}
 	if _, err := aWrapper.Summary(); err == nil {
@@ -194,7 +194,7 @@ func TestDesktopLocalVaultSessionAdoptedCloseTailChainsPriorClose(t *testing.T) 
 	awaitLocalVaultSignal(t, firstCloseWorker, "LOCAL_CLOSE_CHAIN_FIRST_CLOSE_STUCK")
 	awaitLocalVaultSignal(t, secondCloseWorker, "LOCAL_CLOSE_CHAIN_SECOND_CLOSE_STUCK")
 	waitLocalVaultFileCloseTail(t, secondTail)
-	if secondTail.err != nil {
+	if secondTail.result != localVaultFileCloseResultSucceeded {
 		t.Fatal("LOCAL_CLOSE_CHAIN_UNCLEAN_CUMULATIVE_CLOSE")
 	}
 	if _, err := firstWrapper.Summary(); err == nil {
