@@ -16,8 +16,9 @@ import (
 // base against a caller-persisted G hash and this Session's current custody.
 // The full recovery archive, independent kit, local owner slot and recovery
 // slot are verified again. The returned projection is public metadata only.
-// It proves a locally recorded readback/Ack, not that req.Name is still the
-// remote head, that its revision is fresh, or that a SaaS grant exists. The
+// It verifies an exact local generation-0 baseline, not its origin: the same
+// State shape can be initialized without an Ack. It does not prove that
+// req.Name is the remote head, its revision is fresh, or a SaaS grant exists. The
 // caller must supply the original G hash from an independent durable record;
 // neither the journal nor the G itself may supply that expected value.
 func (s *Session) VerifyAckedVaultFileGenesis(req VaultFileGenesisRequest, expectedGHash, password, key, recoveryMaterial []byte) (VaultFileGenesisPublic, error) {
