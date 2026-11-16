@@ -44,8 +44,9 @@ local companion before any backend Create, then uses the Dir backend's
 claim/readback/Ack path. LOCAL_BASELINE reports a verified local genesis base
 with remote_freshness UNVERIFIED, not a current grant or remote head. Status and
 open-baseline accept the original create config after that local Ack.
-Create reserves config plus ".baseline" and the backend namespace. Its paths
-must differ even by case, including on case-sensitive filesystems.
+Create reserves config plus ".baseline" and the backend namespace. It rejects
+paths differing only by case or canonical Unicode (NFC) normalization, even
+on filesystems where those spellings are distinct.
 
 Status reads only the existing configured local journal's contents and prints
 exactly one of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW

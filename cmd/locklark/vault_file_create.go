@@ -20,6 +20,7 @@ import (
 	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"golang.org/x/term"
+	"golang.org/x/text/unicode/norm"
 )
 
 // This provisional manifest is deliberately distinct from the v1 resume
@@ -231,7 +232,7 @@ func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateMani
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
 		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
 		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) ||
-		!vaultFileCreateCasefoldSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
+		!vaultFileCreateNormalizedSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
 	}
 	if requireID {
@@ -255,17 +256,18 @@ func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateMani
 	return true
 }
 
-// Missing leaves cannot be compared with os.SameFile. Reserve case-only names
-// conservatively on every filesystem, after resolving each existing parent.
-// This also reserves the backend namespace before its first directory exists.
-func vaultFileCreateCasefoldSeparate(backendRoot string, paths ...string) bool {
+// Missing leaves cannot be compared with os.SameFile. Reserve case-only and
+// canonically equivalent Unicode names on every filesystem, after resolving
+// each existing parent. This also reserves the backend namespace before its
+// first directory exists.
+func vaultFileCreateNormalizedSeparate(backendRoot string, paths ...string) bool {
 	canonical := make([]string, 0, len(paths))
 	for _, path := range paths {
 		resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path))
 		if err != nil {
 			return false
 		}
-		leaf := filepath.Join(resolvedParent, filepath.Base(path))
+		leaf := norm.NFC.String(filepath.Join(resolvedParent, filepath.Base(path)))
 		for _, prior := range canonical {
 			if strings.EqualFold(leaf, prior) {
 				return false
@@ -277,7 +279,7 @@ func vaultFileCreateCasefoldSeparate(backendRoot string, paths ...string) bool {
 	if err != nil {
 		return false
 	}
-	namespace := filepath.Join(resolvedRootParent, filepath.Base(backendRoot), "vaultfile-backend")
+	namespace := norm.NFC.String(filepath.Join(resolvedRootParent, filepath.Base(backendRoot), "vaultfile-backend"))
 	for _, leaf := range canonical {
 		for ancestor := leaf; ; ancestor = filepath.Dir(ancestor) {
 			if strings.EqualFold(ancestor, namespace) {
