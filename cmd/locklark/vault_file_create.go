@@ -192,6 +192,10 @@ func readVaultFileCreateManifest(path string) (vaultFileCreateManifest, bool, er
 }
 
 func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest, requireID bool) bool {
+	return validVaultFileCreateManifestPhase(path, manifest, requireID, true)
+}
+
+func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateManifest, requireID, journalMustBeNew bool) bool {
 	if manifest.Version != 1 || manifest.Kind != vaultFileCreateKind ||
 		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
@@ -215,7 +219,7 @@ func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest,
 	if separateVaultFileStatusState(manifest.BackendRoot, path, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
 		return false
 	}
-	if teamfiles.CheckNew(manifest.Journal) != nil {
+	if journalMustBeNew && teamfiles.CheckNew(manifest.Journal) != nil {
 		return false
 	}
 	return true
