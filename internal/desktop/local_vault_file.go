@@ -73,6 +73,11 @@ type localVaultFileState struct {
 	// staged. It is parameterless, nil in production and captured before
 	// launch; it never receives a factor, key, handle or capability.
 	refreshSummaryPauseForTest func()
+	// sessionAdoptedClosePauseForTest runs in the tracked-close worker
+	// immediately before the real adopted wrapper Close. It is parameterless,
+	// nil in production and captured on the UI path before launch; it never
+	// receives a factor, key, kit, token, handle or capability.
+	sessionAdoptedClosePauseForTest func()
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
