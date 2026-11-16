@@ -40,6 +40,7 @@ UNAVAILABLE = "unavailable"
 # percent-encoding, so this canonical byte pattern also covers those forms.
 RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
+CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
 
 class AcceptanceFailure(Exception):
@@ -804,6 +805,7 @@ class Acceptance:
 
     def run(self):
         success = False
+        close_failure = None
         try:
             self.setup()
             if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
@@ -880,12 +882,17 @@ class Acceptance:
                     except Exception:
                         pass
             finally:
+                scenario_failure = not success
                 try:
                     self.close()
+                except Exception:
+                    # A close failure is its own fixed cleanup outcome, never
+                    # a success and never an exception-detail projection. The
+                    # barrier still runs in finish below.
+                    close_failure = "close"
+                    success = False
                 finally:
-                    # Finalize inside finally so a scenario, reader or close
-                    # failure still runs the recovery-kit barrier scan.
-                    result = self.finish(success)
+                    result = self.finish(success, close_failure, scenario_failure)
         return result
 
     @staticmethod
@@ -894,7 +901,7 @@ class Acceptance:
         with os.fdopen(os.open(path, flags, 0o600), "w") as output:
             output.write("\n".join(lines) + "\n")
 
-    def finish(self, success):
+    def finish(self, success, cleanup_failure=None, scenario_failure=None):
         """Write the transcript, run the barrier, then project fixed lines."""
         try:
             if getattr(self, "foreign_observations", None):
@@ -909,6 +916,11 @@ class Acceptance:
             failure_line = ("Desktop native acceptance failed at " + self.stage + " [" +
                             self.reason + "] action=" + self.native_action)
             otp_line = getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"
+            cleanup_line = CLEANUP_FAILURE_PREFIX + cleanup_failure if cleanup_failure else None
+            # When a close failure forces success=False, the earlier scenario
+            # outcome is still known separately, so only a real scenario
+            # failure contributes its fixed line.
+            scenario_failed = (not success) if scenario_failure is None else scenario_failure
             privacy = "passed"
             # The provisional transcript carries every controller phase and
             # the fixed outcome before the success label is known. It is what
@@ -916,8 +928,10 @@ class Acceptance:
             provisional = ["Desktop native private state: " + str(self.state),
                            "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
                            "Desktop native private artifact and controller scan: pending"]
-            if not success:
+            if scenario_failed:
                 provisional.append(failure_line)
+            if cleanup_line:
+                provisional.append(cleanup_line)
             provisional.append(otp_line)
             controller = self.state / "controller.log"
             try:
@@ -925,7 +939,8 @@ class Acceptance:
             except Exception:
                 privacy = "controller-write"
             # The recovery-kit syntax scan is part of scan(), so it runs here
-            # on success, scenario failure and transcript-write failure alike.
+            # on success, scenario failure, close failure and transcript-write
+            # failure alike.
             try:
                 self.scan()
             except Exception:
@@ -939,8 +954,14 @@ class Acceptance:
                 # enter the transcript. A rewrite failure also yields no PASS.
                 final = ["Desktop native private state: " + str(self.state),
                          "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
-                         "Desktop native private artifact and controller scan: passed",
-                         success_label if success else failure_line, otp_line]
+                         "Desktop native private artifact and controller scan: passed"]
+                if success:
+                    final.append(success_label)
+                elif scenario_failed:
+                    final.append(failure_line)
+                if cleanup_line:
+                    final.append(cleanup_line)
+                final.append(otp_line)
                 try:
                     self.write_transcript(controller, self.output_lines + final, exclusive=False)
                 except Exception:
@@ -949,15 +970,20 @@ class Acceptance:
                      "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max)]
             if privacy == "passed":
                 lines.append("Desktop native private artifact and controller scan: passed")
-                lines.append(success_label if success else failure_line)
+                if success:
+                    lines.append(success_label)
+                elif scenario_failed:
+                    lines.append(failure_line)
             else:
                 lines.append("Desktop native privacy scan failed")
                 lines.append(PRIVACY_FAILURE_PREFIX + privacy)
-                if not success:
+                if scenario_failed:
                     lines.append(failure_line)
+            if cleanup_line:
+                lines.append(cleanup_line)
             lines.append(otp_line)
             self.emit_lines(lines)
-            return 0 if success and privacy == "passed" else 1
+            return 0 if success and privacy == "passed" and cleanup_line is None else 1
         except Exception:
             # Fixed fallback only; never include a kit, matched value or path.
             try:

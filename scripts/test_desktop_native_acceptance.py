@@ -1093,6 +1093,7 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
     """Runner component tests only; they use no real GUI or product kit."""
 
     KIT = "LLR2-" + "A" * 52 + "-" + "B" * 52
+    SYNTHETIC_ERROR = "Synthetic-Close-Error-0xDEADBEEF"
 
     def acceptance(self):
         root = tempfile.TemporaryDirectory()
@@ -1151,6 +1152,41 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
 
     def test_unregistered_kit_in_controller_transcript_fails_runner(self):
         self.assert_no_success(*self.run_success("controller"))
+
+    def run_close_failure(self, include_kit=False):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        acceptance.close = Mock(side_effect=RuntimeError(self.SYNTHETIC_ERROR))
+        if include_kit:
+            acceptance.log.write("failure " + self.KIT)
+            acceptance.log.flush()
+        with patch("builtins.print") as output, \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_close_failure_is_fixed_cleanup_not_pass(self):
+        acceptance, code, lines = self.run_close_failure()
+        text = "\n".join(lines)
+        self.assertEqual(code, 1)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertNotIn(self.SYNTHETIC_ERROR, text)
+        self.assertNotIn(self.KIT, text)
+        self.assertIn(desktop.CLEANUP_FAILURE_PREFIX + "close", lines)
+        self.assertIn("Desktop native private artifact and controller scan: passed", lines)
+        # A close-only failure does not fabricate a scenario failure line.
+        self.assertNotIn("Desktop native acceptance failed at", text)
+
+    def test_close_failure_still_runs_recovery_kit_barrier(self):
+        acceptance, code, lines = self.run_close_failure(include_kit=True)
+        text = "\n".join(lines)
+        self.assertEqual(code, 1)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertNotIn(self.SYNTHETIC_ERROR, text)
+        self.assertNotIn(self.KIT, text)
+        self.assertIn(desktop.CLEANUP_FAILURE_PREFIX + "close", lines)
+        self.assertIn("Desktop native privacy scan failed", lines)
+        self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "recovery-kit", lines)
 
 
 if __name__ == "__main__":
