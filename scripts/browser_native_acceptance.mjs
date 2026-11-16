@@ -240,6 +240,8 @@ if (rotationRequested) {
     !checkoutFrames && !edgeManagerInstall && !process.env.LOCKLARK_TEST_SHARED_CLIPBOARD &&
     !process.env.LOCKLARK_TEST_BROWSER_PARITY && !process.env.LOCKLARK_TEST_FAILURE_STAGE,
   "Rotation mode requires the normal Linux Chromium journey");
+  assert([undefined, "", "1"].includes(process.env.LOCKLARK_TEST_POPUP_VAULT),
+    "Rotation popup-vault mode requires the exact opt-in");
   assert(process.env.LOCKLARK_BROWSER_REQUIRE_PREBUILT === "1" &&
     process.env.LOCKLARK_BROWSER_FIXTURE && isAbsolute(process.env.LOCKLARK_BROWSER_FIXTURE) && register,
   "Rotation mode requires same-run prebuilt inputs");
@@ -334,6 +336,8 @@ let stage = "fixture",
 // Once a generated password has existed, text inspection alone cannot prove
 // later password-input pixels safe. This invocation never resumes screenshots.
 let rotationScreenshotsBlocked = false;
+let popupVaultReadyProof = false;
+let normalReadyProof = false;
 const screenshotsAllowed = () => !rotationScreenshotsBlocked && browserScreenshotsAllowed(stage);
 startupMarkup(1);
 // Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
@@ -3206,6 +3210,7 @@ try {
     }
     phase("post-repair:route-refused");
     console.log("PASS: real popup refresh re-anchored the normal QuickFill=false route and its native refusal disclosed nothing");
+    popupVaultReadyProof = true;
   }
   await blank();
   popup = await openPopup();
@@ -3360,9 +3365,15 @@ try {
     pageEval: (fn, arg) => page.evaluate(fn, arg),
   };
   if (!process.env.LOCKLARK_TEST_BROWSER_PARITY) {
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
       await acceptBrowserSave(acceptanceDriver);
+      normalReadyProof = true;
+    }
     if (rotationRequested) {
+      assert(normalReadyProof &&
+        ([undefined, ""].includes(process.env.LOCKLARK_TEST_POPUP_VAULT) ||
+          (process.env.LOCKLARK_TEST_POPUP_VAULT === "1" && popupVaultReadyProof)),
+      "Rotation requires completed normal-mode proofs");
       rotationScreenshotsBlocked = true;
       const closePopups = async () => {
         if (lastPopup) { await lastPopup.dismiss(); lastPopup = null; }

@@ -6,8 +6,9 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
+import vm from "node:vm";
 import { createBrowserRotationSite } from "./browser_rotation_site.mjs";
 import { assertPrivateArtifacts, browserScreenshotsAllowed, captureControllerOutput,
   fixtureCanaries, registerRotationValue, ROTATION_OUTPUT_FAILURE } from "./browser_save_acceptance.mjs";
@@ -322,4 +323,70 @@ test("static rotation hook runs once and keeps the remaining invocation free of 
     source.includes("!rotationScreenshotsBlocked && browserScreenshotsAllowed(stage)") &&
     (source.match(/screenshotsAllowed\(\)/g) || []).length === 3,
     "Rotation must latch screenshot suppression across every later failure path");
+});
+
+test("rotation ready mode rejects non-exact popup-vault overrides before startup", () => {
+  const source = readFileSync(new URL("./browser_native_acceptance.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("if (rotationRequested) {");
+  const end = source.indexOf("\n// After every route/Edge", start);
+  assert(start >= 0 && end > start, "Rotation startup guard must precede launch");
+  const run = (popupVault) => vm.runInNewContext(source.slice(start, end), {
+    assert, isAbsolute, rotationRequested: true, browserName: "chromium", routeDetailRead: false,
+    checkoutFrames: false, edgeManagerInstall: false, register: "/owned-prebuilt-register",
+    process: { platform: "linux", env: { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
+      LOCKLARK_BROWSER_FIXTURE: "/owned-prebuilt-fixture", LOCKLARK_TEST_POPUP_VAULT: popupVault } },
+  });
+  for (const popupVault of [undefined, "", "1"]) assert.doesNotThrow(() => run(popupVault));
+  for (const popupVault of ["0", "false", "true", "2"])
+    assert.throws(() => run(popupVault), { message: "Rotation popup-vault mode requires the exact opt-in" });
+});
+
+test("rotation ready proof requires the actual normal save and optional popup prelude", () => {
+  const source = readFileSync(new URL("./browser_native_acceptance.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("assert(normalReadyProof &&");
+  const end = source.indexOf(";", start) + 1;
+  assert(start >= 0 && end > start, "Rotation entry must check completed runtime proofs");
+  const run = (popupVault, normalReadyProof, popupVaultReadyProof) =>
+    vm.runInNewContext(source.slice(start, end), { assert, normalReadyProof, popupVaultReadyProof,
+      process: { env: { LOCKLARK_TEST_POPUP_VAULT: popupVault } } });
+  for (const popupVault of [undefined, ""]) {
+    assert.doesNotThrow(() => run(popupVault, true, false));
+    assert.throws(() => run(popupVault, false, true), { message: "Rotation requires completed normal-mode proofs" });
+  }
+  assert.doesNotThrow(() => run("1", true, true));
+  for (const [normal, popup] of [[false, false], [false, true], [true, false]])
+    assert.throws(() => run("1", normal, popup), { message: "Rotation requires completed normal-mode proofs" });
+  for (const popupVault of ["0", "false"])
+    assert.throws(() => run(popupVault, true, true), { message: "Rotation requires completed normal-mode proofs" });
+});
+
+test("rotation ready assignments follow the complete real prelude and save returns", () => {
+  const source = readFileSync(new URL("./browser_native_acceptance.mjs", import.meta.url), "utf8");
+  assert((source.match(/popupVaultReadyProof = true/g) || []).length === 1 &&
+    (source.match(/normalReadyProof = true/g) || []).length === 1,
+    "Runtime proofs must each have a single successful assignment");
+  const start = source.indexOf("if (process.env.LOCKLARK_TEST_POPUP_VAULT) {");
+  const ordered = [
+    'assert(didCommit, "Popup vault commits are the quick-fill pairing proof")',
+    'phase("native-disconnect")', 'await popup.click("#disconnect")',
+    'phase("native-reconnect")', 'click_label: "确认连接此扩展"',
+    'phase("post-repair:route-reject")', 'input([{ click_label: "拒绝本次操作" }])',
+    "routeWiped(observation)", "browserKey(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX)",
+    '"Rejected route tab was not closed"', 'phase("post-repair:route-refetched")',
+    '"Refused popup not ready"', '"Refused route opened the detail view"',
+    '"Refused route disclosed a synthetic fixture value"', "popupVaultReadyProof = true",
+  ];
+  let previous = start;
+  assert(start >= 0, "Existing popup-vault prelude must remain present");
+  for (const token of ordered) {
+    const position = source.indexOf(token, previous);
+    assert(position > previous, "Popup proof must follow every original native repair and route-wipe assertion");
+    previous = position;
+  }
+  assert.match(source, /await acceptBrowserSave\(acceptanceDriver\);\s+normalReadyProof = true;/);
+  const normal = source.indexOf("normalReadyProof = true");
+  const guard = source.indexOf("assert(normalReadyProof &&", normal);
+  const rotation = source.indexOf("await acceptBrowserRotation(", guard);
+  assert(normal >= 0 && guard > normal && rotation > guard,
+    "Rotation may start only after successful normal save and the runtime proof guard");
 });
