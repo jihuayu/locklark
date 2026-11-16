@@ -141,28 +141,60 @@ func TestVaultFileOwnerCapsuleRejectsMalformedCollection(t *testing.T) {
 		t.Fatal("OWNER_CAPSULE_SHORT_SEED_PUBLIC_ACCEPTED")
 	}
 	invalid[0].RecoverySigningSeed = bytes.Clone(record.RecoverySigningSeed)
-	invalid[0].VaultID = "not-a-vault-id"
-	if validVaultFileOwners(invalid) || func() bool { _, err := vaultFileOwnerPublic(invalid[0]); return err == nil }() {
-		t.Fatal("OWNER_CAPSULE_BAD_ID_ACCEPTED")
-	}
-	invalid[0].VaultID = record.VaultID
 	clear(invalid[0].RecoveryAgeIdentity)
 	invalid[0].RecoveryAgeIdentity = bytes.Repeat([]byte{'a'}, maxVaultFileOwnerAgeBytes+1)
 	if validVaultFileOwners(invalid) {
 		t.Fatal("OWNER_CAPSULE_AGE_BYTE_BOUND_ACCEPTED")
 	}
-	other, err := newVaultFileOwnerRecord()
-	if err != nil {
-		t.Fatal("OWNER_CAPSULE_GENERATE_FAILED")
+	for _, field := range []string{"vault", "root", "device"} {
+		bad := cloneVaultFileOwners([]vaultFileOwnerRecord{record})
+		switch field {
+		case "vault":
+			bad[0].VaultID = "not-a-vault-id"
+		case "root":
+			bad[0].OwnerRootKeyID = "not-a-root-id"
+		case "device":
+			bad[0].RecoveryDeviceID = "not-a-device-id"
+		}
+		if validVaultFileOwners(bad) {
+			t.Fatal("OWNER_CAPSULE_BAD_ID_ACCEPTED")
+		}
+		if _, err := vaultFileOwnerPublic(bad[0]); err == nil {
+			t.Fatal("OWNER_CAPSULE_BAD_ID_PUBLIC_ACCEPTED")
+		}
+		clearVaultFileOwners(bad)
 	}
-	defer clearVaultFileOwners([]vaultFileOwnerRecord{other})
-	unsorted := []vaultFileOwnerRecord{record, other}
-	sort.Slice(unsorted, func(i, j int) bool { return unsorted[i].VaultID > unsorted[j].VaultID })
+	unsorted := cloneVaultFileOwners([]vaultFileOwnerRecord{record, record})
+	defer clearVaultFileOwners(unsorted)
+	unsorted[0].VaultID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	unsorted[1].VaultID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if validVaultFileOwners(unsorted) {
 		t.Fatal("OWNER_CAPSULE_UNSORTED_ACCEPTED")
 	}
 	tooMany := make([]vaultFileOwnerRecord, maxVaultFileOwnerRecords+1)
 	if validVaultFileOwners(tooMany) {
 		t.Fatal("OWNER_CAPSULE_COUNT_LIMIT_ACCEPTED")
+	}
+}
+
+func TestVaultFileOwnerCapsuleAllowsIndependentVaultKeyReuse(t *testing.T) {
+	record, err := newVaultFileOwnerRecord()
+	if err != nil {
+		t.Fatal("OWNER_CAPSULE_GENERATE_FAILED")
+	}
+	defer clearVaultFileOwners([]vaultFileOwnerRecord{record})
+	records := cloneVaultFileOwners([]vaultFileOwnerRecord{record, record})
+	defer clearVaultFileOwners(records)
+	records[0].VaultID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	records[1].VaultID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if !validVaultFileOwners(records) {
+		t.Fatal("OWNER_CAPSULE_CROSS_VAULT_REUSE_REJECTED")
+	}
+	if _, err := vaultFileOwnersDigest(records); err != nil {
+		t.Fatal("OWNER_CAPSULE_CROSS_VAULT_DIGEST_REJECTED")
+	}
+	records[1].RecoverySigningSeed = bytes.Clone(records[1].OwnerRootSeed)
+	if validVaultFileOwners(records) {
+		t.Fatal("OWNER_CAPSULE_SAME_RECORD_KEY_REUSE_ACCEPTED")
 	}
 }

@@ -63,8 +63,6 @@ func validVaultFileOwners(records []vaultFileOwnerRecord) bool {
 		return false
 	}
 	previous := ""
-	publicKeys := make(map[string]bool, len(records)*2)
-	recipients := make(map[string]bool, len(records))
 	for _, record := range records {
 		if !idOK(record.VaultID) || record.VaultID <= previous ||
 			!idOK(record.OwnerRootKeyID) || !idOK(record.RecoveryDeviceID) ||
@@ -79,17 +77,12 @@ func validVaultFileOwners(records []vaultFileOwnerRecord) bool {
 		}
 		root := ed25519.NewKeyFromSeed(record.OwnerRootSeed)
 		signer := ed25519.NewKeyFromSeed(record.RecoverySigningSeed)
-		rootPublic := string(root.Public().(ed25519.PublicKey))
-		signingPublic := string(signer.Public().(ed25519.PublicKey))
-		recipient := device.Recipient().String()
-		separate := !publicKeys[rootPublic] && !publicKeys[signingPublic] &&
-			rootPublic != signingPublic && !recipients[recipient]
+		separate := !bytes.Equal(root.Public().(ed25519.PublicKey), signer.Public().(ed25519.PublicKey))
 		clear(root)
 		clear(signer)
 		if !separate {
 			return false
 		}
-		publicKeys[rootPublic], publicKeys[signingPublic], recipients[recipient] = true, true, true
 	}
 	return true
 }
