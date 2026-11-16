@@ -164,6 +164,62 @@ class ArtifactPrivacyTests(unittest.TestCase):
             self.acceptance.scan()
 
 
+class RecoveryKitBarrierScanTests(unittest.TestCase):
+    """Component scan semantics only; these do not exercise a real GUI."""
+
+    KIT = "LLR2-" + "A" * 52 + "-" + "B" * 52
+
+    def setUp(self):
+        self.private = tempfile.TemporaryDirectory()
+        self.addCleanup(self.private.cleanup)
+        self.acceptance = Acceptance.__new__(Acceptance)
+        self.acceptance.state = pathlib.Path(self.private.name)
+        self.acceptance.fixture_path = self.acceptance.state / "fixture.json"
+        # Reader-failure model: no dynamic value was registered.
+        self.acceptance.values, self.acceptance.codes = set(), set()
+        self.acceptance.privacy_failure = None
+
+    def reject(self, name, text):
+        path = self.acceptance.state / name
+        path.write_text(text)
+        self.assertNotIn(self.KIT, self.acceptance.values)
+        with self.assertRaises(AcceptanceFailure) as caught:
+            self.acceptance.scan()
+        self.assertEqual(str(caught.exception), "")
+        self.assertEqual(self.acceptance.privacy_failure, "recovery-kit")
+        return path
+
+    def test_unregistered_kit_in_native_log_is_rejected(self):
+        self.reject("native.log", "failure " + self.KIT)
+
+    def test_unregistered_kit_in_controller_transcript_is_rejected(self):
+        self.reject("controller.log", "Desktop native stage: privacy " + self.KIT)
+
+    def test_escaped_kit_forms_are_rejected(self):
+        # Base32 and "-" survive JSON and URL escaping unchanged.
+        for encoded in (json.dumps(self.KIT), json.dumps(self.KIT)[1:-1],
+                        urllib.parse.quote(self.KIT, safe="")):
+            with self.subTest(encoding=type(encoded).__name__):
+                self.reject("native.log", "failure " + encoded)
+
+    def test_incomplete_or_invalid_kit_is_allowed(self):
+        for index, value in enumerate((
+                "LLR2-" + "A" * 52,
+                "LLR2-" + "A" * 51 + "-" + "B" * 52,
+                "LLR2-" + "A" * 52 + "-" + "B" * 51,
+                "LLR2-" + "A" * 51 + "0" + "-" + "B" * 52,
+                "llr2-" + "A" * 52 + "-" + "B" * 52)):
+            with self.subTest(index=index):
+                (self.acceptance.state / "native.log").write_text(value)
+                self.assertEqual(self.acceptance.scan(), 1)
+                self.assertIsNone(self.acceptance.privacy_failure)
+
+    def test_clean_artifact_passes(self):
+        (self.acceptance.state / "native.log").write_text("Desktop native stage: privacy")
+        self.assertEqual(self.acceptance.scan(), 1)
+        self.assertIsNone(self.acceptance.privacy_failure)
+
+
 class ProbeTransportTests(unittest.TestCase):
     def acceptance(self, line=""):
         acceptance = Acceptance.__new__(Acceptance)
@@ -1031,6 +1087,181 @@ class ForeignObservationWriteIsolationTests(unittest.TestCase):
         self.assertEqual(ownership.read_text(), json.dumps([self.OBSERVATION], indent=2))
         transcript = (acceptance.state / "controller.log").read_text()
         self.assertIn("Desktop native private artifact and controller scan: passed", transcript)
+
+
+class RecoveryKitRunnerBarrierTests(unittest.TestCase):
+    """Runner component tests only; they use no real GUI or product kit."""
+
+    KIT = "LLR2-" + "A" * 52 + "-" + "B" * 52
+    SYNTHETIC_ERROR = "Synthetic-Close-Error-0xDEADBEEF"
+
+    def acceptance(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.state = pathlib.Path(root.name)
+        acceptance.diagnostics = acceptance.state / "diagnostics"
+        acceptance.diagnostics.mkdir()
+        acceptance.fixture_binary = acceptance.state / "fixture-observer"
+        acceptance.env, acceptance.host = {}, pathlib.Path("/synthetic-native-host")
+        acceptance.fixture_path = acceptance.state / "fixture.json"
+        acceptance.log = (acceptance.state / "native.log").open("w")
+        self.addCleanup(acceptance.log.close)
+        # Reader-failure model: the dynamic kit never enters self.values.
+        acceptance.values, acceptance.codes = set(), set()
+        acceptance.privacy_failure = None
+        acceptance.started = 0
+        acceptance.stage, acceptance.reason, acceptance.native_action = "privacy", "acceptance", "none"
+        acceptance.native_failed_index, acceptance.native_x_error_codes = None, []
+        acceptance.native_elapsed_ms, acceptance.probe_read_attempts_max = 0, 0
+        acceptance.probe_operation, acceptance.probe_elapsed_ms = "unsupported", 0
+        acceptance.probe_diagnostic, acceptance.last_native_click = {}, {}
+        acceptance.foreign_observations, acceptance.output_lines = [], []
+        acceptance.otp_copy, acceptance.otp_diagnostic = None, None
+        acceptance.phase = Mock()
+        acceptance.setup, acceptance.close = Mock(), Mock()
+        acceptance.probe, acceptance.app = Mock(), Mock()
+        acceptance.controls = Mock(return_value={})
+        acceptance.display = Mock(return_value={"present": False, "empty": True})
+        acceptance.emit = lambda message: acceptance.output_lines.append(str(message))
+        return acceptance
+
+    def run_success(self, source):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        if source == "log":
+            acceptance.log.write("failure " + self.KIT)
+            acceptance.log.flush()
+        else:
+            acceptance.output_lines.append("Desktop native stage: privacy " + self.KIT)
+        with patch("builtins.print") as output, \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def assert_no_success(self, acceptance, code, lines):
+        self.assertNotIn(self.KIT, acceptance.values)
+        self.assertEqual(code, 1)
+        self.assertNotIn(self.KIT, "\n".join(lines))
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertIn("Desktop native privacy scan failed", lines)
+        self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "recovery-kit", lines)
+
+    def test_unregistered_kit_in_native_log_fails_runner(self):
+        self.assert_no_success(*self.run_success("log"))
+
+    def test_unregistered_kit_in_controller_transcript_fails_runner(self):
+        self.assert_no_success(*self.run_success("controller"))
+
+    def run_close_failure(self, include_kit=False):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        acceptance.close = Mock(side_effect=RuntimeError(self.SYNTHETIC_ERROR))
+        if include_kit:
+            acceptance.log.write("failure " + self.KIT)
+            acceptance.log.flush()
+        with patch("builtins.print") as output, \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_close_failure_is_fixed_cleanup_not_pass(self):
+        acceptance, code, lines = self.run_close_failure()
+        text = "\n".join(lines)
+        self.assertEqual(code, 1)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertNotIn(self.SYNTHETIC_ERROR, text)
+        self.assertNotIn(self.KIT, text)
+        self.assertIn(desktop.CLEANUP_FAILURE_PREFIX + "close", lines)
+        self.assertIn("Desktop native private artifact and controller scan: passed", lines)
+        # A close-only failure does not fabricate a scenario failure line.
+        self.assertNotIn("Desktop native acceptance failed at", text)
+
+    def test_close_failure_still_runs_recovery_kit_barrier(self):
+        acceptance, code, lines = self.run_close_failure(include_kit=True)
+        text = "\n".join(lines)
+        self.assertEqual(code, 1)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertNotIn(self.SYNTHETIC_ERROR, text)
+        self.assertNotIn(self.KIT, text)
+        self.assertIn(desktop.CLEANUP_FAILURE_PREFIX + "close", lines)
+        self.assertIn("Desktop native privacy scan failed", lines)
+        self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "recovery-kit", lines)
+
+    def run_plain_success(self):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        with patch("builtins.print") as output, \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_success_writes_final_transcript_atomically(self):
+        acceptance, code, lines = self.run_plain_success()
+        self.assertEqual(code, 0)
+        self.assertTrue(any(line.startswith("PASS:") for line in lines))
+        transcript = (acceptance.state / "controller.log").read_text()
+        self.assertIn("Desktop native private artifact and controller scan: passed", transcript)
+        self.assertIn("PASS:", transcript)
+        self.assertEqual(list(acceptance.state.glob(".controller-*.tmp")), [])
+
+    def run_final_write_failure(self, mode):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        error = self.SYNTHETIC_ERROR
+        real_fdopen = desktop.os.fdopen
+        calls = []
+
+        class FailingOutput:
+            def __init__(self, raw):
+                self.raw = raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                try:
+                    self.raw.close()
+                except Exception:
+                    pass
+
+            def write(self, text):
+                if mode == "write":
+                    self.raw.write(text[:len(text) // 2])
+                else:
+                    self.raw.write(text)
+                self.raw.flush()
+                raise OSError(error)
+
+        def fdopen(fd, *args, **kwargs):
+            raw = real_fdopen(fd, *args, **kwargs)
+            calls.append(True)
+            if len(calls) == 2:
+                return FailingOutput(raw)
+            return raw
+
+        with patch("builtins.print") as output, \
+             patch.object(desktop.os, "fdopen", side_effect=fdopen), \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_final_transcript_failure_keeps_private_provisional(self):
+        for mode in ("write", "flush"):
+            with self.subTest(mode=mode):
+                acceptance, code, lines = self.run_final_write_failure(mode)
+                text = "\n".join(lines)
+                self.assertEqual(code, 1)
+                self.assertFalse(any("PASS" in line for line in lines))
+                self.assertNotIn(self.SYNTHETIC_ERROR, text)
+                self.assertNotIn(self.KIT, text)
+                self.assertIn("Desktop native privacy scan failed", lines)
+                self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "controller-write", lines)
+                transcript = (acceptance.state / "controller.log").read_text()
+                self.assertIn("Desktop native private artifact and controller scan: pending", transcript)
+                self.assertNotIn("PASS", transcript)
+                self.assertNotIn("Desktop native private artifact and controller scan: passed", transcript)
+                self.assertEqual(list(acceptance.state.glob(".controller-*.tmp")), [])
 
 
 if __name__ == "__main__":

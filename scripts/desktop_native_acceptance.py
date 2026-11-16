@@ -34,6 +34,13 @@ OTP_DIAGNOSTIC_PREFIX = "Desktop OTP failure diagnostic: "
 OTP_DIAGNOSTIC_DELTA_LIMIT = 64
 OTP_DIAGNOSTIC_LIMIT = 1024
 UNAVAILABLE = "unavailable"
+# Product encoding: newRecovery emits "LLR2-" + base32(32 bytes); the complete
+# checkpoint form is 110 characters with "-" at index 57. Base32 letters, the
+# digits 2-7 and "-" are unchanged by JSON string escaping and URL
+# percent-encoding, so this canonical byte pattern also covers those forms.
+RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
+PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
+CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
 
 class AcceptanceFailure(Exception):
@@ -102,6 +109,10 @@ class Acceptance:
         # fixed record of the first failed copy.
         self.otp_copy = None
         self.otp_diagnostic = None
+        # The recovery-kit barrier is armed before setup and close, so the
+        # upcoming local-vault-file-create scenario is covered even when its
+        # fixture reader never registers the dynamically issued kit.
+        self.privacy_failure = None
         self.log = (self.state / "native.log").open("xb")
         os.chmod(self.state / "native.log", 0o600)
 
@@ -750,6 +761,7 @@ class Acceptance:
         require(self.displays_empty())
 
     def scan(self):
+        self.privacy_failure = None
         if hasattr(self, "fixture"):
             for window in range(int(self.started) // 20, int(time.time()) // 20 + 1):
                 self.otp(window * 20)
@@ -761,11 +773,21 @@ class Acceptance:
             if not path.is_file() or path == self.fixture_path or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
                 continue
             data = path.read_bytes()
-            require(not any(value and value in data for value in patterns))
+            # Syntax-level barrier for a dynamically issued recovery kit that
+            # was never registered in self.values (for example when the
+            # fixture reader fails). A match is kept in memory only.
+            if RECOVERY_KIT_PATTERN.search(data) is not None:
+                self.privacy_failure = "recovery-kit"
+                raise AcceptanceFailure()
+            if any(value and value in data for value in patterns):
+                self.privacy_failure = "known-value"
+                raise AcceptanceFailure()
             # Codes are short: match a complete independent token, so an
             # unrelated hexadecimal ID substring cannot produce a false hit.
             for code in self.codes:
-                require(re.search(rb"(?<![A-Za-z0-9])" + code.encode() + rb"(?![A-Za-z0-9])", data) is None)
+                if re.search(rb"(?<![A-Za-z0-9])" + code.encode() + rb"(?![A-Za-z0-9])", data) is not None:
+                    self.privacy_failure = "otp-code"
+                    raise AcceptanceFailure()
             count += 1
         return count
 
@@ -783,6 +805,7 @@ class Acceptance:
 
     def run(self):
         success = False
+        close_failure = None
         try:
             self.setup()
             if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
@@ -852,45 +875,147 @@ class Acceptance:
         finally:
             # Include a value created immediately before an unrelated failure
             # in the final log scan, without changing the live source vault.
-            if hasattr(self, "fixture"):
+            try:
+                if hasattr(self, "fixture"):
+                    try:
+                        self.observe()
+                    except Exception:
+                        pass
+            finally:
+                scenario_failure = not success
                 try:
-                    self.observe()
+                    self.close()
+                except Exception:
+                    # A close failure is its own fixed cleanup outcome, never
+                    # a success and never an exception-detail projection. The
+                    # barrier still runs in finish below.
+                    close_failure = "close"
+                    success = False
+                finally:
+                    result = self.finish(success, close_failure, scenario_failure)
+        return result
+
+    @staticmethod
+    def write_transcript(path, lines, exclusive):
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+        with os.fdopen(os.open(path, flags, 0o600), "w") as output:
+            output.write("\n".join(lines) + "\n")
+
+    @staticmethod
+    def replace_transcript(path, lines):
+        """Atomically replace a transcript with a fully written private temp."""
+        fd, temp_path = tempfile.mkstemp(dir=str(path.parent),
+                                         prefix=".controller-", suffix=".tmp")
+        try:
+            try:
+                output = os.fdopen(fd, "w")
+            except Exception:
+                os.close(fd)
+                raise
+            with output:
+                output.write("\n".join(lines) + "\n")
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                # Only the file created by this call is removed. The original
+                # transcript is left untouched until the atomic replace.
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    def finish(self, success, cleanup_failure=None, scenario_failure=None):
+        """Write the transcript, run the barrier, then project fixed lines."""
+        try:
+            if getattr(self, "foreign_observations", None):
+                # Best-effort extra detail: a write failure must never replace
+                # the primary outcome or stop the fixed lines below.
+                path = self.diagnostics/"clipboard-ownership.json"
+                try:
+                    with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
+                        json.dump(self.foreign_observations,output,indent=2)
                 except Exception:
                     pass
-            self.close()
-        if self.foreign_observations:
-            # Best-effort extra detail: a write failure must never replace
-            # the primary outcome or stop the fixed lines below.
-            path = self.diagnostics/"clipboard-ownership.json"
+            failure_line = ("Desktop native acceptance failed at " + self.stage + " [" +
+                            self.reason + "] action=" + self.native_action)
+            otp_line = getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"
+            cleanup_line = CLEANUP_FAILURE_PREFIX + cleanup_failure if cleanup_failure else None
+            # When a close failure forces success=False, the earlier scenario
+            # outcome is still known separately, so only a real scenario
+            # failure contributes its fixed line.
+            scenario_failed = (not success) if scenario_failure is None else scenario_failure
+            privacy = "passed"
+            # The provisional transcript carries every controller phase and
+            # the fixed outcome before the success label is known. It is what
+            # the barrier scans, so a text PASS is never written first.
+            provisional = ["Desktop native private state: " + str(self.state),
+                           "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
+                           "Desktop native private artifact and controller scan: pending"]
+            if scenario_failed:
+                provisional.append(failure_line)
+            if cleanup_line:
+                provisional.append(cleanup_line)
+            provisional.append(otp_line)
+            controller = self.state / "controller.log"
             try:
-                with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
-                    json.dump(self.foreign_observations,output,indent=2)
+                self.write_transcript(controller, self.output_lines + provisional, exclusive=True)
+            except Exception:
+                privacy = "controller-write"
+            # The recovery-kit syntax scan is part of scan(), so it runs here
+            # on success, scenario failure, close failure and transcript-write
+            # failure alike.
+            try:
+                self.scan()
+            except Exception:
+                privacy = getattr(self, "privacy_failure", None) or "scan-error"
+            if privacy == "passed":
+                success_label = {
+                    "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
+                    "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
+                }.get(os.environ.get("LOCKLARK_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
+                # Only now, after the scan passed, may the fixed success line
+                # enter the transcript. A rewrite failure also yields no PASS.
+                final = ["Desktop native private state: " + str(self.state),
+                         "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
+                         "Desktop native private artifact and controller scan: passed"]
+                if success:
+                    final.append(success_label)
+                elif scenario_failed:
+                    final.append(failure_line)
+                if cleanup_line:
+                    final.append(cleanup_line)
+                final.append(otp_line)
+                try:
+                    self.replace_transcript(controller, self.output_lines + final)
+                except Exception:
+                    privacy = "controller-write"
+            lines = ["Desktop native private state: " + str(self.state),
+                     "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max)]
+            if privacy == "passed":
+                lines.append("Desktop native private artifact and controller scan: passed")
+                if success:
+                    lines.append(success_label)
+                elif scenario_failed:
+                    lines.append(failure_line)
+            else:
+                lines.append("Desktop native privacy scan failed")
+                lines.append(PRIVACY_FAILURE_PREFIX + privacy)
+                if scenario_failed:
+                    lines.append(failure_line)
+            if cleanup_line:
+                lines.append(cleanup_line)
+            lines.append(otp_line)
+            self.emit_lines(lines)
+            return 0 if success and privacy == "passed" and cleanup_line is None else 1
+        except Exception:
+            # Fixed fallback only; never include a kit, matched value or path.
+            try:
+                self.emit_lines(["Desktop native privacy scan failed",
+                                 PRIVACY_FAILURE_PREFIX + "finalize"])
             except Exception:
                 pass
-        success_label = {
-            "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
-            "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
-        }.get(os.environ.get("LOCKLARK_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
-        final_lines = ["Desktop native private state: " + str(self.state),
-                       "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
-                       "Desktop native private artifact and controller scan: passed",
-                       success_label
-                       if success else "Desktop native acceptance failed at " + self.stage + " [" + self.reason + "] action=" + self.native_action,
-                       getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"]
-        # Include every controller phase and the final summary in the same
-        # scan as native/probe logs and diagnostics. Raw values remain only in
-        # memory; the file contains the already public, fixed transcript.
-        controller = self.state / "controller.log"
-        try:
-            with os.fdopen(os.open(controller, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
-                output.write("\n".join(self.output_lines + final_lines) + "\n")
-            self.scan()
-        except Exception:
-            self.emit_lines(final_lines)
-            print("Desktop native privacy scan failed", flush=True)
             return 1
-        self.emit_lines(final_lines)
-        return 0 if success else 1
 
     @staticmethod
     def emit_lines(lines):
