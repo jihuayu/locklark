@@ -10,6 +10,7 @@ import { isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import vm from "node:vm";
 import { createBrowserRotationSite } from "./browser_rotation_site.mjs";
+import { projectGeneratedStagingOutcome } from "./browser_rotation_acceptance.mjs";
 import { assertPrivateArtifacts, browserScreenshotsAllowed, captureControllerOutput,
   fixtureCanaries, registerRotationValue, ROTATION_OUTPUT_FAILURE } from "./browser_save_acceptance.mjs";
 
@@ -303,7 +304,7 @@ test("generation failure discards unknown output and reports only a fixed error"
 test("rotation row readiness projects bounded metadata without retaining identifiers or errors", async () => {
   const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
   const start = source.indexOf("async function readRotationReadiness(");
-  const end = source.indexOf("\nexport async function acceptBrowserRotation", start);
+  const end = source.indexOf("\nconst STAGING_OUTCOMES", start);
   assert(start >= 0 && end > start, "The actual rotation readiness projection is required");
   const read = vm.runInNewContext("(" + source.slice(start, end).trim() + ")", { assert });
   const id = 'private-id-"<>&', revision = 'private-revision-\\"<>&', payload = "private-error-payload";
@@ -362,6 +363,48 @@ test("rotation row readiness projects bounded metadata without retaining identif
   }
 });
 
+test("generated staging projection freezes only the fresh native-accepted entry", () => {
+  const origin = "https://login.locklark.test";
+  const beforeId = "a".repeat(32);
+  const targetId = "b".repeat(32);
+  const otherId = "c".repeat(32);
+  const target = { beforeIds: [beforeId], origin, password: "synthetic-current", frozenId: "" };
+  const oldEntry = { id: beforeId, origin, password: "synthetic-old", stagingOutcome: "native-accepted" };
+  const entry = (id, password, stagingOutcome) => ({ id, origin, password, stagingOutcome });
+  const state = (history, extra = {}) => ({ generatedHistory: history, ...extra });
+  const accepted = projectGeneratedStagingOutcome(
+    state([entry(targetId, target.password, "native-accepted"), oldEntry], {
+      pendingSave: { stageId: "d".repeat(32), mode: "new", connected: true },
+    }), target);
+  assert.deepEqual(accepted, {
+    available: true, historyCount: 2, freshCount: 1, targetCount: 1,
+    outcome: "native-accepted", targetId,
+  });
+  for (const value of ["synthetic-current", "synthetic-old"])
+    assert.equal(JSON.stringify(accepted).includes(value), false);
+  const localOnly = projectGeneratedStagingOutcome(
+    state([entry(targetId, target.password, "local-only"), oldEntry]), target);
+  assert.equal(localOnly.outcome, "local-only");
+  assert.equal(localOnly.targetId, targetId);
+  const frozen = { ...target, frozenId: targetId };
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(targetId, target.password, "native-accepted"), oldEntry]), frozen).outcome, "native-accepted");
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(otherId, target.password, "native-accepted"), oldEntry]), frozen).outcome, "missing");
+  assert.equal(projectGeneratedStagingOutcome(state([oldEntry]), frozen).outcome, "missing");
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(targetId, "synthetic-replaced", "native-accepted"), oldEntry]), frozen).outcome, "missing");
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(targetId, target.password, "accepted"), oldEntry]), frozen).outcome, "invalid");
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(targetId, target.password, "native-accepted"),
+    entry(otherId, target.password, "pending"), oldEntry]), target).outcome, "multiple");
+  assert.equal(projectGeneratedStagingOutcome(state([
+    entry(targetId, target.password, "native-accepted"), oldEntry]), frozen).targetId, targetId);
+  assert.equal(projectGeneratedStagingOutcome(null, target).outcome, "missing");
+  assert.equal(projectGeneratedStagingOutcome({ generatedHistory: [] }, target).outcome, "missing");
+});
+
 test("static rotation integration encloses actual generator input and read in the output barrier", () => {
   const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
   const start = source.indexOf("const generated = await captureRotationValue(async () => {");
@@ -375,8 +418,29 @@ test("static rotation integration encloses actual generator input and read in th
   assert(click >= 0 && fill > click && close > fill && read > close,
     "Generator click, generated fill, popup closure and actual page read must remain inside the producer");
   assert(!/\.value\s*=(?!=)/.test(source) && !source.includes(".fill(") &&
-    !source.includes("runtime.sendMessage") && !source.includes("performClick"),
+    !source.includes("performClick"),
     "Rotation must not replace real product fill with page mutation or authorization hooks");
+  const stateMessage = 'chrome.runtime.sendMessage({ type: "state" })';
+  assert((source.match(/chrome\.runtime\.sendMessage\(\{ type: "state" \}\)/g) || []).length === 1,
+    "Rotation must read the existing popup state through one controlled projection");
+  const helperStart = source.indexOf("const startPopupStateRead = async (popup, projectSource, target) => {");
+  const helperEnd = source.indexOf("  const readGeneratedHistoryIDs = async (popup) => {", helperStart);
+  assert(helperStart >= 0 && helperEnd > helperStart &&
+    source.slice(helperStart, helperEnd).includes(stateMessage),
+    "Popup state message must stay inside the read-only projection helper");
+  const preview = producer.indexOf('generator.text("#gen-preview")');
+  const baseline = producer.indexOf("beforeGeneratedHistory = await readGeneratedHistoryIDs(generator)");
+  assert(preview >= 0 && baseline > preview && baseline < fill,
+    "History baseline must be read after the real preview and before the single gen-fill");
+  const binding = source.indexOf('step("stage-save:bind-history")');
+  const change = source.indexOf('step("change-post")');
+  const outcome = source.indexOf('step("stage-save:outcome")');
+  const updateStageIndex = source.indexOf('step("update-r0:baseline-observe")');
+  assert(binding > 0 && change > binding && outcome > change && updateStageIndex > outcome,
+    "Fresh-entry binding and exact native outcome must precede the legacy update");
+  assert(source.includes("projectGeneratedStagingOutcome.toString()") &&
+    source.includes("frozenId: generatedHistoryId"),
+    "Driver must use the shared pure projection for the frozen fresh entry");
   assert(source.includes('page.locator("#confirm-password").press("Enter")') &&
     source.includes('response.request().method() === "POST"') &&
     source.includes("oldAuthentication.status === 401") && source.includes("newAuthentication.status === 200") &&
@@ -441,6 +505,53 @@ test("static rotation integration encloses actual generator input and read in th
     !/\b(?:console|error|message|stack|cause)\b/.test(failure.replace(finiteOutput, "")) &&
     failure.includes('throw Error("Browser rotation acceptance failed")'),
     "Failure and cleanup must preserve the last fixed stage without exposing an exception payload");
+});
+
+test("rotation approves temporary staging before refreshing the exact legacy-update row", () => {
+  const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
+  const generator = source.indexOf('step("generator")');
+  const staging = source.indexOf('step("stage-save:observe-before")');
+  const update = source.indexOf('step("update-r0:baseline-observe")');
+  assert(generator >= 0 && staging > generator && update > staging,
+    "Staging approval must sit between the generator and the exact legacy update");
+  const beforeApproval = source.slice(generator, staging);
+  assert(!beforeApproval.includes("exactCandidate(") && !beforeApproval.includes('popup.click("#refresh")'),
+    "Rotation must not refresh candidates while the generated staging approval is pending");
+  const block = source.slice(staging, update);
+  const ordered = [
+    'step("stage-save:observe-before")', "const beforeStaging = observe()",
+    'input([{ wait_label: "批准本次暂存" }])',
+    'stagingControls?.["批准本次暂存"]?.present === true',
+    'stagingControls?.["批准本次保存"]?.present !== true',
+    'input([{ click_label: "批准本次暂存" }])',
+    'await wait(() => {', "const afterStaging = observe()",
+    "afterStaging.snapshot_digest === beforeStaging.snapshot_digest",
+    "assert.deepEqual(afterStaging.save_events, beforeStaging.save_events,",
+    "assert.deepEqual(afterStaging.rows, beforeStaging.rows,",
+    "afterStaging.rows.find((row) => row.id === itemID)?.revision === r0",
+  ];
+  let previous = -1;
+  for (const token of ordered) {
+    const position = block.indexOf(token, previous + 1);
+    assert(position > previous, "Actual staging approval, control check and unchanged-vault proof must stay ordered");
+    previous = position;
+  }
+  assert(!block.includes("exactCandidate(") && !block.includes('popup.click("#refresh")') &&
+    !block.includes("#commit-staged-save") && !block.includes('click_label: "批准本次保存"') &&
+    !block.includes('wait_label: "批准本次保存"'),
+    "Temporary staging must never become the separate commit-staged-save approval");
+  assert(source.includes('updatePopup.click(selected + \' [data-action="update"]\')') &&
+    (source.match(/wait_label: "批准更新登录"/g) || []).length === 1 &&
+    (source.match(/click_label: "批准更新登录"/g) || []).length === 1 &&
+    !source.includes("#commit-staged-save"),
+    "The exact update control must remain the product legacy save-update approval");
+  const popup = readFileSync(new URL("../browser-extension/popup.js", import.meta.url), "utf8");
+  const start = popup.indexOf('update.dataset.action = "update"');
+  const end = popup.indexOf('const otp = document.createElement("button")', start);
+  assert(start >= 0 && end > start, "Product exact-update control must exist");
+  const updateControl = popup.slice(start, end);
+  assert(updateControl.includes('type: "save-update"') && !updateControl.includes("commit-staged-save"),
+    "Product update control must use legacy save-update, not commit-staged-save");
 });
 
 test("static rotation hook runs once and keeps the remaining invocation free of screenshots", () => {
