@@ -400,6 +400,94 @@ type localVaultFileSessionSlot struct {
 	// purgeReady is closed by the tail-readiness goroutine. The map is purged
 	// only on the UI path.
 	purgeReady chan struct{}
+	// closeTail is the latest tracked physical Close for a detached adopted
+	// wrapper owned by this slot. It is installed before the real Close worker
+	// launches and is inherited across same-parent scope replacement. It never
+	// retains the wrapper, a factor, key, kit, token, handle or App pointer.
+	closeTail *localVaultFileCloseTail
+}
+
+// localVaultFileCloseResult is the finite cumulative outcome of a tracked
+// adopted-wrapper Close chain. No raw error string or object is retained.
+type localVaultFileCloseResult uint8
+
+const (
+	localVaultFileCloseResultUnknown localVaultFileCloseResult = iota
+	localVaultFileCloseResultSucceeded
+	localVaultFileCloseResultFailed
+)
+
+// localVaultFileCloseTail is the immutable completion record for one adopted
+// wrapper's real Close. The previous close is held only by the launched worker
+// closure while it waits for that close's actual done and folds its finite
+// result; the worker then releases it. This node retains only the done channel
+// and finite enum: no prior pointer, wrapper, factor, key, kit, token, handle,
+// App or slot pointer.
+type localVaultFileCloseTail struct {
+	done   chan struct{}
+	result localVaultFileCloseResult
+}
+
+// localVaultFileCloseTailFinished reports whether this tail and therefore every
+// prior tail in its chain have published their finite result.
+func localVaultFileCloseTailFinished(tail *localVaultFileCloseTail) bool {
+	if tail == nil {
+		return true
+	}
+	select {
+	case <-tail.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// detachLocalVaultFileSessionWrapper is the one UI-side adopted-wrapper detach
+// helper. It cancels only this slot's borrowed projection delivery, invalidates
+// its fresh evidence, removes the exact wrapper from the slot, clears the
+// visible summary, and installs the new close tail before launching the worker
+// that performs the real Close. The worker receives only the opaque wrapper and
+// the prior tail; it never reads or mutates App or slot state and never holds a
+// lock across Close, launch or dispatch. Calling it again after the wrapper is
+// detached is a no-op for the physical Close.
+func (a *App) detachLocalVaultFileSessionWrapper(slot *localVaultFileSessionSlot) *localVaultFileCloseTail {
+	if slot == nil {
+		return nil
+	}
+	a.cancelLocalVaultFileRefreshExact(slot.refresh)
+	a.invalidateLocalVaultFileRefreshFresh(slot.scope)
+	wrapper := slot.session
+	if wrapper == nil {
+		return slot.closeTail
+	}
+	slot.session = nil
+	clearLocalVaultFileSessionSummary(&slot.summary)
+	// prior is captured only by this worker closure. The published tail node
+	// does not retain it, so a completed chain cannot keep every previous node
+	// alive through the active slot's latest closeTail.
+	prior := slot.closeTail
+	tail := &localVaultFileCloseTail{done: make(chan struct{})}
+	slot.closeTail = tail
+	pause := a.localVaultFiles.sessionAdoptedClosePauseForTest
+	a.launch(func() {
+		if pause != nil {
+			pause()
+		}
+		closeErr := wrapper.Close()
+		result := localVaultFileCloseResultSucceeded
+		if closeErr != nil {
+			result = localVaultFileCloseResultFailed
+		}
+		if prior != nil {
+			<-prior.done
+			if prior.result != localVaultFileCloseResultSucceeded {
+				result = localVaultFileCloseResultFailed
+			}
+		}
+		tail.result = result
+		close(tail.done)
+	})
+	return tail
 }
 
 // localVaultFileSessionScopeFor resolves the exact navigation ref and the
@@ -485,24 +573,17 @@ func (a *App) clearLocalVaultFileSessions() {
 		if slot == nil {
 			continue
 		}
-		// Projection-only refresh work is cancelled even when there is no
-		// generic candidate operation. It never closes the borrowed wrapper;
-		// the established close below is the wrapper's only terminal owner.
-		a.cancelLocalVaultFileRefreshExact(slot.refresh)
-		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
 		if slot.operation != nil {
 			a.cancelLocalVaultFileSessionOperationExact(slot.operation)
 		}
-		session := slot.session
+		// The helper also cancels this exact projection delivery and invalidates
+		// fresh evidence even when there is no adopted wrapper, then installs
+		// the tracked close tail before the real Close launches.
+		a.detachLocalVaultFileSessionWrapper(slot)
 		slot.operation = nil
-		slot.session = nil
-		clearLocalVaultFileSessionSummary(&slot.summary)
 		slot.retiring = true
 		slot.tail = nil
 		slot.parent = nil
-		if session != nil {
-			a.launch(func() { _ = session.Close() })
-		}
 	}
 	state.sessionSlots = nil
 	state.sessionParent = nil
@@ -551,13 +632,21 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 	// ordering key: read-aliased config paths can share one journal.
 	predecessors := a.collectLocalVaultFileSessionPredecessors(scope)
 	slot := state.sessionSlots[scope]
+	// A retiring or expired entry remains discoverable while its physical
+	// close is unfinished. Capture that exact tail before the map entry is
+	// replaced; the new current slot inherits it so a later retire or parent
+	// clear joins the already-launched Close.
+	var inheritTail *localVaultFileCloseTail
 	if slot != nil && slot.retiring {
-		// The retiring entry keeps its tail for collection; the new current
-		// slot is a distinct pointer so its async purge cannot delete it.
+		// The retiring entry keeps its tail and ordering operations for
+		// collection; the new current slot is a distinct pointer so its async
+		// purge cannot delete it.
+		inheritTail = slot.closeTail
 		slot = nil
 	}
 	if slot != nil && (slot.parent != a.session || slot.appGeneration != a.generation) {
 		a.retireLocalVaultFileSessionSlot(slot)
+		inheritTail = slot.closeTail
 		slot = nil
 	}
 	// Conflicting pending predecessors are cancelled exactly. A held old
@@ -567,22 +656,24 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		a.cancelLocalVaultFileSessionOperationExact(pred)
 	}
 	if slot == nil {
-		slot = &localVaultFileSessionSlot{scope: scope, parent: a.session, appGeneration: a.generation}
+		if inheritTail == nil {
+			if existing := state.sessionSlots[scope]; existing != nil {
+				inheritTail = existing.closeTail
+			}
+		}
+		slot = &localVaultFileSessionSlot{
+			scope: scope, parent: a.session, appGeneration: a.generation,
+			closeTail: inheritTail,
+		}
 		if state.sessionSlots == nil {
 			state.sessionSlots = make(map[localVaultFileSessionScope]*localVaultFileSessionSlot)
 		}
 		state.sessionSlots[scope] = slot
 	} else {
-		// Reusing a live slot replaces its wrapper. Cancel the borrowed refresh
-		// before the old wrapper is detached, even when no generic candidate
-		// operation is pending.
-		a.cancelLocalVaultFileRefreshExact(slot.refresh)
-		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
-		if old := slot.session; old != nil {
-			slot.session = nil
-			clearLocalVaultFileSessionSummary(&slot.summary)
-			a.launch(func() { _ = old.Close() })
-		}
+		// Reusing a live slot replaces its wrapper through the one tracked
+		// detach helper, which cancels this exact projection delivery before
+		// installing the new close tail and launching the real Close.
+		a.detachLocalVaultFileSessionWrapper(slot)
 		slot.tail = nil
 	}
 	slot.sequence++
@@ -795,7 +886,7 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 		a.cancelLocalVaultFileRefreshExact(slot.refresh)
 		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
 		if old := slot.session; old != nil && old != result.candidate {
-			a.launch(func() { _ = old.Close() })
+			a.detachLocalVaultFileSessionWrapper(slot)
 		}
 		slot.session = result.candidate
 		slot.summary = localVaultFileSessionSummaryClone(result.summary)
@@ -941,15 +1032,14 @@ func (a *App) retireLocalVaultFileSessionSlot(slot *localVaultFileSessionSlot) {
 		a.cancelLocalVaultFileSessionOperationExact(op)
 		slot.operation = nil
 	}
-	session := slot.session
-	slot.session = nil
-	clearLocalVaultFileSessionSummary(&slot.summary)
-	// Keep parent, scope and appGeneration so a same-parent/new-slot reopen can
-	// inherit this ordering tail. The entry is never cache-readable.
+	// Detach the exact adopted wrapper through the tracked-close helper before
+	// marking the entry retired. The new tail is installed before the real
+	// Close launches, and the helper clears the visible summary immediately.
+	a.detachLocalVaultFileSessionWrapper(slot)
+	// Keep parent, scope, closeTail and appGeneration so a same-parent/new-slot
+	// reopen can inherit this ordering and physical-close tail. The entry is
+	// never cache-readable.
 	slot.retiring = true
-	if session != nil {
-		a.launch(func() { _ = session.Close() })
-	}
 	if state.sessionSlots[slot.scope] != slot {
 		return
 	}
@@ -969,11 +1059,12 @@ func appendLocalVaultFileSessionOperation(list []*localVaultFileSessionOperation
 }
 
 // scheduleLocalVaultFileSessionTailPurge marks a retiring entry ready only
-// after every tail operation settles. The readiness goroutine never touches the
-// App map; the next UI sync purges only an exact current map entry whose tail is
-// still the same and fully settled. This keeps a no-cache tombstone available
-// for inheritance across close/reopen and App generation changes without a
-// second registry or an off-UI map mutation.
+// after every tail operation settles and the latest tracked adopted-wrapper
+// Close chain publishes its finite result. The readiness goroutine never
+// touches the App map; the next UI sync rechecks the exact current map entry,
+// its latest closeTail and its operations before deleting. This keeps a
+// no-cache tombstone available for inheritance across close/reopen and App
+// generation changes without a second registry or an off-UI map mutation.
 func (a *App) scheduleLocalVaultFileSessionTailPurge(slot *localVaultFileSessionSlot) {
 	if slot == nil {
 		return
@@ -982,11 +1073,14 @@ func (a *App) scheduleLocalVaultFileSessionTailPurge(slot *localVaultFileSession
 		slot.purgeReady = make(chan struct{})
 	}
 	tail := append([]*localVaultFileSessionOperation(nil), slot.tail...)
-	allSettled := true
-	for _, op := range tail {
-		if !op.isSettled() {
-			allSettled = false
-			break
+	closeTail := slot.closeTail
+	allSettled := localVaultFileCloseTailFinished(closeTail)
+	if allSettled {
+		for _, op := range tail {
+			if !op.isSettled() {
+				allSettled = false
+				break
+			}
 		}
 	}
 	if allSettled {
@@ -998,13 +1092,18 @@ func (a *App) scheduleLocalVaultFileSessionTailPurge(slot *localVaultFileSession
 		for _, op := range tail {
 			<-op.settledSignal()
 		}
+		if closeTail != nil {
+			<-closeTail.done
+		}
 		close(ready)
 	}()
 }
 
 // purgeSettledLocalVaultFileSessionTails runs on the UI path. It deletes only
 // the exact retiring slot pointer currently in the map with a ready, fully
-// settled tail. A later slot that inherited the scope is never deleted.
+// settled operation tail and a finished latest closeTail. The latest tail is
+// rechecked here rather than trusting an older readiness snapshot, and a later
+// slot that inherited the scope is never deleted.
 func (a *App) purgeSettledLocalVaultFileSessionTails() {
 	state := &a.localVaultFiles
 	for scope, slot := range state.sessionSlots {
@@ -1026,7 +1125,7 @@ func (a *App) purgeSettledLocalVaultFileSessionTails() {
 				break
 			}
 		}
-		if allSettled {
+		if allSettled && localVaultFileCloseTailFinished(slot.closeTail) {
 			delete(state.sessionSlots, scope)
 		}
 	}

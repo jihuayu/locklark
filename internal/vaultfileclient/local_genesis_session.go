@@ -43,6 +43,12 @@ type localGenesisSessionState struct {
 	closed    bool
 	closeErr  error
 	closeDone chan struct{}
+
+	// firstCloseForTest is nil in production and installed only before
+	// concurrent work starts. The first closer runs it after closed is set and
+	// mu is released, immediately before parent.LockVaultFileChild. It receives
+	// no factor, key, token, handle or capability.
+	firstCloseForTest func()
 }
 
 // LocalGenesisSession is a lightweight public handle. It contains only one
@@ -304,7 +310,12 @@ func (s *localGenesisSessionState) close() error {
 	}
 	token := s.token
 	parent := s.parent
+	firstClose := s.firstCloseForTest
 	s.mu.Unlock()
+
+	if firstClose != nil {
+		firstClose()
+	}
 
 	var err error
 	if parent != nil {

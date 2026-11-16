@@ -96,6 +96,11 @@ type localVaultFileState struct {
 	// so no caller blocks on another caller's pause.
 	afterActiveSnapshotForTest func()
 	afterActiveSnapshotClaimed atomic.Bool
+	// sessionAdoptedClosePauseForTest runs in the tracked-close worker
+	// immediately before the real adopted wrapper Close. It is parameterless,
+	// nil in production and captured on the UI path before launch; it never
+	// receives a factor, key, kit, token, handle or capability.
+	sessionAdoptedClosePauseForTest func()
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
