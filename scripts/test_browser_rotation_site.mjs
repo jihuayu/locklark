@@ -34,14 +34,14 @@ function ownedTLS(directory) {
 
 // Every call opens a new real TLS connection. Only this private CA is trusted;
 // hostname verification and TLS authorization remain enabled.
-function httpsRequest(url, ca, { method = "GET", cookie, fields, authorization } = {}) {
+function httpsRequest(url, ca, { method = "GET", cookie, fields, authorization, origin } = {}) {
   return new Promise((resolve, reject) => {
     const body = fields ? new URLSearchParams(fields).toString() : null;
     const headers = {};
     if (cookie) headers.Cookie = cookie;
     if (authorization) headers.Authorization = authorization;
     if (body !== null) {
-      headers.Origin = new URL(url).origin;
+      headers.Origin = origin ?? new URL(url).origin;
       headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8";
       headers["Content-Length"] = Buffer.byteLength(body);
       headers.Accept = "application/json";
@@ -98,7 +98,16 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     };
     const registerPage = await call("/register");
     assert.equal(registerPage.status, 200);
+    assert(registerPage.headers["referrer-policy"] === "same-origin",
+      "Ordinary same-origin form POST must retain its browser Origin header");
     const registrationSession = cookie(registerPage);
+    for (const origin of ["null", "https://cross-origin.invalid"]) {
+      const refused = await call("/register", { method: "POST", cookie: registrationSession, origin,
+        fields: { csrf: csrf(registerPage), username, password: oldPassword, confirm: oldPassword } });
+      assert.equal(refused.status, 403);
+      assert(site.snapshot().registrations === 0 && refused.headers["set-cookie"] === undefined,
+        "Opaque or cross-origin registration must not create an account or replace the session");
+    }
     const registered = await call("/register", { method: "POST", cookie: registrationSession,
       fields: { csrf: csrf(registerPage), username, password: oldPassword, confirm: oldPassword } });
     assert.equal(registered.status, 201);
@@ -144,11 +153,11 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     assert.equal((await call("/credential", { authorization: basic(newPassword) })).status, 200);
 
     const receipt = site.snapshot();
-    assert.deepEqual(receipt, { tlsConnections: 11, requests: 11, registrations: 1, loginAccepted: 1,
+    assert.deepEqual(receipt, { tlsConnections: 13, requests: 13, registrations: 1, loginAccepted: 1,
       loginRejected: 0, passwordChanges: 1, changeRejected: 1, basicAccepted: 3, basicRejected: 1,
-      requestRefused: 0, observerFailures: 0, countersCapped: false, accountRegistered: true, closed: false });
-    assert(observations.length === 30 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
-    console.log("PASS: owned HTTPS website only; verified TLS=11 requests=11 register=1 login=1 change=1 wrong-account refused=1 Basic accepted=3 rejected=1");
+      requestRefused: 2, observerFailures: 0, countersCapped: false, accountRegistered: true, closed: false });
+    assert(observations.length === 36 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
+    console.log("PASS: owned HTTPS website only; verified TLS=13 requests=13 register=1 login=1 change=1 origin refused=2 wrong-account refused=1 Basic accepted=3 rejected=1");
   } finally {
     if (site) {
       await site.close();
