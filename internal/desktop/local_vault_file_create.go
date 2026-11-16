@@ -333,7 +333,7 @@ func (a *App) localCreateComplete() {
 			expected, err = boundLocalVaultFileManifest(scope.configPath, session.VaultPath(), scope.backendRoot)
 			if err == nil {
 				var creation *vaultfileclient.CreationContext
-				creation, err = vaultfileclient.OpenCreation(scope.configPath, &expected, password, secret)
+				creation, err = vaultfileclient.OpenCreationForVault(scope.configPath, &expected, scope.vaultID, password, secret)
 				if creation != nil {
 					if ctx.Err() == nil {
 						var backupRequired bool

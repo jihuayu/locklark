@@ -47,6 +47,43 @@ func OpenCreation(configPath string, proposal *Manifest, password, secretInput [
 	if err != nil {
 		return nil, err
 	}
+	return openCreationManifest(configPath, manifest, password, secretInput)
+}
+
+// OpenCreationForVault binds an existing creation context to one exact VaultID
+// captured by this constructor. It never reserves a missing manifest and never
+// adopts a manifest whose internally read VaultID differs from expectedVaultID.
+// A caller's earlier read is not the comparison source: the comparison uses the
+// same strict manifest value that becomes the immutable c.manifest. Template
+// and path-scope checks run before factor unlock or custody. This is target
+// binding, not universal instant-ABA detection.
+func OpenCreationForVault(configPath string, proposal *Manifest, expectedVaultID string, password, secretInput []byte) (*CreationContext, error) {
+	return openCreationForVault(configPath, proposal, expectedVaultID, password, secretInput, nil)
+}
+
+// openCreationForVault's afterRead is nil in production. Tests use it to make
+// the on-disk path change after the constructor's internal snapshot without
+// receiving factors, identity or a capability. It is not a public bypass.
+func openCreationForVault(configPath string, proposal *Manifest, expectedVaultID string, password, secretInput []byte, afterRead func()) (*CreationContext, error) {
+	if !ValidID(expectedVaultID) || !teamfiles.ValidPath(configPath) {
+		return nil, ErrLocalReview
+	}
+	manifest, exists, err := ReadManifest(configPath)
+	if afterRead != nil {
+		afterRead()
+	}
+	if err != nil || !exists || manifest.VaultID != expectedVaultID {
+		return nil, ErrLocalReview
+	}
+	if proposal != nil && (!ValidManifestPhase(configPath, *proposal, false, false) || !sameCreateTemplate(manifest, *proposal)) {
+		return nil, ErrLocalReview
+	}
+	return openCreationManifest(configPath, manifest, password, secretInput)
+}
+
+// openCreationManifest is the original digest -> unlock -> exact digest
+// confirmation path over an already captured immutable manifest.
+func openCreationManifest(configPath string, manifest Manifest, password, secretInput []byte) (*CreationContext, error) {
 	digest, err := ReadManifestDigest(configPath, manifest)
 	if err != nil {
 		return nil, ErrLocalReview
