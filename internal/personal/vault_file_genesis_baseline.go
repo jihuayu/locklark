@@ -21,6 +21,12 @@ import (
 // caller must supply the original G hash from an independent durable record;
 // neither the journal nor the G itself may supply that expected value.
 func (s *Session) VerifyAckedVaultFileGenesis(req VaultFileGenesisRequest, expectedGHash, password, key, recoveryMaterial []byte) (VaultFileGenesisPublic, error) {
+	return s.verifyAckedVaultFileGenesisWith(req, expectedGHash, password, key, recoveryMaterial, nil)
+}
+
+// beforeFinish is an unexported test seam with no material arguments or
+// results. The production entry always passes nil.
+func (s *Session) verifyAckedVaultFileGenesisWith(req VaultFileGenesisRequest, expectedGHash, password, key, recoveryMaterial []byte, beforeFinish func()) (VaultFileGenesisPublic, error) {
 	var out VaultFileGenesisPublic
 	if s == nil {
 		return out, ErrSessionLocked
@@ -97,6 +103,9 @@ func (s *Session) VerifyAckedVaultFileGenesis(req VaultFileGenesisRequest, expec
 		return out, ErrVaultFileGenesisIntent
 	}
 	out = VaultFileGenesisPublic{Ownership: material.projection, PolicyDigest: hex.EncodeToString(checkpoint.PolicyDigest)}
+	if beforeFinish != nil {
+		beforeFinish()
+	}
 
 	// Reopen after expensive verification and retain the journal's exclusive
 	// lock through the Session completion gate. Another cooperating process

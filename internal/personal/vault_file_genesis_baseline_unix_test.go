@@ -154,6 +154,29 @@ func TestVerifyAckedVaultFileGenesisRejectsNonSoleState(t *testing.T) {
 	}
 }
 
+func TestVerifyAckedVaultFileGenesisFinishRevocationReturnsZeroProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		revoke func(*Session)
+	}{
+		{name: "request-lock", revoke: func(s *Session) { s.RequestLock() }},
+		{name: "expired-full-factor", revoke: func(s *Session) {
+			s.mu.Lock()
+			s.fullUnlock = time.Now().Add(-passkeyTransferFullFactorWindow)
+			s.mu.Unlock()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _, hash := publishedGenesisBaselineFixture(t)
+			got, err := f.session.verifyAckedVaultFileGenesisWith(f.request(), hash, f.password, f.key, f.kit,
+				func() { tc.revoke(f.session) })
+			if err == nil || !reflect.DeepEqual(got, VaultFileGenesisPublic{}) {
+				t.Fatal("GENESIS_BASELINE_REVOKED_FINISH_RETURNED_PROJECTION")
+			}
+		})
+	}
+}
+
 func injectGenesisBaselineForeignKey(path, key string) error {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
