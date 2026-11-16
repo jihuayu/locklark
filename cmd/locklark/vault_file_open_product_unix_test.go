@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -231,6 +232,43 @@ func TestVaultFileOpenBaselineProductRefusals(t *testing.T) {
 			t.Fatal("OPEN_REFUSAL_OUTPUT_FAILED")
 		}
 	}
+	// SDK policy validation precedes proof signature checks. Both mutations
+	// below are impossible valid policies; assert the SDK's typed structural
+	// denial on both the policy value and the exact malformed wire fixture
+	// before testing the real CLI's zero-item refusal. The Session selector's
+	// malformed-input ambiguity defense is covered separately in personal.
+	refuseMalformedPolicy := func(t *testing.T, name string, mutate func(*vaultfile.Policy, map[string]any)) {
+		t.Helper()
+		parsed, err := vaultfile.ParseFile(c.sealed)
+		if err != nil {
+			t.Fatal("OPEN_POLICY_SOURCE_INVALID")
+		}
+		var document map[string]any
+		if json.Unmarshal(c.sealed, &document) != nil {
+			t.Fatal("OPEN_POLICY_FIXTURE_DECODE_FAILED")
+		}
+		proofs := document["signed_policy_proofs"].([]any)
+		policyMap := proofs[len(proofs)-1].(map[string]any)["policy"].(map[string]any)
+		policy := &parsed.SignedPolicyProofs[len(parsed.SignedPolicyProofs)-1].Policy
+		mutate(policy, policyMap)
+		assertSDKPolicyInvalidValue(t, vaultfile.ValidatePolicy(policy))
+		malformed, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal("OPEN_POLICY_FIXTURE_ENCODE_FAILED")
+		}
+		_, err = vaultfile.ParseFile(malformed)
+		assertSDKPolicyInvalidValue(t, err)
+		cfg := c.cfg
+		cfg.Journal = filepath.Join(c.root, name+".db")
+		path := filepath.Join(c.root, name+".json")
+		writeOpenBaselineConfig(t, path, cfg)
+		if err := vaultfilejournal.CreateNewState(cfg.Journal, vaultfilejournal.State{
+			BaseBytes: malformed, WorkingBytes: malformed, RemoteRevision: vaultfilebackend.Revision("owned-revision"),
+		}); err != nil {
+			t.Fatal("OPEN_POLICY_JOURNAL_CREATE_FAILED")
+		}
+		refuse(t, path, password, secret, false, "VERIFY_REJECTED")
+	}
 	t.Run("bad-checkpoint", func(t *testing.T) {
 		cfg := c.cfg
 		pin := *cfg.Checkpoint
@@ -262,33 +300,25 @@ func TestVaultFileOpenBaselineProductRefusals(t *testing.T) {
 		refuse(t, foreign.configPath, password, secret, false, "VERIFY_REJECTED")
 	})
 	t.Run("malformed-duplicate-device", func(t *testing.T) {
-		var document map[string]any
-		if json.Unmarshal(c.sealed, &document) != nil {
-			t.Fatal("OPEN_DUPLICATE_FIXTURE_DECODE_FAILED")
-		}
-		proofs := document["signed_policy_proofs"].([]any)
-		policy := proofs[len(proofs)-1].(map[string]any)["policy"].(map[string]any)
-		devices := policy["devices"].([]any)
-		duplicate := make(map[string]any)
-		for key, value := range devices[len(devices)-1].(map[string]any) {
-			duplicate[key] = value
-		}
-		duplicate["device_id"] = "reader-duplicate"
-		policy["devices"] = append(devices, duplicate)
-		malformed, err := json.Marshal(document)
-		if err != nil {
-			t.Fatal("OPEN_DUPLICATE_FIXTURE_ENCODE_FAILED")
-		}
-		cfg := c.cfg
-		cfg.Journal = filepath.Join(c.root, "ambiguous.db")
-		path := filepath.Join(c.root, "ambiguous.json")
-		writeOpenBaselineConfig(t, path, cfg)
-		if err := vaultfilejournal.CreateNewState(cfg.Journal, vaultfilejournal.State{
-			BaseBytes: malformed, WorkingBytes: malformed, RemoteRevision: vaultfilebackend.Revision("owned-revision"),
-		}); err != nil {
-			t.Fatal("OPEN_DUPLICATE_JOURNAL_CREATE_FAILED")
-		}
-		refuse(t, path, password, secret, false, "VERIFY_REJECTED")
+		refuseMalformedPolicy(t, "duplicate-device", func(policy *vaultfile.Policy, policyMap map[string]any) {
+			copyDevice := policy.Devices[len(policy.Devices)-1]
+			copyDevice.DeviceID = "reader-duplicate"
+			policy.Devices = append(policy.Devices, copyDevice)
+			devices := policyMap["devices"].([]any)
+			duplicate := make(map[string]any)
+			for key, value := range devices[len(devices)-1].(map[string]any) {
+				duplicate[key] = value
+			}
+			duplicate["device_id"] = "reader-duplicate"
+			policyMap["devices"] = append(devices, duplicate)
+		})
+	})
+	t.Run("malformed-unassigned-device", func(t *testing.T) {
+		refuseMalformedPolicy(t, "unassigned-device", func(policy *vaultfile.Policy, policyMap map[string]any) {
+			policy.Devices[len(policy.Devices)-1].PrincipalID = "unassigned"
+			devices := policyMap["devices"].([]any)
+			devices[len(devices)-1].(map[string]any)["principal_id"] = "unassigned"
+		})
 	})
 	t.Run("wrong-factor", func(t *testing.T) {
 		refuse(t, c.configPath, []byte("wrong-owned-password"), secret, false, "VERIFY_REJECTED")
@@ -296,6 +326,14 @@ func TestVaultFileOpenBaselineProductRefusals(t *testing.T) {
 	t.Run("missing-factor", func(t *testing.T) {
 		refuse(t, c.configPath, password, secret, true, "CANCELLED")
 	})
+}
+
+func assertSDKPolicyInvalidValue(t *testing.T, err error) {
+	t.Helper()
+	var sdkErr *vaultfile.Error
+	if !errors.As(err, &sdkErr) || sdkErr.Code != vaultfile.CodeInvalidValue {
+		t.Fatal("OPEN_POLICY_SDK_STRUCTURAL_DENIAL_NOT_PROVEN")
+	}
 }
 
 func TestVaultFileOpenBaselineConfigPathRefusals(t *testing.T) {
