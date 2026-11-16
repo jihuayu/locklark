@@ -14,6 +14,8 @@ const digest = (value) => createHash("sha256").update(value).digest();
 const equal = (left, right) => left.length === right.length && timingSafeEqual(left, right);
 const validPassword = (value) => typeof value === "string" && value.isWellFormed() &&
   Buffer.byteLength(value) >= 4 && Buffer.byteLength(value) <= 256 && !/[\0\r\n]/.test(value);
+const validUsername = (value) => typeof value === "string" && value.isWellFormed() &&
+  Buffer.byteLength(value) <= 128 && /^[\p{L}\p{N}][\p{L}\p{N}@._+-]*$/u.test(value);
 
 class FormRefusal extends Error {
   constructor(status = 400) { super("Owned website form refused"); this.status = status; }
@@ -140,7 +142,7 @@ export function createBrowserRotationSite({ key, cert, onSnapshot = () => {} }) 
     record("requests");
     request.on("error", () => {});
     response.setHeader("Cache-Control", "no-store");
-    response.setHeader("Referrer-Policy", "no-referrer");
+    response.setHeader("Referrer-Policy", "same-origin");
     response.setHeader("X-Content-Type-Options", "nosniff");
     if (closed || request.headers.host !== authority) { refuse(request, response, 421); return; }
     const path = request.url;
@@ -191,7 +193,7 @@ export function createBrowserRotationSite({ key, cert, onSnapshot = () => {} }) 
       if (!active || !/^[a-f0-9]{64}$/.test(csrf) || !equal(Buffer.from(csrf), Buffer.from(active.csrf)))
         throw new FormRefusal(403);
       const username = fields.get("username"), password = fields.get("password");
-      if (!/^[A-Za-z0-9][A-Za-z0-9@._+-]{0,127}$/.test(username) || !validPassword(password)) throw new FormRefusal();
+      if (!validUsername(username) || !validPassword(password)) throw new FormRefusal();
       if (path !== "/login" && fields.get("confirm") !== password) throw new FormRefusal();
       if (path === "/register") {
         if (account) throw new FormRefusal(409);
