@@ -32,6 +32,12 @@ type openBaselineProductCase struct {
 	root, configPath string
 	cfg              vaultFileResumeConfig
 	sealed           []byte
+	pin              vaultfile.PolicyCheckpoint
+	// Present only for the independent-author negative fixture. These are
+	// fixture-owned keys, never the personal Session's identity.
+	authorSigning  ed25519.PrivateKey
+	authorIdentity *age.X25519Identity
+	epochVUK       []byte
 }
 
 // The reader device comes only from the real full-factor personal CLI. The
@@ -42,6 +48,10 @@ func newOpenBaselineProductCase(t *testing.T, personalPath string, reader map[st
 }
 
 func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, reader map[string]string, writer bool) openBaselineProductCase {
+	return newOpenBaselineProductCaseWithAuthor(t, personalPath, reader, writer, false)
+}
+
+func newOpenBaselineProductCaseWithAuthor(t *testing.T, personalPath string, reader map[string]string, writer, retainAuthor bool) openBaselineProductCase {
 	t.Helper()
 	readerPub, err := hex.DecodeString(reader["content_signing_public_key"])
 	if err != nil || len(readerPub) != ed25519.PublicKeySize {
@@ -59,12 +69,23 @@ func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, rea
 	if err != nil {
 		t.Fatal("OPEN_AUTHOR_CREATE_FAILED")
 	}
-	defer clear(authorPriv)
+	if retainAuthor {
+		t.Cleanup(func() { clear(authorPriv) })
+	} else {
+		defer clear(authorPriv)
+	}
 	authorAge, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal("OPEN_AUTHOR_RECIPIENT_FAILED")
 	}
 	writers := []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}}
+	authorPrincipal := "owner"
+	if retainAuthor {
+		// This independent device is a writer, not the local personal device
+		// and not an owner with implicit write authority.
+		authorPrincipal = "foreign-writer"
+		writers = append([]vaultfile.Member{{PrincipalID: authorPrincipal, Label: "Foreign writer"}}, writers...)
+	}
 	if writer {
 		writers = append(writers, vaultfile.Member{PrincipalID: "reader", Label: "Reader"})
 	}
@@ -77,7 +98,7 @@ func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, rea
 		Admins:  []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
 		Owners:  []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
 		Devices: []vaultfile.Device{
-			{DeviceID: "author-device", PrincipalID: "owner", Label: "Author",
+			{DeviceID: "author-device", PrincipalID: authorPrincipal, Label: "Author",
 				ContentSigningKey: vaultfile.PublicKey{Alg: vaultfile.SigAlgEd25519, PublicKey: authorPub},
 				AgeEncryptionKey:  authorAge.Recipient().String()},
 			{DeviceID: "reader-device", PrincipalID: "reader", Label: "Reader",
@@ -100,7 +121,11 @@ func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, rea
 	if _, err := rand.Read(vuk); err != nil {
 		t.Fatal("OPEN_EPOCH_KEY_FAILED")
 	}
-	defer clear(vuk)
+	if retainAuthor {
+		t.Cleanup(func() { clear(vuk) })
+	} else {
+		defer clear(vuk)
+	}
 	db, err := vault.NewItemDatabase([]byte(`{"owned":"open-baseline"}`), []vault.Item{{
 		ID: ownedOpenItemID, Kind: "login", Title: ownedOpenTitle, Username: "owned-user", Password: ownedOpenSecret,
 	}})
@@ -131,7 +156,13 @@ func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, rea
 	if putErr != nil || closeErr != nil {
 		t.Fatal("OPEN_BASELINE_FIXTURE_PUBLISH_FAILED")
 	}
-	return openBaselineProductCase{root: root, configPath: configPath, cfg: cfg, sealed: sealed}
+	out := openBaselineProductCase{root: root, configPath: configPath, cfg: cfg, sealed: sealed, pin: pin}
+	if retainAuthor {
+		out.authorSigning = authorPriv
+		out.authorIdentity = authorAge
+		out.epochVUK = vuk
+	}
+	return out
 }
 
 func writeOpenBaselineConfig(t *testing.T, path string, cfg vaultFileResumeConfig) {

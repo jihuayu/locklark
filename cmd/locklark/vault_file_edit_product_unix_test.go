@@ -5,14 +5,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
@@ -26,6 +30,10 @@ type titleEditProductCase struct {
 }
 
 func newTitleEditProductCase(t *testing.T, writer bool) titleEditProductCase {
+	return newTitleEditProductCaseWithAuthor(t, writer, false)
+}
+
+func newTitleEditProductCaseWithAuthor(t *testing.T, writer, retainAuthor bool) titleEditProductCase {
 	t.Helper()
 	product := vaultFileProductBinary(t)
 	personalPath, password, secret := publicDeviceProductFixture(t)
@@ -34,7 +42,7 @@ func newTitleEditProductCase(t *testing.T, writer bool) titleEditProductCase {
 	if enrollment.Status != "PUBLIC" || enrollment.Echoed || len(enrollment.Public) != 2 {
 		t.Fatal("EDIT_ENROLLMENT_FAILED")
 	}
-	baseline := newOpenBaselineProductCaseWithWriter(t, personalPath, enrollment.Public, writer)
+	baseline := newOpenBaselineProductCaseWithAuthor(t, personalPath, enrollment.Public, writer, retainAuthor)
 	if runTrackProduct(product, baseline.configPath, false) != "TRACKED" {
 		t.Fatal("EDIT_TRACK_FAILED")
 	}
@@ -108,6 +116,100 @@ func requireEditVerdict(t *testing.T, got titleEditPTYVerdict, want string) {
 	t.Helper()
 	if got.Status != want || got.Echoed {
 		t.Fatal("EDIT_PRODUCT_VERDICT_FAILED")
+	}
+}
+
+func sameEditJournalState(a, b vaultfilejournal.State) bool {
+	return a.Generation == b.Generation && a.RemoteRevision == b.RemoteRevision &&
+		bytes.Equal(a.BaseBytes, b.BaseBytes) && bytes.Equal(a.WorkingBytes, b.WorkingBytes)
+}
+
+func sameEditPrepared(a, b vaultfilejournal.PreparedProposal) bool {
+	return a.WorkingGeneration == b.WorkingGeneration &&
+		a.Proposal.Generation == b.Proposal.Generation &&
+		a.Proposal.OperationID == b.Proposal.OperationID &&
+		a.Proposal.ExpectedRevision == b.Proposal.ExpectedRevision &&
+		bytes.Equal(a.Proposal.Bytes, b.Proposal.Bytes)
+}
+
+func loadEditJournalSnapshot(t *testing.T, path string) (vaultfilejournal.State, vaultfilejournal.PreparedProposal) {
+	t.Helper()
+	j, err := vaultfilejournal.OpenExisting(path)
+	if err != nil {
+		t.Fatal("EDIT_JOURNAL_OPEN_FAILED")
+	}
+	state, stateErr := j.LoadState()
+	prepared, prepErr := j.LoadPrepared()
+	if j.Close() != nil || stateErr != nil || prepErr != nil {
+		t.Fatal("EDIT_JOURNAL_SNAPSHOT_FAILED")
+	}
+	return state, prepared
+}
+
+func TestVaultFileTitleEditProductForeignAuthorReplayRefusal(t *testing.T) {
+	c := newTitleEditProductCaseWithAuthor(t, true, true)
+	base, metadata, items, err := vault.OpenAuthenticatedItems(c.baseline.sealed, &c.baseline.pin,
+		"author-device", c.baseline.authorIdentity)
+	if err != nil || len(items) != 1 || items[0].ID != c.itemID || items[0].Title != c.oldTitle {
+		t.Fatal("EDIT_FOREIGN_BASE_AUTH_FAILED")
+	}
+	defer clear(metadata)
+	changed := make([]vault.Item, len(items))
+	for i := range items {
+		changed[i] = vault.CloneItem(items[i])
+	}
+	changed[0].Title = ownedEditedTitle
+	digest, err := vaultfile.FileDigest(base)
+	if err != nil {
+		t.Fatal("EDIT_FOREIGN_BASE_DIGEST_FAILED")
+	}
+	parentDigest, err := hex.DecodeString(digest)
+	if err != nil || len(parentDigest) != 32 {
+		t.Fatal("EDIT_FOREIGN_PARENT_DIGEST_FAILED")
+	}
+	draft := &vaultfile.File{Format: base.Format, Version: base.Version,
+		SignedPolicyProofs: base.SignedPolicyProofs, Header: base.Header}
+	draft.Header.ContentSeq++
+	draft.Header.PrevDigest = parentDigest
+	draft.Header.RevisionID = ""
+	draft.Header.OpID = "owned-foreign-author-rename"
+	draft.Header.AuthorDeviceID = "author-device"
+	sealed, err := vault.SealAuthenticatedItems(draft, metadata, changed, &c.baseline.pin,
+		c.baseline.epochVUK, c.baseline.authorSigning)
+	if err != nil || vaultfile.VerifyContentTransition(c.baseline.sealed, sealed, &c.baseline.pin) != nil {
+		t.Fatal("EDIT_FOREIGN_DIRECT_CHILD_INVALID")
+	}
+	foreign, foreignMetadata, foreignItems, err := vault.OpenAuthenticatedItems(sealed, &c.baseline.pin,
+		"author-device", c.baseline.authorIdentity)
+	if err != nil || foreign.Header.AuthorDeviceID != "author-device" ||
+		!bytes.Equal(metadata, foreignMetadata) || !reflect.DeepEqual(changed, foreignItems) {
+		t.Fatal("EDIT_FOREIGN_RENAME_NOT_EXACT")
+	}
+	defer clear(foreignMetadata)
+	inputPath := filepath.Join(c.baseline.root, "foreign-child.locklark")
+	if os.WriteFile(inputPath, sealed, 0600) != nil {
+		t.Fatal("EDIT_FOREIGN_FILE_WRITE_FAILED")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.product, "vault-file", "import-prepared", "--config", c.baseline.configPath,
+		"--input", inputPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil || ctx.Err() != nil || stdout.String() != "{\"status\":\"PREPARED\"}\n" || stderr.Len() != 0 {
+		t.Fatal("EDIT_FOREIGN_IMPORT_FAILED")
+	}
+	beforeState, beforePrepared := loadEditJournalSnapshot(t, c.baseline.cfg.Journal)
+	if !bytes.Equal(beforeState.BaseBytes, c.baseline.sealed) || !bytes.Equal(beforeState.WorkingBytes, sealed) ||
+		!bytes.Equal(beforePrepared.Proposal.Bytes, sealed) {
+		t.Fatal("EDIT_FOREIGN_IMPORT_STATE_INVALID")
+	}
+	requestPath := writeTitleEditRequest(t, c, "same-rename", c.oldTitle, ownedEditedTitle)
+	requireEditVerdict(t, runTitleEditProduct(t, c, c.baseline.configPath, requestPath, c.password, false,
+		"LOCAL_REVIEW"), "LOCAL_REVIEW")
+	afterState, afterPrepared := loadEditJournalSnapshot(t, c.baseline.cfg.Journal)
+	if !sameEditJournalState(beforeState, afterState) || !sameEditPrepared(beforePrepared, afterPrepared) {
+		t.Fatal("EDIT_FOREIGN_REFUSAL_MUTATED_JOURNAL")
 	}
 }
 
@@ -186,29 +288,12 @@ func TestVaultFileTitleEditProductReplayAndStaleRemote(t *testing.T) {
 	c := newTitleEditProductCase(t, true)
 	input := writeTitleEditRequest(t, c, "first-edit", c.oldTitle, ownedEditedTitle)
 	requireEditVerdict(t, runTitleEditProduct(t, c, c.baseline.configPath, input, c.password, false, ""), "PREPARED")
-	j, err := vaultfilejournal.OpenExisting(c.baseline.cfg.Journal)
-	if err != nil {
-		t.Fatal("EDIT_REPLAY_JOURNAL_OPEN_FAILED")
-	}
-	beforeState, stateErr := j.LoadState()
-	beforePrepared, prepErr := j.LoadPrepared()
-	if j.Close() != nil || stateErr != nil || prepErr != nil {
-		t.Fatal("EDIT_REPLAY_SNAPSHOT_FAILED")
-	}
+	beforeState, beforePrepared := loadEditJournalSnapshot(t, c.baseline.cfg.Journal)
 	requireEditVerdict(t, runTitleEditProduct(t, c, c.baseline.configPath, input, c.password, false, ""), "PREPARED")
 	other := writeTitleEditRequest(t, c, "second-edit", c.oldTitle, "Different second edit")
 	requireEditVerdict(t, runTitleEditProduct(t, c, c.baseline.configPath, other, c.password, false, "LOCAL_REVIEW"), "LOCAL_REVIEW")
-	j, err = vaultfilejournal.OpenExisting(c.baseline.cfg.Journal)
-	if err != nil {
-		t.Fatal("EDIT_REPLAY_JOURNAL_REOPEN_FAILED")
-	}
-	afterState, stateErr := j.LoadState()
-	afterPrepared, prepErr := j.LoadPrepared()
-	if j.Close() != nil || stateErr != nil || prepErr != nil ||
-		afterState.Generation != beforeState.Generation || afterState.RemoteRevision != beforeState.RemoteRevision ||
-		!bytes.Equal(afterState.BaseBytes, beforeState.BaseBytes) || !bytes.Equal(afterState.WorkingBytes, beforeState.WorkingBytes) ||
-		afterPrepared.Proposal.OperationID != beforePrepared.Proposal.OperationID ||
-		!bytes.Equal(afterPrepared.Proposal.Bytes, beforePrepared.Proposal.Bytes) {
+	afterState, afterPrepared := loadEditJournalSnapshot(t, c.baseline.cfg.Journal)
+	if !sameEditJournalState(beforeState, afterState) || !sameEditPrepared(beforePrepared, afterPrepared) {
 		t.Fatal("EDIT_REPLAY_PROPOSAL_CHANGED")
 	}
 	backend, err := vaultfilebackend.OpenExistingDir(c.baseline.cfg.BackendRoot)
@@ -233,8 +318,9 @@ func TestVaultFileTitleEditProductReplayAndStaleRemote(t *testing.T) {
 		!bytes.Equal(afterRemote.Bytes, stale.Bytes) {
 		t.Fatal("EDIT_STALE_RESUME_WROTE_BACKEND")
 	}
-	if runStatusProduct(c.product, c.baseline.configPath) != "PREPARED" {
-		t.Fatal("EDIT_STALE_RESUME_LOST_PREPARED")
+	afterResumeState, afterResumePrepared := loadEditJournalSnapshot(t, c.baseline.cfg.Journal)
+	if !sameEditJournalState(beforeState, afterResumeState) || !sameEditPrepared(beforePrepared, afterResumePrepared) {
+		t.Fatal("EDIT_STALE_RESUME_CHANGED_JOURNAL")
 	}
 }
 
