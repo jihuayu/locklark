@@ -1211,6 +1211,8 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
         error = self.SYNTHETIC_ERROR
         real_fdopen = desktop.os.fdopen
         calls = []
+        fault = {"write_calls": 0, "write_ok": 0, "write_raised": 0,
+                 "flush_ok": 0, "exit_calls": 0, "exit_raised": 0}
 
         class FailingOutput:
             def __init__(self, raw):
@@ -1220,18 +1222,37 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
                 return self
 
             def __exit__(self, *_):
+                fault["exit_calls"] += 1
+                if mode == "flush":
+                    # The controlled failure comes from the with-exit path
+                    # after write() returned successfully and the data was
+                    # flushed/closed, never from write() itself.
+                    try:
+                        self.raw.flush()
+                        fault["flush_ok"] += 1
+                    except OSError:
+                        pass
+                    try:
+                        self.raw.close()
+                    except OSError:
+                        pass
+                    fault["exit_raised"] += 1
+                    raise OSError(error)
                 try:
                     self.raw.close()
-                except Exception:
+                except OSError:
                     pass
 
             def write(self, text):
+                fault["write_calls"] += 1
                 if mode == "write":
                     self.raw.write(text[:len(text) // 2])
-                else:
-                    self.raw.write(text)
-                self.raw.flush()
-                raise OSError(error)
+                    self.raw.flush()
+                    fault["write_raised"] += 1
+                    raise OSError(error)
+                result = self.raw.write(text)
+                fault["write_ok"] += 1
+                return result
 
         def fdopen(fd, *args, **kwargs):
             raw = real_fdopen(fd, *args, **kwargs)
@@ -1244,12 +1265,12 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
              patch.object(desktop.os, "fdopen", side_effect=fdopen), \
              patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
             code = acceptance.run()
-        return acceptance, code, [item.args[0] for item in output.call_args_list]
+        return acceptance, code, [item.args[0] for item in output.call_args_list], fault
 
     def test_final_transcript_failure_keeps_private_provisional(self):
         for mode in ("write", "flush"):
             with self.subTest(mode=mode):
-                acceptance, code, lines = self.run_final_write_failure(mode)
+                acceptance, code, lines, fault = self.run_final_write_failure(mode)
                 text = "\n".join(lines)
                 self.assertEqual(code, 1)
                 self.assertFalse(any("PASS" in line for line in lines))
@@ -1262,6 +1283,13 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
                 self.assertNotIn("PASS", transcript)
                 self.assertNotIn("Desktop native private artifact and controller scan: passed", transcript)
                 self.assertEqual(list(acceptance.state.glob(".controller-*.tmp")), [])
+                if mode == "write":
+                    self.assertEqual((fault["write_calls"], fault["write_ok"], fault["write_raised"],
+                                      fault["exit_raised"]), (1, 0, 1, 0))
+                else:
+                    self.assertEqual((fault["write_calls"], fault["write_ok"], fault["write_raised"],
+                                      fault["flush_ok"], fault["exit_calls"], fault["exit_raised"]),
+                                     (1, 1, 0, 1, 1, 1))
 
 
 if __name__ == "__main__":
