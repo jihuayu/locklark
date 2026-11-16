@@ -747,6 +747,15 @@ func assertScopedStillBlocked(t *testing.T, done <-chan struct{}, what string) {
 	}
 }
 
+func assertScopedErrStillBlocked(t *testing.T, done <-chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("%s returned before the retiring child close completed: %v", what, err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestVaultFileChildParentLockWaitsForRetiringClose(t *testing.T) {
 	t.Run("lock-child-and-duplicate-close", func(t *testing.T) {
 		fx := newScopedChildFixture(t)
@@ -754,53 +763,81 @@ func TestVaultFileChildParentLockWaitsForRetiringClose(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open A: %v", err)
 		}
-		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+		tokenB, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+		if err != nil {
 			t.Fatalf("open B: %v", err)
 		}
 		childA := fx.child(fx.a.journal)
 		childB := fx.child(fx.b.journal)
 		pause := installScopedClosePause(t)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(pause.release) }) }
+		var wg sync.WaitGroup
+		t.Cleanup(func() {
+			release()
+			wg.Wait()
+		})
 
 		// A is the only started close, so it claims the seam first.
 		lockA := make(chan error, 1)
-		go func() { lockA <- fx.session.LockVaultFileChild(tokenA) }()
+		wg.Add(1)
+		go func() { defer wg.Done(); lockA <- fx.session.LockVaultFileChild(tokenA) }()
 		waitScopedCloseSeam(t, pause)
 
-		// A later close must wait on A's real handle.Close, not return on the
-		// closed flag.
-		duplicate := make(chan struct{})
-		duplicateStarted := make(chan struct{})
-		go func() {
-			close(duplicateStarted)
-			childA.close()
-			close(duplicate)
-		}()
-		<-duplicateStarted
-		assertScopedStillBlocked(t, duplicate, "duplicate child close")
+		// A second public close of the same generation must reach the shared
+		// closeDone barrier through the all set, not return on the closed flag.
+		duplicate := make(chan error, 1)
+		wg.Add(1)
+		go func() { defer wg.Done(); duplicate <- fx.session.LockVaultFileChild(tokenA) }()
+		assertScopedErrStillBlocked(t, duplicate, "duplicate public child lock")
+
+		// B is a different child, so the first A pause must not block B's
+		// actual close. This also proves the blocking seam is not a global Once.
+		lockB := make(chan error, 1)
+		wg.Add(1)
+		go func() { defer wg.Done(); lockB <- fx.session.LockVaultFileChild(tokenB) }()
+		select {
+		case err := <-lockB:
+			if err != nil {
+				t.Fatalf("LockVaultFileChild(B): %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("LockVaultFileChild(B) was blocked by A's retiring close")
+		}
+		assertScopedChildHandleClosed(t, childB.handle)
 
 		// RequestLock must not wait on the blocked child close.
 		assertScopedRequestLockImmediate(t, fx.session)
 
+		// Even with the parent revoked, a public close for A must still wait
+		// for A's real handle close through the all set.
+		revokedLock := make(chan error, 1)
+		wg.Add(1)
+		go func() { defer wg.Done(); revokedLock <- fx.session.LockVaultFileChild(tokenA) }()
+		assertScopedErrStillBlocked(t, revokedLock, "revoked public child lock")
+
 		parentDone := make(chan struct{})
-		go func() {
-			fx.session.Lock()
-			close(parentDone)
-		}()
+		wg.Add(1)
+		go func() { defer wg.Done(); fx.session.Lock(); close(parentDone) }()
 		assertScopedStillBlocked(t, parentDone, "Session.Lock")
 
-		close(pause.release)
-		select {
-		case err := <-lockA:
-			if err != nil {
-				t.Fatalf("LockVaultFileChild(A): %v", err)
+		release()
+		for _, tc := range []struct {
+			name string
+			ch   <-chan error
+		}{
+			{name: "LockVaultFileChild(A)", ch: lockA},
+			{name: "duplicate public child lock", ch: duplicate},
+			{name: "revoked public child lock", ch: revokedLock},
+		} {
+			select {
+			case err := <-tc.ch:
+				if err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not return after release", tc.name)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("LockVaultFileChild(A) did not return after release")
-		}
-		select {
-		case <-duplicate:
-		case <-time.After(5 * time.Second):
-			t.Fatal("duplicate close did not return after release")
 		}
 		select {
 		case <-parentDone:

@@ -805,9 +805,16 @@ func (s *Session) RevalidateVaultFileChildOwnership(token VaultFileChildToken) e
 }
 
 // LockVaultFileChild revokes one token generation. It never changes the parent
-// revocation flag, never locks a sibling and never waits on IO. A stale token
-// (for example an old A after A was closed and reopened) is a no-op and cannot
-// remove the new generation.
+// revocation flag, never locks a sibling and never waits on IO while holding
+// saveMu or the registry. A foreign or zero token is a no-op. The exact opaque
+// token is looked up in the active registry and then in the all-generation set,
+// which retains a child until its real handle.Close has returned; the caller
+// therefore waits outside every lock for that generation's actual close
+// completion, not merely for the closed flag. It does not wait for a whole
+// higher-level read to return (the read hook runs after decryption), and the
+// existing current-token read/refusal semantics are unchanged. A stale token
+// (for example an old A after A was closed and reopened) can only retire the
+// exact generation it names and cannot remove the new generation.
 func (s *Session) LockVaultFileChild(token VaultFileChildToken) error {
 	// A foreign-owner token is a no-op: it must not touch the victim child or
 	// any sibling even when path and per-Session generation happen to match.
@@ -816,20 +823,28 @@ func (s *Session) LockVaultFileChild(token VaultFileChildToken) error {
 		return nil
 	}
 	s.saveMu.Lock()
-	if s.vaultFileRevoked.Load() {
-		s.saveMu.Unlock()
-		return nil
-	}
 	s.vaultFileMu.Lock()
 	child := s.vaultFileChildren[token.path]
-	if child == nil || child.token != token {
-		s.vaultFileMu.Unlock()
-		s.saveMu.Unlock()
-		return nil
+	if child != nil && child.token == token {
+		delete(s.vaultFileChildren, token.path)
+	} else {
+		// The active entry is absent or names a later generation. Only the all
+		// set can still contain the exact generation being closed.
+		child = nil
+		for candidate := range s.vaultFileAll {
+			if candidate.token == token {
+				child = candidate
+				break
+			}
+		}
 	}
-	delete(s.vaultFileChildren, token.path)
 	s.vaultFileMu.Unlock()
 	s.saveMu.Unlock()
+	if child == nil {
+		// Both sets only lose a child after its real close has completed, so
+		// no matching entry means this generation's close is already done.
+		return nil
+	}
 	s.retireVaultFileChild(child)
 	return nil
 }
