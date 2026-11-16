@@ -71,6 +71,20 @@ type payload struct {
 	VaultFileOwners []vaultFileOwnerRecord `json:",omitempty"`
 }
 
+// Decrypted backup byte buffers may outlive the plaintext JSON buffer after
+// unmarshalling. Clear every owned byte slice when a decoded payload is
+// rejected or no longer needed. Go strings are not claimed to be erasable.
+func clearDecodedArchiveSensitive(p *payload) {
+	if p == nil {
+		return
+	}
+	clearVaultFileOwners(p.VaultFileOwners)
+	clearAuthenticatedItems(p.Items)
+	for i := range p.Attachments {
+		clear(p.Attachments[i].Content)
+	}
+}
+
 func collectBackupAttachments(items []vault.Item) []backupAttachment {
 	var out []backupAttachment
 	for _, item := range items {
@@ -431,14 +445,14 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	}
 	var body signedBackup
 	if json.Unmarshal(plain, &body) != nil {
-		clearVaultFileOwners(body.Body.VaultFileOwners)
+		clearDecodedArchiveSensitive(&body.Body)
 		return nil, invalid
 	}
 	p := &body.Body
 	accepted := false
 	defer func() {
 		if !accepted {
-			clearVaultFileOwners(p.VaultFileOwners)
+			clearDecodedArchiveSensitive(p)
 		}
 	}()
 
@@ -691,7 +705,7 @@ func PrepareRestore(src, dest, pw string, oldKey []byte, kit string) (*Restorati
 	keep := false
 	defer func() {
 		if !keep {
-			clearVaultFileOwners(p.VaultFileOwners)
+			clearDecodedArchiveSensitive(p)
 		}
 	}()
 	if _, e = os.Lstat(dest); e == nil {
@@ -725,7 +739,7 @@ func (r *Restoration) Publish(newKey []byte) error {
 func (r *Restoration) Close() {
 	clear(r.oldKey)
 	if r.p != nil {
-		clearVaultFileOwners(r.p.VaultFileOwners)
+		clearDecodedArchiveSensitive(r.p)
 	}
 	r.oldKey, r.p, r.pw = nil, nil, ""
 }
