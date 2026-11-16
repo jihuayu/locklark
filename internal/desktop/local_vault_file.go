@@ -62,6 +62,9 @@ type localVaultFileState struct {
 	sessionParent     *personal.Session
 	sessionGeneration uint64
 	sessionPath       string
+	// lockSequence is the private monotonic binding sequence for explicit lock
+	// operations. It is never a path, authority, factor or routing identity.
+	lockSequence uint64
 	// sessionCandidateForTest observes the staged operation after the
 	// production factory result has been handed off and before dispatch. The
 	// worker captures it before launch; production leaves it nil.

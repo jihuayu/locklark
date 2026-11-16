@@ -410,6 +410,11 @@ type localVaultFileSessionSlot struct {
 	// launches and is inherited across same-parent scope replacement. It never
 	// retains the wrapper, a factor, key, kit, token, handle or App pointer.
 	closeTail *localVaultFileCloseTail
+	// lock is the explicit-lock marker shared by every same-parent/exact-journal
+	// slot. While unfinished it blocks every new producer for that journal; the
+	// completed marker is durable feedback for the existing anchor until the
+	// next open boundary. It retains no wrapper, material or path authority.
+	lock *localVaultFileLockOperation
 }
 
 // localVaultFileCloseResult is the finite cumulative outcome of a tracked
@@ -632,6 +637,14 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		return nil
 	}
 	state := &a.localVaultFiles
+	// The shared journal barrier is checked before predecessor collection,
+	// cancellation, replacement or any producer/factor work. It covers every
+	// alias slot, not only the requested scope. A completed marker is consumed
+	// here, because the next real open is the boundary that reconciles it.
+	if a.localVaultFileLockBlocks(scope) {
+		return nil
+	}
+	a.clearCompletedLocalVaultFileLocks(scope)
 	// Capture every unsettled same-parent/same-journal predecessor before any
 	// cancellation or replacement. Full scope equality is deliberately not the
 	// ordering key: read-aliased config paths can share one journal.
@@ -642,16 +655,19 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 	// replaced; the new current slot inherits it so a later retire or parent
 	// clear joins the already-launched Close.
 	var inheritTail *localVaultFileCloseTail
+	var inheritLock *localVaultFileLockOperation
 	if slot != nil && slot.retiring {
 		// The retiring entry keeps its tail and ordering operations for
 		// collection; the new current slot is a distinct pointer so its async
 		// purge cannot delete it.
 		inheritTail = slot.closeTail
+		inheritLock = slot.lock
 		slot = nil
 	}
 	if slot != nil && (slot.parent != a.session || slot.appGeneration != a.generation) {
 		a.retireLocalVaultFileSessionSlot(slot)
 		inheritTail = slot.closeTail
+		inheritLock = slot.lock
 		slot = nil
 	}
 	// Conflicting pending predecessors are cancelled exactly. A held old
@@ -661,14 +677,17 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		a.cancelLocalVaultFileSessionOperationExact(pred)
 	}
 	if slot == nil {
-		if inheritTail == nil {
-			if existing := state.sessionSlots[scope]; existing != nil {
+		if existing := state.sessionSlots[scope]; existing != nil {
+			if inheritTail == nil {
 				inheritTail = existing.closeTail
+			}
+			if inheritLock == nil {
+				inheritLock = existing.lock
 			}
 		}
 		slot = &localVaultFileSessionSlot{
 			scope: scope, parent: a.session, appGeneration: a.generation,
-			closeTail: inheritTail,
+			closeTail: inheritTail, lock: inheritLock,
 		}
 		if state.sessionSlots == nil {
 			state.sessionSlots = make(map[localVaultFileSessionScope]*localVaultFileSessionSlot)
@@ -1147,7 +1166,7 @@ func (a *App) purgeSettledLocalVaultFileSessionTails() {
 				break
 			}
 		}
-		if allSettled && localVaultFileCloseTailFinished(slot.closeTail) {
+		if allSettled && localVaultFileCloseTailFinished(slot.closeTail) && slot.lock == nil {
 			delete(state.sessionSlots, scope)
 		}
 	}
