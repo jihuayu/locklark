@@ -56,6 +56,12 @@ func ReadManifest(path string) (Manifest, bool, error) {
 // Exact concurrent retries may use the winner; foreign or unknown outcomes
 // are never overwritten. The encoding retains the original v1 field order.
 func ReserveManifest(path string, input Manifest) (Manifest, error) {
+	return reserveManifestWithWriter(path, input, nil)
+}
+
+// The package-private writer seam is nil in production. Tests can make the
+// publication result unknown after a real WriteNew without altering disk I/O.
+func reserveManifestWithWriter(path string, input Manifest, writeNew func(string, []byte) error) (Manifest, error) {
 	if !ValidManifestPhase(path, input, false, false) {
 		return Manifest{}, ErrConfig
 	}
@@ -72,7 +78,15 @@ func ReserveManifest(path string, input Manifest) (Manifest, error) {
 		return Manifest{}, ErrLocalUnknown
 	}
 	defer clear(encoded)
-	if err := teamfiles.WriteNew(path, encoded); err != nil {
+	if writeNew == nil {
+		writeNew = teamfiles.WriteNew
+	}
+	if err := writeNew(path, encoded); err != nil {
+		// A visible inode after publication-unknown is not durable proof.
+		// Only a definite pre-publication refusal may name another winner.
+		if errors.Is(err, teamfiles.ErrPublicationUnknown) || !errors.Is(err, teamfiles.ErrFile) {
+			return Manifest{}, ErrLocalUnknown
+		}
 		manifest, exists, readErr := ReadManifest(path)
 		if readErr != nil || !exists || manifest.PersonalFile != input.PersonalFile ||
 			manifest.BackendRoot != input.BackendRoot || manifest.Name != input.Name ||
