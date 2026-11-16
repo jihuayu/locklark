@@ -1,6 +1,9 @@
 package desktop
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 )
@@ -20,36 +23,47 @@ type localVaultFileDisplayLabel struct {
 }
 
 // localVaultFileDisplayLabels preserves every input ref and its order. Valid
-// refs get "Name · prefix", where same-name groups extend each distinct ID's
-// prefix only as far as needed to distinguish it from the other full IDs.
-// Duplicate same-name/full-ID refs share one marked label rather than gaining
-// a fabricated unique suffix. Invalid shapes use a fixed review fallback.
+// refs get "Name · prefix", where same-display-name groups extend each distinct
+// ID's prefix only as far as needed to distinguish it from the other full IDs.
+// Bidi controls are replaced in the display copy only. Duplicate displayed
+// name/full-ID refs share one marked label rather than gaining a fabricated
+// unique suffix. Multiple invalid shapes use deterministic display indexes in a
+// fixed review fallback; they are not stable identities.
 func localVaultFileDisplayLabels(refs []localVaultFileRef) []localVaultFileDisplayLabel {
 	out := make([]localVaultFileDisplayLabel, len(refs))
 	idCounts := make(map[string]map[string]int)
-	valid := make([]bool, len(refs))
+	displayNames := make([]string, len(refs))
+	invalid := make([]bool, len(refs))
+	reviewCount := 0
 
 	for i, ref := range refs {
 		out[i].ref = ref
 		if !vaultfileclient.ValidID(ref.vaultID) || !vaultfilebackend.ValidName(ref.name) {
-			out[i].label = localVaultFileReviewLabel
+			invalid[i] = true
+			reviewCount++
 			continue
 		}
-		valid[i] = true
-		counts := idCounts[ref.name]
+		displayName := localVaultFileDisplayName(ref.name)
+		displayNames[i] = displayName
+		counts := idCounts[displayName]
 		if counts == nil {
 			counts = make(map[string]int)
-			idCounts[ref.name] = counts
+			idCounts[displayName] = counts
 		}
 		counts[ref.vaultID]++
 	}
 
 	for i, ref := range refs {
-		if !valid[i] {
+		if invalid[i] {
+			out[i].label = localVaultFileReviewLabel
+			if reviewCount > 1 {
+				out[i].label = fmt.Sprintf("%s #%d", localVaultFileReviewLabel, i+1)
+			}
 			continue
 		}
+		displayName := displayNames[i]
 		prefixLen := localVaultFileLabelMinPrefix
-		for otherID := range idCounts[ref.name] {
+		for otherID := range idCounts[displayName] {
 			if otherID == ref.vaultID {
 				continue
 			}
@@ -61,13 +75,42 @@ func localVaultFileDisplayLabels(refs []localVaultFileRef) []localVaultFileDispl
 				prefixLen = needed
 			}
 		}
-		label := ref.name + " · " + ref.vaultID[:prefixLen]
-		if idCounts[ref.name][ref.vaultID] > 1 {
+		label := displayName + " · " + ref.vaultID[:prefixLen]
+		if idCounts[displayName][ref.vaultID] > 1 {
 			label += localVaultFileDuplicateSuffix
 		}
 		out[i].label = label
 	}
 	return out
+}
+
+// localVaultFileDisplayName creates a visible display copy without active bidi
+// controls. The escape marker is a backslash, which ValidName rejects, and
+// backslashes are escaped too so literal escape text cannot alias a control.
+func localVaultFileDisplayName(name string) string {
+	var display strings.Builder
+	display.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case localVaultFileBidiControl(r):
+			fmt.Fprintf(&display, `\u%04X`, r)
+		case r == '\\':
+			display.WriteString(`\\`)
+		default:
+			display.WriteRune(r)
+		}
+	}
+	return display.String()
+}
+
+func localVaultFileBidiControl(r rune) bool {
+	switch r {
+	case '\u061c', '\u200e', '\u200f',
+		'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+		'\u2066', '\u2067', '\u2068', '\u2069':
+		return true
+	}
+	return false
 }
 
 func localVaultFileCommonPrefix(a, b string) int {

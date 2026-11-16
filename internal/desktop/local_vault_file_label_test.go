@@ -28,6 +28,65 @@ func TestLocalVaultFileDisplayLabelsExtendSharedNamePrefix(t *testing.T) {
 	}
 }
 
+func TestLocalVaultFileDisplayLabelsEscapeBidiControls(t *testing.T) {
+	ref := localVaultFileRef{
+		path:    "/synthetic/bidi",
+		name:    "库\u202e名\u2066🙂\u2069",
+		vaultID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	out := localVaultFileDisplayLabels([]localVaultFileRef{ref})
+	if len(out) != 1 || out[0].ref != ref {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_REF_CHANGED")
+	}
+	if localVaultFileTestBidiControl(out[0].label) {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_CONTROL_SURVIVED")
+	}
+	if !strings.HasPrefix(out[0].label, "库\\u202E名\\u2066🙂\\u2069 · ") {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_NOT_VISIBLY_ESCAPED")
+	}
+	if !strings.ContainsRune(ref.name, '\u202e') {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_RAW_NAME_MUTATED")
+	}
+}
+
+func TestLocalVaultFileDisplayLabelsBidiEscapeDoesNotCollide(t *testing.T) {
+	controlName := "A\u202eB"
+	literalName := `A\u202EB`
+	const prefix = "aaaaaaaa"
+	controlDisplay := localVaultFileDisplayName(controlName)
+	literalDisplay := localVaultFileDisplayName(literalName)
+	if controlDisplay == literalDisplay {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_ESCAPE_ALIASED")
+	}
+	if controlDisplay+" · "+prefix == literalDisplay+" · "+prefix {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_NORMAL_LABEL_ALIASED")
+	}
+	control := localVaultFileRef{path: "/synthetic/bidi-control", name: controlName, vaultID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	literal := localVaultFileRef{path: "/synthetic/bidi-literal", name: literalName, vaultID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	out := localVaultFileDisplayLabels([]localVaultFileRef{control, literal})
+	if len(out) != 2 || out[0].ref != control || out[1].ref != literal {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_ESCAPE_REF_CHANGED")
+	}
+	if out[0].label == out[1].label {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_ESCAPE_LABEL_COLLISION")
+	}
+	if out[1].label != localVaultFileReviewLabel {
+		t.Fatal("LOCAL_VAULT_LABEL_BIDI_ESCAPE_LITERAL_NOT_REVIEW")
+	}
+}
+
+func localVaultFileTestBidiControl(s string) bool {
+	for _, r := range s {
+		switch r {
+		case '\u061c', '\u200e', '\u200f',
+			'\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+			'\u2066', '\u2067', '\u2068', '\u2069':
+			return true
+		}
+	}
+	return false
+}
+
 func TestLocalVaultFileDisplayLabelsDuplicateAndInvalidRefsDegrade(t *testing.T) {
 	duplicateID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	first := localVaultFileRef{path: "/synthetic/duplicate-first", name: "Same", vaultID: duplicateID}
@@ -50,8 +109,8 @@ func TestLocalVaultFileDisplayLabelsDuplicateAndInvalidRefsDegrade(t *testing.T)
 	if !strings.HasSuffix(out[0].label, localVaultFileDuplicateSuffix) {
 		t.Fatal("LOCAL_VAULT_LABEL_DUPLICATE_NOT_MARKED")
 	}
-	if out[1].label != localVaultFileReviewLabel || out[3].label != localVaultFileReviewLabel {
-		t.Fatal("LOCAL_VAULT_LABEL_INVALID_SHAPE_NOT_REVIEW")
+	if out[1].label != localVaultFileReviewLabel+" #2" || out[3].label != localVaultFileReviewLabel+" #4" {
+		t.Fatal("LOCAL_VAULT_LABEL_REVIEW_ROWS_NOT_DISTINGUISHED")
 	}
 }
 
@@ -63,6 +122,9 @@ func TestLocalVaultFileDisplayLabelsStableAcrossReorder(t *testing.T) {
 		{path: "/synthetic/reorder-review", name: "bad/name", vaultID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 	}
 	forward := localVaultFileDisplayLabels(refs)
+	if forward[3].label != localVaultFileReviewLabel {
+		t.Fatal("LOCAL_VAULT_LABEL_SINGLE_REVIEW_CHANGED")
+	}
 	reversedRefs := make([]localVaultFileRef, len(refs))
 	for i := range refs {
 		reversedRefs[i] = refs[len(refs)-1-i]
