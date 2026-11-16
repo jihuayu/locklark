@@ -120,7 +120,9 @@ export function createBrowserRotationSite({ key, cert, onSnapshot = () => {} }) 
   };
   const form = (kind) => {
     const changing = kind === "change-password", registering = kind === "register";
-    return `<form id="${kind}" method="post" action="/${kind}"><input type="hidden" name="csrf" value="${session.csrf}"><label>Username<input id="username" name="username" autocomplete="username" required${changing ? ` readonly value="${escapeHTML(account.username)}"` : ""}></label><label>${changing ? "New password" : "Password"}<input id="${changing ? "new-password" : "password"}" name="password" type="password" autocomplete="${changing || registering ? "new-password" : "current-password"}" required></label>${changing || registering ? '<label>Confirm password<input id="confirm-password" name="confirm" type="password" autocomplete="new-password" required></label>' : ""}<button type="submit">${changing ? "Change password" : registering ? "Register" : "Sign in"}</button></form><p id="change-result" role="status"></p>`;
+    // The extension captures writable username fields. This presentation does
+    // not select the account: the authenticated POST still checks its username.
+    return `<form id="${kind}" method="post" action="/${kind}"><input type="hidden" name="csrf" value="${session.csrf}"><label>Username<input id="username" name="username" autocomplete="username" required${changing ? ` value="${escapeHTML(account.username)}"` : ""}></label><label>${changing ? "New password" : "Password"}<input id="${changing ? "new-password" : "password"}" name="password" type="password" autocomplete="${changing || registering ? "new-password" : "current-password"}" required></label>${changing || registering ? '<label>Confirm password<input id="confirm-password" name="confirm" type="password" autocomplete="new-password" required></label>' : ""}<button type="submit">${changing ? "Change password" : registering ? "Register" : "Sign in"}</button></form><p id="change-result" role="status"></p>`;
   };
   // The fetch performs the real form POST while retaining the document in
   // which the extension generated/staged the new password for native save.

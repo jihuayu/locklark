@@ -118,7 +118,17 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     assert(changePage.body.includes('action="/change-password"') &&
       changePage.body.includes('id="new-password"') && changePage.body.includes('id="confirm-password"') &&
       changePage.body.includes('fetch(form.action'), "Session-authenticated real POST change form required");
+    const usernameInput = /<input id="username"[^>]*>/.exec(changePage.body)?.[0];
+    assert(typeof usernameInput === "string" && usernameInput.includes('autocomplete="username"') &&
+      usernameInput.includes('value="' + username + '"') && !/\b(?:readonly|disabled|hidden)\b/.test(usernameInput),
+      "Change form must expose the current username for ordinary extension capture");
     const basic = (password) => "Basic " + Buffer.from(username + ":" + password).toString("base64");
+    assert.equal((await call("/credential", { authorization: basic(oldPassword) })).status, 200);
+    const wrongAccount = await call("/change-password", { method: "POST", cookie: authenticatedSession,
+      fields: { csrf: csrf(changePage), username: "other-rotation-user", password: newPassword, confirm: newPassword } });
+    assert.equal(wrongAccount.status, 403);
+    assert(site.snapshot().passwordChanges === 0 && wrongAccount.headers["set-cookie"] === undefined,
+      "A form username must not switch the authenticated account or rotate its session");
     assert.equal((await call("/credential", { authorization: basic(oldPassword) })).status, 200);
     const changed = await call("/change-password", { method: "POST", cookie: authenticatedSession,
       fields: { csrf: csrf(changePage), username, password: newPassword, confirm: newPassword } });
@@ -129,11 +139,11 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     assert.equal((await call("/credential", { authorization: basic(newPassword) })).status, 200);
 
     const receipt = site.snapshot();
-    assert.deepEqual(receipt, { tlsConnections: 9, requests: 9, registrations: 1, loginAccepted: 1,
-      loginRejected: 0, passwordChanges: 1, changeRejected: 0, basicAccepted: 2, basicRejected: 1,
+    assert.deepEqual(receipt, { tlsConnections: 11, requests: 11, registrations: 1, loginAccepted: 1,
+      loginRejected: 0, passwordChanges: 1, changeRejected: 1, basicAccepted: 3, basicRejected: 1,
       requestRefused: 0, observerFailures: 0, countersCapped: false, accountRegistered: true, closed: false });
-    assert(observations.length === 24 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
-    console.log("PASS: owned HTTPS website only; verified TLS=9 requests=9 register=1 login=1 change=1 Basic accepted=2 rejected=1");
+    assert(observations.length === 30 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
+    console.log("PASS: owned HTTPS website only; verified TLS=11 requests=11 register=1 login=1 change=1 wrong-account refused=1 Basic accepted=3 rejected=1");
   } finally {
     if (site) {
       await site.close();
