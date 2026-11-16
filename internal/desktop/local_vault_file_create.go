@@ -6,12 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
-	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 )
@@ -103,50 +103,13 @@ func ensureLocalVaultFileWorkspace(settingsPath, personalPath string) (profileDi
 	}
 	profileDir, backendRoot = localVaultFilePaths(settingsPath, personalPath)
 	settingsDir := filepath.Dir(settingsPath)
-	if !ensureLocalVaultFileSettingsDir(settingsDir) {
-		return "", "", vaultfileclient.ErrLocalReview
-	}
 	base := filepath.Dir(filepath.Dir(profileDir))
-	for _, path := range []string{base, filepath.Join(base, "profiles"), profileDir, backendRoot} {
-		if e := os.Mkdir(path, 0700); e != nil && !os.IsExist(e) {
-			return "", "", vaultfileclient.ErrLocalReview
-		}
-		if !localVaultFilePrivateDir(path) {
+	for _, path := range []string{settingsDir, base, filepath.Join(base, "profiles"), profileDir, backendRoot} {
+		if teamfiles.EnsurePrivateWorkspace(path) != nil {
 			return "", "", vaultfileclient.ErrLocalReview
 		}
 	}
 	return profileDir, backendRoot, nil
-}
-
-// ensureLocalVaultFileSettingsDir accepts only an existing exact-0700 leaf, or
-// creates the missing leaf once under an existing non-symlink parent that group
-// and other users cannot write to. Existing user directories are never chmodded.
-func ensureLocalVaultFileSettingsDir(path string) bool {
-	info, err := os.Lstat(path)
-	if err == nil {
-		return localVaultFilePrivateDirInfo(info)
-	}
-	if !os.IsNotExist(err) {
-		return false
-	}
-	parent, err := os.Lstat(filepath.Dir(path))
-	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0022 != 0 {
-		return false
-	}
-	if e := os.Mkdir(path, 0700); e != nil && !os.IsExist(e) {
-		return false
-	}
-	info, err = os.Lstat(path)
-	return err == nil && localVaultFilePrivateDirInfo(info)
-}
-
-func localVaultFilePrivateDir(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && localVaultFilePrivateDirInfo(info)
-}
-
-func localVaultFilePrivateDirInfo(info os.FileInfo) bool {
-	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm() == 0700
 }
 
 // boundLocalVaultFileManifest is the strict resume/completion entry binding.

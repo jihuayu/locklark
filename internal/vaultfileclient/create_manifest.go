@@ -107,7 +107,7 @@ func ValidManifestPhase(path string, manifest Manifest, requireID, journalMustBe
 		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
-		!privateCreateParent(filepath.Dir(path)) || !privateCreateParent(filepath.Dir(manifest.Journal)) ||
+		teamfiles.ValidatePrivateParent(filepath.Dir(path)) != nil || teamfiles.ValidatePrivateParent(filepath.Dir(manifest.Journal)) != nil ||
 		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) ||
 		!normalizedCreateSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
@@ -120,8 +120,7 @@ func ValidManifestPhase(path string, manifest Manifest, requireID, journalMustBe
 	} else if manifest.VaultID != "" {
 		return false
 	}
-	info, err := os.Lstat(manifest.PersonalFile)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+	if teamfiles.ValidatePrivateFile(manifest.PersonalFile) != nil {
 		return false
 	}
 	if SeparateStatusState(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
@@ -168,9 +167,4 @@ func normalizedCreateSeparate(backendRoot string, paths ...string) bool {
 		}
 	}
 	return true
-}
-
-func privateCreateParent(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && info.IsDir() && info.Mode().Perm()&0077 == 0
 }
