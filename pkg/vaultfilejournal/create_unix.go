@@ -33,14 +33,30 @@ func createNewState(path string, state State) error {
 
 // probe is a private deterministic negative-test seam, never a product hook.
 func createNewStateWith(path string, state State, probe func(newStateStage) error) (retErr error) {
-	if !validInitialState(state) || path == "" || len(path) > 4096 || !utf8.ValidString(path) || strings.ContainsRune(path, 0) ||
-		!filepath.IsAbs(path) || filepath.Clean(path) != path {
+	if !validInitialState(state) {
 		return ErrInvalid
 	}
 	// Own the sealed bytes for the whole create/initialize attempt.
 	state.BaseBytes = bytes.Clone(state.BaseBytes)
 	state.WorkingBytes = state.BaseBytes
 	defer clear(state.BaseBytes)
+	return createNewJournalWith(path, func(j *Journal) error { return j.InitializeEmptyState(state) }, probe)
+}
+
+func createNewGenesisIntent(path string, intent GenesisIntent) error {
+	if !validGenesisIntent(intent) {
+		return ErrInvalid
+	}
+	intent = cloneGenesisIntent(intent)
+	defer clear(intent.SealedBytes)
+	return createNewJournalWith(path, func(j *Journal) error { return j.initializeGenesisIntent(intent) }, nil)
+}
+
+func createNewJournalWith(path string, initialize func(*Journal) error, probe func(newStateStage) error) (retErr error) {
+	if path == "" || len(path) > 4096 || !utf8.ValidString(path) || strings.ContainsRune(path, 0) ||
+		!filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return ErrInvalid
+	}
 	originalParent := filepath.Dir(path)
 	if checkPrivateDir(originalParent) != nil {
 		return ErrInvalid
@@ -146,7 +162,7 @@ func createNewStateWith(path string, state State, probe func(newStateStage) erro
 	if step(newStateDatabaseLocked) != nil || validate() != nil {
 		return ErrCreateUnknown
 	}
-	if journal.InitializeEmptyState(state) != nil {
+	if initialize(journal) != nil {
 		return ErrCreateUnknown
 	}
 	if step(newStateCommitted) != nil || validate() != nil || step(newStateBeforeParentSync) != nil || parent.Sync() != nil || validate() != nil {

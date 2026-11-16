@@ -16,6 +16,14 @@ func openExistingOnlyDatabase(path string) (*Journal, error) {
 // beforeBolt is a private deterministic seam for name-replacement tests. It
 // runs after the only descriptor open and before bbolt acquires its lock.
 func openExistingOnlyDatabaseWith(path string, beforeBolt func()) (*Journal, error) {
+	return openExistingOnlyDatabaseKindWith(path, beforeBolt, false)
+}
+
+func openExistingIntentOnlyDatabase(path string) (*Journal, error) {
+	return openExistingOnlyDatabaseKindWith(path, nil, true)
+}
+
+func openExistingOnlyDatabaseKindWith(path string, beforeBolt func(), wantIntent bool) (*Journal, error) {
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrInvalid
@@ -32,7 +40,7 @@ func openExistingOnlyDatabaseWith(path string, beforeBolt func()) (*Journal, err
 	if beforeBolt != nil {
 		beforeBolt()
 	}
-	return openExistingValidated(path, file, func() error {
+	return openExistingValidatedKind(path, file, func() error {
 		// This runs only after bbolt's exclusive lock has been acquired.
 		// Rechecking just the pathname before Open would not bind that lock
 		// or the database reads to the configured journal's inode.
@@ -45,7 +53,7 @@ func openExistingOnlyDatabaseWith(path string, beforeBolt func()) (*Journal, err
 			return ErrInvalid
 		}
 		return nil
-	})
+	}, wantIntent)
 }
 
 func existingFileInfo(file *os.File) (os.FileInfo, error) {

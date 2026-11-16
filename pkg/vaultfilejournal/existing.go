@@ -36,6 +36,10 @@ func OpenExisting(path string) (*Journal, error) {
 // openExistingValidated never opens a name. The platform opener owns file until
 // the one permitted OpenFile handoff; bbolt owns and closes it from then on.
 func openExistingValidated(path string, file *os.File, validateLocked func() error) (*Journal, error) {
+	return openExistingValidatedKind(path, file, validateLocked, false)
+}
+
+func openExistingValidatedKind(path string, file *os.File, validateLocked func() error, wantIntent bool) (*Journal, error) {
 	if file == nil {
 		return nil, ErrInvalid
 	}
@@ -78,6 +82,13 @@ func openExistingValidated(path string, file *os.File, validateLocked func() err
 		return refuse(ErrInvalid)
 	}
 	if err := db.View(func(tx *bolt.Tx) error {
+		if wantIntent {
+			_, err := readGenesisIntentOnly(tx)
+			return err
+		}
+		if genesisIntentPresent(tx) {
+			return ErrPendingGenesisIntent
+		}
 		_, found, err := readStateTx(tx)
 		if err != nil {
 			return err
@@ -87,7 +98,7 @@ func openExistingValidated(path string, file *os.File, validateLocked func() err
 		}
 		return nil
 	}); err != nil {
-		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrEmpty) {
+		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrEmpty) || errors.Is(err, ErrPendingGenesisIntent) {
 			return refuse(err)
 		}
 		return refuse(ErrInvalid)
