@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,10 +11,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 
 	"github.com/jihuayu/locklark/internal/teamfiles"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"github.com/jihuayu/locklark/internal/vaultfilesync"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
@@ -97,9 +95,9 @@ current SaaS grants or remote freshness.
 `
 
 var (
-	errVaultFileConfig       = errors.New("CONFIG_REJECTED")
+	errVaultFileConfig       = vaultfileclient.ErrConfig
 	errVaultFileJournal      = errors.New("JOURNAL_REJECTED")
-	errVaultFileBackend      = errors.New("BACKEND_REJECTED")
+	errVaultFileBackend      = vaultfileclient.ErrBackend
 	errVaultFileVerification = errors.New("VERIFY_REJECTED")
 	errVaultFileUnknown      = errors.New("UNKNOWN_REVIEW")
 	errVaultFileConflict     = errors.New("CONFLICT")
@@ -112,58 +110,15 @@ var (
 	errVaultFileTargetExists = errors.New("TARGET_EXISTS")
 )
 
-type vaultFileCheckpointConfig struct {
-	VaultID            string  `json:"vault_id"`
-	OwnerRootKeyID     string  `json:"owner_root_key_id"`
-	OwnerRootPublicKey string  `json:"owner_root_public_key"`
-	PolicySeq          *uint64 `json:"policy_seq"`
-	PolicyDigest       string  `json:"policy_digest"`
-}
-
-type vaultFileResumeConfig struct {
-	Version      int                        `json:"version"`
-	BackendRoot  string                     `json:"backend_root"`
-	Name         string                     `json:"name"`
-	Journal      string                     `json:"journal"`
-	PersonalFile string                     `json:"personal_file,omitempty"`
-	Checkpoint   *vaultFileCheckpointConfig `json:"checkpoint"`
-}
+type vaultFileCheckpointConfig = vaultfileclient.CheckpointConfig
+type vaultFileResumeConfig = vaultfileclient.ResumeConfig
 
 func decodeVaultFileResumeConfig(raw []byte) (vaultFileResumeConfig, vaultfile.PolicyCheckpoint, error) {
-	var cfg vaultFileResumeConfig
-	var pin vaultfile.PolicyCheckpoint
-	if teamfiles.JSON(raw, &cfg) != nil || cfg.Version != 1 ||
-		!teamfiles.ValidPath(cfg.BackendRoot) || !teamfiles.ValidPath(cfg.Journal) ||
-		cfg.PersonalFile != "" && !teamfiles.ValidPath(cfg.PersonalFile) ||
-		!vaultfilebackend.ValidName(cfg.Name) || cfg.Checkpoint == nil {
-		return cfg, pin, errVaultFileConfig
-	}
-	cp := cfg.Checkpoint
-	if cp.PolicySeq == nil || cp.VaultID == "" || cp.OwnerRootKeyID == "" ||
-		len(cp.VaultID) > 4096 || len(cp.OwnerRootKeyID) > 4096 {
-		return cfg, pin, errVaultFileConfig
-	}
-	public, ok := decodeVaultFileHex(cp.OwnerRootPublicKey)
-	if !ok {
-		return cfg, pin, errVaultFileConfig
-	}
-	digest, ok := decodeVaultFileHex(cp.PolicyDigest)
-	if !ok {
-		return cfg, pin, errVaultFileConfig
-	}
-	pin = vaultfile.PolicyCheckpoint{
-		VaultID: cp.VaultID, OwnerRootKeyID: cp.OwnerRootKeyID,
-		OwnerRootPublicKey: ed25519.PublicKey(public), PolicySeq: *cp.PolicySeq, PolicyDigest: digest,
-	}
-	return cfg, pin, nil
+	return vaultfileclient.DecodeResumeConfig(raw)
 }
 
 func decodeVaultFileHex(value string) ([]byte, bool) {
-	if len(value) != 64 || strings.ToLower(value) != value {
-		return nil, false
-	}
-	decoded, err := hex.DecodeString(value)
-	return decoded, err == nil && len(decoded) == 32
+	return vaultfileclient.DecodeHex(value)
 }
 
 func runVaultFile(args []string, out io.Writer) error {
@@ -314,79 +269,10 @@ func runVaultFile(args []string, out io.Writer) error {
 	return nil
 }
 
-// Status uses backend path metadata only for namespace separation. A missing
-// path is safe only when an existing, resolved directory has an absent child;
-// dangling links, loops, non-directories and inaccessible paths are refused.
-// Mutating commands retain their stricter existing-backend check below.
+// Keep the CLI call site and its error identities while sharing the strict
+// read-only status scope with other vault-file clients.
 func separateVaultFileStatusState(backendRoot string, paths ...string) error {
-	namespacePath := filepath.Join(backendRoot, "vaultfile-backend")
-	for _, path := range paths {
-		if path == namespacePath || strings.HasPrefix(path, namespacePath+string(os.PathSeparator)) {
-			return errVaultFileConfig
-		}
-	}
-	root, absent, err := statusVaultFileExistingDir(backendRoot)
-	if err != nil {
-		return errVaultFileBackend
-	}
-	if absent {
-		return nil
-	}
-	namespace, err := os.Lstat(filepath.Join(root, "vaultfile-backend"))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil || !namespace.IsDir() || namespace.Mode()&os.ModeSymlink != 0 {
-		return errVaultFileBackend
-	}
-	for _, path := range paths {
-		if info, err := os.Stat(path); err == nil && os.SameFile(namespace, info) {
-			return errVaultFileConfig
-		}
-		parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-		if err != nil {
-			return errVaultFileConfig
-		}
-		for {
-			info, err := os.Stat(parent)
-			if err != nil || !info.IsDir() || os.SameFile(namespace, info) {
-				return errVaultFileConfig
-			}
-			next := filepath.Dir(parent)
-			if next == parent {
-				break
-			}
-			parent = next
-		}
-	}
-	return nil
-}
-
-// Resolve each existing component separately so ENOENT means a truly absent
-// child, not the target of a dangling ancestor symlink.
-func statusVaultFileExistingDir(path string) (string, bool, error) {
-	resolved := string(os.PathSeparator)
-	for _, component := range strings.Split(strings.TrimPrefix(path, resolved), resolved) {
-		if component == "" {
-			continue
-		}
-		next := filepath.Join(resolved, component)
-		if _, err := os.Lstat(next); os.IsNotExist(err) {
-			return "", true, nil
-		} else if err != nil {
-			return "", false, err
-		}
-		var err error
-		resolved, err = filepath.EvalSymlinks(next)
-		if err != nil {
-			return "", false, err
-		}
-		info, err := os.Stat(resolved)
-		if err != nil || !info.IsDir() {
-			return "", false, errVaultFileBackend
-		}
-	}
-	return resolved, false, nil
+	return vaultfileclient.SeparateStatusState(backendRoot, paths...)
 }
 
 // The backend owns its whole documented vaultfile-backend subtree, including
