@@ -22,6 +22,7 @@ import ctypes as C
 import json
 import os
 import re
+import stat
 import sys
 import time
 
@@ -59,6 +60,9 @@ CONTROL_LABELS = (
     "Daily OTP login · active", "Daily other login · active",
     "Daily provider login · active", "停用系统快捷解锁",
     "Daily archived login · archived", "Daily trashed login · trashed",
+    "新建独立文件库", "准备创建", "确认并发布备份", "完成创建",
+    "备份恢复码", "重新输入恢复码", "恢复码未逐字匹配",
+    "关闭本地基线视图", "已验证本地初始版本 · 远端状态未核实",
 )
 
 # Exact grammar of the reviewed multi-credential choice labels. The account
@@ -74,6 +78,15 @@ PASSKEY_CHOICE_LABEL = re.compile(
 )
 
 
+# One private recovery material is a fixed 110-character ASCII token. The
+# accessible name is the only readable field; value/text APIs remain unused.
+RECOVERY_TITLE = "Locklark · 本地金库"
+RECOVERY_KEYS = frozenset({"title", "executable", "expected_pid",
+                           "preserve_focus", "read_recovery"})
+RECOVERY_MATERIAL = re.compile(r"^LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}$")
+RECOVERY_NODE_LIMIT = 4096
+
+
 def control_label_allowed(label):
     return label in CONTROL_LABELS or (
         type(label) is str and PASSKEY_CHOICE_LABEL.fullmatch(label) is not None
@@ -87,12 +100,18 @@ FAILURE_REASONS = {
     "Native accessibility tree limit": "a11y-tree-limit",
     "Native accessibility child limit": "a11y-child-limit",
     "Native accessibility window must be unique": "a11y-window-ambiguous",
+    "Native accessibility window unavailable": "a11y-window-unavailable",
     "Native acceptance label is not allowlisted": "label-not-allowed",
     "Native acceptance control must be unique": "control-ambiguous",
     "Native acceptance control not ready": "control-ready-timeout",
     "X display unavailable": "x-display",
     "Exact native-window absence request required": "absence-request",
     "Exact read-only native inspection required": "inspection-request",
+    "Exact private recovery request required": "recovery-request",
+    "Native recovery identity mismatch": "recovery-identity",
+    "Native recovery material not ready": "recovery-material-timeout",
+    "Native recovery material must be unique": "recovery-ambiguous",
+    "Native recovery private pipe required": "recovery-pipe",
     "Native acceptance X query failed": "x-query",
     "Previous native acceptance window did not close": "window-close-timeout",
     "Native acceptance window must be unique": "window-ambiguous",
@@ -641,6 +660,67 @@ def ascii_path(value):
     if value.endswith("/") and len(value) > 1:
         return None
     return value
+
+
+def recovery_key_present(value):
+    """Bounded scan for a read_recovery key at any depth, including false."""
+    stack, visited = [value], 0
+    while stack:
+        current = stack.pop()
+        visited += 1
+        if visited > RECOVERY_NODE_LIMIT:
+            # An unbounded or unexpected shape cannot be proven key-free.
+            return True
+        if type(current) is dict:
+            if "read_recovery" in current:
+                return True
+            stack.extend(current.values())
+        elif type(current) is list:
+            stack.extend(current)
+    return False
+
+
+def parse_recovery_request(request):
+    """Strict, purpose-bound schema for the only no-action recovery read.
+
+    The presence of read_recovery anywhere (including false or a malformed
+    nested value) selects this parser and can never fall back to ordinary
+    input. The returned record contains only the fixed title, canonical
+    executable, exact positive non-bool PID and the two true flags.
+    """
+    if not recovery_key_present(request):
+        return None
+    if type(request) is not dict or set(request) != RECOVERY_KEYS:
+        raise RuntimeError("Exact private recovery request required")
+    if request.get("read_recovery") is not True or request.get("preserve_focus") is not True:
+        raise RuntimeError("Exact private recovery request required")
+    if request.get("title") != RECOVERY_TITLE:
+        raise RuntimeError("Exact private recovery request required")
+    executable = request.get("executable")
+    if ascii_path(executable) is None or os.path.normpath(executable) != executable or \
+            os.path.realpath(executable) != executable:
+        raise RuntimeError("Exact private recovery request required")
+    expected_pid = request.get("expected_pid")
+    if type(expected_pid) is not int or expected_pid <= 0:
+        raise RuntimeError("Exact private recovery request required")
+    return {"title": RECOVERY_TITLE, "executable": executable,
+            "expected_pid": expected_pid, "preserve_focus": True,
+            "read_recovery": True}
+
+
+def recovery_target_matches(expected, title, pid, expected_process):
+    """Exact X title/PID/executable binding before any AT-SPI read or input."""
+    return (type(expected) is dict and title == expected.get("title")
+            and type(pid) is int and pid == expected.get("expected_pid")
+            and expected_process is True)
+
+
+def recovery_stdout_is_pipe(fd=1):
+    """The success kit is released only through the caller's private pipe."""
+    try:
+        return stat.S_ISFIFO(os.fstat(fd).st_mode)
+    except OSError:
+        return False
 
 
 def title_matches(title, prefix):
@@ -1366,7 +1446,7 @@ class NativeControls:
             finally:
                 self.go.g_object_unref(child)
 
-    def snapshot(self):
+    def window_refs(self):
         for _ in range(100):
             if not self.gl.g_main_context_iteration(None, 0):
                 break
@@ -1388,12 +1468,18 @@ class NativeControls:
             for node in windows:
                 self.go.g_object_unref(node)
             raise
-        if not windows:
-            return {}
         if len(windows) != 1:
             for node in windows:
                 self.go.g_object_unref(node)
-            raise RuntimeError("Native accessibility window must be unique")
+            if windows:
+                raise RuntimeError("Native accessibility window must be unique")
+            return []
+        return windows
+
+    def snapshot(self):
+        windows = self.window_refs()
+        if not windows:
+            return {}
         controls = {}
 
         def control(node, _depth):
@@ -1435,6 +1521,48 @@ class NativeControls:
             self.go.g_object_unref(windows[0])
         return controls
 
+    def recovery(self):
+        """Read exactly one visible text accessible name matching the kit.
+
+        This uses only the public name/role/state metadata. It never calls a
+        Value or Text accessor, never retains names that do not match, and
+        never emits anything; the caller owns the one returned value.
+        """
+        windows = self.window_refs()
+        if not windows:
+            raise RuntimeError("Native accessibility window unavailable")
+        matches = []
+
+        def text(node, _depth):
+            role = self.string(self.at.atspi_accessible_get_role_name, node)
+            if role != "text":
+                return True
+            state = self.at.atspi_accessible_get_state_set(node)
+            if not state:
+                return True
+            try:
+                # SHOWING=25, VISIBLE=30, the same public state pair as the
+                # fixed allowlist snapshot.
+                visible = all(self.at.atspi_state_set_contains(state, n) for n in (25, 30))
+            finally:
+                self.go.g_object_unref(state)
+            if not visible:
+                return True
+            name = self.string(self.at.atspi_accessible_get_name, node)
+            if RECOVERY_MATERIAL.fullmatch(name):
+                matches.append(name)
+            return True
+
+        try:
+            self.walk(windows[0], text)
+        finally:
+            self.go.g_object_unref(windows[0])
+        if not matches:
+            raise RuntimeError("Native recovery material not ready")
+        if len(matches) != 1:
+            raise RuntimeError("Native recovery material must be unique")
+        return matches[0]
+
     def ready(self, label):
         if not control_label_allowed(label):
             raise RuntimeError("Native acceptance label is not allowlisted")
@@ -1466,6 +1594,12 @@ class NativeControls:
 
 def main():
     request = json.load(sys.stdin)
+    # This strict purpose-bound schema is selected before owner dispatch, X
+    # focus, XTest or any other request path. A false/malformed key never
+    # falls back to ordinary input.
+    if recovery_key_present(request):
+        FAILURE_CONTEXT["action"] = "read-recovery"
+    recovery = parse_recovery_request(request)
     x = C.CDLL("libX11.so.6")
     xt = C.CDLL("libXtst.so.6")
     pointer, window = C.c_void_p, C.c_ulong
@@ -1675,6 +1809,29 @@ def main():
         time.sleep(0.05)
     if not target:
         raise RuntimeError("Native acceptance window unavailable")
+
+    if recovery is not None:
+        # Purpose-bound read-only branch. It is reached after unique exact-title
+        # X-window discovery and the same bounded viewability wait used by the
+        # other read-only form, but before focus, raise, click or any XTest.
+        def recovery_map_state():
+            attributes = attributes_of(target)
+            return None if attributes is None else attributes.map_state
+        wait_window_viewable(recovery_map_state, discovery_deadline)
+        x.XSync(display, 0)
+        check_x_target_errors(errors, target)
+        errors.clear()
+        if not normal_viewable(target) or not recovery_target_matches(
+                recovery, window_title(target), window_pid(target), expected_process(target)):
+            raise RuntimeError("Native recovery identity mismatch")
+        if not recovery_stdout_is_pipe():
+            raise RuntimeError("Native recovery private pipe required")
+        # NativeControls is constructed with expected_pid, so an AT-SPI window
+        # with the same title but another process can never be selected.
+        kit = NativeControls(recovery["title"], recovery["expected_pid"]).recovery()
+        print(json.dumps({"recovery": kit}), flush=True)
+        x.XCloseDisplay(display)
+        return
 
     ownership = None
     if owner is not None:
