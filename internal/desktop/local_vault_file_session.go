@@ -198,12 +198,29 @@ func (a *App) clearLocalVaultFileSessions() {
 	state.sessionGeneration = 0
 }
 
-// beginLocalVaultFileSession starts one real candidate open for the exact slot.
-// The pending operation stores only the ref scope, captured parent, App
-// generation and cancel information. Explicit short-lived factors are cloned
-// into the launched worker and cleared there; they are not stored in the slot
-// or the operation.
+// beginLocalVaultFileSession reserves one operation and immediately starts the
+// generic candidate-open worker. The pending operation stores only the ref
+// scope, captured parent, App generation and cancel information. Explicit
+// short-lived factors are cloned into the launched worker and cleared there;
+// they are not stored in the slot or the operation.
+//
+// Creation completion uses the reserve/submit split below so it can own its
+// exact handoff before the single Complete/Verify worker launches. Calling this
+// generic entry from that worker would start a second factor-open launch.
 func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, password, key []byte) *localVaultFileSessionOperation {
+	op := a.reserveLocalVaultFileSessionOperation(scope)
+	if op == nil {
+		return nil
+	}
+	a.launchLocalVaultFileSessionOperation(op, password, key)
+	return op
+}
+
+// reserveLocalVaultFileSessionOperation binds the exact slot, parent, App
+// generation, sequence and scope. It performs no factor work and captures no
+// password, Secret Key or recovery kit. It runs on the UI path so creation
+// completion can reserve before its worker launches.
+func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionScope) *localVaultFileSessionOperation {
 	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive ||
 		scope.configPath == "" || scope.vaultID == "" || scope.backendRoot == "" {
 		return nil
@@ -244,6 +261,16 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 		cancel:     cancel,
 	}
 	slot.operation = op
+	return op
+}
+
+// launchLocalVaultFileSessionOperation starts the generic candidate-open worker
+// for an already reserved operation. The dispatcher and test hook are captured
+// on the UI path, so the worker never reads mutable App state.
+func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOperation, password, key []byte) {
+	if op == nil {
+		return
+	}
 	ownedPassword := append([]byte(nil), password...)
 	ownedKey := append([]byte(nil), key...)
 	dispatch := a.dispatch
@@ -260,21 +287,38 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 			outcome = localVaultFileSessionOutcomeFailed
 		}
 		result := localVaultFileSessionResult{candidate: candidate, summary: summary, outcome: outcome}
-		if !op.stage(result) {
-			// Cancellation already became terminal and owns no result. This
-			// worker still owns the exact candidate returned by the factory.
-			clearLocalVaultFileSessionSummary(&summary)
-			if candidate != nil {
-				_ = candidate.Close()
-			}
-			return
-		}
-		if hook != nil {
-			hook(op)
-		}
-		dispatch(func() { a.takeAndCompleteLocalVaultFileSessionResult(op) })
+		a.stageAndDispatchLocalVaultFileSessionResult(op, result, dispatch, hook)
 	})
-	return op
+}
+
+// stageLocalVaultFileSessionResult stages one result on the operation and calls
+// the optional hook. It never dispatches; the caller's single dispatch closure
+// owns the take/adopt and any UI transition. On refusal the operation already
+// became terminal, so this call still owns and closes the returned candidate.
+func (a *App) stageLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, hook func(*localVaultFileSessionOperation)) bool {
+	if op == nil || !op.stage(result) {
+		clearLocalVaultFileSessionSummary(&result.summary)
+		if result.candidate != nil {
+			_ = result.candidate.Close()
+		}
+		return false
+	}
+	if hook != nil {
+		hook(op)
+	}
+	return true
+}
+
+// stageAndDispatchLocalVaultFileSessionResult is the generic worker's single
+// ownership handoff. Dispatcher and hook were captured before launch.
+func (a *App) stageAndDispatchLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, dispatch func(func()), hook func(*localVaultFileSessionOperation)) bool {
+	if !a.stageLocalVaultFileSessionResult(op, result, hook) {
+		return false
+	}
+	if dispatch != nil {
+		dispatch(func() { a.takeAndCompleteLocalVaultFileSessionResult(op) })
+	}
+	return true
 }
 
 // openLocalVaultFileSessionCandidate is the production factory. It calls the
@@ -290,12 +334,13 @@ func (a *App) openLocalVaultFileSessionCandidate(op *localVaultFileSessionOperat
 // takeAndCompleteLocalVaultFileSessionResult is the serial dispatch owner of
 // the single staged result. take is terminal, so a late or repeated callback
 // cannot affect a later operation or child.
-func (a *App) takeAndCompleteLocalVaultFileSessionResult(op *localVaultFileSessionOperation) {
+func (a *App) takeAndCompleteLocalVaultFileSessionResult(op *localVaultFileSessionOperation) bool {
 	result, ok := op.take()
 	if !ok {
-		return
+		return false
 	}
 	a.completeLocalVaultFileSessionResult(op, result)
+	return true
 }
 
 // completeLocalVaultFileSessionResult accepts a candidate only when the exact
@@ -355,10 +400,20 @@ func (a *App) finishLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 // operation. An already adopted wrapper is left for an explicit close or
 // replacement so a pending failure cannot close a valid child.
 func (a *App) cancelLocalVaultFileSessionOperation(slot *localVaultFileSessionSlot) {
-	if slot == nil || slot.operation == nil {
+	if slot == nil {
 		return
 	}
-	op := slot.operation
+	a.cancelLocalVaultFileSessionOperationExact(slot.operation)
+}
+
+// cancelLocalVaultFileSessionOperationExact cancels this exact operation, never
+// whatever operation the slot may hold later. It closes only an undelivered
+// staged candidate; an already adopted wrapper is left for explicit close or
+// replacement so a stale callback cannot close a valid current child.
+func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessionOperation) {
+	if op == nil {
+		return
+	}
 	result, pending := op.takeCancelled()
 	a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeCancelled)
 	if !pending {

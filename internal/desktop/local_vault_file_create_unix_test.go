@@ -240,6 +240,39 @@ func newDesktopCreateResumeFixture(t *testing.T) *desktopCreateResumeFixture {
 	}
 }
 
+// prepareDesktopCreateCompletion drives the real Prepare/Publish protocol to
+// the Complete phase and returns the literal issued kit plus the exact captured
+// public scope. It uses the same launch/dispatch seam as the C1 lifecycle tests.
+func prepareDesktopCreateCompletion(t *testing.T, f *desktopCreateResumeFixture, q *localVaultSessionQueue) (string, localVaultFileSessionScope) {
+	t.Helper()
+	q.install(f.app)
+	f.app.openLocalVaultFileCreate("")
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreatePrepare()
+	q.runLaunch(t)
+	q.runDispatch(t)
+	// The Prepare dispatch queues the visible-refresh list worker; drain it so
+	// the next launch is the publish worker rather than that refresh.
+	q.drain(t)
+	if f.app.localCreate.phase != "confirm" || f.app.localCreate.backup == nil || f.app.localCreate.issued == "" {
+		t.Fatal("DESKTOP_CREATE_COMPLETION_CONFIRM_SETUP_FAILED")
+	}
+	configPath := f.app.localCreate.configPath
+	scope := f.app.localCreate.scope
+	if scope.configPath != configPath || scope.vaultID == "" || scope.backendRoot != f.backendRoot {
+		t.Fatal("DESKTOP_CREATE_COMPLETION_SCOPE_MISSING")
+	}
+	kit := f.app.localCreate.issued
+	f.app.localCreate.confirm = kit
+	f.app.localCreatePublishBackup()
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if f.app.localCreate.phase != "complete" || f.app.localCreate.scope != scope {
+		t.Fatal("DESKTOP_CREATE_COMPLETION_PUBLISH_FAILED")
+	}
+	return kit, scope
+}
+
 func (f *desktopCreateResumeFixture) reserve(t *testing.T, name string, proposal vaultfileclient.Manifest) string {
 	t.Helper()
 	path := filepath.Join(f.profileDir, name+".json")
@@ -398,6 +431,9 @@ func TestDesktopCreateCompleteRejectsWrongBackendBeforePublish(t *testing.T) {
 
 	f.app.openLocalVaultFileCreate(configPath)
 	f.app.localCreate.phase = "complete"
+	f.app.localCreate.scope = localVaultFileSessionScope{
+		configPath: configPath, vaultID: "wrong-backend-scope", backendRoot: f.backendRoot,
+	}
 	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
 	f.app.localCreate.kit = "unused-kit"
 	f.app.localCreateComplete()
@@ -415,6 +451,210 @@ func TestDesktopCreateCompleteRejectsWrongBackendBeforePublish(t *testing.T) {
 	}
 	if desktopCreateDirDigest(t, f.backendRoot) != correctBackend {
 		t.Fatal("DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_CORRECT_ROOT_CHANGED")
+	}
+}
+
+func TestDesktopCreateCompleteAdoptsExactOwnedChild(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	q := &localVaultSessionQueue{}
+	kit, scope := prepareDesktopCreateCompletion(t, f, q)
+	var observed []*localVaultFileSessionOperation
+	f.app.localVaultFiles.sessionCandidateForTest = func(op *localVaultFileSessionOperation) {
+		observed = append(observed, op)
+	}
+	f.app.localCreate.password, f.app.localCreate.secret, f.app.localCreate.kit = f.password, f.secret, kit
+	launchesBefore := len(q.launches)
+	f.app.localCreateComplete()
+	if len(q.launches) != launchesBefore+1 {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_EXTRA_LAUNCH")
+	}
+	childOp := f.app.localCreate.child
+	if childOp == nil || childOp.parent != f.app.session || childOp.scope != scope ||
+		childOp.generation != f.app.generation {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_OPERATION_NOT_RESERVED")
+	}
+	q.runLaunch(t)
+	if len(observed) != 1 || observed[0] != childOp {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_RESULT_NOT_STAGED")
+	}
+	result := localVaultSessionStagedResult(t, childOp)
+	if result.outcome != localVaultFileSessionOutcomeOpened || result.candidate == nil ||
+		result.summary.VaultID != scope.vaultID {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_CANDIDATE_NOT_OWNED")
+	}
+	candidate := result.candidate
+	if len(q.dispatches) != 1 {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_ADOPT_NOT_QUEUED")
+	}
+	q.runDispatch(t)
+	slot := f.app.localVaultFiles.sessionSlots[scope]
+	if slot == nil || slot.session != candidate || slot.operation != nil ||
+		slot.parent != f.app.session || slot.appGeneration != f.app.generation ||
+		slot.summary.VaultID != scope.vaultID {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_CHILD_NOT_ADOPTED")
+	}
+	if childOp.finiteOutcome() != localVaultFileSessionOutcomeOpened {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_OPERATION_NOT_OPENED")
+	}
+	if f.app.localCreate.open || f.app.localCreate.phase != "done" ||
+		f.app.localCreate.status != "已验证本地初始版本 · 远端状态未核实" ||
+		f.app.localCreate.child != nil || f.app.localCreate.password != "" ||
+		f.app.localCreate.secret != "" || f.app.localCreate.kit != "" {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_UI_NOT_FINISHED")
+	}
+	if f.app.localVaultFiles.selected != scope.configPath ||
+		f.app.localVaultFiles.status != "已验证本地初始版本 · 远端状态未核实" ||
+		len(f.app.localVaultFiles.items) != len(slot.summary.Items) {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_BASELINE_NOT_SHOWN")
+	}
+	summary, err := candidate.Summary()
+	if err != nil || summary.VaultID != scope.vaultID {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_WRAPPER_NOT_READABLE")
+	}
+	if len(observed) != 1 {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_EXTRA_FACTORY_LAUNCH")
+	}
+	q.drain(t)
+	if len(observed) != 1 {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_EXTRA_IMPLICIT_LAUNCH")
+	}
+	if len(f.app.localVaultFiles.refs) != 1 ||
+		f.app.localVaultFiles.refs[0].path != scope.configPath ||
+		f.app.localVaultFiles.refs[0].vaultID != scope.vaultID {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_REF_NOT_VISIBLE")
+	}
+	f.app.closeLocalVaultFileSession(scope)
+	q.drain(t)
+}
+
+func TestDesktopCreateCompleteChildOpenFailureIsCreatedUnopened(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	q := &localVaultSessionQueue{}
+	kit, scope := prepareDesktopCreateCompletion(t, f, q)
+	var observed []*localVaultFileSessionOperation
+	f.app.localVaultFiles.sessionCandidateForTest = func(op *localVaultFileSessionOperation) {
+		observed = append(observed, op)
+	}
+	f.app.localCreate.password, f.app.localCreate.secret, f.app.localCreate.kit = f.password, f.secret, kit
+	f.app.localCreateComplete()
+	childOp := f.app.localCreate.child
+	if childOp == nil {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_OPERATION_NOT_RESERVED")
+	}
+	q.runLaunch(t)
+	if len(observed) != 1 || observed[0] != childOp {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_NOT_STAGED")
+	}
+	result := localVaultSessionStagedResult(t, childOp)
+	if result.outcome != localVaultFileSessionOutcomeOpened || result.candidate == nil {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_NOT_OPENED")
+	}
+	candidate := result.candidate
+	// A workspace change after the child was really opened but before the
+	// single adoption dispatch must reject adoption and close that candidate.
+	f.app.settingsPath = filepath.Join(f.root, "changed-settings", "settings.json")
+	q.runDispatch(t)
+	if childOp.finiteOutcome() != localVaultFileSessionOutcomeFailed {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_NOT_FINISHED")
+	}
+	if f.app.localCreate.open || f.app.localCreate.phase != "done" ||
+		f.app.localCreate.status != "已创建，尚未打开；请核查本地状态" ||
+		f.app.localCreate.child != nil {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_STATE_NOT_FINITE")
+	}
+	if f.app.localVaultFiles.status != "已创建，尚未打开；请核查本地状态" {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_VIEW_NOT_FINITE")
+	}
+	slot := f.app.localVaultFiles.sessionSlots[scope]
+	if slot == nil || slot.operation != nil || slot.session != nil {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_RETAINED_CHILD")
+	}
+	q.drain(t)
+	if _, err := candidate.Summary(); err == nil {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_CANDIDATE_READABLE")
+	}
+	launches, dispatches := len(q.launches), len(q.dispatches)
+	f.app.localCreateComplete()
+	if len(q.launches) != launches || len(q.dispatches) != dispatches {
+		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_RETRIED_COMPLETE")
+	}
+}
+
+func TestDesktopCreateCancelAfterStagedCandidateClosesOwnedCandidate(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	q := &localVaultSessionQueue{}
+	kit, scope := prepareDesktopCreateCompletion(t, f, q)
+	var observed []*localVaultFileSessionOperation
+	f.app.localVaultFiles.sessionCandidateForTest = func(op *localVaultFileSessionOperation) {
+		observed = append(observed, op)
+	}
+	f.app.localCreate.password, f.app.localCreate.secret, f.app.localCreate.kit = f.password, f.secret, kit
+	f.app.localCreateComplete()
+	childOp := f.app.localCreate.child
+	if childOp == nil {
+		t.Fatal("DESKTOP_CREATE_CANCEL_OPERATION_NOT_RESERVED")
+	}
+	q.runLaunch(t)
+	if len(observed) != 1 || observed[0] != childOp {
+		t.Fatal("DESKTOP_CREATE_CANCEL_NOT_STAGED")
+	}
+	result := localVaultSessionStagedResult(t, childOp)
+	if result.outcome != localVaultFileSessionOutcomeOpened || result.candidate == nil {
+		t.Fatal("DESKTOP_CREATE_CANCEL_CANDIDATE_MISSING")
+	}
+	candidate := result.candidate
+	if len(q.dispatches) != 1 {
+		t.Fatal("DESKTOP_CREATE_CANCEL_DISPATCH_NOT_HELD")
+	}
+	// Drop the queued dispatch without executing it, then cancel creation.
+	q.dispatches = nil
+	f.app.cancelLocalVaultFileCreate()
+	if f.app.localCreate.open || f.app.localCreate.child != nil ||
+		f.app.localCreate.password != "" || f.app.localCreate.secret != "" ||
+		f.app.localCreate.kit != "" {
+		t.Fatal("DESKTOP_CREATE_CANCEL_RETAINED_STATE")
+	}
+	assertLocalVaultSessionCompleted(t, childOp, localVaultFileSessionOutcomeCancelled)
+	// Product cleanup, not the test, must close the staged candidate.
+	q.drainLaunches(t)
+	if _, err := candidate.Summary(); err == nil {
+		t.Fatal("DESKTOP_CREATE_CANCEL_CANDIDATE_READABLE")
+	}
+	slot := f.app.localVaultFiles.sessionSlots[scope]
+	if slot == nil || slot.operation != nil || slot.session != nil {
+		t.Fatal("DESKTOP_CREATE_CANCEL_RETAINED_CHILD")
+	}
+}
+
+func TestDesktopCreateCompleteWrongKitStaysProtocolState(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	q := &localVaultSessionQueue{}
+	_, scope := prepareDesktopCreateCompletion(t, f, q)
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreate.kit = "wrong-recovery-kit"
+	f.app.localCreateComplete()
+	childOp := f.app.localCreate.child
+	if childOp == nil {
+		t.Fatal("DESKTOP_CREATE_WRONG_KIT_OPERATION_NOT_RESERVED")
+	}
+	q.runLaunch(t)
+	childOp.handoffMu.Lock()
+	staged := childOp.handoffReady
+	childOp.handoffMu.Unlock()
+	if staged {
+		t.Fatal("DESKTOP_CREATE_WRONG_KIT_STAGED_CHILD")
+	}
+	q.runDispatch(t)
+	if !f.app.localCreate.open || f.app.localCreate.phase != "complete" ||
+		f.app.localCreate.status != "创建未完成；请核查本地状态" {
+		t.Fatal("DESKTOP_CREATE_WRONG_KIT_PROTOCOL_STATE_CHANGED")
+	}
+	if childOp.finiteOutcome() != localVaultFileSessionOutcomeCancelled {
+		t.Fatal("DESKTOP_CREATE_WRONG_KIT_OPERATION_NOT_CANCELLED")
+	}
+	slot := f.app.localVaultFiles.sessionSlots[scope]
+	if slot == nil || slot.operation != nil || slot.session != nil {
+		t.Fatal("DESKTOP_CREATE_WRONG_KIT_RETAINED_CHILD")
 	}
 }
 
