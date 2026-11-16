@@ -109,6 +109,23 @@ func localVaultFilePrivateDirInfo(info os.FileInfo) bool {
 	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm() == 0700
 }
 
+// boundLocalVaultFileManifest is the strict resume/completion entry binding.
+// It reads and authenticates the existing manifest before any CreationContext,
+// ownership write or publish, and accepts it only for this session's personal
+// file and unified workspace backend. The returned empty-VaultID template is
+// passed to OpenCreation so EnsureCreateManifest re-checks the exact fields.
+func boundLocalVaultFileManifest(configPath, personalPath, backendRoot string) (vaultfileclient.Manifest, error) {
+	manifest, exists, err := vaultfileclient.ReadManifest(configPath)
+	if err != nil || !exists || manifest.PersonalFile != personalPath || manifest.BackendRoot != backendRoot {
+		return vaultfileclient.Manifest{}, vaultfileclient.ErrLocalReview
+	}
+	manifest.VaultID = ""
+	if !vaultfileclient.ValidManifestPhase(configPath, manifest, false, false) {
+		return vaultfileclient.Manifest{}, vaultfileclient.ErrLocalReview
+	}
+	return manifest, nil
+}
+
 func newLocalVaultFileProposal(profileDir, backendRoot, personalPath string) (string, vaultfileclient.Manifest, error) {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -147,6 +164,12 @@ func (a *App) localCreatePrepare() {
 			var initial vaultfileclient.Manifest
 			configPath, initial, err = newLocalVaultFileProposal(profileDir, backendRoot, session.VaultPath())
 			proposal = &initial
+		} else if err == nil {
+			var expected vaultfileclient.Manifest
+			expected, err = boundLocalVaultFileManifest(configPath, session.VaultPath(), backendRoot)
+			if err == nil {
+				proposal = &expected
+			}
 		}
 		var backup *personal.BackupPreparation
 		var needsBackup bool
@@ -267,25 +290,29 @@ func (a *App) localCreateComplete() {
 		defer clear(kit)
 		var err error
 		if ctx.Err() == nil {
-			var creation *vaultfileclient.CreationContext
-			creation, err = vaultfileclient.OpenCreation(configPath, nil, password, secret)
-			if creation != nil {
-				if ctx.Err() == nil {
-					var backupRequired bool
-					backupRequired, err = creation.Prepare(ctx)
-					if err == nil && backupRequired {
-						err = vaultfileclient.ErrLocalReview
+			var expected vaultfileclient.Manifest
+			expected, err = boundLocalVaultFileManifest(configPath, session.VaultPath(), backendRoot)
+			if err == nil {
+				var creation *vaultfileclient.CreationContext
+				creation, err = vaultfileclient.OpenCreation(configPath, &expected, password, secret)
+				if creation != nil {
+					if ctx.Err() == nil {
+						var backupRequired bool
+						backupRequired, err = creation.Prepare(ctx)
+						if err == nil && backupRequired {
+							err = vaultfileclient.ErrLocalReview
+						}
+						if err == nil {
+							err = creation.Complete(ctx, password, secret, kit)
+						}
+						if err == nil {
+							err = creation.Verify(ctx, password, secret, kit)
+						}
+					} else {
+						creation.Cancel()
 					}
-					if err == nil {
-						err = creation.Complete(ctx, password, secret, kit)
-					}
-					if err == nil {
-						err = creation.Verify(ctx, password, secret, kit)
-					}
-				} else {
-					creation.Cancel()
+					creation.Close()
 				}
-				creation.Close()
 			}
 		}
 		var ref localVaultFileRef

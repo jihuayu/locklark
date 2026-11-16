@@ -9,6 +9,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -191,5 +193,223 @@ func TestDesktopCreateWorkspaceRejectsSymlinkSettingsDir(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(realDir, "vaultfile-workspace")); !os.IsNotExist(err) {
 		t.Fatal("DESKTOP_CREATE_WORKSPACE_SYMLINK_CREATED_WORKSPACE")
+	}
+}
+
+type desktopCreateResumeFixture struct {
+	app                            *App
+	root, profileDir, backendRoot  string
+	personalPath, password, secret string
+	key                            []byte
+}
+
+func newDesktopCreateResumeFixture(t *testing.T) *desktopCreateResumeFixture {
+	t.Helper()
+	root := t.TempDir()
+	settingsDir := filepath.Join(root, "settings")
+	if err := os.Mkdir(settingsDir, 0700); err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_SETTINGS_DIRECTORY_FAILED")
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	personalPath := filepath.Join(root, "personal.ll")
+	password := "desktop-resume-factor"
+	key := []byte("1234567890abcdef")
+	if personal.Create(personalPath, password, key) != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_PROFILE_FAILED")
+	}
+	session, err := personal.UnlockSession(personalPath, []byte(password), key, time.Minute)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_PROFILE_UNLOCK_FAILED")
+	}
+	a := New()
+	a.path, a.session = personalPath, session
+	a.settingsPath = settingsPath
+	a.launch = func(fn func()) { fn() }
+	t.Cleanup(session.Lock)
+	profileDir, backendRoot, err := ensureLocalVaultFileWorkspace(settingsPath, personalPath)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_WORKSPACE_FAILED")
+	}
+	return &desktopCreateResumeFixture{
+		app: a, root: root, profileDir: profileDir, backendRoot: backendRoot,
+		personalPath: personalPath, password: password, secret: personal.FormatSecret(key), key: key,
+	}
+}
+
+func (f *desktopCreateResumeFixture) reserve(t *testing.T, name string, proposal vaultfileclient.Manifest) string {
+	t.Helper()
+	path := filepath.Join(f.profileDir, name+".json")
+	if _, err := vaultfileclient.ReserveManifest(path, proposal); err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_MANIFEST_RESERVE_FAILED")
+	}
+	return path
+}
+
+func (f *desktopCreateResumeFixture) seedWrongBackendArchive(t *testing.T) (string, vaultfileclient.Manifest) {
+	t.Helper()
+	wrongBackend := filepath.Join(f.root, "wrong-backend")
+	if err := os.Mkdir(wrongBackend, 0700); err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_WRONG_BACKEND_SETUP_FAILED")
+	}
+	if err := os.WriteFile(filepath.Join(wrongBackend, "sentinel"), []byte("keep"), 0600); err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_WRONG_BACKEND_SETUP_FAILED")
+	}
+	proposal := vaultfileclient.Manifest{
+		Version: 1, Kind: vaultfileclient.CreateKind,
+		PersonalFile: f.personalPath, BackendRoot: wrongBackend,
+		Name:    "wrong-backend.llv",
+		Journal: filepath.Join(f.profileDir, "wrong-backend.journal"),
+		Archive: filepath.Join(f.profileDir, "wrong-backend.llb"),
+	}
+	if err := os.WriteFile(proposal.Archive, []byte("existing-archive"), 0600); err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_ARCHIVE_SETUP_FAILED")
+	}
+	return f.reserve(t, "wrong-backend", proposal), proposal
+}
+
+type desktopCreateFileSnapshot struct {
+	digest string
+	mode   os.FileMode
+	uid    uint32
+	gid    uint32
+}
+
+func desktopCreateSnapshotFile(t *testing.T, path string) desktopCreateFileSnapshot {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_FILE_READ_FAILED")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_FILE_STAT_FAILED")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("DESKTOP_CREATE_RESUME_FILE_OWNER_UNAVAILABLE")
+	}
+	sum := sha256.Sum256(raw)
+	return desktopCreateFileSnapshot{digest: hex.EncodeToString(sum[:]), mode: info.Mode(), uid: stat.Uid, gid: stat.Gid}
+}
+
+func (s desktopCreateFileSnapshot) assertUnchanged(t *testing.T, path, code string) {
+	t.Helper()
+	if desktopCreateSnapshotFile(t, path) != s {
+		t.Fatal(code)
+	}
+}
+
+func desktopCreateDirDigest(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_RESUME_DIRECTORY_READ_FAILED")
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return strings.Join(names, "\n")
+}
+
+func TestDesktopCreatePrepareRejectsForeignPersonalManifest(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	foreignPath := filepath.Join(f.root, "foreign.ll")
+	if personal.Create(foreignPath, f.password, f.key) != nil {
+		t.Fatal("DESKTOP_CREATE_FOREIGN_PERSONAL_FIXTURE_FAILED")
+	}
+	probe, err := personal.UnlockSession(foreignPath, []byte(f.password), f.key, time.Minute)
+	if err != nil {
+		t.Fatal("DESKTOP_CREATE_FOREIGN_PERSONAL_FIXTURE_UNLOCK_FAILED")
+	}
+	probe.Lock()
+	proposal := vaultfileclient.Manifest{
+		Version: 1, Kind: vaultfileclient.CreateKind,
+		PersonalFile: foreignPath, BackendRoot: f.backendRoot,
+		Name:    "foreign-personal.llv",
+		Journal: filepath.Join(f.profileDir, "foreign-personal.journal"),
+		Archive: filepath.Join(f.profileDir, "foreign-personal.llb"),
+	}
+	configPath := f.reserve(t, "foreign-personal", proposal)
+	foreign := desktopCreateSnapshotFile(t, foreignPath)
+	manifest := desktopCreateSnapshotFile(t, configPath)
+	backend := desktopCreateDirDigest(t, f.backendRoot)
+
+	f.app.openLocalVaultFileCreate(configPath)
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreatePrepare()
+
+	if f.app.localCreate.phase != "prepare" || f.app.localCreate.configPath != configPath ||
+		f.app.localCreate.backup != nil || f.app.localCreate.issued != "" ||
+		f.app.localCreate.status != "准备失败；请核查本地状态" {
+		t.Fatal("DESKTOP_CREATE_FOREIGN_PERSONAL_INTENT_CHANGED")
+	}
+	foreign.assertUnchanged(t, foreignPath, "DESKTOP_CREATE_FOREIGN_PERSONAL_CHANGED")
+	manifest.assertUnchanged(t, configPath, "DESKTOP_CREATE_FOREIGN_MANIFEST_CHANGED")
+	if desktopCreateDirDigest(t, f.backendRoot) != backend {
+		t.Fatal("DESKTOP_CREATE_FOREIGN_BACKEND_CHANGED")
+	}
+	if _, err := os.Lstat(proposal.Archive); !os.IsNotExist(err) {
+		t.Fatal("DESKTOP_CREATE_FOREIGN_ARCHIVE_CREATED")
+	}
+}
+
+func TestDesktopCreateResumeRejectsWrongBackendWithExistingArchive(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	configPath, proposal := f.seedWrongBackendArchive(t)
+	personal := desktopCreateSnapshotFile(t, f.personalPath)
+	archive := desktopCreateSnapshotFile(t, proposal.Archive)
+	manifest := desktopCreateSnapshotFile(t, configPath)
+	wrongBackend := desktopCreateDirDigest(t, proposal.BackendRoot)
+	correctBackend := desktopCreateDirDigest(t, f.backendRoot)
+
+	f.app.openLocalVaultFileCreate(configPath)
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreatePrepare()
+
+	if f.app.localCreate.phase != "prepare" || f.app.localCreate.configPath != configPath ||
+		f.app.localCreate.backup != nil || f.app.localCreate.issued != "" ||
+		f.app.localCreate.status != "准备失败；请核查本地状态" {
+		t.Fatal("DESKTOP_CREATE_WRONG_BACKEND_INTENT_CHANGED")
+	}
+	personal.assertUnchanged(t, f.personalPath, "DESKTOP_CREATE_WRONG_BACKEND_PERSONAL_CHANGED")
+	archive.assertUnchanged(t, proposal.Archive, "DESKTOP_CREATE_WRONG_BACKEND_ARCHIVE_CHANGED")
+	manifest.assertUnchanged(t, configPath, "DESKTOP_CREATE_WRONG_BACKEND_MANIFEST_CHANGED")
+	if desktopCreateDirDigest(t, proposal.BackendRoot) != wrongBackend {
+		t.Fatal("DESKTOP_CREATE_WRONG_BACKEND_OBJECTS_CHANGED")
+	}
+	if desktopCreateDirDigest(t, f.backendRoot) != correctBackend {
+		t.Fatal("DESKTOP_CREATE_WRONG_BACKEND_CORRECT_ROOT_CHANGED")
+	}
+}
+
+func TestDesktopCreateCompleteRejectsWrongBackendBeforePublish(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	configPath, proposal := f.seedWrongBackendArchive(t)
+	personal := desktopCreateSnapshotFile(t, f.personalPath)
+	archive := desktopCreateSnapshotFile(t, proposal.Archive)
+	manifest := desktopCreateSnapshotFile(t, configPath)
+	wrongBackend := desktopCreateDirDigest(t, proposal.BackendRoot)
+	correctBackend := desktopCreateDirDigest(t, f.backendRoot)
+
+	f.app.openLocalVaultFileCreate(configPath)
+	f.app.localCreate.phase = "complete"
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreate.kit = "unused-kit"
+	f.app.localCreateComplete()
+
+	if f.app.localCreate.phase != "complete" || f.app.localCreate.configPath != configPath ||
+		f.app.localCreate.backup != nil || f.app.localCreate.issued != "" ||
+		f.app.localCreate.status != "创建未完成；请核查本地状态" {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_INTENT_CHANGED")
+	}
+	personal.assertUnchanged(t, f.personalPath, "DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_PERSONAL_CHANGED")
+	archive.assertUnchanged(t, proposal.Archive, "DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_ARCHIVE_CHANGED")
+	manifest.assertUnchanged(t, configPath, "DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_MANIFEST_CHANGED")
+	if desktopCreateDirDigest(t, proposal.BackendRoot) != wrongBackend {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_OBJECTS_CHANGED")
+	}
+	if desktopCreateDirDigest(t, f.backendRoot) != correctBackend {
+		t.Fatal("DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_CORRECT_ROOT_CHANGED")
 	}
 }
