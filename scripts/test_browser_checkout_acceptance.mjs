@@ -3130,6 +3130,10 @@ test("native failure projection drops raw window, ids, coords, clicks and unknow
       "解锁": { present: true, enabled: true, showing: false },
       "确认连接此扩展": { present: true, enabled: true, showing: true },
       "批准本次填充": { present: false, enabled: false, showing: false },
+      "批准本次暂存": { present: true, enabled: true, showing: true, value: canary },
+      "拒绝本次暂存": { present: true, enabled: true, showing: true, text: canary },
+      "批准本次保存": { present: false, enabled: false, showing: false, value: canary },
+      "拒绝本次保存": { present: false, enabled: false, showing: false, text: canary },
       [canary]: { present: true, enabled: true, showing: true },
     },
     extra: { canary, window: "0xEXTRA-WINDOW" },
@@ -3155,7 +3159,10 @@ test("native failure projection drops raw window, ids, coords, clicks and unknow
     );
     const projected = JSON.parse(json);
     assert.equal(projected.native.available, true);
-    assert.equal(projected.native.controlCount, 6);
+    assert.equal(projected.native.controlCount, 10);
+    for (const label of ["批准本次暂存", "拒绝本次暂存", "批准本次保存", "拒绝本次保存"]) {
+      assert.deepEqual(Object.keys(projected.native.controls[label]).sort(), ["enabled", "present", "showing"]);
+    }
     assert.deepEqual(projected.native.controls["金库文件"], {
       present: true, enabled: true, showing: true,
     });

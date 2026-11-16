@@ -157,8 +157,11 @@ func (a *App) browserV2ApprovalView(c *ui.Context, b *browserhost.Connection, p 
 	case "item-create", "item-edit", "item-save", "item-state", "item-restore-history":
 		heading, detail = "确认浏览器修改金库", "仅在本窗口批准后，才会写入这次金库变更。"
 		approve, reject = "批准本次金库写入", "拒绝本次金库写入"
-	case "stage-save", "commit-staged-save":
-		heading, detail = "确认浏览器保存登录", "仅在本窗口批准后，才会暂存或提交这次登录保存。"
+	case "stage-save":
+		heading, detail = "确认暂存浏览器登录", "仅暂存这次登录信息供后续确认；不会提交金库变更。"
+		approve, reject = "批准本次暂存", "拒绝本次暂存"
+	case "commit-staged-save":
+		heading, detail = "确认浏览器保存登录", "仅在本窗口批准后，才会提交这次登录保存。"
 		approve, reject = "批准本次保存", "拒绝本次保存"
 	case "attachment-read":
 		heading, detail = "确认下载金库附件", "仅在本窗口批准后，才会把附件内容交给当前浏览器页面。"
