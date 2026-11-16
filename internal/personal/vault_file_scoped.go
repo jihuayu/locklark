@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -93,11 +94,23 @@ type VaultFileChildToken struct {
 func (VaultFileChildToken) String() string   { return "[vault-file child token]" }
 func (VaultFileChildToken) GoString() string { return "[vault-file child token]" }
 
+// vaultFileOwnedSnapshot is the target-only public ownership snapshot bound to
+// one owned child. It never contains a private seed, age identity, account
+// material or another vault's record.
+type vaultFileOwnedSnapshot struct {
+	owner VaultFileOwnershipPublic
+}
+
 type vaultFileChild struct {
 	mu sync.Mutex
 
 	token  VaultFileChildToken
 	handle *vaultfile.ScopedUnlock
+
+	// owned is nil for a generic caller-pinned child. It is non-nil only when
+	// this child was registered through OpenOwnedVaultFileChild; the snapshot
+	// is immutable and scope failures close only this child.
+	owned *vaultFileOwnedSnapshot
 
 	// checkpoint is an independent deep copy of the caller trust pin. B1
 	// revalidates scope through the ScopedUnlock built from the same pin; this
@@ -156,6 +169,14 @@ var vaultFileChildBeforeHandleClose func()
 // final real-slot check rejects without leaving a candidate.
 var vaultFileChildBeforeRegister func()
 
+// vaultFileChildCandidateReady is a private test seam. It runs after a real
+// candidate handle has decrypted the initial summary and the journal has been
+// rechecked, but before the final parent/slot/ownership registration gate. It
+// carries only the real handle, never key material. Tests use it to change the
+// parent, slot or target ownership at the last responsible moment and prove
+// the candidate is closed without disclosure. Production leaves it nil.
+var vaultFileChildCandidateReady func(*vaultfile.ScopedUnlock)
+
 // vaultFileParentCheckCloseFault is a private fault-injection seam. The real
 // read transaction and account database are closed first; a non-nil error is
 // then appended by the test to model a close failure. Production leaves it nil,
@@ -183,6 +204,31 @@ var vaultFileParentCheckCloseFault func() error
 // nothing. A registered child is only readable through this package; no
 // ScopedUnlock leaves it.
 func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions) (VaultFileChildToken, []VaultFileBaselineItem, error) {
+	return s.openVaultFileChild(journalPath, checkpoint, password, key, options, vaultFileChildOpenMode{})
+}
+
+// OpenOwnedVaultFileChild is the narrow companion-owned child constructor. It
+// proves the same fresh factors and real parent authority as OpenVaultFileChild,
+// then authenticates the local account state/audit and the target vault's
+// unpublished owner custody before any candidate handle is created. The caller
+// checkpoint is only a candidate: its VaultID, owner root key ID and owner root
+// public key must match exactly one real local owner record, and only that
+// authenticated record supplies root trust. The target record's public custody
+// snapshot is bound to the child so later reads cannot cross the owner scope.
+//
+// The generic OpenVaultFileChild contract remains caller-pinned trust and is
+// deliberately unchanged; an owned child adds this local-custody proof and a
+// nil owned snapshot means the child is generic. No account material, owner
+// seed, age identity or other vault record is retained by the child.
+func (s *Session) OpenOwnedVaultFileChild(journalPath string, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions) (VaultFileChildToken, []VaultFileBaselineItem, error) {
+	return s.openVaultFileChild(journalPath, checkpoint, password, key, options, vaultFileChildOpenMode{owned: true})
+}
+
+type vaultFileChildOpenMode struct {
+	owned bool
+}
+
+func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions, mode vaultFileChildOpenMode) (VaultFileChildToken, []VaultFileBaselineItem, error) {
 	if s == nil {
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
@@ -229,6 +275,25 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	}
 	if vaultFileChildBeforeRegister != nil {
 		vaultFileChildBeforeRegister()
+	}
+
+	var ownedSnapshot *vaultFileOwnedSnapshot
+	if mode.owned {
+		snapshot, ownedErr := s.authenticateVaultFileOwnedTarget(parentPath, password, key, checkpoint.VaultID)
+		switch {
+		case errors.Is(ownedErr, errVaultFileChildInvalidSlot):
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		case ownedErr != nil && !errors.Is(ownedErr, ErrVaultFileOwnership):
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		case ownedErr != nil:
+			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+		}
+		if !vaultFileOwnedSnapshotMatchesCheckpoint(snapshot, checkpoint) {
+			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+		}
+		ownedSnapshot = &vaultFileOwnedSnapshot{owner: snapshot}
 	}
 
 	// Parse the local account identity only after the factors are proven.
@@ -309,6 +374,9 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		clearVaultFileChildItems(initialItems)
 		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
 	}
+	if vaultFileChildCandidateReady != nil {
+		vaultFileChildCandidateReady(handle)
+	}
 
 	// Final registration holds Session.mu, then a real read-only account
 	// transaction, then the short saveMu/registry gate. Holding Session.mu
@@ -337,6 +405,20 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		_ = handle.Close()
 		clearVaultFileChildItems(initialItems)
 		return VaultFileChildToken{}, nil, ErrSessionLocked
+	}
+	if ownedSnapshot != nil {
+		ownedErr := s.verifyOwnedVaultFileTargetLocked(parentCheck, ownedSnapshot.owner)
+		if ownedErr != nil {
+			s.mu.Unlock()
+			clearVaultFileChildItems(initialItems)
+			closeErr := parentCheck.close()
+			_ = handle.Close()
+			if closeErr != nil || errors.Is(ownedErr, errVaultFileChildInvalidSlot) {
+				s.lockVaultFileParent()
+				return VaultFileChildToken{}, nil, ErrSessionLocked
+			}
+			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+		}
 	}
 
 	now := time.Now()
@@ -372,6 +454,7 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	child := &vaultFileChild{
 		token:              token,
 		handle:             handle,
+		owned:              ownedSnapshot,
 		closeDone:          make(chan struct{}),
 		checkpoint:         cloneVaultFileCheckpoint(checkpoint),
 		journalGeneration:  baseline.generation,
@@ -525,6 +608,24 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 		clearVaultFileChildItems(items)
 		return nil, ErrSessionLocked
 	}
+	// An owned child remains owner-bound even through the generic read method.
+	// The authenticated target snapshot is rechecked under the same held RO
+	// transaction before disclosure; a target-only drift closes this child,
+	// while an account-level authentication failure follows the parent drain.
+	if child.owned != nil {
+		ownedErr := s.verifyOwnedVaultFileTargetLocked(parentCheck, child.owned.owner)
+		if ownedErr != nil {
+			s.mu.Unlock()
+			clearVaultFileChildItems(items)
+			closeErr := parentCheck.close()
+			s.invalidateVaultFileChild(child)
+			if closeErr != nil || errors.Is(ownedErr, errVaultFileChildInvalidSlot) {
+				s.lockVaultFileParent()
+				return nil, ErrSessionLocked
+			}
+			return nil, ErrVaultFileOwnership
+		}
+	}
 	now := time.Now()
 	s.saveMu.Lock()
 	revoked := s.vaultFileRevoked.Load()
@@ -555,6 +656,103 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 		return nil, ErrSessionLocked
 	}
 	return items, nil
+}
+
+// RevalidateVaultFileChildOwnership rechecks the local owner custody bound to
+// an already registered owned child. It never re-unwraps the account slot,
+// never extends a factor or idle proof and never promotes a generic child: a
+// generic token or a child without an owned snapshot returns
+// ErrVaultFileScopedChild. The token's parent marker, generation and current
+// registry entry, the child's fixed deadline, the parent active/slot state and
+// the target-only authenticated owner snapshot are all checked. A missing or
+// changed target record closes only that child; an account-level slot, audit or
+// ownership-store failure follows the B1 parent drain.
+func (s *Session) RevalidateVaultFileChildOwnership(token VaultFileChildToken) error {
+	if s == nil || token.generation == 0 || token.path == "" ||
+		token.owner == nil || s.vaultFileOwner == nil || token.owner != s.vaultFileOwner {
+		return ErrVaultFileScopedChild
+	}
+	if s.vaultFileRevoked.Load() {
+		return ErrSessionLocked
+	}
+
+	s.mu.Lock()
+	if err := s.active(false); err != nil {
+		s.mu.Unlock()
+		return ErrSessionLocked
+	}
+	parentCheck, err := s.openVaultFileParentCheckLocked()
+	if err != nil {
+		s.lock()
+		s.mu.Unlock()
+		return ErrSessionLocked
+	}
+	child, err := s.snapshotVaultFileChild(token)
+	if err != nil {
+		s.mu.Unlock()
+		if closeErr := parentCheck.close(); closeErr != nil {
+			s.lockVaultFileParent()
+			return ErrSessionLocked
+		}
+		return err
+	}
+	if child.owned == nil {
+		s.mu.Unlock()
+		if closeErr := parentCheck.close(); closeErr != nil {
+			s.lockVaultFileParent()
+			return ErrSessionLocked
+		}
+		return ErrVaultFileScopedChild
+	}
+	if err := child.deadlineError(time.Now()); err != nil {
+		s.mu.Unlock()
+		closeErr := parentCheck.close()
+		s.invalidateVaultFileChild(child)
+		if closeErr != nil {
+			s.lockVaultFileParent()
+			return ErrSessionLocked
+		}
+		return err
+	}
+	ownedErr := s.verifyOwnedVaultFileTargetLocked(parentCheck, child.owned.owner)
+	if ownedErr != nil {
+		s.mu.Unlock()
+		closeErr := parentCheck.close()
+		if errors.Is(ownedErr, errVaultFileChildInvalidSlot) || closeErr != nil {
+			s.lockVaultFileParent()
+			return ErrSessionLocked
+		}
+		s.invalidateVaultFileChild(child)
+		return ErrVaultFileOwnership
+	}
+
+	now := time.Now()
+	s.saveMu.Lock()
+	revoked := s.vaultFileRevoked.Load()
+	parentExpired := parentCheck.idleExpired(now)
+	s.vaultFileMu.Lock()
+	current := s.vaultFileChildren[token.path]
+	s.vaultFileMu.Unlock()
+	s.saveMu.Unlock()
+	s.mu.Unlock()
+	if revoked || parentExpired {
+		_ = parentCheck.close()
+		s.lockVaultFileParent()
+		return ErrSessionLocked
+	}
+	if current != child || child.expired(now) {
+		if closeErr := parentCheck.close(); closeErr != nil {
+			s.lockVaultFileParent()
+			return ErrSessionLocked
+		}
+		s.invalidateVaultFileChild(child)
+		return ErrVaultFileScopedChild
+	}
+	if err := parentCheck.close(); err != nil {
+		s.lockVaultFileParent()
+		return ErrSessionLocked
+	}
+	return nil
 }
 
 // LockVaultFileChild revokes one token generation. It never changes the parent
@@ -771,6 +969,110 @@ func verifyVaultFileChildFactors(path string, slotDigest [32]byte, material, pas
 		return errVaultFileChildInvalidSlot
 	}
 	return nil
+}
+
+// authenticateVaultFileOwnedTarget authenticates the real account state and
+// audit with the same freshly supplied factors, then returns the unique public
+// custody projection for vaultID. It never trusts the candidate checkpoint for
+// ownership and clears every private owner record before returning.
+func (s *Session) authenticateVaultFileOwnedTarget(path string, password, key []byte, vaultID string) (VaultFileOwnershipPublic, error) {
+	db, err := existingWithReadOnly(path, true)
+	if err != nil {
+		return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
+	}
+	var snapshot VaultFileOwnershipPublic
+	viewErr := db.View(func(tx *bolt.Tx) error {
+		auth, err := authenticateStateItems(tx, string(password), key, vaultFileOwnerListAction, nil, false)
+		if err != nil {
+			return errVaultFileChildInvalidSlot
+		}
+		defer auth.clear()
+		records, err := loadVaultFileOwners(tx.Bucket(bucket), auth.identity, auth.rows)
+		if err != nil {
+			return errVaultFileChildInvalidSlot
+		}
+		defer clearVaultFileOwners(records)
+		snapshot, err = vaultFileOwnedProjection(records, vaultID)
+		return err
+	})
+	if closeErr := db.Close(); closeErr != nil {
+		return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
+	}
+	if viewErr != nil {
+		return VaultFileOwnershipPublic{}, viewErr
+	}
+	return snapshot, nil
+}
+
+// verifyOwnedVaultFileTargetLocked re-authenticates the current target owner
+// record under the caller's already-held parent RO transaction and compares it
+// with the target-only creation snapshot. The caller holds Session.mu; this
+// function must be called before saveMu is taken.
+func (s *Session) verifyOwnedVaultFileTargetLocked(check *vaultFileParentCheck, expected VaultFileOwnershipPublic) error {
+	if check == nil || check.tx == nil || expected.VaultID == "" {
+		return errVaultFileChildInvalidSlot
+	}
+	auth, err := authenticateStateItems(check.tx, "", nil, vaultFileOwnerListAction, s, false)
+	if err != nil {
+		return errVaultFileChildInvalidSlot
+	}
+	defer auth.clear()
+	records, err := loadVaultFileOwners(check.tx.Bucket(bucket), auth.identity, auth.rows)
+	if err != nil {
+		return errVaultFileChildInvalidSlot
+	}
+	defer clearVaultFileOwners(records)
+	current, err := vaultFileOwnedProjection(records, expected.VaultID)
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return ErrVaultFileOwnership
+	}
+	return nil
+}
+
+// vaultFileOwnedProjection selects exactly one record for the target vault and
+// returns only its public projection. A missing target is a target-scope
+// failure; duplicate or invalid records are account-store failures.
+func vaultFileOwnedProjection(records []vaultFileOwnerRecord, vaultID string) (VaultFileOwnershipPublic, error) {
+	var out VaultFileOwnershipPublic
+	found := false
+	for _, record := range records {
+		if record.VaultID != vaultID {
+			continue
+		}
+		if found {
+			return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
+		}
+		projection, err := vaultFileOwnerPublic(record)
+		if err != nil {
+			return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
+		}
+		out = projection
+		found = true
+	}
+	if !found {
+		return VaultFileOwnershipPublic{}, ErrVaultFileOwnership
+	}
+	return out, nil
+}
+
+// vaultFileOwnedSnapshotMatchesCheckpoint binds the candidate checkpoint to
+// the authenticated target owner record. The candidate still supplies the
+// policy pin; only its vault ID and root identity are checked against local
+// custody here.
+func vaultFileOwnedSnapshotMatchesCheckpoint(snapshot VaultFileOwnershipPublic, checkpoint *vaultfile.PolicyCheckpoint) bool {
+	if checkpoint == nil || snapshot.VaultID != checkpoint.VaultID ||
+		snapshot.OwnerRootKeyID != checkpoint.OwnerRootKeyID {
+		return false
+	}
+	root, err := hex.DecodeString(snapshot.OwnerRootPublicKey)
+	if err != nil {
+		return false
+	}
+	defer clear(root)
+	return bytes.Equal(root, checkpoint.OwnerRootPublicKey)
 }
 
 // vaultFileParentCheck holds a real read-only account transaction open so a
