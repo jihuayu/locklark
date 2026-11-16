@@ -251,7 +251,7 @@ func (f *localVaultSessionFixture) createVault(t *testing.T) (string, vaultfilec
 }
 
 func (f *localVaultSessionFixture) scope(configPath string, manifest vaultfileclient.Manifest) localVaultFileSessionScope {
-	return localVaultFileSessionScope{configPath: configPath, vaultID: manifest.VaultID, backendRoot: f.backendRoot}
+	return localVaultFileSessionScope{configPath: configPath, vaultID: manifest.VaultID, backendRoot: f.backendRoot, journalPath: manifest.Journal}
 }
 
 func (f *localVaultSessionFixture) openVault(t *testing.T, q *localVaultSessionQueue, scope localVaultFileSessionScope) *localVaultFileSessionOperation {

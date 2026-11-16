@@ -19,8 +19,10 @@ import (
 )
 
 // Local refs are navigation hints only. They never supply a policy checkpoint.
+// journalPath is a captured scheduling hint from the strict manifest read; it is
+// not a routing identity, grant or authority.
 type localVaultFileRef struct {
-	path, vaultID, name string
+	path, vaultID, name, journalPath string
 }
 
 type localVaultFileState struct {
@@ -81,7 +83,7 @@ func listLocalVaultFileRefs(profileDir, backendRoot, personalPath string) ([]loc
 		ref := localVaultFileRef{path: path, name: "待核查文件"}
 		manifest, exists, e := vaultfileclient.ReadManifest(path)
 		if e == nil && exists && manifest.PersonalFile == personalPath && manifest.BackendRoot == backendRoot {
-			ref.vaultID, ref.name = manifest.VaultID, manifest.Name
+			ref.vaultID, ref.name, ref.journalPath = manifest.VaultID, manifest.Name, manifest.Journal
 		}
 		refs = append(refs, ref)
 	}

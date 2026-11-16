@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 )
 
@@ -66,7 +67,27 @@ var (
 // factors. Only after the owned child has been read, its locator re-read and
 // its target-only ownership revalidated does it release the initial bounded
 // summary. Any failure closes the candidate token before returning.
+//
+// This legacy variant pins whatever journal the captured manifest names. New
+// scheduling callers must use OpenLocalGenesisSessionForJournal.
 func OpenLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vaultID string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+	return openLocalGenesisSession(s, configPath, workspaceRoot, vaultID, "", password, key)
+}
+
+// OpenLocalGenesisSessionForJournal is the narrow pinned constructor used by
+// scheduling callers. The expected journal must be a valid path. After this
+// constructor captures the real manifest, it compares that captured
+// manifest.Journal with expectedJournal before owned-child unlock or any
+// registration. The comparison source is the captured manifest itself, not a
+// caller preflight, and later Summary revalidation keeps the frozen path bound.
+func OpenLocalGenesisSessionForJournal(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+	if !teamfiles.ValidPath(expectedJournal) {
+		return nil, LocalGenesisBaseline{}, ErrLocalReview
+	}
+	return openLocalGenesisSession(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key)
+}
+
+func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
 	empty := LocalGenesisBaseline{}
 	if s == nil || !s.Unlocked() || configPath == "" || workspaceRoot == "" || vaultID == "" {
 		return nil, empty, ErrLocalReview
@@ -74,6 +95,9 @@ func OpenLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 	manifest, digest, companion, err := readLocalGenesisLocator(s, configPath, workspaceRoot, vaultID)
 	if err != nil {
 		return nil, empty, err
+	}
+	if expectedJournal != "" && manifest.Journal != expectedJournal {
+		return nil, empty, ErrLocalReview
 	}
 	checkpoint, revision, err := verifyLocalGenesisCompanion(manifest, companion)
 	if err != nil {

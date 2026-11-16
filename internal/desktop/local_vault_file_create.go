@@ -219,7 +219,7 @@ func (a *App) localCreatePrepare() {
 				manifest.PersonalFile != session.VaultPath() || manifest.BackendRoot != backendRoot {
 				err = vaultfileclient.ErrLocalReview
 			} else {
-				scope = localVaultFileSessionScope{configPath: configPath, vaultID: manifest.VaultID, backendRoot: backendRoot}
+				scope = localVaultFileSessionScope{configPath: configPath, vaultID: manifest.VaultID, backendRoot: backendRoot, journalPath: manifest.Journal}
 			}
 		}
 		if ctx.Err() != nil && err == nil {
@@ -332,6 +332,13 @@ func (a *App) localCreateComplete() {
 		if ctx.Err() == nil {
 			var expected vaultfileclient.Manifest
 			expected, err = boundLocalVaultFileManifest(scope.configPath, session.VaultPath(), scope.backendRoot)
+			if err == nil && expected.Journal != scope.journalPath {
+				// The template that will be handed to the protocol constructor
+				// must match the frozen scheduling hint. The constructor still
+				// compares its own captured manifest with this template, so this
+				// is not a preflight-only check.
+				err = vaultfileclient.ErrLocalReview
+			}
 			if err == nil {
 				var creation *vaultfileclient.CreationContext
 				creation, err = vaultfileclient.OpenCreationForVault(scope.configPath, &expected, scope.vaultID, password, secret)

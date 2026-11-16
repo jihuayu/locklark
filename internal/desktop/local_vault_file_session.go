@@ -21,6 +21,10 @@ type localVaultFileSessionScope struct {
 	configPath  string
 	vaultID     string
 	backendRoot string
+	// journalPath is the scheduling hint captured from the strict manifest
+	// read. It is part of the exact slot key but is not routing authority or a
+	// grant; the client constructor compares it to its own captured manifest.
+	journalPath string
 }
 
 type localVaultFileSessionOutcome uint8
@@ -230,7 +234,7 @@ func (a *App) localVaultFileSessionScopeFor(ref localVaultFileRef) (localVaultFi
 	if backendRoot == "" {
 		return localVaultFileSessionScope{}, false
 	}
-	return localVaultFileSessionScope{configPath: ref.path, vaultID: ref.vaultID, backendRoot: backendRoot}, true
+	return localVaultFileSessionScope{configPath: ref.path, vaultID: ref.vaultID, backendRoot: backendRoot, journalPath: ref.journalPath}, true
 }
 
 // syncLocalVaultFileSessions is the lazy generation/parent boundary. A parent
@@ -299,7 +303,8 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 // completion can reserve before its worker launches.
 func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionScope) *localVaultFileSessionOperation {
 	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive ||
-		scope.configPath == "" || scope.vaultID == "" || scope.backendRoot == "" {
+		scope.configPath == "" || scope.vaultID == "" || scope.backendRoot == "" ||
+		scope.journalPath == "" {
 		return nil
 	}
 	_, currentRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
@@ -442,7 +447,7 @@ func (a *App) openLocalVaultFileSessionCandidate(op *localVaultFileSessionOperat
 	if op == nil || op.parent == nil {
 		return nil, vaultfileclient.LocalGenesisBaseline{}, vaultfileclient.ErrLocalReview
 	}
-	return vaultfileclient.OpenLocalGenesisSession(op.parent, op.scope.configPath, op.scope.backendRoot, op.scope.vaultID, password, key)
+	return vaultfileclient.OpenLocalGenesisSessionForJournal(op.parent, op.scope.configPath, op.scope.backendRoot, op.scope.vaultID, op.scope.journalPath, password, key)
 }
 
 // takeAndCompleteLocalVaultFileSessionResult is the serial dispatch owner of

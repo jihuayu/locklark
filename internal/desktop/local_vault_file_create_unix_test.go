@@ -432,7 +432,7 @@ func TestDesktopCreateCompleteRejectsWrongBackendBeforePublish(t *testing.T) {
 	f.app.openLocalVaultFileCreate(configPath)
 	f.app.localCreate.phase = "complete"
 	f.app.localCreate.scope = localVaultFileSessionScope{
-		configPath: configPath, vaultID: "wrong-backend-scope", backendRoot: f.backendRoot,
+		configPath: configPath, vaultID: "wrong-backend-scope", backendRoot: f.backendRoot, journalPath: proposal.Journal,
 	}
 	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
 	f.app.localCreate.kit = "unused-kit"
