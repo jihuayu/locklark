@@ -57,8 +57,18 @@ func SeparateStatusState(backendRoot string, paths ...string) error {
 // Resolve each existing component separately so ENOENT means a truly absent
 // child, not the target of a dangling ancestor symlink.
 func statusExistingDir(path string) (string, bool, error) {
-	resolved := string(os.PathSeparator)
-	for _, component := range strings.Split(strings.TrimPrefix(path, resolved), resolved) {
+	root, components := statusPathRootComponents(path, filepath.VolumeName(path), string(os.PathSeparator))
+	// An absent drive or UNC share is not an absent child of a trusted parent.
+	// Prove the volume root before accepting ENOENT in the walk below.
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", false, err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return "", false, ErrBackend
+	}
+	for _, component := range components {
 		if component == "" {
 			continue
 		}
@@ -68,7 +78,6 @@ func statusExistingDir(path string) (string, bool, error) {
 		} else if err != nil {
 			return "", false, err
 		}
-		var err error
 		resolved, err = filepath.EvalSymlinks(next)
 		if err != nil {
 			return "", false, err
@@ -79,4 +88,12 @@ func statusExistingDir(path string) (string, bool, error) {
 		}
 	}
 	return resolved, false, nil
+}
+
+// The volume is part of the walk's root on Windows (drive or UNC share).
+// Keeping the split pure also makes its platform-specific starting point
+// testable without probing a host drive or share.
+func statusPathRootComponents(path, volume, separator string) (string, []string) {
+	rest := strings.TrimPrefix(path[len(volume):], separator)
+	return volume + separator, strings.Split(rest, separator)
 }

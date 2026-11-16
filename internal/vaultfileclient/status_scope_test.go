@@ -3,8 +3,26 @@ package vaultfileclient
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
+
+func TestStatusPathRootComponents(t *testing.T) {
+	tests := []struct {
+		path, volume, separator, root string
+		components                    []string
+	}{
+		{path: "/one/two", separator: "/", root: "/", components: []string{"one", "two"}},
+		{path: `C:\one\two`, volume: "C:", separator: `\`, root: `C:\`, components: []string{"one", "two"}},
+		{path: `\\server\share\one`, volume: `\\server\share`, separator: `\`, root: `\\server\share\`, components: []string{"one"}},
+	}
+	for _, tt := range tests {
+		root, components := statusPathRootComponents(tt.path, tt.volume, tt.separator)
+		if root != tt.root || !reflect.DeepEqual(components, tt.components) {
+			t.Fatalf("STATUS_SCOPE_ROOT_COMPONENTS_FAILED: %q", tt.path)
+		}
+	}
+}
 
 func TestSeparateStatusStatePreservesNamespaceAndMissingRootBoundary(t *testing.T) {
 	root := t.TempDir()
