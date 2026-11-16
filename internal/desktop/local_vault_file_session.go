@@ -359,9 +359,11 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 		defer clear(ownedPassword)
 		defer clear(ownedKey)
 		if op.ctx.Err() != nil {
-			// No factory ran, so no candidate can exist. The producer still
-			// reached its terminal state and a cancellation that already
-			// withdrew the operation may settle now.
+			// No factory ran, so no candidate can exist. Clear both
+			// worker-owned factor copies before the settlement mark; the
+			// deferred clears remain as safety.
+			clear(ownedPassword)
+			clear(ownedKey)
 			op.markProcessingFinished()
 			return
 		}
