@@ -162,7 +162,12 @@ function harness(options = {}) {
         queueMicrotask(() =>
           portMessage({ v: 1, id: r.id, type: "cancelled" }),
         );
-      if (r.type === "generate" && capabilities.includes("generate-v1"))
+      if (r.type === "generate" && typeof options.generateReply === "function") {
+        Promise.resolve(options.generateReply(r)).then(
+          (reply) => { if (reply) queueMicrotask(() => portMessage(reply)); },
+          () => {},
+        );
+      } else if (r.type === "generate" && capabilities.includes("generate-v1"))
         queueMicrotask(() =>
           portMessage({
             v: 1,
@@ -178,7 +183,12 @@ function harness(options = {}) {
             history_id: "7".repeat(32),
           }),
         );
-      if (r.type === "stage-save" && capabilities.includes("stage-save-v1"))
+      if (r.type === "stage-save" && typeof options.stageReply === "function") {
+        Promise.resolve(options.stageReply(r)).then(
+          (reply) => { if (reply) queueMicrotask(() => portMessage(reply)); },
+          () => {},
+        );
+      } else if (r.type === "stage-save" && capabilities.includes("stage-save-v1"))
         queueMicrotask(() =>
           portMessage({
             v: 1,
@@ -3678,6 +3688,297 @@ test("popup generator commands fill the preview, stage history and manage never-
   }
 });
 
+function generatedStageReply(request, overrides = {}) {
+  return {
+    v: 1,
+    id: request.id,
+    type: "save-staged",
+    staged_save: {
+      stage_id: "9".repeat(32),
+      origin: request.origin,
+      username: request.username,
+      title: request.title,
+      mode: request.mode,
+      existing_item_id: request.item_id || "",
+      existing_revision: request.revision || "",
+      expires_at: Date.now() + 60000,
+      ...overrides,
+    },
+  };
+}
+test("generated staging outcome follows only its own native stage reply", async () => {
+  let releaseNative;
+  const h = harness({
+    capabilities: ["stage-save-v1"],
+    stageReply: (request) => {
+      if (request.password === "Generated-A") {
+        return new Promise((resolve) => {
+          releaseNative = () => resolve(generatedStageReply(request));
+        });
+      }
+      if (request.password === "Draft-B")
+        return { v: 1, id: request.id, type: "error", error: "refused" };
+      return undefined;
+    },
+  });
+  try {
+    await ready(h);
+    const generated = h.send({
+      type: "inline-generate-fill",
+      password: "Generated-A",
+      profile: { mode: "random", length: 11, alphabet_size: 84, entropy_bits_floor: 60 },
+      username: "alice",
+    }, contentSender());
+    await waitFor(() => h.sent.some((request) =>
+      request.type === "stage-save" && request.password === "Generated-A"),
+    "generator native stage request");
+    let state = await h.send({ type: "state" });
+    assert.equal(state.generatedHistory.length, 1);
+    assert.equal(state.generatedHistory[0].stagingOutcome, "pending");
+    const draft = await h.send({
+      type: "inline-stage-save",
+      username: "alice",
+      password: "Draft-B",
+      isNewPassword: true,
+    }, contentSender());
+    assert.deepEqual(Object.keys(draft).sort(), ["mode", "pendingSave", "stageId"]);
+    assert.equal("native" in draft, false);
+    assert.equal("stagingOutcome" in draft, false);
+    state = await h.send({ type: "state" });
+    assert.equal(state.generatedHistory.length, 1);
+    assert.equal(state.generatedHistory[0].stagingOutcome, "pending");
+    releaseNative();
+    const response = await generated;
+    assert.equal(response.historyId, state.generatedHistory[0].id);
+    assert.equal("native" in response, false);
+    assert.equal("stagingOutcome" in response, false);
+    assert.deepEqual(Object.keys(response).sort(),
+      ["filledCount", "historyId", "mode", "password", "profile", "stageId", "status"]);
+    state = await h.send({ type: "state" });
+    assert.equal(state.generatedHistory.length, 1);
+    assert.equal(state.generatedHistory[0].stagingOutcome, "native-accepted");
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("generated staging outcome is local-only for rejected, missing or malformed native stage", async () => {
+  const h = harness({
+    capabilities: ["stage-save-v1"],
+    stageReply: (request) => {
+      if (request.password === "Accepted-A") return generatedStageReply(request);
+      if (request.password === "Rejected-B")
+        return { v: 1, id: request.id, type: "error", error: "refused" };
+      if (request.password === "Missing-C")
+        return generatedStageReply(request, { origin: "https://other.example.test" });
+      if (request.password === "Malformed-D")
+        return generatedStageReply(request, { mode: "never" });
+      return undefined;
+    },
+  });
+  try {
+    await ready(h);
+    const fill = (password) => h.send({
+      type: "inline-generate-fill",
+      password,
+      profile: { mode: "random", length: 11, alphabet_size: 84, entropy_bits_floor: 60 },
+      username: "alice",
+    }, contentSender());
+    const accepted = await fill("Accepted-A");
+    const rejected = await fill("Rejected-B");
+    const missing = await fill("Missing-C");
+    const malformed = await fill("Malformed-D");
+    const ids = [accepted.historyId, rejected.historyId, missing.historyId, malformed.historyId];
+    assert.equal(new Set(ids).size, 4);
+    let state = await h.send({ type: "state" });
+    let byId = new Map(state.generatedHistory.map((entry) => [entry.id, entry]));
+    assert.equal(byId.get(accepted.historyId).stagingOutcome, "native-accepted");
+    assert.equal(byId.get(rejected.historyId).stagingOutcome, "local-only");
+    assert.equal(byId.get(missing.historyId).stagingOutcome, "local-only");
+    assert.equal(byId.get(malformed.historyId).stagingOutcome, "local-only");
+    const historyFill = await h.send({
+      type: "generator-history-fill",
+      historyId: accepted.historyId,
+    });
+    const historySave = await h.send({
+      type: "generator-history-save",
+      historyId: accepted.historyId,
+    });
+    for (const reply of [historyFill, historySave]) {
+      assert.equal("native" in reply, false);
+      assert.equal("stagingOutcome" in reply, false);
+      assert.equal(typeof reply.historyId, "string");
+      assert.equal(typeof reply.stageId, "string");
+      assert.equal(typeof reply.mode, "string");
+    }
+    state = await h.send({ type: "state" });
+    byId = new Map(state.generatedHistory.map((entry) => [entry.id, entry]));
+    assert.equal(byId.get(accepted.historyId).stagingOutcome, "native-accepted");
+    assert.equal(byId.get(rejected.historyId).stagingOutcome, "local-only");
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("plain generated history does not stage or default to pending", async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const stageRequests = h.sent.filter((request) => request.type === "stage-save").length;
+    const generated = await h.send({
+      type: "inline-generate",
+      mode: "pin",
+      length: 6,
+      recordHistory: true,
+    }, contentSender());
+    const state = await h.send({ type: "state" });
+    assert.equal(h.sent.filter((request) => request.type === "stage-save").length, stageRequests);
+    assert.equal(state.pendingSave, null);
+    const entry = state.generatedHistory.find((item) => item.id === generated.historyId);
+    assert.ok(entry);
+    assert.equal(Object.hasOwn(entry, "stagingOutcome"), false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("late generator results cannot revive history or staging outcome", async () => {
+  let releaseGenerate;
+  const generation = harness({
+    capabilities: ["generate-v1"],
+    generateReply: (request) => new Promise((resolve) => {
+      releaseGenerate = () => resolve({
+        v: 1,
+        id: request.id,
+        type: "generated",
+        generated_password: "Late-Generate-1",
+        profile: { mode: "random", length: 15, alphabet_size: 84, entropy_bits_floor: 80 },
+        history_id: "7".repeat(32),
+      });
+    }),
+  });
+  try {
+    await ready(generation);
+    const pending = generation.send({
+      type: "inline-generate-fill",
+      mode: "random",
+      length: 20,
+    }, contentSender());
+    await waitFor(() => generation.sent.some((request) => request.type === "generate"),
+      "native generate request");
+    generation.losePort();
+    await tick();
+    await tick();
+    releaseGenerate();
+    await tick();
+    await tick();
+    await pending;
+    await ready(generation);
+    const state = await generation.send({ type: "state" });
+    assert.equal(state.generatedHistory.length, 0);
+  } finally {
+    await generation.send({ type: "disconnect" });
+  }
+});
+test("late stage results cannot revive a disconnected generated history entry", async () => {
+  let releaseStage;
+  const h = harness({
+    capabilities: ["stage-save-v1"],
+    stageReply: (request) => new Promise((resolve) => {
+      releaseStage = () => resolve(generatedStageReply(request));
+    }),
+  });
+  try {
+    await ready(h);
+    const pending = h.send({
+      type: "inline-generate-fill",
+      password: "Stage-Late-1",
+      profile: { mode: "random", length: 11, alphabet_size: 84, entropy_bits_floor: 60 },
+      username: "alice",
+    }, contentSender());
+    await waitFor(() => h.sent.some((request) => request.type === "stage-save"),
+      "native stage request");
+    let state = await h.send({ type: "state" });
+    const historyId = state.generatedHistory[0].id;
+    assert.equal(state.generatedHistory[0].stagingOutcome, "pending");
+    h.losePort();
+    await tick();
+    await tick();
+    releaseStage();
+    await tick();
+    await tick();
+    await pending;
+    await ready(h);
+    state = await h.send({ type: "state" });
+    assert.equal(state.generatedHistory.some((entry) => entry.id === historyId), false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("expired or evicted generated history never revives a late stage outcome", async () => {
+  const expiry = harness({
+    clock: 1_700_000_000_000,
+    capabilities: ["stage-save-v1"],
+    stageReply: (request) => new Promise((resolve) => {
+      expiry.releaseStage = () => resolve(generatedStageReply(request));
+    }),
+  });
+  try {
+    await ready(expiry);
+    const pending = expiry.send({
+      type: "inline-generate-fill",
+      password: "Expire-Late-1",
+      profile: { mode: "random", length: 11, alphabet_size: 84, entropy_bits_floor: 60 },
+      username: "alice",
+    }, contentSender());
+    await waitFor(() => expiry.sent.some((request) => request.type === "stage-save"),
+      "expiry stage request");
+    let state = await expiry.send({ type: "state" });
+    const historyId = state.generatedHistory[0].id;
+    assert.equal(state.generatedHistory[0].stagingOutcome, "pending");
+    expiry.advanceClock(5 * 60 * 1000 + 1);
+    expiry.releaseStage();
+    await pending;
+    state = await expiry.send({ type: "state" });
+    assert.equal(state.generatedHistory.some((entry) => entry.id === historyId), false);
+  } finally {
+    await expiry.send({ type: "disconnect" });
+  }
+
+  const eviction = harness({
+    capabilities: ["stage-save-v1"],
+    stageReply: (request) => new Promise((resolve) => {
+      eviction.releaseStage = () => resolve(generatedStageReply(request));
+    }),
+  });
+  try {
+    await ready(eviction);
+    const pending = eviction.send({
+      type: "inline-generate-fill",
+      password: "Evict-Late-1",
+      profile: { mode: "random", length: 11, alphabet_size: 84, entropy_bits_floor: 60 },
+      username: "alice",
+    }, contentSender());
+    await waitFor(() => eviction.sent.some((request) => request.type === "stage-save"),
+      "eviction stage request");
+    let state = await eviction.send({ type: "state" });
+    const historyId = state.generatedHistory[0].id;
+    for (let index = 0; index < 20; index++)
+      await eviction.send({
+        type: "inline-generate",
+        mode: "pin",
+        length: 6,
+        recordHistory: true,
+      }, contentSender());
+    state = await eviction.send({ type: "state" });
+    assert.equal(state.generatedHistory.length, 20);
+    assert.equal(state.generatedHistory.some((entry) => entry.id === historyId), false);
+    eviction.releaseStage();
+    await pending;
+    state = await eviction.send({ type: "state" });
+    assert.equal(state.generatedHistory.some((entry) => entry.id === historyId), false);
+    assert.equal(state.generatedHistory.some((entry) => entry.stagingOutcome === "pending"), false);
+  } finally {
+    await eviction.send({ type: "disconnect" });
+  }
+});
 test("native v2 detail projects has-value rows and URLs without secret values", async () => {
   const id = "b".repeat(32), rev = "c".repeat(64);
   const nativeDetail = {
