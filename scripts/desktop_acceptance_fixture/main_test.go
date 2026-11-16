@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jihuayu/locklark/internal/personal"
@@ -65,7 +66,15 @@ func newPublishedLocalFixture(t *testing.T) *publishedLocalFixture {
 			t.Fatal("OBSERVER_FIXTURE_WORKSPACE_FAILED")
 		}
 	}
+	return createPublishedVault(t, f, root, workspace, backendRoot)
+}
 
+// createPublishedVault runs the real product creation flow for one new selector
+// in an existing fixture/workspace/backend. It never copies another vault's
+// ciphertext or fabricates a manifest/companion pair.
+func createPublishedVault(t *testing.T, f fixture, root, workspace, backendRoot string) *publishedLocalFixture {
+	t.Helper()
+	profileDir := localProfileDir(workspace, f.Path)
 	var selectorRaw [16]byte
 	if _, err := rand.Read(selectorRaw[:]); err != nil {
 		t.Fatal("OBSERVER_FIXTURE_SELECTOR_FAILED")
@@ -135,6 +144,17 @@ func newPublishedLocalFixture(t *testing.T) *publishedLocalFixture {
 	return p
 }
 
+// newPublishedLocalPair creates a second complete vault in the same personal
+// file, workspace and backend through the product flow. The fresh backup has
+// its own recovery material and ciphertext; only the source fixture and storage
+// locations are shared.
+func newPublishedLocalPair(t *testing.T) (*publishedLocalFixture, *publishedLocalFixture) {
+	t.Helper()
+	first := newPublishedLocalFixture(t)
+	second := createPublishedVault(t, first.fixture, first.root, first.workspace, first.backendRoot)
+	return first, second
+}
+
 type persistentState struct {
 	mode   os.FileMode
 	size   int64
@@ -194,6 +214,347 @@ func assertLimitedReport(t *testing.T, report localProjection, p *publishedLocal
 		t.Fatal("OBSERVER_REPORT_ENCODE_FAILED")
 	}
 	assertLimitedBytes(t, buf.Bytes(), p)
+}
+
+func allPairProjectionTrue(report localProjection) bool {
+	return report.ManifestCount == 2 && report.ManifestPersonal && report.ManifestBackend &&
+		report.CompanionPresent && report.ManifestDigest && report.JournalPresent &&
+		report.ArchivePresent && report.PrivateModes && report.BackendHashMatches && report.FactorsAbsent
+}
+
+func assertPairLimitedReport(t *testing.T, report localProjection, fixtures ...*publishedLocalFixture) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(report); err != nil {
+		t.Fatal("OBSERVER_PAIR_REPORT_ENCODE_FAILED")
+	}
+	assertPairLimitedBytes(t, buf.Bytes(), fixtures...)
+}
+
+func assertPairLimitedBytes(t *testing.T, out []byte, fixtures ...*publishedLocalFixture) {
+	t.Helper()
+	if len(out) > 4096 {
+		t.Fatal("OBSERVER_PAIR_REPORT_NOT_BOUNDED")
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(out, &fields) != nil || len(fields) != 10 {
+		t.Fatal("OBSERVER_PAIR_REPORT_KEYS_INVALID")
+	}
+	for _, key := range []string{"manifest_count", "manifest_personal", "manifest_backend", "companion_present",
+		"manifest_digest", "journal_present", "archive_present", "private_modes", "backend_hash_matches", "factors_absent"} {
+		raw, ok := fields[key]
+		if !ok {
+			t.Fatal("OBSERVER_PAIR_REPORT_KEY_MISSING")
+		}
+		if key == "manifest_count" {
+			var count int
+			if json.Unmarshal(raw, &count) != nil || count != 2 {
+				t.Fatal("OBSERVER_PAIR_REPORT_COUNT_INVALID")
+			}
+			continue
+		}
+		var value bool
+		if json.Unmarshal(raw, &value) != nil {
+			t.Fatal("OBSERVER_PAIR_REPORT_BOOL_INVALID")
+		}
+	}
+	for _, p := range fixtures {
+		for _, secret := range [][]byte{[]byte(p.fixture.Password), []byte(p.fixture.Secret), []byte(p.fixture.OTPSeed),
+			[]byte(p.fixture.ProviderCanary), p.kit, []byte(p.personalPath), []byte(p.config),
+			[]byte(p.companion), []byte(p.journal), []byte(p.archive), []byte(strings.TrimSuffix(filepath.Base(p.config), ".json"))} {
+			if len(secret) > 0 && bytes.Contains(out, secret) {
+				t.Fatal("OBSERVER_PAIR_REPORT_LEAKED_LOCAL_VALUE")
+			}
+		}
+		manifest, exists, err := vaultfileclient.ReadManifest(p.config)
+		if err != nil || !exists {
+			t.Fatal("OBSERVER_PAIR_REPORT_MANIFEST_FAILED")
+		}
+		for _, secret := range [][]byte{[]byte(manifest.VaultID), []byte(manifest.Name)} {
+			if len(secret) > 0 && bytes.Contains(out, secret) {
+				t.Fatal("OBSERVER_PAIR_REPORT_LEAKED_IDENTITY")
+			}
+		}
+	}
+}
+
+func TestLocalVaultPairReadObserverPositive(t *testing.T) {
+	first, second := newPublishedLocalPair(t)
+	fixturePath := filepath.Join(filepath.Dir(first.personalPath), "fixture.json")
+
+	before := snapshotPersistent(t, first.root)
+	report, err := verifyLocalPairWorkspace(first.fixture, first.workspace)
+	if err != nil {
+		t.Fatal("OBSERVER_PAIR_POSITIVE_READ_FAILED")
+	}
+	after := snapshotPersistent(t, first.root)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("OBSERVER_PAIR_POSITIVE_MUTATED_PERSISTENT_FILES")
+	}
+	if !allPairProjectionTrue(report) {
+		t.Fatal("OBSERVER_PAIR_POSITIVE_NOT_ALL_TRUE")
+	}
+	assertPairLimitedReport(t, report, first, second)
+
+	beforeCLI := snapshotPersistent(t, first.root)
+	cliRaw := captureRun(t, []string{"-fixture", fixturePath, "-verify-local-pair", first.workspace})
+	afterCLI := snapshotPersistent(t, first.root)
+	if !reflect.DeepEqual(beforeCLI, afterCLI) {
+		t.Fatal("OBSERVER_PAIR_CLI_MUTATED_PERSISTENT_FILES")
+	}
+	var cliReport localProjection
+	if json.Unmarshal(cliRaw, &cliReport) != nil || !allPairProjectionTrue(cliReport) {
+		t.Fatal("OBSERVER_PAIR_CLI_NOT_ALL_TRUE")
+	}
+	assertPairLimitedBytes(t, cliRaw, first, second)
+}
+
+func TestLocalVaultObserverModesRequireExactCount(t *testing.T) {
+	single := newPublishedLocalFixture(t)
+	pairFirst, _ := newPublishedLocalPair(t)
+
+	pairOnSingle, err := verifyLocalPairWorkspace(single.fixture, single.workspace)
+	if err != nil {
+		t.Fatal("OBSERVER_PAIR_ON_SINGLE_ERROR")
+	}
+	if pairOnSingle.ManifestCount != 1 || allPairProjectionTrue(pairOnSingle) {
+		t.Fatal("OBSERVER_PAIR_ON_SINGLE_ACCEPTED")
+	}
+	singleOnPair, err := verifyLocalWorkspace(pairFirst.fixture, pairFirst.workspace)
+	if err != nil {
+		t.Fatal("OBSERVER_SINGLE_ON_PAIR_ERROR")
+	}
+	if singleOnPair.ManifestCount != 2 || allProjectionTrue(singleOnPair) {
+		t.Fatal("OBSERVER_SINGLE_ON_PAIR_ACCEPTED")
+	}
+}
+
+// TestLocalVaultPairReadObserverRejectsMutations applies each static change to
+// a fresh pair and restores it before the next case. No case may reach the
+// all-true pair projection, and structural cases must return an error.
+func TestLocalVaultPairReadObserverRejectsMutations(t *testing.T) {
+	first, second := newPublishedLocalPair(t)
+	readRaw := func(t *testing.T, path string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("OBSERVER_PAIR_MUTATION_READ_FAILED")
+		}
+		return raw
+	}
+	restore := func(t *testing.T, path string, raw []byte) func() {
+		t.Helper()
+		return func() {
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal("OBSERVER_PAIR_MUTATION_RESTORE_FAILED")
+			}
+		}
+	}
+	firstManifest, firstExists, err := vaultfileclient.ReadManifest(first.config)
+	if err != nil || !firstExists {
+		t.Fatal("OBSERVER_PAIR_MUTATION_FIRST_MANIFEST_FAILED")
+	}
+	secondManifest, secondExists, err := vaultfileclient.ReadManifest(second.config)
+	if err != nil || !secondExists {
+		t.Fatal("OBSERVER_PAIR_MUTATION_SECOND_MANIFEST_FAILED")
+	}
+	dataDir := filepath.Join(first.backendRoot, "vaultfile-backend", "v1", "data")
+
+	cases := []struct {
+		name    string
+		wantErr bool
+		mutate  func(t *testing.T) func()
+	}{
+		{
+			name: "third manifest", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				base := "observer-third"
+				third := vaultfileclient.Manifest{
+					Version: 1, Kind: vaultfileclient.CreateKind, VaultID: strings.Repeat("a", 32),
+					PersonalFile: first.personalPath, BackendRoot: first.backendRoot, Name: base + ".llv",
+					Journal: filepath.Join(first.profileDir, base+".journal"),
+					Archive: filepath.Join(first.profileDir, base+".llb"),
+				}
+				raw, err := json.Marshal(third)
+				if err != nil {
+					t.Fatal("OBSERVER_PAIR_THIRD_MANIFEST_ENCODE_FAILED")
+				}
+				path := filepath.Join(first.profileDir, base+".json")
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_THIRD_MANIFEST_WRITE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "unknown profile entry", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(first.profileDir, "unknown.txt")
+				if err := os.WriteFile(path, []byte("unknown"), 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_UNKNOWN_PROFILE_WRITE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "extra backend object", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(dataDir, "extra-object")
+				if err := os.WriteFile(path, []byte("extra"), 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_EXTRA_BACKEND_WRITE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "occupied backend tmp", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				path := filepath.Join(first.backendRoot, "vaultfile-backend", "v1", "tmp", "occupied")
+				if err := os.WriteFile(path, []byte("tmp"), 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_TMP_WRITE_FAILED")
+				}
+				return func() { os.Remove(path) }
+			},
+		},
+		{
+			name: "duplicate vault id", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				original := readRaw(t, first.config)
+				duplicate := firstManifest
+				duplicate.VaultID = secondManifest.VaultID
+				raw, err := json.Marshal(duplicate)
+				if err != nil {
+					t.Fatal("OBSERVER_PAIR_DUPLICATE_ID_ENCODE_FAILED")
+				}
+				if err := os.WriteFile(first.config, raw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_DUPLICATE_ID_WRITE_FAILED")
+				}
+				return restore(t, first.config, original)
+			},
+		},
+		{
+			name: "swapped companions", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				firstRaw, secondRaw := readRaw(t, first.companion), readRaw(t, second.companion)
+				if err := os.WriteFile(first.companion, secondRaw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_SWAP_COMPANION_WRITE_FAILED")
+				}
+				if err := os.WriteFile(second.companion, firstRaw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_SWAP_COMPANION_WRITE_FAILED")
+				}
+				return func() {
+					if err := os.WriteFile(first.companion, firstRaw, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_SWAP_COMPANION_RESTORE_FAILED")
+					}
+					if err := os.WriteFile(second.companion, secondRaw, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_SWAP_COMPANION_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+		{
+			name: "foreign personal binding", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				foreign := filepath.Join(first.root, "foreign.ll")
+				if err := os.WriteFile(foreign, []byte("foreign"), 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_FOREIGN_WRITE_FAILED")
+				}
+				original := readRaw(t, first.config)
+				changed := firstManifest
+				changed.PersonalFile = foreign
+				raw, err := json.Marshal(changed)
+				if err != nil {
+					t.Fatal("OBSERVER_PAIR_FOREIGN_ENCODE_FAILED")
+				}
+				if err := os.WriteFile(first.config, raw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_FOREIGN_BINDING_WRITE_FAILED")
+				}
+				return func() {
+					restore(t, first.config, original)()
+					os.Remove(foreign)
+				}
+			},
+		},
+		{
+			name: "swapped backend objects", wantErr: false,
+			mutate: func(t *testing.T) func() {
+				firstName := sha256.Sum256([]byte(firstManifest.Name))
+				secondName := sha256.Sum256([]byte(secondManifest.Name))
+				firstObject := filepath.Join(dataDir, hex.EncodeToString(firstName[:]))
+				secondObject := filepath.Join(dataDir, hex.EncodeToString(secondName[:]))
+				firstRaw, secondRaw := readRaw(t, firstObject), readRaw(t, secondObject)
+				if err := os.WriteFile(firstObject, secondRaw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_SWAP_BACKEND_WRITE_FAILED")
+				}
+				if err := os.WriteFile(secondObject, firstRaw, 0600); err != nil {
+					t.Fatal("OBSERVER_PAIR_SWAP_BACKEND_WRITE_FAILED")
+				}
+				return func() {
+					if err := os.WriteFile(firstObject, firstRaw, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_SWAP_BACKEND_RESTORE_FAILED")
+					}
+					if err := os.WriteFile(secondObject, secondRaw, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_SWAP_BACKEND_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+		{
+			name: "symlink profile entry", wantErr: true,
+			mutate: func(t *testing.T) func() {
+				original := readRaw(t, second.journal)
+				if err := os.Remove(second.journal); err != nil {
+					t.Fatal("OBSERVER_PAIR_SYMLINK_REMOVE_FAILED")
+				}
+				if err := os.Symlink(first.journal, second.journal); err != nil {
+					t.Fatal("OBSERVER_PAIR_SYMLINK_CREATE_FAILED")
+				}
+				return func() {
+					os.Remove(second.journal)
+					if err := os.WriteFile(second.journal, original, 0600); err != nil {
+						t.Fatal("OBSERVER_PAIR_SYMLINK_RESTORE_FAILED")
+					}
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanup := tc.mutate(t)
+			t.Cleanup(cleanup)
+			report, err := verifyLocalPairWorkspace(first.fixture, first.workspace)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("OBSERVER_PAIR_MUTATION_ERROR_EXPECTED")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("OBSERVER_PAIR_MUTATION_UNEXPECTED_ERROR")
+			}
+			if allPairProjectionTrue(report) {
+				t.Fatal("OBSERVER_PAIR_MUTATION_ACCEPTED")
+			}
+			switch tc.name {
+			case "extra backend object":
+				if report.BackendHashMatches {
+					t.Fatal("OBSERVER_PAIR_EXTRA_BACKEND_ACCEPTED")
+				}
+			case "swapped companions":
+				if report.CompanionPresent || report.ManifestDigest {
+					t.Fatal("OBSERVER_PAIR_SWAP_COMPANION_ACCEPTED")
+				}
+			case "foreign personal binding":
+				if report.ManifestPersonal {
+					t.Fatal("OBSERVER_PAIR_FOREIGN_PERSONAL_ACCEPTED")
+				}
+			case "swapped backend objects":
+				if report.BackendHashMatches {
+					t.Fatal("OBSERVER_PAIR_SWAP_BACKEND_ACCEPTED")
+				}
+			}
+		})
+	}
 }
 
 func assertLimitedBytes(t *testing.T, out []byte, p *publishedLocalFixture) {
@@ -442,6 +803,8 @@ func TestRunHelpUsesFixedUsageAndSucceeds(t *testing.T) {
 		{"-fixture", fixtureArg, "-help"},
 		{"-verify-local", workspaceArg, "-h"},
 		{"-verify-local", workspaceArg, "-help"},
+		{"-verify-local-pair", workspaceArg, "-h"},
+		{"-verify-local-pair", workspaceArg, "-help"},
 	}
 	for _, args := range cases {
 		stdout, stderr, runErr := captureRunStreams(t, args)
@@ -457,7 +820,7 @@ func TestRunHelpUsesFixedUsageAndSucceeds(t *testing.T) {
 		if bytes.Contains(stdout, []byte(fixtureArg)) || bytes.Contains(stdout, []byte(workspaceArg)) {
 			t.Fatal("OBSERVER_HELP_LEAKED_INPUT")
 		}
-		for _, option := range []string{"-out", "-fixture", "-private-pipe", "-stale", "-hold-readonly", "-verify-local"} {
+		for _, option := range []string{"-out", "-fixture", "-private-pipe", "-stale", "-hold-readonly", "-verify-local", "-verify-local-pair"} {
 			if !bytes.Contains(stdout, []byte(option)) {
 				t.Fatal("OBSERVER_HELP_MISSING_OPTION")
 			}
@@ -474,6 +837,8 @@ func TestRunFlagParseErrorsUseFixedFailure(t *testing.T) {
 	cases := [][]string{
 		{"-fixture", "unused", "-private-pipe=" + synthetic},
 		{"-fixture", "unused", "-unknown-" + synthetic},
+		{"-fixture", "unused", "-verify-local-pair"},
+		{"-fixture", "unused", "-verify-local-pair=" + synthetic},
 	}
 	for _, args := range cases {
 		reader, writer, err := os.Pipe()
@@ -510,6 +875,8 @@ func TestLocalVaultFileReadObserverOperationExclusion(t *testing.T) {
 	cases := [][]string{
 		{"-fixture", filepath.Join(dir, "fixture.json"), "-verify-local", filepath.Join(dir, "workspace"), "-private-pipe"},
 		{"-out", filepath.Join(dir, "out"), "-verify-local", filepath.Join(dir, "workspace")},
+		{"-fixture", filepath.Join(dir, "fixture.json"), "-verify-local", filepath.Join(dir, "workspace"), "-verify-local-pair", filepath.Join(dir, "workspace")},
+		{"-out", filepath.Join(dir, "out"), "-verify-local-pair", filepath.Join(dir, "workspace")},
 	}
 	for _, args := range cases {
 		if err := run(args); err == nil {
