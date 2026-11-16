@@ -311,9 +311,10 @@ test("rotation row readiness projects bounded metadata without retaining identif
     dataset: { itemId: itemID, itemRevision },
     querySelectorAll: (selector) => Array(selector === '[data-action="fill"]' ? fills : updates).fill({}),
   });
-  const probe = async (rows, disabled = false) => {
+  const probe = async (rows, disabled = false, status) => {
     const result = await read({ evaluate: (expression) => vm.runInNewContext(expression, {
-      document: { querySelector: () => ({ disabled }), querySelectorAll: () => rows },
+      document: { querySelector: (selector) => selector === "#refresh" ? { disabled } : { textContent: status },
+        querySelectorAll: () => rows },
     }) }, id, revision);
     const serialized = JSON.stringify(result);
     assert(![id, revision, payload].some((value) => serialized.includes(value)), "Readiness output must contain no identifier or error payload");
@@ -322,7 +323,20 @@ test("rotation row readiness projects bounded metadata without retaining identif
   };
   const ready = await probe([row(id, revision)]);
   assert.deepEqual(ready, { probeAvailable: true, refreshDisabled: false, rowCount: 1,
-    sameIDCount: 1, exactRevisionCount: 1, fillCount: 1, updateCount: 1, failure: "none" });
+    sameIDCount: 1, exactRevisionCount: 1, fillCount: 1, updateCount: 1, statusClass: "UNKNOWN", failure: "none" });
+  const knownStatuses = [
+    ["0 个当前网站登录", "EMPTY_MATCH"],
+    ["操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面", "REFUSED"],
+    ["页面或活动标签已变化，请重新读取候选", "CONTEXT_CHANGED"],
+  ];
+  for (const [status, expected] of knownStatuses) {
+    assert.equal((await probe([], false, status)).statusClass, expected);
+    for (const suffix of [" ", " arbitrary suffix", payload]) {
+      assert.equal((await probe([], false, status + suffix)).statusClass, "UNKNOWN");
+      assert.equal((await probe([], false, suffix + status)).statusClass, "UNKNOWN");
+    }
+  }
+  assert.equal((await probe([], false, payload)).statusClass, "UNKNOWN");
   assert.equal((await probe([row(id, revision)], true)).refreshDisabled, true);
   assert.equal((await probe([])).rowCount, 0);
   assert.equal((await probe([row(id, "different-revision")])).exactRevisionCount, 0);
@@ -331,11 +345,15 @@ test("rotation row readiness projects bounded metadata without retaining identif
   for (const key of ["rowCount", "sameIDCount", "exactRevisionCount", "fillCount", "updateCount"])
     assert.equal(capped[key], 100);
   const unavailable = { probeAvailable: false, refreshDisabled: true, rowCount: 0,
-    sameIDCount: 0, exactRevisionCount: 0, fillCount: 0, updateCount: 0, failure: "probe-failed" };
+    sameIDCount: 0, exactRevisionCount: 0, fillCount: 0, updateCount: 0, statusClass: "UNKNOWN", failure: "probe-failed" };
   for (const popup of [
     { evaluate: () => { throw Error(payload); } },
     { evaluate: (expression) => vm.runInNewContext(expression, { document: { querySelectorAll: () => { throw Error(payload); } } }) },
     { evaluate: () => ({ ...ready, payload }) },
+    { evaluate: () => ({ ...ready, statusClass: payload }) },
+    { evaluate: (expression) => vm.runInNewContext(expression, { document: {
+      querySelectorAll: () => [], querySelector: () => { throw Error(payload); },
+    } }) },
   ]) {
     const result = await read(popup, id, revision);
     assert.deepEqual(JSON.parse(JSON.stringify(result)), unavailable);
