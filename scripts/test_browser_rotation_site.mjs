@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createBrowserRotationSite } from "./browser_rotation_site.mjs";
 import { assertPrivateArtifacts, browserScreenshotsAllowed, captureControllerOutput,
-  fixtureCanaries, registerRotationValue } from "./browser_save_acceptance.mjs";
+  fixtureCanaries, registerRotationValue, ROTATION_OUTPUT_FAILURE } from "./browser_save_acceptance.mjs";
 
 function ownedTLS(directory) {
   const file = (name) => join(directory, name);
@@ -210,4 +210,74 @@ test("refused private fixture input still registers the generated value for clea
       { message: "Private rotation fixture input refused" });
     assert(fixtureCanaries(fixture).includes(value), "Input refusal must not lose the in-memory canary");
   } finally { rmSync(state, { recursive: true, force: true }); }
+});
+
+// These are controlled component producers, not real browser generator callers.
+test("generation output barrier suppresses pending text until value registration succeeds", async () => {
+  const state = mkdtempSync(join(tmpdir(), "locklark-rotation-barrier-"));
+  const originalLog = console.log, originalError = console.error;
+  try {
+    chmodSync(state, 0o700);
+    const vault = join(state, "vault");
+    mkdirSync(vault, { mode: 0o700 });
+    const fixture = { Path: join(vault, "synthetic.ll") };
+    writeFileSync(join(vault, "fixture.json"), JSON.stringify(fixture), { mode: 0o600 });
+    const forwarded = [];
+    console.log = (...values) => forwarded.push(values);
+    console.error = (...values) => forwarded.push(values);
+    const scan = captureControllerOutput({ getFixture: () => fixture });
+    const value = "Unknown-generated-" + randomBytes(20).toString("hex");
+    let inspected = false;
+    const registered = await scan.captureRotationValue(fixture, state, async () => {
+      console.log(value);
+      console.error({ [Symbol.for("nodejs.util.inspect.custom")]: () => { inspected = true; return value; } });
+      // Direct suppression has no buffered-text limit or retained payload.
+      console.error(value.repeat(10000));
+      await Promise.resolve();
+      assert(forwarded.length === 0 && !inspected, "Pending output must be discarded before formatting");
+      return value;
+    });
+    assert(registered === value && fixture.RotationValue === value,
+      "Barrier may reopen only after the generated value is registered");
+    scan(fixture);
+    assert.throws(() => console.log(value), { message: "Synthetic factor or field leaked in output" });
+    assert.throws(() => console.error(encodeURIComponent(value)), { message: "Synthetic factor or field leaked in output" });
+    console.log("Fixed rotation receipt");
+    assert(forwarded.length === 1 && forwarded[0][0] === "Fixed rotation receipt",
+      "Successful registration must restore guarded fixed output");
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("generation failure discards unknown output and reports only a fixed error", async () => {
+  const originalLog = console.log, originalError = console.error;
+  try {
+    const fixture = {};
+    const forwarded = [];
+    console.log = (...values) => forwarded.push(values);
+    console.error = (...values) => forwarded.push(values);
+    const scan = captureControllerOutput({ getFixture: () => fixture });
+    const value = "Unknown-failed-" + randomBytes(20).toString("hex");
+    await assert.rejects(scan.captureRotationValue(fixture, "unused-private-state", async () => {
+      console.log(value);
+      console.error(new Error(value));
+      throw new Error(value);
+    }), (error) => error.message === ROTATION_OUTPUT_FAILURE && !error.stack.includes(value) && !("cause" in error));
+    // Late output after a failed producer remains suppressed: its value may
+    // never have become known to the registry or final privacy scanner.
+    console.error(new Error(value));
+    console.log(value);
+    console.error(ROTATION_OUTPUT_FAILURE, value);
+    assert(forwarded.length === 0 && fixture.RotationValue === undefined,
+      "Failure must not reopen unknown-value output or retain a generated value");
+    console.error(ROTATION_OUTPUT_FAILURE);
+    assert(forwarded.length === 1 && forwarded[0][0] === ROTATION_OUTPUT_FAILURE,
+      "A fixed failure report must remain available after suppression");
+    await assert.rejects(scan.captureRotationValue(fixture, "unused-private-state", async () => value),
+      { message: ROTATION_OUTPUT_FAILURE });
+    scan(fixture);
+  } finally { console.log = originalLog; console.error = originalError; }
 });

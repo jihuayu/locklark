@@ -179,11 +179,20 @@ export function browserScreenshotsAllowed(stage) {
     !(stage.startsWith("passkey-conditional") || stage.startsWith("passkey-signal"));
 }
 
+export const ROTATION_OUTPUT_FAILURE = "Private rotation generation failed";
+
 export function captureControllerOutput({ getFixture = () => null } = {}) {
   const lines = [];
+  let rotationOutput = "open";
   for (const method of ["log", "error"]) {
     const original = console[method].bind(console);
     console[method] = (...values) => {
+      // Unknown generator values must not reach formatting, storage, or the
+      // original logger. After failure only this exact fixed report is allowed;
+      // late asynchronous output may still contain an unregistered value.
+      if (rotationOutput === "pending") return;
+      if (rotationOutput === "failed" &&
+          !(values.length === 1 && values[0] === ROTATION_OUTPUT_FAILURE)) return;
       const line = format(...values);
       const fixture = getFixture();
       // Refuse before forwarding, including values registered after this
@@ -193,7 +202,26 @@ export function captureControllerOutput({ getFixture = () => null } = {}) {
       original(...values);
     };
   }
-  return (fixture) => assertPrivateText(lines.join("\n"), fixture);
+  const scan = (fixture) => assertPrivateText(lines.join("\n"), fixture);
+  // The caller supplies the real generator/read operation later. This API
+  // closes the output window before invoking it, and reopens only after both
+  // in-memory and private observer registration succeed. No raw error/cause
+  // escapes and a failure cannot be retried through this controller.
+  scan.captureRotationValue = async (fixture, state, produceValue) => {
+    if (rotationOutput !== "open" || typeof produceValue !== "function")
+      throw Error(ROTATION_OUTPUT_FAILURE);
+    rotationOutput = "pending";
+    try {
+      const value = await produceValue();
+      registerRotationValue(fixture, state, value);
+      rotationOutput = "open";
+      return value;
+    } catch {
+      rotationOutput = "failed";
+      throw Error(ROTATION_OUTPUT_FAILURE);
+    }
+  };
+  return Object.freeze(scan);
 }
 
 // Browser LevelDB detection is anchored to the fixed `profile/Default` prefix
