@@ -34,6 +34,7 @@ type Session struct {
 	lockRequested        atomic.Bool
 	vaultFileMu          sync.Mutex
 	vaultFileChildren    map[string]*vaultFileChild
+	vaultFileAll         map[*vaultFileChild]struct{}
 	vaultFileNext        atomic.Uint64
 	vaultFileRevoked     atomic.Bool
 	mu                   sync.Mutex
@@ -109,7 +110,7 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 // every unlock path (password and system quick unlock) starts with the same
 // opt-in HIBP client and empty pending tables.
 func newUnlockedSession(path string, material []byte, slotDigest [32]byte, now time.Time, idle time.Duration) *Session {
-	return &Session{path: path, material: material, slotDigest: slotDigest, last: now, fullUnlock: now, idle: idle, pending: make(map[*NativeField]bool), vaultFileChildren: make(map[string]*vaultFileChild), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}
+	return &Session{path: path, material: material, slotDigest: slotDigest, last: now, fullUnlock: now, idle: idle, pending: make(map[*NativeField]bool), vaultFileChildren: make(map[string]*vaultFileChild), vaultFileAll: make(map[*vaultFileChild]struct{}), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}
 }
 
 // SetIdleTimeout applies a new inactivity policy to an active session. A zero

@@ -102,7 +102,11 @@ type vaultFileChild struct {
 	fullFactorDeadline time.Time
 	idleDeadline       time.Time
 
-	closed bool
+	// closed marks that a first close claimed the handle. closeDone closes only
+	// after the real handle.Close has returned, so every later close and the
+	// parent drain wait for actual VUK clearing rather than the flag.
+	closed    bool
+	closeDone chan struct{}
 }
 
 func cloneVaultFileCheckpoint(c *vaultfile.PolicyCheckpoint) vaultfile.PolicyCheckpoint {
@@ -124,6 +128,13 @@ func cloneVaultFileCheckpoint(c *vaultfile.PolicyCheckpoint) vaultfile.PolicyChe
 // RequestLock can be proven non-blocking and the final gate can be proven to
 // clear a losing result.
 var vaultFileChildReadHook func()
+
+// vaultFileChildBeforeHandleClose is a narrow private test seam. It runs only
+// on the first closer, after closed is set and before the real handle.Close.
+// It receives no secret and is nil in production. Tests claim it with an
+// atomic CAS so a later sibling close returns immediately instead of joining
+// the same blocking Once.
+var vaultFileChildBeforeHandleClose func()
 
 // OpenVaultFileChild explicitly verifies the supplied full password and Secret
 // Key against the current account slot and material, authenticates the exact
@@ -306,6 +317,7 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	child := &vaultFileChild{
 		token:              token,
 		handle:             handle,
+		closeDone:          make(chan struct{}),
 		checkpoint:         cloneVaultFileCheckpoint(checkpoint),
 		journalGeneration:  baseline.generation,
 		remoteRevision:     baseline.remoteRevision,
@@ -317,8 +329,12 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	if hasIdle {
 		child.idleDeadline = idleDeadline
 	}
+	if s.vaultFileAll == nil {
+		s.vaultFileAll = make(map[*vaultFileChild]struct{})
+	}
 	old := s.vaultFileChildren[journalPath]
 	s.vaultFileChildren[journalPath] = child
+	s.vaultFileAll[child] = struct{}{}
 	s.vaultFileMu.Unlock()
 	s.saveMu.Unlock()
 	s.mu.Unlock()
@@ -326,7 +342,7 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	// Superseded candidates are closed, never merely dropped. This is outside
 	// every gate so a late reader can finish and observe the new generation.
 	if old != nil {
-		old.close()
+		s.retireVaultFileChild(old)
 	}
 	return token, initialItems, nil
 }
@@ -445,7 +461,7 @@ func (s *Session) LockVaultFileChild(token VaultFileChildToken) error {
 	delete(s.vaultFileChildren, token.path)
 	s.vaultFileMu.Unlock()
 	s.saveMu.Unlock()
-	child.close()
+	s.retireVaultFileChild(child)
 	return nil
 }
 
@@ -468,7 +484,7 @@ func (s *Session) invalidateVaultFileChild(child *vaultFileChild) {
 		delete(s.vaultFileChildren, child.token.path)
 	}
 	s.vaultFileMu.Unlock()
-	child.close()
+	s.retireVaultFileChild(child)
 }
 
 // lockVaultFileParent follows the existing Session.lock boundary after an
@@ -485,29 +501,62 @@ func (s *Session) lockVaultFileParent() {
 // so no registry or Session.mu lock is held while waiting on a child.
 func (s *Session) drainVaultFileChildren() {
 	s.vaultFileMu.Lock()
-	children := make([]*vaultFileChild, 0, len(s.vaultFileChildren))
-	for _, child := range s.vaultFileChildren {
+	children := make([]*vaultFileChild, 0, len(s.vaultFileAll))
+	for child := range s.vaultFileAll {
 		children = append(children, child)
 	}
 	s.vaultFileChildren = make(map[string]*vaultFileChild)
 	s.vaultFileMu.Unlock()
 	for _, child := range children {
-		child.close()
+		s.retireVaultFileChild(child)
 	}
 }
 
+// retireVaultFileChild is the single completion path shared by replacement,
+// LockVaultFileChild, invalidation and parent drain. The child stays in the
+// all set until the real handle.Close has returned, so the parent cannot return
+// while a retiring child still owns a VUK. This function never takes
+// Session.mu or saveMu.
+func (s *Session) retireVaultFileChild(child *vaultFileChild) {
+	if child == nil {
+		return
+	}
+	child.close()
+	s.vaultFileMu.Lock()
+	delete(s.vaultFileAll, child)
+	s.vaultFileMu.Unlock()
+}
+
+// close revokes the handle and waits for the actual handle.Close. The first
+// closer sets closed, runs the private seam and closes the handle outside
+// child.mu; later closers wait on closeDone. child.mu is never held while
+// waiting, so completion cleanup can never try to take Session.mu.
 func (c *vaultFileChild) close() {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return
 	}
 	c.closed = true
+	if c.closeDone == nil {
+		c.closeDone = make(chan struct{})
+	}
+	done := c.closeDone
 	handle := c.handle
 	c.mu.Unlock()
+	if vaultFileChildBeforeHandleClose != nil {
+		vaultFileChildBeforeHandleClose()
+	}
 	if handle != nil {
 		_ = handle.Close()
 	}
+	c.mu.Lock()
+	close(done)
+	c.mu.Unlock()
 }
 
 func (c *vaultFileChild) readHandle() (*vaultfile.ScopedUnlock, error) {

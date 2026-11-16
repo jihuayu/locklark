@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -319,6 +320,256 @@ func TestVaultFileChildLifecycleAndTokenGeneration(t *testing.T) {
 	if _, err := fx.session.ReadVaultFileChild(tokenA3, VaultFileChildOptions{}); err != nil {
 		t.Fatal("superseded close removed the current A")
 	}
+}
+
+type scopedClosePause struct {
+	entered chan struct{}
+	release chan struct{}
+	claimed atomic.Bool
+}
+
+func installScopedClosePause(t *testing.T) *scopedClosePause {
+	t.Helper()
+	p := &scopedClosePause{entered: make(chan struct{}), release: make(chan struct{})}
+	vaultFileChildBeforeHandleClose = func() {
+		// Claim only the first closer. A later sibling must return without
+		// joining this wait, so a bug that fails to make the parent wait for
+		// A cannot be masked by B blocking on the same Once.
+		if !p.claimed.CompareAndSwap(false, true) {
+			return
+		}
+		close(p.entered)
+		<-p.release
+	}
+	t.Cleanup(func() { vaultFileChildBeforeHandleClose = nil })
+	return p
+}
+
+func waitScopedCloseSeam(t *testing.T, p *scopedClosePause) {
+	t.Helper()
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first child close did not reach the before-handle-close seam")
+	}
+}
+
+func assertScopedRequestLockImmediate(t *testing.T, s *Session) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		s.RequestLock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RequestLock waited for a retiring child")
+	}
+}
+
+func assertScopedStillBlocked(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+		t.Fatalf("%s returned before the retiring child close completed", what)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestVaultFileChildParentLockWaitsForRetiringClose(t *testing.T) {
+	t.Run("lock-child-and-duplicate-close", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+		if err != nil {
+			t.Fatalf("open A: %v", err)
+		}
+		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open B: %v", err)
+		}
+		childA := fx.child(fx.a.journal)
+		childB := fx.child(fx.b.journal)
+		pause := installScopedClosePause(t)
+
+		// A is the only started close, so it claims the seam first.
+		lockA := make(chan error, 1)
+		go func() { lockA <- fx.session.LockVaultFileChild(tokenA) }()
+		waitScopedCloseSeam(t, pause)
+
+		// A later close must wait on A's real handle.Close, not return on the
+		// closed flag.
+		duplicate := make(chan struct{})
+		duplicateStarted := make(chan struct{})
+		go func() {
+			close(duplicateStarted)
+			childA.close()
+			close(duplicate)
+		}()
+		<-duplicateStarted
+		assertScopedStillBlocked(t, duplicate, "duplicate child close")
+
+		// RequestLock must not wait on the blocked child close.
+		assertScopedRequestLockImmediate(t, fx.session)
+
+		parentDone := make(chan struct{})
+		go func() {
+			fx.session.Lock()
+			close(parentDone)
+		}()
+		assertScopedStillBlocked(t, parentDone, "Session.Lock")
+
+		close(pause.release)
+		select {
+		case err := <-lockA:
+			if err != nil {
+				t.Fatalf("LockVaultFileChild(A): %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("LockVaultFileChild(A) did not return after release")
+		}
+		select {
+		case <-duplicate:
+		case <-time.After(5 * time.Second):
+			t.Fatal("duplicate close did not return after release")
+		}
+		select {
+		case <-parentDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Session.Lock did not return after release")
+		}
+		assertScopedChildHandleClosed(t, childA.handle)
+		assertScopedChildHandleClosed(t, childB.handle)
+	})
+
+	t.Run("supersession", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		if _, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open A: %v", err)
+		}
+		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open B: %v", err)
+		}
+		oldChild := fx.child(fx.a.journal)
+		childB := fx.child(fx.b.journal)
+		pause := installScopedClosePause(t)
+
+		reopen := make(chan error, 1)
+		go func() {
+			_, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+			reopen <- err
+		}()
+		waitScopedCloseSeam(t, pause)
+		newChild := fx.child(fx.a.journal)
+		if newChild == nil || newChild == oldChild {
+			t.Fatal("replacement did not publish a new active child")
+		}
+		assertScopedRequestLockImmediate(t, fx.session)
+
+		parentDone := make(chan struct{})
+		go func() {
+			fx.session.Lock()
+			close(parentDone)
+		}()
+		assertScopedStillBlocked(t, parentDone, "Session.Lock after supersession")
+
+		close(pause.release)
+		select {
+		case err := <-reopen:
+			if err != nil {
+				t.Fatalf("replacement open: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("replacement open did not return after release")
+		}
+		select {
+		case <-parentDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Session.Lock did not return after supersession release")
+		}
+		assertScopedChildHandleClosed(t, oldChild.handle)
+		assertScopedChildHandleClosed(t, newChild.handle)
+		assertScopedChildHandleClosed(t, childB.handle)
+	})
+
+	t.Run("invalidate", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+		if err != nil {
+			t.Fatalf("open A: %v", err)
+		}
+		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open B: %v", err)
+		}
+		childA := fx.child(fx.a.journal)
+		childB := fx.child(fx.b.journal)
+		childA.mu.Lock()
+		childA.fullFactorDeadline = time.Now().Add(-time.Second)
+		childA.mu.Unlock()
+		pause := installScopedClosePause(t)
+
+		readA := make(chan error, 1)
+		go func() {
+			_, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{})
+			readA <- err
+		}()
+		waitScopedCloseSeam(t, pause)
+		assertScopedRequestLockImmediate(t, fx.session)
+
+		parentDone := make(chan struct{})
+		go func() {
+			fx.session.Lock()
+			close(parentDone)
+		}()
+		assertScopedStillBlocked(t, parentDone, "Session.Lock after invalidation")
+
+		close(pause.release)
+		select {
+		case err := <-readA:
+			if !errors.Is(err, ErrVaultFileScopedChild) {
+				t.Fatalf("expired A read = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("expired A read did not return after release")
+		}
+		select {
+		case <-parentDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Session.Lock did not return after invalidation release")
+		}
+		assertScopedChildHandleClosed(t, childA.handle)
+		assertScopedChildHandleClosed(t, childB.handle)
+	})
+
+	t.Run("parent-drain", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		if _, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open A: %v", err)
+		}
+		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open B: %v", err)
+		}
+		childA := fx.child(fx.a.journal)
+		childB := fx.child(fx.b.journal)
+		pause := installScopedClosePause(t)
+
+		parentDone := make(chan struct{})
+		go func() {
+			fx.session.Lock()
+			close(parentDone)
+		}()
+		waitScopedCloseSeam(t, pause)
+		assertScopedRequestLockImmediate(t, fx.session)
+		assertScopedStillBlocked(t, parentDone, "Session.Lock during parent drain")
+
+		close(pause.release)
+		select {
+		case <-parentDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Session.Lock did not return after parent-drain release")
+		}
+		assertScopedChildHandleClosed(t, childA.handle)
+		assertScopedChildHandleClosed(t, childB.handle)
+	})
 }
 
 func TestVaultFileChildWrongCheckpointRejected(t *testing.T) {
