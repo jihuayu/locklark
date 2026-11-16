@@ -120,6 +120,7 @@ func (a *App) onevraVaultView(c *ui.Context) {
 func (a *App) onevraVaultDialogs(c *ui.Context) {
 	t := c.Theme()
 	a.onevraLocalVaultFileCreateDialog(c)
+	a.onevraLocalVaultFileUnlockDialog(c)
 	ui.Column(c.Key("dialog-new-vault")).Children(func() {
 		oneui.Dialog(c, &a.v2.newVaultOpen, oneui.DialogOptions{Label: "新建子保险库"}, func(panel ui.Element) {
 			panel.Width(420).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))

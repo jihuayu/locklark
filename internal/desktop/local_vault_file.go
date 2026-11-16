@@ -50,6 +50,9 @@ type localVaultFileState struct {
 	// adopted child and its bounded cache summary stay alive.
 	viewSequence     uint64
 	viewVerification localVaultFileViewVerification
+	// lockWaiter is the one UI completion waiter already launched for the
+	// current lock marker. It is display-only bookkeeping, never authority.
+	lockWaiter *localVaultFileLockOperation
 
 	// Owned-session lifecycle state. It is reset on lock and never survives a
 	// parent or App generation boundary. The wrapper itself is opaque here.
@@ -361,7 +364,9 @@ func (a *App) onevraLocalVaultFileSidebar(c *ui.Context) {
 		if oneui.Button(c, "刷新独立文件库", oneui.ButtonGhost).Clicked() {
 			a.refreshLocalVaultFiles()
 		}
-		if oneui.Button(c, "新建独立文件库", oneui.ButtonGhost).Clicked() {
+		create := oneui.Button(c, "新建独立文件库", oneui.ButtonGhost)
+		create.Disabled(a.localVaultUnlock.open)
+		if create.Clicked() {
 			a.openLocalVaultFileCreate("")
 		}
 	})
@@ -396,20 +401,22 @@ func (a *App) localVaultFileLabel() string {
 
 func (a *App) onevraLocalVaultFileView(c *ui.Context) {
 	t := c.Theme()
+	status := a.localVaultFileDisplayStatus()
 	ui.Column(c).Fill().Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-		oneui.Text(c, a.localVaultFiles.status).Bold()
+		oneui.Text(c, status).Bold()
 		if caption := a.localVaultFileRefreshCaption(); caption != "" {
 			oneui.Text(c, caption).TextColor(t.TextMuted)
 		}
+		a.onevraLocalVaultFileActions(c)
 		if oneui.Button(c, "关闭本地基线视图", oneui.ButtonOutline).Clicked() {
 			a.closeLocalVaultFileView()
 		}
-		if a.localVaultFiles.status == localVaultFileStatusReview && !a.localCreate.open {
+		if status == localVaultFileStatusReview && !a.localCreate.open && !a.localVaultUnlock.open {
 			if oneui.Button(c, "核查或继续创建", oneui.ButtonOutline).Clicked() {
 				a.openLocalVaultFileCreate(a.localVaultFiles.selected)
 			}
 		}
-		for _, item := range a.localVaultFiles.items {
+		for _, item := range a.localVaultFileCurrentItems() {
 			oneui.Text(c, item.Title).SingleLine()
 		}
 	})
