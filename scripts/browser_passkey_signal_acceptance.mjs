@@ -10,7 +10,7 @@ function prepareSignalPage() {
   window.addEventListener("message", event => {
     if (event.source !== window || event.origin !== location.origin) return;
     const value = event.data;
-    if (!String(value?.source || "").startsWith("locklark-")) return;
+    if (!String(value?.source || "").startsWith("passme-")) return;
     if (["passkeys", "changes", "signalResult", "count", "affected"].some(key => Object.hasOwn(value, key)) ||
         value.type === "passkey-signal-accepted") window.signalBridgeLeak = true;
   });
@@ -49,7 +49,7 @@ export async function acceptPasskeySignals({
   openPopup, dismissPopup, eventually, input, observe, phase,
 }) {
   const rp = new URL(origin).hostname;
-  assert.equal(rp, "login.locklark.test", "Controlled signal RP required");
+  assert.equal(rp, "login.passme.test", "Controlled signal RP required");
   const userId = Buffer.from([27, 28, 29]).toString("base64url");
   const names = ["signal-one", "signal-two"];
   const confirm = "确认应用这些更新", cancel = "取消（不做任何更改）";
@@ -57,8 +57,8 @@ export async function acceptPasskeySignals({
     { wait_label: "验证主密码" }, { click_label: "验证主密码" }, { text: fixture.Password },
     { click_label: "验证 Secret Key" }, { text: fixture.Secret },
   ];
-  const verifier = process.env.LOCKLARK_TEST_WEBAUTHN_SERVER
-    ? createRequire(import.meta.url)(process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) : null;
+  const verifier = process.env.PASSME_TEST_WEBAUTHN_SERVER
+    ? createRequire(import.meta.url)(process.env.PASSME_TEST_WEBAUTHN_SERVER) : null;
   const peers = new Map();
   const challenge = () => randomBytes(32).toString("base64url");
   const nativeGone = async () => eventually(() => {
@@ -86,7 +86,7 @@ export async function acceptPasskeySignals({
     await dismissPopup(); await focusPage();
     const expectedChallenge = challenge();
     await pageEval(startSignalCredential, { create: false, rp, id: registration.id, challenge: expectedChallenge });
-    await inlineClick("使用 Locklark 登录");
+    await inlineClick("使用 Passme 登录");
     input([...factors, { click_label: passkeyChoiceLabel({ rp, title: rp + " · " + name, username: name, credentialId: registration.id }) }]);
     await focusPage();
     const signed = await waitCredential();
@@ -165,7 +165,7 @@ export async function acceptPasskeySignals({
     phase("passkey-signal:create-" + name);
     const expectedChallenge = challenge();
     await pageEval(startSignalCredential, { create: true, rp, name, challenge: expectedChallenge });
-    await inlineClick("保存到 Locklark");
+    await inlineClick("保存到 Passme");
     input([...factors, { click_label: "创建新登录并保存 Passkey" }]);
     await focusPage();
     const registration = await waitCredential();

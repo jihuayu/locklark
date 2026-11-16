@@ -44,7 +44,7 @@ var (
 // enrollment changes require an app restart to take effect.
 func Biometry() string {
 	biometryOnce.Do(func() {
-		switch int(C.ll_biometry_available()) {
+		switch int(C.pm_biometry_available()) {
 		case 2:
 			biometryName = "Touch ID"
 		case 1:
@@ -109,7 +109,7 @@ func (keychain) Store(id string, b []byte) error {
 	}
 	name := C.CString(id)
 	defer C.free(unsafe.Pointer(name))
-	if status := int(C.ll_unlock_store(name, (*C.uchar)(unsafe.Pointer(&b[0])), C.long(len(b)))); status != 0 {
+	if status := int(C.pm_unlock_store(name, (*C.uchar)(unsafe.Pointer(&b[0])), C.long(len(b)))); status != 0 {
 		return nativeError(status)
 	}
 	return nil
@@ -122,16 +122,16 @@ func (keychain) Load(id string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(name))
 	var value *C.uchar
 	var n C.long
-	if status := int(C.ll_unlock_load(name, &value, &n)); status != 0 {
+	if status := int(C.pm_unlock_load(name, &value, &n)); status != 0 {
 		return nil, nativeError(status)
 	}
 	if value == nil || n <= 0 || n > 8192 {
 		if value != nil {
-			C.ll_unlock_clear_free(value, n)
+			C.pm_unlock_clear_free(value, n)
 		}
 		return nil, ErrUnavailable
 	}
-	defer C.ll_unlock_clear_free(value, n)
+	defer C.pm_unlock_clear_free(value, n)
 	return C.GoBytes(unsafe.Pointer(value), C.int(n)), nil
 }
 func (keychain) Delete(id string) error {
@@ -140,7 +140,7 @@ func (keychain) Delete(id string) error {
 	}
 	name := C.CString(id)
 	defer C.free(unsafe.Pointer(name))
-	if status := int(C.ll_unlock_delete(name)); status != 0 {
+	if status := int(C.pm_unlock_delete(name)); status != 0 {
 		return nativeError(status)
 	}
 	return nil

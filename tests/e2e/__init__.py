@@ -1,4 +1,4 @@
-"""Locklark M5 opaque-box E2E test package.
+"""Passme M5 opaque-box E2E test package.
 
 Test modules live next to this file and register cases with
 :func:`tests.e2e.harness.register_test` (also exported as ``e2e_test``).  The

@@ -18,6 +18,6 @@ swift test --package-path "$ROOT/safari"
 # Standalone native probe (its own process, SIGPIPE at SIG_DFL): a closed-peer
 # socket write and a closed-pipe write must return the fixed failure instead of
 # terminating the process, and the caller thread mask must be restored.
-swift build --package-path "$ROOT/safari" --product LocklarkSafariSIGPipeProbe
+swift build --package-path "$ROOT/safari" --product PassmeSafariSIGPipeProbe
 BIN_DIR="$(swift build --package-path "$ROOT/safari" --show-bin-path)"
-"$BIN_DIR/LocklarkSafariSIGPipeProbe"
+"$BIN_DIR/PassmeSafariSIGPipeProbe"

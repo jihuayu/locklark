@@ -28,31 +28,31 @@ jobs:
       - name: Check reachable Go vulnerabilities
         if: runner.os == 'Linux'
         timeout-minutes: 5
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "$RUNNER_TEMP/locklark-govulncheck.json"
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "$RUNNER_TEMP/passme-govulncheck.json"
       - name: Preserve Go vulnerability scan
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: locklark-go-vulnerability-scan
-          path: ${{ runner.temp }}/locklark-govulncheck.json
+          name: passme-go-vulnerability-scan
+          path: ${{ runner.temp }}/passme-govulncheck.json
           if-no-files-found: error
           retention-days: 14
-      - run: go build ./cmd/locklark-desktop
+      - run: go build ./cmd/passme-desktop
       - name: Build native browser hosts
-        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
+        run: go build ./cmd/passme-browser-chromium ./cmd/passme-browser-firefox ./cmd/passme-browser-register
       - name: Test native Windows clipboard ownership
         if: runner.os == 'Windows'
         timeout-minutes: 3
         env:
-          LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
+          PASSME_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -run TestNativeClipboardSmoke -count=1
       - name: Test Go packages and native OpenSSH transport
         shell: pwsh
         env:
-          LOCKLARK_TEST_OPENSSH: '1'
+          PASSME_TEST_OPENSSH: '1'
         run: |
-          $env:LOCKLARK_TEST_OPENSSH_BIN = if ($IsWindows) { Join-Path $env:WINDIR 'System32/OpenSSH/ssh-add.exe' } else { '/usr/bin/ssh-add' }
-          if (-not (Test-Path -LiteralPath $env:LOCKLARK_TEST_OPENSSH_BIN -PathType Leaf)) { throw 'Native system OpenSSH client unavailable' }
+          $env:PASSME_TEST_OPENSSH_BIN = if ($IsWindows) { Join-Path $env:WINDIR 'System32/OpenSSH/ssh-add.exe' } else { '/usr/bin/ssh-add' }
+          if (-not (Test-Path -LiteralPath $env:PASSME_TEST_OPENSSH_BIN -PathType Leaf)) { throw 'Native system OpenSSH client unavailable' }
           if ($IsWindows) {
             foreach ($name in @('ssh-add.exe', 'ssh.exe')) {
               $nativeClient = Join-Path $env:WINDIR "System32/OpenSSH/$name"
@@ -62,49 +62,49 @@ jobs:
               Write-Output "Native Windows $name file version: $version"
             }
           }
-          $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
+          $peerEnv = Join-Path $env:RUNNER_TEMP 'passme-kdbx-peer'
           python -m venv $peerEnv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:LOCKLARK_TEST_PYKEEPASS = Join-Path $peerEnv $(if ($IsWindows) { 'Scripts/python.exe' } else { 'bin/python' })
-          & $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
+          $env:PASSME_TEST_PYKEEPASS = Join-Path $peerEnv $(if ($IsWindows) { 'Scripts/python.exe' } else { 'bin/python' })
+          & $env:PASSME_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
+          $env:PASSME_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
           go test -count=1 ./...
       - if: runner.os == 'Linux'
         run: |
           python3 scripts/team_sync_acceptance.py --go "$(command -v go)"
-          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
-          python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/disclosure_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/generation_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/otp_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/references_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/matching_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/archive_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/health_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/search_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/locklark"
+          go build -o "$RUNNER_TEMP/passme" ./cmd/passme
+          python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/personal_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/disclosure_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/generation_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/otp_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/references_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/matching_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/archive_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/health_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/search_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/passme"
           python3 -m unittest discover -s scripts -p test_run_cli_acceptance.py
           /usr/bin/gh --version
-          python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
-          python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/locklark"
-          python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/trash_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/import_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/export_acceptance.py "$RUNNER_TEMP/locklark"
-          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/plugin_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/passme" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/passme-run-cli-evidence"
+          python3 scripts/injection_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/passme"
+          python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/passme"
+          "$RUNNER_TEMP/passme-kdbx-peer/bin/python" scripts/trash_acceptance.py "$RUNNER_TEMP/passme"
+          "$RUNNER_TEMP/passme-kdbx-peer/bin/python" scripts/import_acceptance.py "$RUNNER_TEMP/passme"
+          "$RUNNER_TEMP/passme-kdbx-peer/bin/python" scripts/export_acceptance.py "$RUNNER_TEMP/passme"
+          "$RUNNER_TEMP/passme-kdbx-peer/bin/python" scripts/plugin_acceptance.py "$RUNNER_TEMP/passme"
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./scripts/acceptance.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
+          $python = Join-Path $env:RUNNER_TEMP 'passme-kdbx-peer/Scripts/python.exe'
           & $python -m pip install 'pywinpty==3.1.2'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
-          go build -o $binary ./cmd/locklark
+          go build -o $binary ./cmd/passme
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/personal_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -148,7 +148,7 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: |
-          $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
+          $peerEnv = Join-Path $env:RUNNER_TEMP 'passme-kdbx-peer'
           $python = Join-Path $peerEnv 'Scripts/python.exe'
           $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
           $fixture = Join-Path $env:RUNNER_TEMP 'run-cli-windows-fixture.exe'
@@ -159,7 +159,7 @@ jobs:
           & $python -m pip install 'pywinpty==3.1.2'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
-            go build -o $binary ./cmd/locklark
+            go build -o $binary ./cmd/passme
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           go build -o $fixture ./scripts/run_cli_windows_fixture
@@ -173,9 +173,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
-      - run: go build ./cmd/locklark-desktop
+      - run: go build ./cmd/passme-desktop
       - name: Build native browser hosts
-        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
+        run: go build ./cmd/passme-browser-chromium ./cmd/passme-browser-firefox ./cmd/passme-browser-register
       - name: Test Safari transport policy and compile the macOS app
         timeout-minutes: 15
         run: |
@@ -183,8 +183,8 @@ jobs:
             brew install xcodegen
           fi
           safari/scripts/test_safari_swift.sh
-          go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
-          LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
+          go build -o "$RUNNER_TEMP/passme-browser-safari" ./cmd/passme-browser-safari
+          PASSME_UNSIGNED_CI=1 PASSME_SAFARI_HELPER="$RUNNER_TEMP/passme-browser-safari" safari/scripts/build_safari.sh
           echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'
       - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes' -count=1
       - name: Test full browser host on macOS
@@ -197,21 +197,21 @@ jobs:
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
         env:
-          LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
+          PASSME_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -count=1
       - name: Test native macOS SSH transport and RunCLI isolation
         timeout-minutes: 5
         env:
-          LOCKLARK_TEST_OPENSSH: '1'
-          LOCKLARK_TEST_OPENSSH_BIN: /usr/bin/ssh-add
+          PASSME_TEST_OPENSSH: '1'
+          PASSME_TEST_OPENSSH_BIN: /usr/bin/ssh-add
         run: |
-          test -x "$LOCKLARK_TEST_OPENSSH_BIN"
+          test -x "$PASSME_TEST_OPENSSH_BIN"
           go test ./internal/sshagent ./internal/localpath -count=1
-          go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
+          go test ./internal/personal ./cmd/passme -run '^TestRunCLI' -count=1
   web:
     runs-on: ubuntu-latest
     env:
-      LOCKLARK_DESKTOP_LAYOUT: classic
+      PASSME_DESKTOP_LAYOUT: classic
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
@@ -231,19 +231,19 @@ jobs:
           python3 -m pip install -r scripts/browserrelease/requirements.txt
           PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
           python3 scripts/test_package_browser_extension.py
-          python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
-          python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
+          python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/passme-extension-unsigned"
+          python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/passme-extension-unsigned"
           for product in chromium firefox safari; do
-            PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
-            PYTHONPATH=scripts python3 -m browserrelease --verify --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
+            PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/passme-extension-verified"
+            PYTHONPATH=scripts python3 -m browserrelease --verify --product "$product" --output "$RUNNER_TEMP/passme-extension-verified"
           done
       - name: Preserve unsigned extension preparation artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: locklark-extension-unsigned-preparation
+          name: passme-extension-unsigned-preparation
           path: |
-            ${{ runner.temp }}/locklark-extension-unsigned/
-            ${{ runner.temp }}/locklark-extension-verified/
+            ${{ runner.temp }}/passme-extension-unsigned/
+            ${{ runner.temp }}/passme-extension-verified/
           if-no-files-found: error
           retention-days: 14
       - name: Test native acceptance readiness and reference cleanup
@@ -265,7 +265,7 @@ jobs:
             fi
           done
           printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' |
-            sudo tee /etc/apt/apt.conf.d/99locklark-playwright-network >/dev/null
+            sudo tee /etc/apt/apt.conf.d/99passme-playwright-network >/dev/null
       - name: Install Playwright browsers and dependencies
         timeout-minutes: 10
         run: npx playwright install --with-deps chromium firefox
@@ -275,7 +275,7 @@ jobs:
       - run: npm run test:e2e
         working-directory: web
         env:
-          LOCKLARK_TEST_BROWSER: firefox
+          PASSME_TEST_BROWSER: firefox
       - name: Install native GUI acceptance tools
         timeout-minutes: 10
         run: |
@@ -290,11 +290,11 @@ jobs:
       - name: Build native hosts for browser acceptance
         timeout-minutes: 10
         run: |
-          go build -o "$RUNNER_TEMP/locklark-browser-chromium" ./cmd/locklark-browser-chromium
-          go build -o "$RUNNER_TEMP/locklark-browser-firefox" ./cmd/locklark-browser-firefox
-          go build -o "$RUNNER_TEMP/locklark-browser-register" ./cmd/locklark-browser-register
-          go build -o "$RUNNER_TEMP/locklark-desktop" ./cmd/locklark-desktop
-          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
+          go build -o "$RUNNER_TEMP/passme-browser-chromium" ./cmd/passme-browser-chromium
+          go build -o "$RUNNER_TEMP/passme-browser-firefox" ./cmd/passme-browser-firefox
+          go build -o "$RUNNER_TEMP/passme-browser-register" ./cmd/passme-browser-register
+          go build -o "$RUNNER_TEMP/passme-desktop" ./cmd/passme-desktop
+          go build -o "$RUNNER_TEMP/passme" ./cmd/passme
       - name: Test reconciled E2E gates and component contracts
         timeout-minutes: 10
         run: |
@@ -303,50 +303,50 @@ jobs:
           python3 -m unittest scripts/test_native_acceptance_contract.py scripts/test_native_acceptance_platforms.py scripts/test_safari_package.py
           # GUI probes create their own D-Bus/Xvfb session; avoid inherited
           # runner displays or buses from earlier browser steps.
-          env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py --feature all --json-out "$RUNNER_TEMP/locklark-e2e-report.json"
+          env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py --feature all --json-out "$RUNNER_TEMP/passme-e2e-report.json"
       - name: Preserve E2E report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: locklark-e2e-report
-          path: ${{ runner.temp }}/locklark-e2e-report.json
+          name: passme-e2e-report
+          path: ${{ runner.temp }}/passme-e2e-report.json
           if-no-files-found: warn
           retention-days: 14
       - name: Test native desktop daily tools and clipboard ownership
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
         env:
-          LOCKLARK_GO: go
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          PASSME_GO: go
+          PASSME_DESKTOP_HOST: ${{ runner.temp }}/passme-desktop
       - name: Test native desktop global quick search
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_quick_search_acceptance.py
         env:
-          LOCKLARK_GO: go
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          PASSME_GO: go
+          PASSME_DESKTOP_HOST: ${{ runner.temp }}/passme-desktop
       - name: Install independent notes KDBX reader
         timeout-minutes: 3
         run: |
-          python3 -m venv "$RUNNER_TEMP/locklark-notes-peer"
-          "$RUNNER_TEMP/locklark-notes-peer/bin/python" -m pip install 'pykeepass==4.2.0'
+          python3 -m venv "$RUNNER_TEMP/passme-notes-peer"
+          "$RUNNER_TEMP/passme-notes-peer/bin/python" -m pip install 'pykeepass==4.2.0'
       - name: Test native imported multiline login notes and failure privacy
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_login_notes_acceptance.py
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/login_notes_privacy_acceptance.py
         env:
-          LOCKLARK_GO: go
-          LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark
-          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
-          LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
+          PASSME_GO: go
+          PASSME_CLI_HOST: ${{ runner.temp }}/passme
+          PASSME_DESKTOP_HOST: ${{ runner.temp }}/passme-desktop
+          PASSME_TEST_PYKEEPASS: ${{ runner.temp }}/passme-notes-peer/bin/python
       - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
         timeout-minutes: 10
         run: |
           python3 -m unittest discover -s scripts -p test_ssh_agent_acceptance.py
           dbus-run-session -- xvfb-run -a -s '-screen 0 1920x2160x24 -nolisten tcp' python3 scripts/ssh_agent_acceptance.py \
-            --host "$RUNNER_TEMP/locklark-desktop" --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" \
-            --peer "$RUNNER_TEMP/locklark-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
-            --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
+            --host "$RUNNER_TEMP/passme-desktop" --cli "$RUNNER_TEMP/passme" --go "$(command -v go)" \
+            --peer "$RUNNER_TEMP/passme-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
+            --artifacts "$RUNNER_TEMP/passme-ssh-evidence"
       - name: Test browser extension DOM
         timeout-minutes: 10
         run: |
@@ -354,8 +354,8 @@ jobs:
           node scripts/browser_public_site_compatibility.cjs
           node scripts/browser_popup_ui_acceptance.cjs
         env:
-          LOCKLARK_TEST_UI_ARTIFACTS: ${{ runner.temp }}/locklark-ui-acceptance
-          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          PASSME_TEST_UI_ARTIFACTS: ${{ runner.temp }}/passme-ui-acceptance
+          PASSME_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
       - name: Test Firefox browser extension DOM
         timeout-minutes: 10
         run: |
@@ -363,54 +363,54 @@ jobs:
           node scripts/browser_public_site_compatibility.cjs
           node scripts/browser_popup_ui_acceptance.cjs
         env:
-          LOCKLARK_TEST_UI_ARTIFACTS: ${{ runner.temp }}/locklark-ui-acceptance
-          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
-          LOCKLARK_TEST_BROWSER: firefox
+          PASSME_TEST_UI_ARTIFACTS: ${{ runner.temp }}/passme-ui-acceptance
+          PASSME_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          PASSME_TEST_BROWSER: firefox
       - name: Preserve synthetic popup UI screenshots
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: locklark-synthetic-popup-ui
-          path: ${{ runner.temp }}/locklark-ui-acceptance/
+          name: passme-synthetic-popup-ui
+          path: ${{ runner.temp }}/passme-ui-acceptance/
           if-no-files-found: error
           retention-days: 14
       - name: Install independent WebAuthn verifier
         timeout-minutes: 3
-        run: npm install --prefix "$RUNNER_TEMP/locklark-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3
+        run: npm install --prefix "$RUNNER_TEMP/passme-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3
       - name: Test native browser approval, popup editing, fill, save and OTP
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py chromium
         env:
-          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
-          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
-          LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
-          LOCKLARK_TEST_POPUP_VAULT: "1"
-          LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
-          LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
-          LOCKLARK_TEST_OTHER_PROVIDER: "1"
-          LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
+          PASSME_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          PASSME_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/passme-webauthn-peer/node_modules/@simplewebauthn/server
+          PASSME_GO: go
+          PASSME_BROWSER_HOST: ${{ runner.temp }}/passme-browser-chromium
+          PASSME_TEST_POPUP_VAULT: "1"
+          PASSME_TEST_PASSKEY_MANAGEMENT: "1"
+          PASSME_TEST_PASSKEY_CONDITIONAL: "1"
+          PASSME_TEST_OTHER_PROVIDER: "1"
+          PASSME_TEST_PASSKEY_SIGNALS: "1"
       - name: Test checkout iframe approvals and stale-context refusals
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
         env:
-          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
-          LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
-          LOCKLARK_TEST_CHECKOUT_FRAMES: "1"
+          PASSME_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          PASSME_GO: go
+          PASSME_BROWSER_HOST: ${{ runner.temp }}/passme-browser-chromium
+          PASSME_TEST_CHECKOUT_FRAMES: "1"
       - name: Test Firefox native approval, fill, save, OTP and Passkey
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py firefox
         env:
-          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
-          LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-firefox
-          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-browser-register
-          LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
-          LOCKLARK_TEST_FIREFOX_PASSKEY: "1"
-          LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
-          LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
-          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+          PASSME_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          PASSME_GO: go
+          PASSME_BROWSER_HOST: ${{ runner.temp }}/passme-browser-firefox
+          PASSME_BROWSER_REGISTER: ${{ runner.temp }}/passme-browser-register
+          PASSME_GECKODRIVER: ${{ runner.temp }}/geckodriver
+          PASSME_TEST_FIREFOX_PASSKEY: "1"
+          PASSME_TEST_PASSKEY_MANAGEMENT: "1"
+          PASSME_TEST_PASSKEY_CONDITIONAL: "1"
+          PASSME_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/passme-webauthn-peer/node_modules/@simplewebauthn/server

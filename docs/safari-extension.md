@@ -3,7 +3,7 @@
 This tree is the **build and transport foundation** for a macOS Safari web
 extension. It is not a claim that Safari has been run, that an app is signed,
 or that signed Safari installation and runtime flows have passed. The compiled
-`locklark-browser-safari` helper implements the fixed Darwin-only
+`passme-browser-safari` helper implements the fixed Darwin-only
 `--safari-browser` mode; other OSes and arbitrary launch arguments refuse it.
 
 Apple's transport reference:
@@ -25,11 +25,11 @@ The relevant asymmetry is:
 
 | Item | Fixed value |
 | --- | --- |
-| Containing macOS app bundle ID | `org.locklark.browser.safari` |
-| Safari web extension bundle ID | `org.locklark.browser.safari.Extension` |
-| App group | `group.org.locklark.browser.safari` |
-| Native host name used by the shim | `org.locklark.browser` |
-| Embedded helper | `locklark-browser-safari` |
+| Containing macOS app bundle ID | `org.passme.browser.safari` |
+| Safari web extension bundle ID | `org.passme.browser.safari.Extension` |
+| App group | `group.org.passme.browser.safari` |
+| Native host name used by the shim | `org.passme.browser` |
+| Embedded helper | `passme-browser-safari` |
 
 The Team ID comes from the signed build and Info.plist. Blank values,
 placeholders (`REPLACE`, `CHANGEME`, `YOUR_`, `PLACEHOLDER`, `EXAMPLE`,
@@ -42,11 +42,11 @@ the extension bundle ID must equal the app bundle ID plus `.Extension`.
 ```
 background.js
   -> safari-native-port.js (explicit connector, safari-web-extension:// only)
-       -> runtime.sendNativeMessage("org.locklark.browser", envelope)
+       -> runtime.sendNativeMessage("org.passme.browser", envelope)
             -> SafariWebExtensionHandler.beginRequest
                  -> app-group UNIX socket native/relay.sock
                       -> containing app RelayServer
-                           -> fixed embedded locklark-browser-safari
+                           -> fixed embedded passme-browser-safari
                               (Foundation.Process + 4-byte LE framed stdio)
 ```
 
@@ -110,7 +110,7 @@ Safari extension runtime and the fixed native host. It is never listed in
   `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`. No
   JavaScript-supplied path, executable, argv or environment is accepted.
 - The containing app, only after a normal user launch, starts the fixed
-  embedded `locklark-browser-safari` binary with fixed arguments. The
+  embedded `passme-browser-safari` binary with fixed arguments. The
   Application Extension never launches processes.
 - Before accepting app-group IPC, the app pins the peer UID **and** validates
   `SecCode` against a fixed requirement containing the same Team ID and the
@@ -124,30 +124,30 @@ Safari extension runtime and the fixed native host. It is never listed in
 Signed build (required for an installable Safari extension):
 
 ```sh
-LOCKLARK_TEAM_ID=ABCDE12345 \
-LOCKLARK_APP_GROUP_ID=group.org.locklark.browser.safari \
-LOCKLARK_SAFARI_HELPER=/absolute/path/locklark-browser-safari \
+PASSME_TEAM_ID=ABCDE12345 \
+PASSME_APP_GROUP_ID=group.org.passme.browser.safari \
+PASSME_SAFARI_HELPER=/absolute/path/passme-browser-safari \
 safari/scripts/build_safari.sh
 ```
 
-The helper basename must be exactly `locklark-browser-safari`, must be
+The helper basename must be exactly `passme-browser-safari`, must be
 executable, and in a signed build must already be signed by the same Team ID.
 The script generates the Xcode project with the checked-in
 `safari/project.yml` (XcodeGen), runs `node browser-extension/build.js safari`,
-verifies the package, and builds `Locklark.app` with the extension embedded.
+verifies the package, and builds `Passme.app` with the extension embedded.
 
 Unsigned compile-only mode for CI:
 
 ```sh
-LOCKLARK_UNSIGNED_CI=1 \
-LOCKLARK_SAFARI_HELPER=/absolute/path/locklark-browser-safari \
+PASSME_UNSIGNED_CI=1 \
+PASSME_SAFARI_HELPER=/absolute/path/passme-browser-safari \
 safari/scripts/build_safari.sh
 ```
 
 This sets `CODE_SIGNING_ALLOWED=NO`/`CODE_SIGNING_REQUIRED=NO`. It is **not**
 an installed or signed Safari extension and does not prove Safari loads it.
 If the helper is absent, CI may additionally set
-`LOCKLARK_ALLOW_MISSING_HELPER=1`; the app then reports `unavailable` at
+`PASSME_ALLOW_MISSING_HELPER=1`; the app then reports `unavailable` at
 runtime instead of faking a helper. Signature checks are never disabled to force
 a passing signed build.
 
@@ -168,7 +168,7 @@ safari/scripts/test_safari_swift.sh
 ```
 
 That script also builds and runs the standalone native probe
-`safari/TestProbe/Sources/main.swift` (`LocklarkSafariSIGPipeProbe`), which sets
+`safari/TestProbe/Sources/main.swift` (`PassmeSafariSIGPipeProbe`), which sets
 SIGPIPE to `SIG_DFL` **in its own process** (never in the XCTest host) and
 requires that a closed-peer `socketpair` write and a closed-pipe write both
 return the fixed failure, that the process survives, and that the caller thread

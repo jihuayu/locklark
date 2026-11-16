@@ -35,7 +35,7 @@ func publishFixtureFile(t *testing.T, dir string, value byte) string {
 
 func TestRenameNoReplaceKeepsExistingTargetUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "vault.ll")
+	target := filepath.Join(dir, "vault.pm")
 	if e := os.WriteFile(target, bytes.Repeat([]byte{7}, 4096), 0600); e != nil {
 		t.Fatal("existing target setup failed")
 	}
@@ -54,7 +54,7 @@ func TestRenameNoReplaceKeepsExistingTargetUnchanged(t *testing.T) {
 
 func TestRenameNoReplaceConcurrentPublishHasOneCompleteWinner(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "vault.ll")
+	target := filepath.Join(dir, "vault.pm")
 	sources := []string{publishFixtureFile(t, dir, 11), publishFixtureFile(t, dir, 13)}
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -87,7 +87,7 @@ func TestRenameNoReplaceConcurrentPublishHasOneCompleteWinner(t *testing.T) {
 
 func TestRenameNoReplaceSyncFailureLeavesCompletePublishedFile(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "vault.ll")
+	target := filepath.Join(dir, "vault.pm")
 	source := publishFixtureFile(t, dir, 17)
 	e := publishRenameNoReplaceWith(source, target, unix.Renameat2, func(dir *os.File) error { _ = dir.Close(); return dir.Sync() })
 	if e == nil {
@@ -104,7 +104,7 @@ func TestRenameNoReplaceSyncFailureLeavesCompletePublishedFile(t *testing.T) {
 
 func TestRenameNoReplaceUnsupportedKernelFailsClosed(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "vault.ll")
+	target := filepath.Join(dir, "vault.pm")
 	source := publishFixtureFile(t, dir, 19)
 	called := 0
 	e := publishRenameNoReplaceWith(source, target, func(int, string, int, string, uint) error { called++; return unix.ENOSYS }, (*os.File).Sync)

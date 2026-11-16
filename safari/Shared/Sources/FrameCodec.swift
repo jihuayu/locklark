@@ -6,7 +6,7 @@ public enum FrameCodecError: Error, Equatable {
     case invalidLength
 }
 
-/// Existing Locklark stdio framing: four-byte little-endian length followed by
+/// Existing Passme stdio framing: four-byte little-endian length followed by
 /// one UTF-8 JSON frame. The Safari relay reuses it unchanged so the embedded
 /// helper keeps one protocol.
 public enum FrameCodec {

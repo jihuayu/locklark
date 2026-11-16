@@ -35,7 +35,7 @@ func install() (func() error, error) {
 		if _, err = rand.Read(suffix[:]); err != nil {
 			return nil, err
 		}
-		root := filepath.Join(public, "locklark-test-temp-"+hex.EncodeToString(suffix[:]))
+		root := filepath.Join(public, "passme-test-temp-"+hex.EncodeToString(suffix[:]))
 		wide, err := windows.UTF16PtrFromString(root)
 		if err != nil {
 			return nil, err

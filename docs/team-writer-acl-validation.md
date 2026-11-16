@@ -12,7 +12,7 @@ owner 仍使用 `Build` / `Freeze`，独占初建、成员及角色变更、撤�
 
 ## 验证与边界
 
-失败先行：`/tmp/locklark-validation/writer-red.log` 缺少 ACL API 与 signer 字段。真实 Ed25519/age/KDBX/bbolt 测试覆盖 writer 发布及全部成员解密、reader 绕过 builder 后以正确密钥签署完整快照仍被事务拒绝、降级后旧父及自提权拒绝、成员/角色/密钥篡改、作者双填/双空、writer 冻结与初建拒绝、旧策略拒绝新授权、事务回滚、并发 CAS、只持公开 pins 的新进程重读，以及带有效新 snapshot 和 sequencer 签名的历史自提权拒绝。冻结和失败读回不提供 signer。
+失败先行：`/tmp/passme-validation/writer-red.log` 缺少 ACL API 与 signer 字段。真实 Ed25519/age/KDBX/bbolt 测试覆盖 writer 发布及全部成员解密、reader 绕过 builder 后以正确密钥签署完整快照仍被事务拒绝、降级后旧父及自提权拒绝、成员/角色/密钥篡改、作者双填/双空、writer 冻结与初建拒绝、旧策略拒绝新授权、事务回滚、并发 CAS、只持公开 pins 的新进程重读，以及带有效新 snapshot 和 sequencer 签名的历史自提权拒绝。冻结和失败读回不提供 signer。
 
 命令：`go test ./internal/directory -count=1`、`go test -race ./internal/directory -count=1`、带 PyKeePass/Bun 的 `go test -count=1 ./...`、`go vet ./...`、`git diff --check`。本地结果、Luna/max 独立复核及最终精确 head 的双平台 CI 以本批 PR 证据为准；设计预审不计作实现复核。
 

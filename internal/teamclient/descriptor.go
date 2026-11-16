@@ -11,12 +11,12 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/edwards25519"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 const deviceVersion = 1
 const deviceRole = "device"
-const storeDomain = "locklark/teamclient/system-store/device/v1\x00"
+const storeDomain = "passme/teamclient/system-store/device/v1\x00"
 
 func clonePins(p directory.Pins) directory.Pins           { p.Owners = slices.Clone(p.Owners); return p }
 func cloneDescriptor(d DeviceDescriptor) DeviceDescriptor { d.Pins = clonePins(d.Pins); return d }

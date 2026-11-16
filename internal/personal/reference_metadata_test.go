@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func referenceFixture() ([]vault.Item, map[string]string) {
@@ -127,7 +127,7 @@ func TestProjectionRejectsIncompleteOrUnsupportedMetadata(t *testing.T) {
 		})
 	}
 	items, revs := referenceFixture()
-	for _, profile := range [][]byte{nil, []byte(schema + " "), []byte("locklark/personal/items/v2"), []byte(`{"Version":1,"Layout":"imported-sections"}`)} {
+	for _, profile := range [][]byte{nil, []byte(schema + " "), []byte("passme/personal/items/v2"), []byte(`{"Version":1,"Layout":"imported-sections"}`)} {
 		if got, err := ProjectReferenceMetadata(profile, "personal-vault", "Work", items, revs); !errors.Is(err, ErrReferenceProfile) || got != nil {
 			t.Fatal("unknown layout was relabelled as built-in fields", err)
 		}
@@ -154,7 +154,7 @@ func TestProjectionAcceptsEmptyAndUnicodeNamedVault(t *testing.T) {
 }
 
 func TestProjectionTracksRealPersonalAuditRevision(t *testing.T) {
-	path, pw, key := filepath.Join(t.TempDir(), "source.ll"), "synthetic-master", bytes.Repeat([]byte{4}, 16)
+	path, pw, key := filepath.Join(t.TempDir(), "source.pm"), "synthetic-master", bytes.Repeat([]byte{4}, 16)
 	if err := Create(path, pw, key); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestProjectionTracksRealPersonalAuditRevision(t *testing.T) {
 	if bytes.Contains(raw, []byte("synthetic-private-password")) || bytes.Contains(raw, []byte("synthetic-user")) {
 		t.Fatal("source audit leaked field values")
 	}
-	archive, restored := filepath.Join(t.TempDir(), "backup.llb"), filepath.Join(t.TempDir(), "restored.ll")
+	archive, restored := filepath.Join(t.TempDir(), "backup.pmb"), filepath.Join(t.TempDir(), "restored.pm")
 	material, err := Backup(path, archive, pw, key)
 	if err != nil {
 		t.Fatal(err)

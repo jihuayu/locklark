@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"filippo.io/age"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +13,9 @@ import (
 )
 
 func TestIndependentNativeEditor(t *testing.T) {
-	python := os.Getenv("LOCKLARK_TEST_PYKEEPASS")
+	python := os.Getenv("PASSME_TEST_PYKEEPASS")
 	if python == "" {
-		t.Skip("set LOCKLARK_TEST_PYKEEPASS for independent reader/writer")
+		t.Skip("set PASSME_TEST_PYKEEPASS for independent reader/writer")
 	}
 	pub, signer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

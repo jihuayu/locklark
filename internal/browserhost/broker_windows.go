@@ -54,7 +54,7 @@ func DefaultBrokerEndpoint() (string, error) {
 	if custom := brokerSocketEnv(); custom != "" && safeBrokerToken(custom) {
 		suffix += "-" + custom
 	}
-	return `\\.\pipe\Locklark-Browser-broker-` + suffix, nil
+	return `\\.\pipe\Passme-Browser-broker-` + suffix, nil
 }
 
 func listenLocal(path string) (net.Listener, error) {
@@ -146,5 +146,5 @@ func authenticatedPeer(conn net.Conn) (Peer, error) {
 }
 
 func brokerSocketEnv() string {
-	return strings.TrimSpace(os.Getenv("LOCKLARK_BROWSER_SOCKET"))
+	return strings.TrimSpace(os.Getenv("PASSME_BROWSER_SOCKET"))
 }

@@ -3,7 +3,7 @@ package desktop
 import (
 	"os"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 // Supported browsers disable their own GTK accessibility bridge and export

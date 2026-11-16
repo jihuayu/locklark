@@ -10,6 +10,6 @@
 
 版本化共享向量 `internal/origin/testdata/origin-v1.json` 可供 Swift/Kotlin/扩展适配器对照。这一 CLI 的 origin 字符串只是调用者声明，无法认证页面来源；未来适配器必须从浏览器/系统可信 API 获取顶层和 frame origin，并独立做解锁、连接生命周期和用户授权验证。真正 Chrome/Edge/Firefox/Safari 集成、iOS/Android 真机系统填充与 Passkey 均未验收。
 
-失败先行记录 `/tmp/locklark-validation/origin-red.log`。单测覆盖域名/端口/编码边界、错误因素、同源、跨源、归档排除、无秘密审计、事务回滚以及备份恢复；PyKeePass 验证独立导出 URL。`scripts/matching_acceptance.py` 通过 PTY/ConPTY 验证隐藏编辑与匹配/拒绝/归档流程。完整 Go、定向 race、vet/模块、Luna/max 与最终双平台 CI 结果见 PR。
+失败先行记录 `/tmp/passme-validation/origin-red.log`。单测覆盖域名/端口/编码边界、错误因素、同源、跨源、归档排除、无秘密审计、事务回滚以及备份恢复；PyKeePass 验证独立导出 URL。`scripts/matching_acceptance.py` 通过 PTY/ConPTY 验证隐藏编辑与匹配/拒绝/归档流程。完整 Go、定向 race、vet/模块、Luna/max 与最终双平台 CI 结果见 PR。
 
 Luna/max 静态审阅未见阻塞；反馈已补齐：CLI 明确完整 URL 的 ASCII 输入范围，匹配时说明来源来自调用者且只查询候选，清除 URL 后不可匹配有专门回归测试。最终复核与双平台 CI 见 PR #11。

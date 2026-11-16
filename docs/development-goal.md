@@ -1,4 +1,4 @@
-# Locklark 持续开发目标
+# Passme 持续开发目标
 
 > 当前已合并基线（2026-11-07）：`main` `4abecb8`，PR #43 最终六项 CI 全部通过。当前浏览器功能与仍需参考对照的范围见[浏览器清单](browser-parity-checklist.md)，进度/E2E 对账与插件收尾见[本轮验收](plugin-completion-validation.md)。下文“下一项候选”及旧 PR/CI 待办包含历史阶段，应由较新记录覆盖，不作为现有功能缺失的自动判据。
 

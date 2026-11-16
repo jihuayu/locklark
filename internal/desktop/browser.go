@@ -9,9 +9,9 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func (a *App) browserView(c *ui.Context) {
@@ -372,7 +372,7 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browserhost.ValidateLaunch(browser, args) != nil {
 		return browserhost.ErrProtocol
 	}
-	if os.Getenv("LOCKLARK_BROWSER_STANDALONE") != "1" {
+	if os.Getenv("PASSME_BROWSER_STANDALONE") != "1" {
 		err := browserhost.RelayStdio(browser, args, os.Stdin, os.Stdout)
 		if err == nil {
 			return nil
@@ -393,9 +393,9 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 		a.browserLabel = browserhost.SafariID
 	}
 	writer := browserhost.NewNativeWriter(os.Stdout, 250*time.Millisecond, func() { os.Exit(74) })
-	mygo.App.SetName("Locklark Browser")
+	mygo.App.SetName("Passme Browser")
 	mygo.App.WhenReady(func() {
-		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 浏览器原生确认", Width: 1000, Height: 780, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
+		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Passme · 浏览器原生确认", Width: 1000, Height: 780, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
 		a.dispatch = a.win.Update
 		a.browser = browserhost.NewConnection(writer, func() { a.win.Invalidate() })
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock(); a.browser.Close(); mygo.App.Quit() })

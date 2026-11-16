@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -92,7 +92,7 @@ func SettingsPath() string {
 	if err != nil || dir == "" {
 		dir = os.TempDir()
 	}
-	return filepath.Join(dir, "locklark", "settings.json")
+	return filepath.Join(dir, "passme", "settings.json")
 }
 
 // normalize copies duration aliases into the canonical persisted units and
@@ -616,7 +616,6 @@ func durationLabel(d time.Duration) string {
 	}
 	return fmt.Sprintf("%d 秒", int(d/time.Second))
 }
-
 
 // normalizeThemeName is a small helper for future appearance controls and
 // keeps the accepted values in one place.

@@ -71,7 +71,7 @@ test("a missing or unknown fence is unsupported and never initialized", () => {
   assert.equal(
     Object.prototype.hasOwnProperty.call(
       missing.context,
-      "LocklarkCheckoutFence",
+      "PassmeCheckoutFence",
     ),
     false,
   );

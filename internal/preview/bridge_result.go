@@ -13,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 )
 
 type resultAttempt struct {
@@ -51,7 +51,7 @@ func resultKeys(c PollConfig, p BridgeProfile, id, review string) (cipher.AEAD, 
 	if e != nil || string(bytes.TrimSpace(audience)) != p.Audience {
 		return nil, b, errInvoke
 	}
-	k, e := hkdf.Key(sha256.New, seed, nil, "locklark/bridge-result-storage/v1", 32)
+	k, e := hkdf.Key(sha256.New, seed, nil, "passme/bridge-result-storage/v1", 32)
 	if e != nil {
 		return nil, b, e
 	}
@@ -70,7 +70,7 @@ func loadResultAttempt(c PollConfig, p BridgeProfile, id, review string, newTarg
 	if e != nil {
 		return saved, e
 	}
-	associated := message("locklark/bridge-result-state/v1\x00", b)
+	associated := message("passme/bridge-result-state/v1\x00", b)
 	name := id + ".replykey"
 	raw, e := read(c.Private, name, 16384)
 	if errors.Is(e, os.ErrNotExist) && newTarget != nil {

@@ -56,7 +56,7 @@ export async function acceptPasskeyManagement({
   dismissPopup, reconnect, eventually, input, observe, phase, conditionalSibling,
 }) {
   const rp = new URL(origin).hostname;
-  assert.equal(rp, "login.locklark.test", "Allowlisted synthetic management RP required");
+  assert.equal(rp, "login.passme.test", "Allowlisted synthetic management RP required");
   const account = "passkey-other";
   const firstTitle = rp + " · passkey-test";
   const secondTitle = rp + " · " + account;
@@ -64,8 +64,8 @@ export async function acceptPasskeyManagement({
     { wait_label: "验证主密码" }, { click_label: "验证主密码" }, { text: fixture.Password },
     { click_label: "验证 Secret Key" }, { text: fixture.Secret },
   ];
-  const verifier = process.env.LOCKLARK_TEST_WEBAUTHN_SERVER
-    ? createRequire(import.meta.url)(process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) : null;
+  const verifier = process.env.PASSME_TEST_WEBAUTHN_SERVER
+    ? createRequire(import.meta.url)(process.env.PASSME_TEST_WEBAUTHN_SERVER) : null;
   const verified = new Map();
   const waitResult = async () => {
     await eventually(async () => {
@@ -90,7 +90,7 @@ export async function acceptPasskeyManagement({
     await dismissPopup();
     const challenge = Buffer.from("synthetic-managed-get-" + name).toString("base64url");
     await pageEval(startCredential, { create: false, rp, id: registration.id, challenge });
-    await inlineClick("使用 Locklark 登录");
+    await inlineClick("使用 Passme 登录");
     input([...factors, { click_label: passkeyChoiceLabel({ rp, title: rp + " · " + name, username: name, credentialId: registration.id }) }]);
     await focusPage();
     const state = await waitResult();
@@ -111,7 +111,7 @@ export async function acceptPasskeyManagement({
   await dismissPopup();
   const challenge = Buffer.from("synthetic-managed-create-second-account").toString("base64url");
   await pageEval(startCredential, { create: true, rp, challenge, account });
-  await inlineClick("保存到 Locklark");
+  await inlineClick("保存到 Passme");
   input([...factors, { click_label: "创建新登录并保存 Passkey" }]);
   await focusPage();
   const created = await waitResult();
@@ -162,7 +162,7 @@ export async function acceptPasskeyManagement({
     create: true, rp, challenge: siblingChallenge, account: "passkey-test",
     userId: [1, 2, 3], displayName: "Synthetic user",
   });
-  await inlineClick("保存到 Locklark");
+  await inlineClick("保存到 Passme");
   input([...factors, {
     click_label: passkeyChoiceLabel({
       create: true, rp, title: firstTitle, username: "passkey-test",
@@ -223,7 +223,7 @@ export async function acceptPasskeyManagement({
   await dismissPopup();
   const siblingGetChallenge = Buffer.from("synthetic-managed-sibling-get").toString("base64url");
   await pageEval(startCredential, { create: false, rp, id: sibling.id, challenge: siblingGetChallenge });
-  await inlineClick("使用 Locklark 登录");
+  await inlineClick("使用 Passme 登录");
   input([...factors, {
     click_label: passkeyChoiceLabel({
       rp, title: firstTitle, username: "passkey-test", credentialId: sibling.id,
@@ -244,7 +244,7 @@ export async function acceptPasskeyManagement({
     });
     assert.equal(checked.verified, true, "Independent verifier rejected second sibling");
   }
-  if (conditionalSibling && process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+  if (conditionalSibling && process.env.PASSME_TEST_PASSKEY_CONDITIONAL === "1") {
     phase("passkey-management:conditional-two-siblings");
     await conditionalSibling({ first, second: sibling });
   }
@@ -273,7 +273,7 @@ export async function acceptPasskeyManagement({
   await dismissPopup();
   await pageEval(startCredential, { create: false, rp, id: sibling.id,
     challenge: Buffer.from("synthetic-deleted-sibling-get").toString("base64url"), abortAfter: 2000 });
-  await inlineClick("使用 Locklark 登录");
+  await inlineClick("使用 Passme 登录");
   const removedSibling = await waitResult();
   assert(!removedSibling.result && removedSibling.error,
     "Deleted sibling credential produced an assertion result");
@@ -285,7 +285,7 @@ export async function acceptPasskeyManagement({
   await dismissPopup();
   const firstAfterChallenge = Buffer.from("synthetic-managed-first-after-sibling").toString("base64url");
   await pageEval(startCredential, { create: false, rp, id: first.id, challenge: firstAfterChallenge });
-  await inlineClick("使用 Locklark 登录");
+  await inlineClick("使用 Passme 登录");
   input([...factors, {
     click_label: passkeyChoiceLabel({
       rp, title: firstTitle, username: "passkey-test", credentialId: first.id,
@@ -342,7 +342,7 @@ export async function acceptPasskeyManagement({
   await dismissPopup();
   await pageEval(startCredential, { create: false, rp, id: first.id,
     challenge: Buffer.from("synthetic-deleted-credential-get").toString("base64url"), abortAfter: 2000 });
-  await inlineClick("使用 Locklark 登录");
+  await inlineClick("使用 Passme 登录");
   const removed = await waitResult();
   assert(!removed.result && removed.error, "Deleted credential produced a result");
   const controls = input([], true, { inspect: true }).controls || {};

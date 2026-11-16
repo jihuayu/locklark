@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 )
 
-const sequencerSealDomain = "locklark/teamclient/protected-sequencer/v1\x00"
+const sequencerSealDomain = "passme/teamclient/protected-sequencer/v1\x00"
 
 type sequencerBinding struct {
 	Version  int    `json:"version"`

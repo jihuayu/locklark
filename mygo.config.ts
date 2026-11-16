@@ -11,18 +11,18 @@
 
 const defineConfig = <T,>(config: T): T => config;
 
-const signingIdentity = process.env.LOCKLARK_MACOS_SIGNING_IDENTITY || "-";
-const entitlements = process.env.LOCKLARK_MACOS_ENTITLEMENTS;
-const provisioningProfile = process.env.LOCKLARK_MACOS_PROVISIONING_PROFILE;
-const notaryProfile = process.env.LOCKLARK_NOTARY_PROFILE;
+const signingIdentity = process.env.PASSME_MACOS_SIGNING_IDENTITY || "-";
+const entitlements = process.env.PASSME_MACOS_ENTITLEMENTS;
+const provisioningProfile = process.env.PASSME_MACOS_PROVISIONING_PROFILE;
+const notaryProfile = process.env.PASSME_NOTARY_PROFILE;
 
 export default defineConfig({
-  name: "Locklark",
-  slug: "locklark",
-  identifier: "app.locklark.desktop",
+  name: "Passme",
+  slug: "passme",
+  identifier: "app.passme.desktop",
   version: "0.1.0",
-  copyright: "© 2026 Locklark contributors",
-  main: "./cmd/locklark-desktop",
+  copyright: "© 2026 Passme contributors",
+  main: "./cmd/passme-desktop",
   out: "out",
   macos: {
     minimumSystemVersion: "13.0",

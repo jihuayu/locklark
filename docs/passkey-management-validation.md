@@ -1,6 +1,6 @@
 # Passkey 管理验收
 
-日期：2026-11-07。起点为已合并 [PR #44](https://github.com/jihuayu/locklark/pull/44) 的 `main` `e2561be1f8070f9539433412bc7ac635b965bd5f`；分支 `codex/passkey-management`。协议、事务和并发边界见[设计](passkey-management-design.md)。主代理设计并独立验收，实际外部 DeepSeek workers 实现 Go/扩展并并行调研 CLI；只读复核另行运行。
+日期：2026-11-07。起点为已合并 [PR #44](https://github.com/jihuayu/passme/pull/44) 的 `main` `e2561be1f8070f9539433412bc7ac635b965bd5f`；分支 `codex/passkey-management`。协议、事务和并发边界见[设计](passkey-management-design.md)。主代理设计并独立验收，实际外部 DeepSeek workers 实现 Go/扩展并并行调研 CLI；只读复核另行运行。
 
 ## 实现范围
 

@@ -20,21 +20,21 @@ Session 只保留已解开的身份材料，不保留主密码/Secret Key或条�
 
 ## 验证记录
 
-失败先行日志在执行环境 `/tmp/locklark-validation`：`desktop-session-red.log`、`desktop-ui-red.log`、`desktop-unicode-red.log`、`system-unlock-red.log`、`system-prompt-lock-red.log`（最后一项实际复现 OS 提示阻塞锁定）。
+失败先行日志在执行环境 `/tmp/passme-validation`：`desktop-session-red.log`、`desktop-ui-red.log`、`desktop-unicode-red.log`、`system-unlock-red.log`、`system-prompt-lock-red.log`（最后一项实际复现 OS 提示阻塞锁定）。
 
 已实际运行 Linux Xorg dummy 显示服务器及 MyGo 原生窗口，使用 XTest 键鼠输入合成金库路径、主密码和 Secret Key，完成解锁与条目显示；截图 `desktop-window.png`、`desktop-unlocked.png`。这不是 Hello、Keychain 或真机锁屏验收。
 
 工具链由 Go 1.26.8 升到 MyGo 所需 1.27.3；搜索 Unicode 数据随之升到 17，审计绑定 profile 更新为 `title-nfc-fold-substring-u17-v2`，不能将新结果称为原 Unicode 15 profile。
 
-Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存活、OS 写入前成功审计问题；已加入取消/锁竞争测试并修复，Luna/max 最终复审通过，无可复现阻断。最终 head `bb5965751250cf957e8fe629588a8db7e0a6f3a8` 的 [CI 42044135997](https://github.com/jihuayu/locklark/actions/runs/42044135997) 全部通过：Ubuntu 3m4s、Windows 7m38s、macOS 33s；PR #23 已合入 main `de7ba5a`。
+Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存活、OS 写入前成功审计问题；已加入取消/锁竞争测试并修复，Luna/max 最终复审通过，无可复现阻断。最终 head `bb5965751250cf957e8fe629588a8db7e0a6f3a8` 的 [CI 42044135997](https://github.com/jihuayu/passme/actions/runs/42044135997) 全部通过：Ubuntu 3m4s、Windows 7m38s、macOS 33s；PR #23 已合入 main `de7ba5a`。
 
-本地完整 `go test -count=1 ./...`（独立 PyKeePass 与 Bun 环境）通过；`go vet ./...` 通过。桌面/会话定向 race、系统提示取消 race、真实金库 UI 工作流 race 通过；标题搜索 PTY 验收通过。已创建 [PR #23](https://github.com/jihuayu/locklark/pull/23)，三平台 CI 已通过并合并。新增选择上下文检查：切换条目/页面后，已准备字段被销毁，不能迟到显示在另一条目下。
+本地完整 `go test -count=1 ./...`（独立 PyKeePass 与 Bun 环境）通过；`go vet ./...` 通过。桌面/会话定向 race、系统提示取消 race、真实金库 UI 工作流 race 通过；标题搜索 PTY 验收通过。已创建 [PR #23](https://github.com/jihuayu/passme/pull/23)，三平台 CI 已通过并合并。新增选择上下文检查：切换条目/页面后，已准备字段被销毁，不能迟到显示在另一条目下。
 
 ## 尚待真实平台验收
 
 Windows Hello 每次解密提示、拒绝/取消、TPM 清除/密钥失效、休眠锁屏、系统时间变化；macOS 原生编译及签名后的 Touch ID/密码提示、Keychain 权限变化；Linux Secret Service 锁定/取消与 GNOME/KDE 锁屏通知；三平台剪贴板管理器、窗口关闭/托盘与密码字符串残留边界。跨编译和 fake Store 测试不替代这些条目。完整产品和安全认证未完成。
 
-2026-11-09 的 macOS 27.0.1 arm64 实测补记：Touch ID 硬件可用（`LAContext` biometryType=touchID，`bioutil` 已启用），但 `go build` 的 ad-hoc 二进制在 `SecItemAdd`（ACL=UserPresence）上返回 `-34018 errSecMissingEntitlement`；`osunlock.Store` 与 `Session.EnableSystemUnlock` 均失败，UI 曾误报“金库已锁定”。现已把该失败分类为 `ErrMissingEntitlement`/`ErrSystemUnlockUnavailable`，并增加签名提示；`mygo.config.ts`、`macos/locklark.entitlements.plist.template` 与 `scripts/macos_release.sh` 提供签名 `.app` 的构建入口。**签名后的成功 Touch ID 提示仍未取得验收回执**，不能把本记录当作已完成的生物识别验收。
+2026-11-09 的 macOS 27.0.1 arm64 实测补记：Touch ID 硬件可用（`LAContext` biometryType=touchID，`bioutil` 已启用），但 `go build` 的 ad-hoc 二进制在 `SecItemAdd`（ACL=UserPresence）上返回 `-34018 errSecMissingEntitlement`；`osunlock.Store` 与 `Session.EnableSystemUnlock` 均失败，UI 曾误报“金库已锁定”。现已把该失败分类为 `ErrMissingEntitlement`/`ErrSystemUnlockUnavailable`，并增加签名提示；`mygo.config.ts`、`macos/passme.entitlements.plist.template` 与 `scripts/macos_release.sh` 提供签名 `.app` 的构建入口。**签名后的成功 Touch ID 提示仍未取得验收回执**，不能把本记录当作已完成的生物识别验收。
 
 2026-11-09 第二轮 macOS 审计补记：新增 `osunlock.Biometry()` 能力探测（`canEvaluatePolicy` 不弹提示），安全设置中的快捷解锁标签/说明反映“Touch ID / 系统密码 / 不可用”，无 Touch ID 时文案不再声称会弹 Touch ID；补充 `errSecAuthFailed(-25293)`、`errSecNotAvailable(-25291)`、`errSecServiceNotAvailable(-67585)`、`errSecInteractionRequired(-25315)` 的分类与 UI 文案；修复 passkey 原生适配器失败时返回 `-1` 导致错误分类丢失的问题。新增 `scripts/macos_verify_touchid.sh` 检查 ad-hoc、TeamIdentifier、`keychain-access-groups`、embedded profile、codesign、Gatekeeper 与 stapling。自签名证书实验：`codesign` 可签名但 `TeamIdentifier=not set`，带 keychain group 的进程被 AMFI SIGKILL（exit 137），`security verify-cert` 为 `CSSMERR_TP_NOT_TRUSTED`，因此不能替代 Apple Developer ID；成功 Touch ID 验收仍被签名身份阻塞。
 

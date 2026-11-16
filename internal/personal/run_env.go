@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const runProfile = "single-env-direct-process-v1"
@@ -69,7 +69,7 @@ func (r RunRequest) binding(secret []byte) (string, error) {
 	if r.cli != nil {
 		return r.cli.binding(r, secret)
 	}
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/run-env/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/run-env/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

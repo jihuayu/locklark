@@ -3,7 +3,7 @@ if (typeof importScripts === "function") importScripts("core.js");
 (() => {
   "use strict";
   const api = globalThis.browser || globalThis.chrome,
-    core = globalThis.LocklarkCore;
+    core = globalThis.PassmeCore;
   let quickFill = false,
     fillUnknown = false,
     pendingPasskey = null,
@@ -117,7 +117,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (state === "active" || !(settings.idleLockMinutes > 0)) return;
       if (!capability) return;
       status = "空闲自动锁定";
-      notify("Locklark 已锁定", "因空闲已自动锁定，请重新解锁。");
+      notify("Passme 已锁定", "因空闲已自动锁定，请重新解锁。");
       lockVault();
     });
   } catch {}
@@ -628,11 +628,11 @@ if (typeof importScripts === "function") importScripts("core.js");
   function updateBadge() {
     if (!api.action) return;
     if (unconfirmedSave || otpUnknown || fillUnknown || passkeyUnknown) {
-      setBadge("!", "#dc2626", "Locklark — 存在未确认操作");
+      setBadge("!", "#dc2626", "Passme — 存在未确认操作");
       return;
     }
     if (!capability) {
-      setBadge("L", "#d97706", "Locklark — 已锁定");
+      setBadge("L", "#d97706", "Passme — 已锁定");
       return;
     }
     if (
@@ -641,10 +641,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       context?.origin
     ) {
       const count = rows.length > 99 ? "99+" : String(rows.length);
-      setBadge(count, "#0f766e", `Locklark — ${rows.length} 个匹配登录`);
+      setBadge(count, "#0f766e", `Passme — ${rows.length} 个匹配登录`);
       return;
     }
-    setBadge("", "#0f766e", "Locklark — 已解锁");
+    setBadge("", "#0f766e", "Passme — 已解锁");
   }
   function validCategory(value) {
     return ["login", "identity", "credit_card"].includes(value);
@@ -764,16 +764,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     return (
       {
         missing:
-          "未找到 Locklark 原生宿主：请重新安装桌面端，或运行 locklark-browser-register 注册后重试",
+          "未找到 Passme 原生宿主：请重新安装桌面端，或运行 passme-browser-register 注册后重试",
         forbidden:
           "浏览器拒绝了这个原生宿主：请重新运行注册命令并确认清单路径",
-        exited: "Locklark 原生宿主已退出：请确认桌面端已安装并重新连接",
+        exited: "Passme 原生宿主已退出：请确认桌面端已安装并重新连接",
         timeout:
-          "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试",
+          "等待 Passme 解锁超时：请在 Passme 窗口中完成解锁后重试",
         outdated:
-          "Locklark 原生宿主版本过旧，请升级桌面端后重新连接",
-        error: "无法连接 Locklark 原生宿主，请重新连接",
-      }[code] || "无法连接 Locklark 原生宿主，请重新连接"
+          "Passme 原生宿主版本过旧，请升级桌面端后重新连接",
+        error: "无法连接 Passme 原生宿主，请重新连接",
+      }[code] || "无法连接 Passme 原生宿主，请重新连接"
     );
   }
   function disconnectWithStatus(message) {
@@ -804,20 +804,20 @@ if (typeof importScripts === "function") importScripts("core.js");
       return;
     menuRemoveAll();
     menuCreate({
-      id: "locklark-root",
-      title: "Locklark",
+      id: "passme-root",
+      title: "Passme",
       contexts: ["page", "editable"],
     });
     if (!capability) {
       menuCreate({
-        id: "locklark-connect",
-        parentId: "locklark-root",
-        title: "解锁 Locklark…",
+        id: "passme-connect",
+        parentId: "passme-root",
+        title: "解锁 Passme…",
         contexts: ["page", "editable"],
       });
       menuCreate({
-        id: "locklark-options",
-        parentId: "locklark-root",
+        id: "passme-options",
+        parentId: "passme-root",
         title: "扩展设置…",
         contexts: ["page", "editable"],
       });
@@ -830,7 +830,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     ]) {
       menuCreate({
         id,
-        parentId: "locklark-root",
+        parentId: "passme-root",
         title,
         contexts: ["page", "editable"],
       });
@@ -863,25 +863,25 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     menuCreate({
       id: "generate-password",
-      parentId: "locklark-root",
+      parentId: "passme-root",
       title: "生成并填充新密码",
       contexts: ["editable"],
     });
     menuCreate({
       id: "save-login",
-      parentId: "locklark-root",
+      parentId: "passme-root",
       title: "保存当前页面登录",
       contexts: ["page", "editable"],
     });
     menuCreate({
       id: "context-separator-1",
-      parentId: "locklark-root",
+      parentId: "passme-root",
       type: "separator",
       contexts: ["page", "editable"],
     });
     menuCreate({
-      id: "locklark-toggle-site-inline",
-      parentId: "locklark-root",
+      id: "passme-toggle-site-inline",
+      parentId: "passme-root",
       title: "在此网站停用快捷菜单",
       type: "checkbox",
       checked: currentSiteFlags().disabledInline,
@@ -889,13 +889,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
     menuCreate({
       id: "lock-vault",
-      parentId: "locklark-root",
-      title: "立即锁定 Locklark",
+      parentId: "passme-root",
+      title: "立即锁定 Passme",
       contexts: ["all"],
     });
     menuCreate({
-      id: "locklark-options",
-      parentId: "locklark-root",
+      id: "passme-options",
+      parentId: "passme-root",
       title: "扩展设置…",
       contexts: ["all"],
     });
@@ -908,11 +908,11 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function contextMenuClicked(info) {
     const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
-    if (id === "locklark-connect") {
+    if (id === "passme-connect") {
       void connect();
       return;
     }
-    if (id === "locklark-options") {
+    if (id === "passme-options") {
       openOptions();
       return;
     }
@@ -928,7 +928,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       void generateAndFill();
       return;
     }
-    if (id === "locklark-toggle-site-inline") {
+    if (id === "passme-toggle-site-inline") {
       void toggleSiteInline();
       return;
     }
@@ -1706,15 +1706,15 @@ if (typeof importScripts === "function") importScripts("core.js");
   // namespace script. Chromium and Firefox keep calling their own
   // api.runtime.connectNative unchanged; nothing is patched globally.
   function nativeConnect() {
-    const shim = globalThis.LocklarkSafariNativePort;
+    const shim = globalThis.PassmeSafariNativePort;
     if (
       shim &&
       typeof shim.connectNative === "function" &&
       typeof shim.isSafariRuntime === "function" &&
       shim.isSafariRuntime(api)
     )
-      return shim.connectNative(api, "org.locklark.browser");
-    return api.runtime.connectNative("org.locklark.browser");
+      return shim.connectNative(api, "org.passme.browser");
+    return api.runtime.connectNative("org.passme.browser");
   }
   async function connect() {
     disconnect(true);
@@ -1742,7 +1742,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       status = uncertain
         ? "结果未确认，请在金库核实，勿重复保存"
         : neverPaired
-          ? "Locklark 原生宿主已退出，请确认桌面端已安装并重新连接"
+          ? "Passme 原生宿主已退出，请确认桌面端已安装并重新连接"
           : "原生连接已断开，请重新连接";
       if (otpUnknown) status += " · " + OTP_UNKNOWN;
       void api.runtime.lastError;
@@ -1914,7 +1914,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         !hostCapabilities.includes("popup-vault-v1")
       ) {
         hostState = "outdated";
-        status = "Locklark 原生宿主版本过旧，请升级桌面端后重新连接";
+        status = "Passme 原生宿主版本过旧，请升级桌面端后重新连接";
       } else {
         hostState = "";
         status = "已连接，请读取当前网站候选";
@@ -1924,7 +1924,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     } catch (error) {
       if (error?.timeout) {
         hostState = "timeout";
-        status = "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试";
+        status = "等待 Passme 解锁超时：请在 Passme 窗口中完成解锁后重试";
         updateBadge();
         return;
       }
@@ -3208,7 +3208,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         p.postMessage({ v: 1, id: id(), type: "lock", capability: cap });
       } catch {}
     }
-    disconnectWithStatus("已锁定 Locklark");
+    disconnectWithStatus("已锁定 Passme");
     updateBadge();
     rebuildContextMenus();
   }
@@ -3295,7 +3295,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   async function autofillActiveTab() {
     if (!capability) {
-      status = "请先解锁 Locklark";
+      status = "请先解锁 Passme";
       updateBadge();
       return;
     }
@@ -3313,7 +3313,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         if (tabs.length === 1 && Number.isSafeInteger(tabs[0].id))
           await api.tabs
             .sendMessage?.(tabs[0].id, {
-              type: "locklark:open-inline-menu",
+              type: "passme:open-inline-menu",
             })
             .catch(() => {});
         status = `发现 ${rows.length} 个匹配登录，请在页面中选择`;
@@ -3340,7 +3340,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   async function generateAndFill() {
     if (!capability) {
-      status = "请先解锁 Locklark";
+      status = "请先解锁 Passme";
       updateBadge();
       return;
     }
@@ -5005,7 +5005,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (!/^[a-f0-9-]{36}$/.test(intent.pageID || "")) continue;
       if (!Number.isSafeInteger(intent.tabId) || intent.tabId < 1) continue;
       const message = {
-        type: "locklark:conditional-passkey-cancel",
+        type: "passme:conditional-passkey-cancel",
         id: intent.pageID,
       };
       try {
@@ -5665,7 +5665,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             extra.nativeUnlock = {
               ok: false,
               pending: true,
-              status: "正在启动 Locklark，请在窗口中完成解锁",
+              status: "正在启动 Passme，请在窗口中完成解锁",
             };
             break;
           }
@@ -5673,8 +5673,8 @@ if (typeof importScripts === "function") importScripts("core.js");
             const reply = await request("unlock-request", {}, 8000);
             const unlocked = reply.unlocked === true;
             status = unlocked
-              ? "Locklark 已解锁，请重新连接"
-              : "请在 Locklark 窗口中完成解锁";
+              ? "Passme 已解锁，请重新连接"
+              : "请在 Passme 窗口中完成解锁";
             extra.nativeUnlock = {
               ok: reply.type === "status",
               pending: false,
@@ -5682,7 +5682,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               status,
             };
           } catch {
-            status = "无法请求桌面解锁，请确认 Locklark 正在运行";
+            status = "无法请求桌面解锁，请确认 Passme 正在运行";
             extra.nativeUnlock = { ok: false, pending: false, status };
           }
           break;

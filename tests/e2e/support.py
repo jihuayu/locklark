@@ -2,7 +2,7 @@
 
 Everything in this module talks to the product through the same user-facing
 surfaces the harness exposes: compiled binaries, native-messaging frames,
-built extension bundles, and repository files.  It never imports a Locklark Go
+built extension bundles, and repository files.  It never imports a Passme Go
 package or inspects private in-memory state.
 """
 
@@ -831,7 +831,7 @@ def source_files(ctx: E2EContext, relative_glob: str) -> list[Path]:
 def cli_help(ctx: E2EContext) -> str:
     result = ctx.run_cli(["help"])
     if result.returncode != 0:
-        raise AssertionError(f"locklark help failed (rc={result.returncode}): {result.stderr}")
+        raise AssertionError(f"passme help failed (rc={result.returncode}): {result.stderr}")
     return result.stdout + "\n" + result.stderr
 
 
@@ -847,7 +847,7 @@ def command_known(ctx: E2EContext, args: Sequence[Any]) -> tuple[bool, CLIResult
     result = ctx.run_cli(args)
     known = not (
         result.returncode != 0
-        and "unknown command; see locklark help" in (result.stderr or "")
+        and "unknown command; see passme help" in (result.stderr or "")
     )
     return known, result
 
@@ -944,7 +944,7 @@ def go_tool() -> str | None:
 
     candidates = [
         shutil.which("go") or "",
-        os.environ.get("LOCKLARK_GO", ""),
+        os.environ.get("PASSME_GO", ""),
         "/workspace/toolchains/go/bin/go",
     ]
     for candidate in candidates:
@@ -1298,7 +1298,7 @@ def cli_profiles(ctx: E2EContext) -> list[dict[str, Any]]:
     help_result = ctx.run_cli(["help"])
     if help_result.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={help_result.returncode}): "
+            f"passme help probe failed (rc={help_result.returncode}): "
             f"{help_result.stderr[-800:]}"
         )
     if "cli profiles" not in (help_result.stdout + help_result.stderr):
@@ -1354,7 +1354,7 @@ def f15_run_bundle_ready(ctx: E2EContext) -> bool:
     top = ctx.run_cli(["help"])
     if top.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+            f"passme help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
         )
     if "cli run" not in (top.stdout + top.stderr):
         return False
@@ -1369,7 +1369,7 @@ def f15_run_bundle_ready(ctx: E2EContext) -> bool:
         )
     usage = run_help.stdout + run_help.stderr
     required = (
-        "locklark cli run <tool>",
+        "passme cli run <tool>",
         "--binding PATH",
         "--cwd ABS_DIR",
         "--timeout SECONDS",
@@ -1405,7 +1405,7 @@ def f16_cli_shell_ready(ctx: E2EContext) -> bool:
     top = ctx.run_cli(["help"])
     if top.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+            f"passme help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
         )
     if "cli shell-init" not in (top.stdout + top.stderr):
         return False
@@ -1420,8 +1420,8 @@ def f16_cli_shell_ready(ctx: E2EContext) -> bool:
         raise AssertionError("cli shell-init did not emit a gh function")
     if not re.search(r"\bcli\s+run\s+gh\b", body):
         raise AssertionError(f"gh wrapper does not call cli run: {body!r}")
-    if not re.search(r"(?:command|&)\s+\S*locklark\b", body):
-        raise AssertionError(f"gh wrapper does not invoke a locklark executable: {body!r}")
+    if not re.search(r"(?:command|&)\s+\S*passme\b", body):
+        raise AssertionError(f"gh wrapper does not invoke a passme executable: {body!r}")
     if '"$@"' not in body:
         raise AssertionError(f"gh wrapper does not forward arguments: {body!r}")
     return True
@@ -1433,8 +1433,8 @@ def desktop_broker_implemented(ctx: E2EContext) -> bool:
 
 
 def cli_broker_client_implemented(ctx: E2EContext) -> bool:
-    return sources_contain(ctx, "cmd/locklark/*.go", "RequestCLIRun") or sources_contain(
-        ctx, "cmd/locklark/*.go", "BrokerCLI"
+    return sources_contain(ctx, "cmd/passme/*.go", "RequestCLIRun") or sources_contain(
+        ctx, "cmd/passme/*.go", "BrokerCLI"
     )
 
 

@@ -4,11 +4,11 @@
 // at-spi2-core/libatspi2.0-0, and geckodriver 0.36.0 from Mozilla:
 // https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
 // Archive SHA-256: 0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04
-// Set LOCKLARK_BROWSER_HOST and LOCKLARK_BROWSER_REGISTER to built Firefox/helper
-// binaries. Optional: LOCKLARK_FIREFOX (otherwise installed Playwright Firefox),
-// LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO.
+// Set PASSME_BROWSER_HOST and PASSME_BROWSER_REGISTER to built Firefox/helper
+// binaries. Optional: PASSME_FIREFOX (otherwise installed Playwright Firefox),
+// PASSME_TEST_PLAYWRIGHT, PASSME_GECKODRIVER (otherwise PATH), PASSME_GO.
 // For an intentional privacy-check failure after real pairing, set the tool-only
-// LOCKLARK_TEST_FAILURE_STAGE=after-pair. It must exit 1 without echoing factors.
+// PASSME_TEST_FAILURE_STAGE=after-pair. It must exit 1 without echoing factors.
 // page-arguments exercises a real driver failure carrying synthetic parameters.
 import assert from "node:assert/strict";
 import { createServer } from "node:https";
@@ -51,32 +51,32 @@ assert(
   "Run with a real DISPLAY inside dbus-run-session",
 );
 assert(
-  process.env.LOCKLARK_BROWSER_HOST && process.env.LOCKLARK_BROWSER_REGISTER,
+  process.env.PASSME_BROWSER_HOST && process.env.PASSME_BROWSER_REGISTER,
   "Built Firefox host and registration helper paths are required",
 );
 assert(
-  !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
+  !process.env.PASSME_TEST_FAILURE_STAGE ||
     ["after-pair", "page-arguments", "otp-page-arguments"].includes(
-      process.env.LOCKLARK_TEST_FAILURE_STAGE,
+      process.env.PASSME_TEST_FAILURE_STAGE,
     ),
   "Unsupported acceptance failure stage",
 );
 assert(
-  !process.env.LOCKLARK_TEST_FIREFOX_PASSKEY ||
-    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1",
-  "LOCKLARK_TEST_FIREFOX_PASSKEY only accepts 1",
+  !process.env.PASSME_TEST_FIREFOX_PASSKEY ||
+    process.env.PASSME_TEST_FIREFOX_PASSKEY === "1",
+  "PASSME_TEST_FIREFOX_PASSKEY only accepts 1",
 );
 assert(
-  !process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY ||
-    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY === "1",
-  "LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY only accepts 1",
+  !process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY ||
+    process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY === "1",
+  "PASSME_TEST_FIREFOX_PASSKEY_ONLY only accepts 1",
 );
 assert(
-  process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY !== "1" ||
-    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1",
-  "LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY requires LOCKLARK_TEST_FIREFOX_PASSKEY=1",
+  process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY !== "1" ||
+    process.env.PASSME_TEST_FIREFOX_PASSKEY === "1",
+  "PASSME_TEST_FIREFOX_PASSKEY_ONLY requires PASSME_TEST_FIREFOX_PASSKEY=1",
 );
-const passkeyOnly = process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY === "1";
+const passkeyOnly = process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY === "1";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 import {
   acceptFirefoxPasskey,
@@ -88,16 +88,16 @@ import {
 } from "./browser_shared_clipboard_acceptance.mjs";
 
 const firefox =
-  process.env.LOCKLARK_FIREFOX ||
+  process.env.PASSME_FIREFOX ||
   require(
-    process.env.LOCKLARK_TEST_PLAYWRIGHT || "playwright",
+    process.env.PASSME_TEST_PLAYWRIGHT || "playwright",
   ).firefox.executablePath();
-const geckodriver = process.env.LOCKLARK_GECKODRIVER || "geckodriver";
-const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
-const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
-const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
+const geckodriver = process.env.PASSME_GECKODRIVER || "geckodriver";
+const host = resolve(process.env.PASSME_BROWSER_HOST);
+const register = resolve(process.env.PASSME_BROWSER_REGISTER);
+const state = mkdtempSync(join(tmpdir(), "passme-firefox-native-"));
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
-const sharedClipboard = process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1";
+const sharedClipboard = process.env.PASSME_TEST_SHARED_CLIPBOARD === "1";
 const originalEnv = { ...process.env };
 const env = sharedClipboard
   ? prepareSharedEnvironment(state, originalEnv)
@@ -107,7 +107,7 @@ if (sharedClipboard && !env.GOMODCACHE) {
   // private HOME/TMPDIR/broker environment.
   try {
     env.GOMODCACHE = execFileSync(
-      process.env.LOCKLARK_GO || "go",
+      process.env.PASSME_GO || "go",
       ["env", "GOMODCACHE"],
       { env: originalEnv, encoding: "utf8" },
     ).trim();
@@ -115,7 +115,7 @@ if (sharedClipboard && !env.GOMODCACHE) {
 }
 const nativeManifest = join(
   sharedClipboard ? env.HOME : homedir(),
-  ".mozilla/native-messaging-hosts/org.locklark.browser.json",
+  ".mozilla/native-messaging-hosts/org.passme.browser.json",
 );
 try {
   lstatSync(nativeManifest);
@@ -254,12 +254,12 @@ function evaluate(script, args = []) {
 function input(actions, native = true, options = {}) {
   const request = native
     ? {
-        title: "Locklark · 浏览器原生确认",
+        title: "Passme · 浏览器原生确认",
         executable: host,
         actions,
         ...options,
       }
-    : { title_prefix: "Locklark Firefox acceptance", actions, ...options };
+    : { title_prefix: "Passme Firefox acceptance", actions, ...options };
   try {
     return JSON.parse(
       execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
@@ -615,7 +615,7 @@ async function openPopup() {
   const action = await command("POST", "/element", {
     using: "css selector",
     value:
-      'unified-extensions-item[extension-id="browser@locklark.local"] .unified-extensions-item-action-button, #browser_locklark_local-browser-action .unified-extensions-item-action-button',
+      'unified-extensions-item[extension-id="browser@passme.local"] .unified-extensions-item-action-button, #browser_passme_local-browser-action .unified-extensions-item-action-button',
   });
   await command("POST", "/element/" + action[elementKey] + "/click", {});
   await eventually(
@@ -752,7 +752,7 @@ try {
     readFileSync(join(root, "browser-extension/dist/firefox/manifest.json")),
   );
   assert(
-    manifest.browser_specific_settings?.gecko?.id === "browser@locklark.local",
+    manifest.browser_specific_settings?.gecko?.id === "browser@passme.local",
     "Fixed production Firefox identity required",
   );
   assert.deepEqual(
@@ -789,7 +789,7 @@ try {
       "-out",
       caCertificate,
       "-subj",
-      "/CN=Locklark temporary synthetic CA",
+      "/CN=Passme temporary synthetic CA",
       "-addext",
       "basicConstraints=critical,CA:TRUE",
       "-addext",
@@ -810,13 +810,13 @@ try {
       "-out",
       request,
       "-subj",
-      "/CN=login.locklark.test",
+      "/CN=login.passme.test",
     ],
     { stdio: "ignore" },
   );
   writeFileSync(
     extensions,
-    "subjectAltName=DNS:login.locklark.test\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    "subjectAltName=DNS:login.passme.test\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
   );
   execFileSync(
     "openssl",
@@ -850,7 +850,7 @@ try {
     [
       "-A",
       "-n",
-      "Locklark temporary synthetic certificate",
+      "Passme temporary synthetic certificate",
       "-t",
       "C,,",
       "-i",
@@ -865,7 +865,7 @@ try {
   const encodedProfile = execFileSync("python3", ["-c", zipSource, profile])
     .toString()
     .trim();
-  const extensionZip = join(state, "locklark-firefox.xpi");
+  const extensionZip = join(state, "passme-firefox.xpi");
   execFileSync("python3", [
     "-c",
     'import pathlib,sys,zipfile\nroot=pathlib.Path(sys.argv[1])\nwith zipfile.ZipFile(sys.argv[2],"w",zipfile.ZIP_DEFLATED) as archive:\n for path in root.rglob("*"):\n  if path.is_file(): archive.write(path,path.relative_to(root))',
@@ -873,7 +873,7 @@ try {
     extensionZip,
   ]);
   const html =
-    '<!doctype html><html><head><title>Locklark Firefox acceptance</title></head><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector("form").addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
+    '<!doctype html><html><head><title>Passme Firefox acceptance</title></head><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector("form").addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
   server = createServer(
     { key: readFileSync(key), cert: readFileSync(certificate) },
     (request, response) => {
@@ -881,18 +881,18 @@ try {
       response.end(
         request.url.startsWith("/otp")
           ? otpHTML.replace(
-              "Locklark OTP acceptance",
-              "Locklark Firefox acceptance · OTP",
+              "Passme OTP acceptance",
+              "Passme Firefox acceptance · OTP",
             )
           : html,
       );
     },
   );
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const origin = "https://login.locklark.test:" + server.address().port;
+  const origin = "https://login.passme.test:" + server.address().port;
   progress("create private synthetic fixture");
   execFileSync(
-    process.env.LOCKLARK_GO || "go",
+    process.env.PASSME_GO || "go",
     [
       "run",
       "./scripts/browser_acceptance_fixture",
@@ -959,7 +959,7 @@ try {
             String(debuggerPort),
           ],
           prefs: {
-            "network.dns.localDomains": "login.locklark.test",
+            "network.dns.localDomains": "login.passme.test",
             "network.trr.mode": 5,
             "network.proxy.type": 0,
             "browser.shell.checkDefaultBrowser": false,
@@ -1015,7 +1015,7 @@ try {
   });
   assert.equal(
     installed,
-    "browser@locklark.local",
+    "browser@passme.local",
     "Actual fixed Firefox add-on identity required",
   );
   await rdpConnect(debuggerPort);
@@ -1146,7 +1146,7 @@ try {
           geckodriverVersion: driverVersion,
           hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
           certificateVerification: true,
-          productionExtension: "browser@locklark.local",
+          productionExtension: "browser@passme.local",
           realAction: true,
         },
         null,
@@ -1181,13 +1181,13 @@ try {
     if (await popupEvaluate('return !!document.querySelector(".site-preferences:not([open]) > summary");'))
       await popupClick(".site-preferences > summary");
     await popupClick("#auto-login"); // Legacy manual-mode acceptance disables auto-submit.
-    if (!passkeyOnly && process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
+    if (!passkeyOnly && process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments") {
       progress("native approval and actual Firefox document-targeted fill");
       await select();
       await blank();
-      if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
+      if (process.env.PASSME_TEST_FAILURE_STAGE === "after-pair")
         throw Error(fixtureCanaries(fixture).join("\n"));
-      if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+      if (process.env.PASSME_TEST_FAILURE_STAGE === "page-arguments") {
         progress("driver-arguments-failure");
         await pageEvaluate(
           'document.querySelector("#username").value=arguments[0];document.querySelector("#password").value=arguments[1];throw Error("Controlled driver argument failure");',
@@ -1262,7 +1262,7 @@ try {
       input,
       inspect: () => input([], true, { inspect: true }),
       observe: vaultObserver({
-        go: process.env.LOCKLARK_GO || "go",
+        go: process.env.PASSME_GO || "go",
         root,
         env,
         state,
@@ -1426,7 +1426,7 @@ try {
         ),
     };
     if (!passkeyOnly) {
-      if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+      if (process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments")
         await acceptBrowserSave(acceptanceDriver);
       await acceptBrowserOTP(acceptanceDriver);
     }
@@ -1449,7 +1449,7 @@ try {
       progress("native-pair");
       input([{ click_label: "确认连接此扩展" }]);
     }
-    if (process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1") {
+    if (process.env.PASSME_TEST_FIREFOX_PASSKEY === "1") {
       progress("firefox-passkey");
       firefoxPasskey = await acceptFirefoxPasskey({
         origin,
@@ -1489,7 +1489,7 @@ try {
           geckodriverVersion: driverVersion,
           hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
           certificateVerification: true,
-          productionExtension: "browser@locklark.local",
+          productionExtension: "browser@passme.local",
           realAction: true,
         }
       : {
@@ -1498,7 +1498,7 @@ try {
       geckodriverVersion: driverVersion,
       hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
       certificateVerification: true,
-      productionExtension: "browser@locklark.local",
+      productionExtension: "browser@passme.local",
       realAction: true,
       realNativeUnlockAndPair: true,
       approvedFill: true,

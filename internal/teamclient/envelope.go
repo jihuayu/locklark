@@ -10,7 +10,7 @@ import (
 )
 
 const maxDeviceEnvelope = 4096
-const envelopeDomain = "locklark/teamclient/device-envelope/v1\x00"
+const envelopeDomain = "passme/teamclient/device-envelope/v1\x00"
 
 // ageEncoded and signingSeed are owned mutable buffers. The age library also
 // creates private objects/strings that Go does not offer a physical wipe API for.

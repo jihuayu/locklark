@@ -19,7 +19,7 @@ func (keyring) Store(id string, b []byte) error {
 	if !validID(id) || len(b) > mygo.MaxSecretSize {
 		return ErrUnavailable
 	}
-	if mygo.Secrets.Service("app.locklark.unlock.v1").Set(id, b) != nil {
+	if mygo.Secrets.Service("app.passme.unlock.v1").Set(id, b) != nil {
 		return ErrUnavailable
 	}
 	return nil
@@ -28,7 +28,7 @@ func (keyring) Load(id string) ([]byte, error) {
 	if !validID(id) {
 		return nil, ErrUnavailable
 	}
-	b, e := mygo.Secrets.Service("app.locklark.unlock.v1").Get(id)
+	b, e := mygo.Secrets.Service("app.passme.unlock.v1").Get(id)
 	if e != nil {
 		clear(b)
 		return nil, ErrUnavailable
@@ -39,7 +39,7 @@ func (keyring) Delete(id string) error {
 	if !validID(id) {
 		return ErrUnavailable
 	}
-	if mygo.Secrets.Service("app.locklark.unlock.v1").Delete(id) != nil {
+	if mygo.Secrets.Service("app.passme.unlock.v1").Delete(id) != nil {
 		return ErrUnavailable
 	}
 	return nil

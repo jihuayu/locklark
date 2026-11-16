@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func v2Fixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "v2.ll")
+	path := filepath.Join(t.TempDir(), "v2.pm")
 	key := bytes.Repeat([]byte{5}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

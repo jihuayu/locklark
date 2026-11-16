@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/ssh"
 )
@@ -542,7 +542,7 @@ func (r *sshStoreRequest) binding(key []byte) (string, error) {
 	if r == nil || r.sign == nil || !validSSHRequest(*r.sign) {
 		return "", ErrSSHSign
 	}
-	derived, e := hkdf.Key(sha256.New, key, nil, "locklark/personal/ssh-sign/key/v1", 32)
+	derived, e := hkdf.Key(sha256.New, key, nil, "passme/personal/ssh-sign/key/v1", 32)
 	if e != nil {
 		return "", ErrSSHSign
 	}

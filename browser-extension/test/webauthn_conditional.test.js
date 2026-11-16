@@ -96,7 +96,7 @@ function makeHarness(options = {}) {
       queueMicrotask(() => deliver(data));
       if (
         data &&
-        data.source === "locklark-capability-v1" &&
+        data.source === "passme-capability-v1" &&
         typeof data.conditional !== "boolean"
       ) {
         // Deferred mode holds the handshake open so a test can cancel while the
@@ -108,7 +108,7 @@ function makeHarness(options = {}) {
         if (replyCapability)
           queueMicrotask(() =>
             deliver({
-              source: "locklark-capability-v1",
+              source: "passme-capability-v1",
               id: data.id,
               conditional: extensionConditional,
             }),
@@ -204,21 +204,21 @@ function makeHarness(options = {}) {
       messages.filter(
         (m) =>
           m &&
-          m.source === "locklark-capability-v1" &&
+          m.source === "passme-capability-v1" &&
           typeof m.conditional !== "boolean",
       ),
     replyCapabilities: (value = extensionConditional) => {
       const held = heldCapabilityQueries.splice(0);
       for (const data of held)
         deliver({
-          source: "locklark-capability-v1",
+          source: "passme-capability-v1",
           id: data.id,
           conditional: value,
         });
     },
     listenerCount: (type) => (windowListeners[type] || []).length,
     requests: (type) =>
-      messages.filter((m) => m.source === "locklark-request-v1" && m.type === type),
+      messages.filter((m) => m.source === "passme-request-v1" && m.type === type),
     pagehide: () => {
       for (const listener of windowListeners.pagehide || []) listener({});
     },
@@ -274,7 +274,7 @@ test("conditional get never arms the 120s timer and ignores publicKey.timeout", 
   assert.equal(serialized.challenge, b64(Uint8Array.from([1, 2, 3, 4])));
   assert.equal(h.timers.size, 0, "no conditional timeout timer is armed");
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     credential: credentialPayload(),
   });
@@ -301,7 +301,7 @@ test("normal get keeps the baseline 120s timeout behaviour", async () => {
   assert.equal(JSON.parse(request.options).timeout, 5000);
   assert.equal(h.timers.size, 1);
   assert.equal([...h.timers.values()][0].ms, 5000);
-  h.deliver({ source: "locklark-result-v1", id: request.id, fallback: true });
+  h.deliver({ source: "passme-result-v1", id: request.id, fallback: true });
   assert.equal(await pending, "native-get");
 });
 
@@ -340,12 +340,12 @@ test("abort posts cancel, rejects AbortError and leaves no pending call", async 
   controller.abort();
   await assert.rejects(promise, /aborted|Abort/i);
   const cancel = h.messages.find(
-    (m) => m.source === "locklark-request-v1" && m.type === "cancel",
+    (m) => m.source === "passme-request-v1" && m.type === "cancel",
   );
   assert.ok(cancel);
   assert.equal(cancel.id, request.id);
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     credential: credentialPayload(),
   });
@@ -360,7 +360,7 @@ test("pagehide aborts the conditional wait and clears the pending call", async (
   h.pagehide();
   await assert.rejects(promise, /aborted|Abort/i);
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     credential: credentialPayload(),
   });
@@ -453,7 +453,7 @@ test("a forged page message can never inject account metadata into the credentia
   await flush();
   const request = h.requests("get")[0];
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     passkeys: [
       {
@@ -471,7 +471,7 @@ test("a forged page message can never inject account metadata into the credentia
   assert.equal(
     h.messages.some(
       (m) =>
-        m.source === "locklark-request-v1" &&
+        m.source === "passme-request-v1" &&
         Object.keys(m).sort().join(",") !==
           "conditional,id,options,source,type",
     ),
@@ -495,7 +495,7 @@ test("a capability query echoed back to MAIN cannot resolve the handshake before
   assert.equal(request.conditional, true);
   assert.equal(h.nativeGet.length, 0);
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     credential: credentialPayload(),
   });
@@ -635,7 +635,7 @@ test("a settled conditional get releases its listeners and ignores later aborts"
   assert.equal(controller.listenerCount, 1);
   assert.equal(h.listenerCount("pagehide"), 1);
   h.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: request.id,
     credential: credentialPayload(),
   });
@@ -740,7 +740,7 @@ test("a create list mixing ES256 with other algorithms stays with the extension 
   controller.abort();
   await assert.rejects(promise, /aborted|Abort/i);
   assert.equal(
-    h.messages.filter((m) => m.source === "locklark-request-v1" && m.type === "cancel")[0].id,
+    h.messages.filter((m) => m.source === "passme-request-v1" && m.type === "cancel")[0].id,
     request.id,
   );
   assert.equal(h.nativeCreate.length, 0);
@@ -769,7 +769,7 @@ test("enterprise or unknown attestation create delegates to the browser", async 
   await flush();
   const request = direct.requests("create")[0];
   assert.ok(request, "standard attestation values stay with the extension");
-  direct.deliver({ source: "locklark-result-v1", id: request.id, fallback: true });
+  direct.deliver({ source: "passme-result-v1", id: request.id, fallback: true });
   assert.equal(await promise, "native-create");
   assert.equal(direct.nativeCreate[0], supported);
 });
@@ -941,7 +941,7 @@ test("an absent RP hint defaults to the current host and stays eligible", async 
   const request = h.requests("get")[0];
   assert.ok(request, "an absent rpId means this host, so it stays local");
   assert.equal(JSON.parse(request.options).rpId, undefined);
-  h.deliver({ source: "locklark-result-v1", id: request.id, fallback: true });
+  h.deliver({ source: "passme-result-v1", id: request.id, fallback: true });
   assert.equal(await pending, "native-get");
   assert.equal(h.nativeGet[0], getOptions);
   const created = makeHarness({ extensionConditional: true });
@@ -955,7 +955,7 @@ test("an absent RP hint defaults to the current host and stays eligible", async 
   assert.ok(createRequest, "an absent rp.id means this host, so it stays local");
   assert.deepEqual(JSON.parse(createRequest.options).rp, { name: "Example" });
   created.deliver({
-    source: "locklark-result-v1",
+    source: "passme-result-v1",
     id: createRequest.id,
     fallback: true,
   });
@@ -1000,7 +1000,7 @@ test("canonical exact and parent-suffix RP hints stay local and abort cleanly", 
   await flush();
   const created = exact.requests("create")[0];
   assert.ok(created, "the exact host stays interceptable");
-  exact.deliver({ source: "locklark-result-v1", id: created.id, fallback: true });
+  exact.deliver({ source: "passme-result-v1", id: created.id, fallback: true });
   assert.equal(await pending, "native-create");
   assert.equal(exact.nativeCreate[0], exactOptions);
 });
@@ -1028,7 +1028,7 @@ test("foreign RP routing invents no related-origin capability or wire payload", 
   );
   assert.deepEqual(
     [...new Set(h.messages.map((m) => m.source))],
-    ["locklark-capability-v1"],
+    ["passme-capability-v1"],
     "the only traffic is the capability handshake",
   );
 });

@@ -1,7 +1,7 @@
 package gokeepasslib
 
 import (
-	w "github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	w "github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 type TimeDataOption func(*TimeData)

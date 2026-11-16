@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 func TestNativeBrowserAccessibilityEnvironment(t *testing.T) {

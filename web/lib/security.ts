@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-export const COOKIE = "locklark_management";
+export const COOKIE = "passme_management";
 const tokenPattern = /^[0-9a-f]{64}$/;
 const hash = (s: string) => createHash("sha256").update(s).digest();
 export type Session = { id: string; expires: number };

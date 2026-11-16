@@ -3,7 +3,7 @@ package preview
 import (
 	"context"
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 
 	"crypto/ed25519"
 	"encoding/json"

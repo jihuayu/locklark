@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/crypto"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/crypto"
 )
 
 // Constant enumerator for the inner random stream ID

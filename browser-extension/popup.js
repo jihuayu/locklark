@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const api = globalThis.browser || globalThis.chrome;
-  const core = globalThis.LocklarkCore || null;
+  const core = globalThis.PassmeCore || null;
   const vaultEnabled = document.body?.dataset?.vault === "1";
   let busy = false,
     renderedCandidates = "",
@@ -611,45 +611,45 @@
   function nativeCommand() {
     const ua = String(globalThis.navigator?.userAgent || "");
     if (/Firefox\//i.test(ua))
-      return "locklark-browser-register --browser firefox --host /path/to/locklark-browser-firefox";
+      return "passme-browser-register --browser firefox --host /path/to/passme-browser-firefox";
     if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua))
       return "";
-    return "locklark-browser-register --browser chromium --host /path/to/locklark-browser-chromium";
+    return "passme-browser-register --browser chromium --host /path/to/passme-browser-chromium";
   }
   const NATIVE_GUIDANCE = {
     missing: {
-      title: "未找到 Locklark 原生宿主",
+      title: "未找到 Passme 原生宿主",
       text: "桌面端可能未安装，或还没有注册浏览器集成。注册后点击重新连接。",
       command: true,
       unlock: false,
     },
     forbidden: {
       title: "浏览器拒绝了原生宿主",
-      text: "请重新运行注册命令，并确认清单指向 Locklark 原生宿主二进制。",
+      text: "请重新运行注册命令，并确认清单指向 Passme 原生宿主二进制。",
       command: true,
       unlock: false,
     },
     exited: {
       title: "原生宿主已退出",
-      text: "Locklark 可能已关闭或升级。重新连接会再次启动原生宿主。",
+      text: "Passme 可能已关闭或升级。重新连接会再次启动原生宿主。",
       command: false,
       unlock: true,
     },
     timeout: {
       title: "等待桌面解锁",
-      text: "Locklark 窗口可能已在后台打开；请在其中完成解锁，然后重新连接。",
+      text: "Passme 窗口可能已在后台打开；请在其中完成解锁，然后重新连接。",
       command: false,
       unlock: true,
     },
     outdated: {
       title: "需要升级桌面端",
-      text: "当前原生宿主缺少新版能力。请升级 Locklark 后重新连接。",
+      text: "当前原生宿主缺少新版能力。请升级 Passme 后重新连接。",
       command: false,
       unlock: false,
     },
     error: {
       title: "无法连接桌面端",
-      text: "请确认 Locklark 已安装并正在运行；也可以先在桌面应用中解锁。",
+      text: "请确认 Passme 已安装并正在运行；也可以先在桌面应用中解锁。",
       command: false,
       unlock: true,
     },

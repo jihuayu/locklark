@@ -1,4 +1,4 @@
-"""Test only: edit native entries without Locklark-specific field access APIs."""
+"""Test only: edit native entries without Passme-specific field access APIs."""
 import io
 import sys
 from pykeepass import PyKeePass
@@ -9,14 +9,14 @@ if len(key) != 32:
     raise ValueError("expected ephemeral fixture key")
 db = PyKeePass(source, keyfile=io.BytesIO(key))
 if len(sys.argv) == 2:
-    doc = next(e for e in db.entries if e.get_custom_property("Locklark.ID") == "doc")
+    doc = next(e for e in db.entries if e.get_custom_property("Passme.ID") == "doc")
     a, = doc.attachments
     assert db.payload.inner_header.binary[a.id].data == b"\x01RUZH", "lost protected attachment flag"
     sys.exit(0)
 target = sys.argv[2]
 twins = db.find_entries(title="same")
 assert len(twins) == 2 and twins[0].uuid != twins[1].uuid
-entries = {e.get_custom_property("Locklark.ID"): e for e in twins}
+entries = {e.get_custom_property("Passme.ID"): e for e in twins}
 login, doc = entries["login"], entries["doc"]
 assert login.password == "fixture password" and login.otp == "otpauth://totp/example?secret=AAAA"
 assert login._is_property_protected("Password") and login._is_property_protected("otp")

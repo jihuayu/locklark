@@ -1,6 +1,6 @@
 package personal
 
-import "github.com/jihuayu/locklark/internal/vault"
+import "github.com/jihuayu/passme/internal/vault"
 
 // V2CustomFieldInput is the mutation-only custom field input. A nil Value means
 // "preserve the durable value stored under this stable field id"; an explicit

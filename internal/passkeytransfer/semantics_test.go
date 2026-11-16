@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 // numericRevisionField rewrites one quoted revision digest as a JSON number, so

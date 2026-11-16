@@ -72,7 +72,7 @@ var depPattern = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]{0,47}/)?[a-z0-9][a-z
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$`)
 
 func ValidID(id string) bool {
-	return len(id) <= 113 && idPattern.MatchString(id) && !bytes.HasPrefix([]byte(id), []byte("locklark.builtin/"))
+	return len(id) <= 113 && idPattern.MatchString(id) && !bytes.HasPrefix([]byte(id), []byte("passme.builtin/"))
 }
 func hexValue(s string, n int) bool {
 	if len(s) != n*2 {
@@ -94,12 +94,12 @@ func publicKey(s string) (ed25519.PublicKey, error) {
 }
 func encoded(v any) []byte { b, _ := json.Marshal(v); return b }
 func Digest(raw []byte) string {
-	h := sha256.Sum256(append([]byte("locklark/plugin-package/digest/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/plugin-package/digest/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func (p Release) proof() []byte {
 	p.Signature = nil
-	return append([]byte("locklark/plugin-package/signature/v1\x00"), encoded(p)...)
+	return append([]byte("passme/plugin-package/signature/v1\x00"), encoded(p)...)
 }
 func (p Release) shape() bool {
 	if p.Schema != 1 || !ValidID(p.ID) || p.Version == 0 || p.Version > 1_000_000_000 || p.Runtime != "bun-1.4.4/bundled-v1" || len(p.Bundle) == 0 || len(p.Bundle) > 1<<20 || !utf8.Valid(p.Bundle) || bytes.IndexByte(p.Bundle, 0) >= 0 || len(p.Capabilities) != 1 || p.Capabilities[0] != "github.pulls.get" || p.Dependencies == nil || len(p.Dependencies) > 64 {

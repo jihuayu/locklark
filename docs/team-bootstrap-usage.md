@@ -6,12 +6,12 @@
 
 | 步骤 | 命令与参数 |
 | --- | --- |
-| 服务端准备身份 | `locklark-team-sync prepare-identity --profile P --public-out D` |
-| owner 核对服务身份并创建配置 | `locklark team create --profile O --anchor A --service D --expect-sequencer-fingerprint FP --pins-out T` |
-| owner 导出原初始化材料 | `locklark team export-initial --profile O --out I` |
-| 服务端核对 owner 并初始化 | `locklark-team-sync initialize --profile P --service D --trusted-pins T --expect-owner-fingerprint FP --artifact I --directory B --anchor S` |
-| 服务端启动 TLS | `locklark-team-sync serve-profile --profile P --service D --trusted-pins T --listen ADDR --certificate CERT --tls-key KEY` |
-| owner 首次同步并解密验证 | `locklark team fetch-initial --profile O --endpoint HTTPS_URL [--ca CA_FILE]` |
+| 服务端准备身份 | `passme-team-sync prepare-identity --profile P --public-out D` |
+| owner 核对服务身份并创建配置 | `passme team create --profile O --anchor A --service D --expect-sequencer-fingerprint FP --pins-out T` |
+| owner 导出原初始化材料 | `passme team export-initial --profile O --out I` |
+| 服务端核对 owner 并初始化 | `passme-team-sync initialize --profile P --service D --trusted-pins T --expect-owner-fingerprint FP --artifact I --directory B --anchor S` |
+| 服务端启动 TLS | `passme-team-sync serve-profile --profile P --service D --trusted-pins T --listen ADDR --certificate CERT --tls-key KEY` |
+| owner 首次同步并解密验证 | `passme team fetch-initial --profile O --endpoint HTTPS_URL [--ca CA_FILE]` |
 
 表中的字母是需替换的路径或值，不是默认文件名。`P/O` 是双方各自的私有配置，`A/S` 是彼此独立的检查点，`B` 是服务目录。`D/T/I` 分别是服务公开身份、owner 导出的可信 pins 和初始化材料。初始化不能从 `I` 自动接受信任根。
 
@@ -21,7 +21,7 @@
 
 ## 查询与恢复
 
-双方分别使用 `locklark team status --profile O` 和 `locklark-team-sync status --profile P` 查询本地记录；这些状态未经新的系统认证或远端校验。status 可用 `--pins-out` 或 `--public-out` 重新导出同一份公开信息，新输出仍拒绝覆盖。
+双方分别使用 `passme team status --profile O` 和 `passme-team-sync status --profile P` 查询本地记录；这些状态未经新的系统认证或远端校验。status 可用 `--pins-out` 或 `--public-out` 重新导出同一份公开信息，新输出仍拒绝覆盖。
 
 `reconcile-protection --profile …` 仅加载并核验原系统记录。服务端 `reconcile-initialize` 使用与原 initialize 完全相同的参数，只对账原操作。重复 export-initial 只返回与系统保护摘要匹配的原材料。
 

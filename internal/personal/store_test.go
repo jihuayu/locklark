@@ -5,8 +5,8 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"os"
 	"path/filepath"
@@ -15,7 +15,7 @@ import (
 )
 
 func TestReadOnlyOperationLeavesVaultCiphertextUnchanged(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owner.ll")
+	path := filepath.Join(t.TempDir(), "owner.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if e := Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -148,7 +148,7 @@ func readStoredItems(t *testing.T, path, pw string, key []byte) []vault.Item {
 }
 func TestPublishDoesNotClobberConcurrentCreator(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "owner.ll")
+	target := filepath.Join(dir, "owner.pm")
 	tmp := filepath.Join(dir, "source")
 	if err := os.WriteFile(tmp, []byte("new"), 0600); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestPublishDoesNotClobberConcurrentCreator(t *testing.T) {
 	}
 }
 func TestPersonalVaultLifecycle(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "local.ll")
+	path := filepath.Join(t.TempDir(), "local.pm")
 	key := bytes.Repeat([]byte{0x27}, 16)
 	pw := "synthetic owner passphrase"
 	value := "only-in-the-item-fixture"

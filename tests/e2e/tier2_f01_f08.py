@@ -322,7 +322,7 @@ def t2_f2_11(ctx):
 @e2e_test("T2_F3_01", 2, ["F3"], "Team sync serve rejects pipes, seed flags and wrong seeds")
 def t2_f3_01(ctx):
     ready = f3_team_sync_ready(ctx)
-    gate(ctx, "F3", ready, "locklark-team-sync binary is absent; serve refusal cannot be tested")
+    gate(ctx, "F3", ready, "passme-team-sync binary is absent; serve refusal cannot be tested")
     output = _team_sync_help(ctx)
     assert "team" in output.lower() or "usage" in output.lower()
 
@@ -365,7 +365,7 @@ def t2_f3_05(ctx):
 @e2e_test("T2_F4_01", 2, ["F4"], "Fingerprint mismatch or mistyped TRUST prompt aborts bootstrap")
 def t2_f4_01(ctx):
     ready = f4_team_cli_ready(ctx)
-    gate(ctx, "F4", ready, "locklark team bootstrap command is absent")
+    gate(ctx, "F4", ready, "passme team bootstrap command is absent")
     result = ctx.run_cli(["team", "status"])
     assert "unknown command" not in (result.stderr or "").lower()
 
@@ -781,7 +781,7 @@ def t2_f8_05(ctx):
 def t2_f8_06(ctx):
     ready = f8_desktop_v2_ready(ctx)
     gate(ctx, "F8", ready, "v2 generator policy validation is absent")
-    result = ctx.run_cli(["personal", "generate-login", "--file", str(ctx.temp_dir / "x.ll"), "--length", "8"])
+    result = ctx.run_cli(["personal", "generate-login", "--file", str(ctx.temp_dir / "x.pm"), "--length", "8"])
     assert result.returncode != 0
     assert "entropy below required minimum" in result.stderr.lower()
 

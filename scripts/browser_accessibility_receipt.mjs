@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
-export const SCHEMA = "locklark.browser-accessibility-receipt.v1";
+export const SCHEMA = "passme.browser-accessibility-receipt.v1";
 export const AXE_VERSION = "4.10.3";
 export const EXTENSION_ID = "geldnhjapnackobgknocomedmjgphnpe";
 export const VIEWPORTS = [
@@ -58,7 +58,7 @@ export function errorCode(error) { return error instanceof AccessibilityError ? 
 export function validateAxeVersion(version) { return version === AXE_VERSION; }
 
 export function resolveAxeSource(explicit, env = process.env) {
-  const source = explicit || env.LOCKLARK_TEST_AXE_SOURCE || "";
+  const source = explicit || env.PASSME_TEST_AXE_SOURCE || "";
   if (!source || !isAbsolute(source)) fail("axe-source-not-absolute");
   const path = resolve(source);
   if (!existsSync(path) || !statSync(path).isFile()) fail("axe-source-unavailable");

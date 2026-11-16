@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/cliprofile"
 )
 
 func TestInformationalCLIChild(t *testing.T) {
-	if os.Getenv("LOCKLARK_CLI_ACTIVE") != "informational-test" {
+	if os.Getenv("PASSME_CLI_ACTIVE") != "informational-test" {
 		return
 	}
 	for _, name := range []string{"GH_TOKEN", "DEEPSEEK_API_KEY", "HTTPS_PROXY", "PYTHONPATH", "LD_PRELOAD"} {

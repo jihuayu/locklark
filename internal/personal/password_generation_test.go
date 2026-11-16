@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/password"
+	"github.com/jihuayu/passme/internal/password"
 )
 
 func TestGeneratedPasswordEncryptedRoundTripAndAudit(t *testing.T) {
@@ -15,7 +15,7 @@ func TestGeneratedPasswordEncryptedRoundTripAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, master, key := filepath.Join(t.TempDir(), "generated.ll"), "synthetic-master", bytes.Repeat([]byte{6}, 16)
+	path, master, key := filepath.Join(t.TempDir(), "generated.pm"), "synthetic-master", bytes.Repeat([]byte{6}, 16)
 	if err = Create(path, master, key); err != nil {
 		t.Fatal(err)
 	}

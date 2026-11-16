@@ -8,9 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -387,7 +387,7 @@ func (s *Session) PerformPasskey(t PasskeyTarget, verified bool, g *MutationGate
 			Verified bool
 		}{t, verified})
 		mac := hmac.New(sha256.New, auth.identity.AuditEncryption)
-		mac.Write([]byte("locklark/passkey/v1\x00"))
+		mac.Write([]byte("passme/passkey/v1\x00"))
 		mac.Write(bound)
 		clear(bound)
 		link := hex.EncodeToString(mac.Sum(nil))

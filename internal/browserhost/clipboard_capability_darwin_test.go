@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
 )
 
 // TestDarwinDoesNotAdvertiseOrInstallNativeClipboardLease pins the truthful

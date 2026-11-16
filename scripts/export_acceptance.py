@@ -8,7 +8,7 @@ from pykeepass import PyKeePass
 def check(binary):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path, dest = str(root / "owner.ll"), str(root / "portable.kdbx")
+        path, dest = str(root / "owner.pm"), str(root / "portable.kdbx")
         pw, export_pw = "synthetic-master-password", "synthetic-export-password"
         _, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw), ("重新输入刚保存的 Secret Key", None)], issue=True)
         factors = [("主密码", pw), ("Secret Key", key)]

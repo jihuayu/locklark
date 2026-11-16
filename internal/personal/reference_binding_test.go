@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/reference"
+	"github.com/jihuayu/passme/internal/reference"
 )
 
 func TestBindPersonalReferenceMetadata(t *testing.T) {
@@ -60,7 +60,7 @@ func TestBindPersonalRejectsUnboundTargets(t *testing.T) {
 			case "cross-profile":
 				target = reference.Target{VaultID: "synthetic-vault", ItemID: "login-sample", FieldID: "password", Revision: "snapshot-signature-v1:" + strings.Repeat("a", 128)}
 			case "unknown-profile":
-				meta = []byte("locklark/synthetic/native-fixture/v1")
+				meta = []byte("passme/synthetic/native-fixture/v1")
 				want = ErrReferenceProfile
 			case "missing-revision":
 				delete(revs, items[1].ID)

@@ -36,7 +36,7 @@ func newTestHandler(t *testing.T) *testHandler {
 }
 func (h *testHandler) Identities(context.Context, Peer) ([]Identity, error) {
 	h.lists.Add(1)
-	return []Identity{{h.signer.PublicKey().Marshal(), "Locklark fixture"}}, nil
+	return []Identity{{h.signer.PublicKey().Marshal(), "Passme fixture"}}, nil
 }
 func (h *testHandler) Sign(ctx context.Context, r SignRequest) ([]byte, error) {
 	h.calls.Add(1)

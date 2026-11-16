@@ -57,14 +57,14 @@ def key_policy_metadata(returncode, raw):
             return "unknown"
         value = observed[-1].decode("ascii", errors="replace")
         return value if value in allowed else "unknown"
-    expected_class = b"org.locklark.android.DeviceKeyProtectionTest"
+    expected_class = b"org.passme.android.DeviceKeyProtectionTest"
     expected_test = b"realDeviceCapsuleUsesNonexportablePerOperationKey"
     counts = re.findall(rb"OK \(([0-9]{1,3}) tests?\)", raw)
     if not counts:
         counts = re.findall(rb"Tests run: ([0-9]{1,3})", raw)
-    levels = values("locklark_key_level")
+    levels = values("passme_key_level")
     level = levels[0].decode("ascii", errors="replace") if len(levels) == 1 else "unknown"
-    validity_values = values("locklark_key_auth_validity")
+    validity_values = values("passme_key_auth_validity")
     validity = "unknown"
     if validity_values and len(set(validity_values)) == 1:
         value = validity_values[0]
@@ -73,28 +73,28 @@ def key_policy_metadata(returncode, raw):
         elif re.fullmatch(rb"-1|[0-9]{1,5}", value) and -1 <= int(value) <= 86400:
             validity = str(int(value))
     exceptions = {kind.lower() for kind in AUTH_EXCEPTIONS} | {"assertion"}
-    exception = scalar("locklark_key_exception", exceptions, default="none", last=True)
+    exception = scalar("passme_key_exception", exceptions, default="none", last=True)
     if exception == "none":
         for marker, category in ((b"java.lang.AssertionError", "assertion"), (b"java.security.ProviderException", "provider"),
                                  (b"java.security.InvalidKeyException", "invalid_key"), (b"java.lang.IllegalStateException", "illegal_state")):
             if marker in raw:
                 exception = category; break
-    lines = values("locklark_key_source_line")
+    lines = values("passme_key_source_line")
     line = lines[-1] if lines else next(iter(re.findall(rb"DeviceKeyProtectionTest\.kt:([0-9]{1,5})\)", raw)), b"0")
     return {"exit_code":returncode if isinstance(returncode, int) and -255 <= returncode <= 255 else "outside-range",
             "complete_pass":complete_pass(returncode, raw, expected_tests=1),
             "test_count":int(counts[0]) if len(counts) == 1 else "unknown",
             "class_match":set(values("class")) == {expected_class}, "test_match":set(values("test")) == {expected_test},
             "key_level_count":min(len(levels), 1000), "key_level":level if level in KEY_LEVELS else "unknown",
-            "stage":scalar("locklark_key_stage", KEY_POLICY_STAGES, last=True),
-            "assertion":scalar("locklark_key_assertion", KEY_POLICY_ASSERTIONS, last=True),
+            "stage":scalar("passme_key_stage", KEY_POLICY_STAGES, last=True),
+            "assertion":scalar("passme_key_assertion", KEY_POLICY_ASSERTIONS, last=True),
             "exception":exception, "own_source_line":int(line) if re.fullmatch(rb"[0-9]{1,5}", line) else 0,
             "auth_validity":validity,
-            "fresh_denial":scalar("locklark_key_fresh_denial", {"none", "user_not_authenticated", "keystore_authentication_required"}),
+            "fresh_denial":scalar("passme_key_fresh_denial", {"none", "user_not_authenticated", "keystore_authentication_required"}),
             **{field:scalar(name, {"true", "false"}) for field, name in (
-                ("auth_required", "locklark_key_auth_required"), ("nonexportable", "locklark_key_nonexportable"),
-                ("cipher_exact", "locklark_key_cipher_exact"), ("auth_types_exact", "locklark_key_auth_types_exact"),
-                ("fresh_rejected", "locklark_key_fresh_rejected"))}}
+                ("auth_required", "passme_key_auth_required"), ("nonexportable", "passme_key_nonexportable"),
+                ("cipher_exact", "passme_key_cipher_exact"), ("auth_types_exact", "passme_key_auth_types_exact"),
+                ("fresh_rejected", "passme_key_fresh_rejected"))}}
 
 
 def key_policy_passed(metadata):
@@ -194,7 +194,7 @@ def validated_evidence(argument):
     canaries = json.loads(private_file(run / "canaries.json"))
     require(isinstance(canaries, list) and all(isinstance(value, str) and value for value in canaries))
     require(isinstance(fixture.get("master"), str) and bool(re.fullmatch(r"[A-Za-z0-9_-]+", fixture["master"])))
-    require(bool(re.fullmatch(r"LL1-[A-Z2-7]{26}", fixture.get("key", ""))))
+    require(bool(re.fullmatch(r"PM1-[A-Z2-7]{26}", fixture.get("key", ""))))
     require(fixture["master"] in canaries and fixture["key"] in canaries)
     items = fixture.get("items")
     require(isinstance(items, list) and len(items) == 2)
@@ -381,7 +381,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                 "key_policy":getattr(self, "key_policy_diagnostic", {}).copy()}
 
     def auth_log(self, pid):
-        return self.shell("logcat", "-d", "-v", "raw", "--pid", str(pid), "-s", "LocklarkAuth:I", "*:S").stdout
+        return self.shell("logcat", "-d", "-v", "raw", "--pid", str(pid), "-s", "PassmeAuth:I", "*:S").stdout
 
     def arm_auth_diagnostic(self):
         raw = self.shell("pidof", PACKAGE).stdout.strip()
@@ -560,7 +560,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.key_policy_diagnostic = key_policy_metadata(-1, b"")
         self.key_policy_diagnostic["stage"] = "instrument-command"
         result = self.command(["shell", "am", "instrument", "-w", "-r", "-e", "class",
-                               "org.locklark.android.DeviceKeyProtectionTest",
+                               "org.passme.android.DeviceKeyProtectionTest",
                                PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], timeout=180, required=False,
                               oracle="key-policy-instrumentation.txt")
         self.key_policy_diagnostic = key_policy_metadata(result.returncode, result.stdout)
@@ -573,13 +573,13 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
     def copy_and_reinstall(self):
         self.set_stage("copy-encrypted-state")
         self.shell("am", "force-stop", PACKAGE)
-        archive = self.command(["exec-out", "run-as", PACKAGE, "tar", "-C", "no_backup", "-cf", "-", "personal.ll", "device-unlock"],oracle="encrypted-transfer.tar",timeout=90).stdout
+        archive = self.command(["exec-out", "run-as", PACKAGE, "tar", "-C", "no_backup", "-cf", "-", "personal.pm", "device-unlock"],oracle="encrypted-transfer.tar",timeout=90).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
             files = [member for member in bundle.getmembers() if member.isfile()]
-            require(any(member.name == "personal.ll" for member in files))
+            require(any(member.name == "personal.pm" for member in files))
             for member in bundle.getmembers():
                 require(not member.issym() and not member.islnk())
-                require(member.name.rstrip("/") in {"personal.ll","device-unlock","device-unlock/installation"} or bool(re.fullmatch(r"device-unlock/[a-f0-9]{64}\.capsule",member.name)))
+                require(member.name.rstrip("/") in {"personal.pm","device-unlock","device-unlock/installation"} or bool(re.fullmatch(r"device-unlock/[a-f0-9]{64}\.capsule",member.name)))
         self.set_stage("reinstall")
         self.command(["uninstall",PACKAGE],timeout=120)
         self.command(["install", "-r",self.args.apk],timeout=180)
@@ -592,7 +592,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                                 input=archive,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
         self.controller.write(result.stdout + result.stderr); self.controller.flush()
         require(result.returncode == 0)
-        self.shell("run-as",PACKAGE,"test","-s","no_backup/personal.ll","-a","-s","no_backup/device-unlock/installation")
+        self.shell("run-as",PACKAGE,"test","-s","no_backup/personal.pm","-a","-s","no_backup/device-unlock/installation")
         self.launch(); self.visible("打开本地金库",class_name="android.widget.Button")
         self.observe_lifecycle()
         self.set_stage("copied-capsule-refusal")

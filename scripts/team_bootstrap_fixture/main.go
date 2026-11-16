@@ -25,10 +25,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/teamclient"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/teamclient"
+	"github.com/jihuayu/passme/internal/teamsync"
 	"golang.org/x/sys/unix"
 )
 

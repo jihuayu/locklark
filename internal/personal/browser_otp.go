@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const browserOTPAction = "item.browser.fill.otp-code"
@@ -41,7 +41,7 @@ func (t BrowserOTPTarget) valid() bool {
 	return t.Context.Valid() && idOK(t.ID) && digestOK(t.Revision) && t.ProfileVersion == 1
 }
 func (t BrowserOTPTarget) binding(key []byte) (string, error) {
-	derived, err := hkdf.Key(sha256.New, key, nil, "locklark/personal/browser-otp/key/v1", 32)
+	derived, err := hkdf.Key(sha256.New, key, nil, "passme/personal/browser-otp/key/v1", 32)
 	if err != nil {
 		return "", ErrBrowserOTP
 	}
@@ -52,7 +52,7 @@ func (t BrowserOTPTarget) binding(key []byte) (string, error) {
 	}
 	defer clear(raw)
 	m := hmac.New(sha256.New, derived)
-	m.Write([]byte("locklark/browser-otp/v1\x00"))
+	m.Write([]byte("passme/browser-otp/v1\x00"))
 	m.Write(raw)
 	return hex.EncodeToString(m.Sum(nil)), nil
 }

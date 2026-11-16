@@ -6,13 +6,13 @@
 
 ## 范围与边界
 
-Next.js 16.4.5 / React 19.3.1，概览、成员、设备、连接与安全页面，搜索及窄屏布局。Go `locklark-management` 从启动时固定的目录、可信 pins/policy/checkpoint 配置读取并验证历史与快照，再投影成员 ID、角色、设备 ID、检查点与读取时间。快照密文、字段、设备公钥/私钥均不进入网页 DTO。页面说明本地验签不证明远端最新，也不宣称同步完成。
+Next.js 16.4.5 / React 19.3.1，概览、成员、设备、连接与安全页面，搜索及窄屏布局。Go `passme-management` 从启动时固定的目录、可信 pins/policy/checkpoint 配置读取并验证历史与快照，再投影成员 ID、角色、设备 ID、检查点与读取时间。快照密文、字段、设备公钥/私钥均不进入网页 DTO。页面说明本地验签不证明远端最新，也不宣称同步完成。
 
 Go 仅监听 `127.0.0.1` 随机端口，独立 256-bit bearer，仅固定 `GET /v1/summary`；校验实际 loopback peer 与精确 Host，拒绝任何 Origin、请求体、查询路径、Forwarded、HEAD/OPTIONS 和其他操作。请求头/响应/时间/并发有界，错误固定、无部分元数据、无 CORS。每次都重新读取并验证目录，不返回旧缓存。
 
 可信配置在 Unix 要求当前用户拥有、不可被 group/other 写；沿原始与解析路径核验祖先所有者/可写性，可信 sticky 临时目录允许；拒绝最终 symlink，以非阻塞/不跟随链接方式打开后核对句柄。Windows 核验文件与祖先 owner/DACL，拒绝其他普通账户可写、改权限或替换已有路径；当前用户、SYSTEM、Administrators、TrustedInstaller 属于本机信任边界。管理员或当前 OS 用户的恶意程序不在本机访问隔离范围内。
 
-连接文件的全部父目录必须可信，禁止其他普通账户替换既有路径；读端在所有平台复用 Go 校验句柄、owner/DACL/目录链和私密读取权限。Node 启动器通过受限 helper 私有 stdout pipe 获取三字段连接记录，Windows 不再只依赖 mode 位。连接文件新建、不覆盖；Unix 0600，Windows 创建时设受保护当前用户 DACL。SIGINT/SIGTERM 清理与当前进程匹配的文件；强杀/崩溃可能留下旧文件，必须确认旧服务已结束后显式处理，不自动覆盖。Node 启动器只读取一次固定连接文件（开发模式需要 Go；可用 `LOCKLARK_MANAGEMENT_EXECUTABLE` 指定预编译 helper 的绝对路径），运行时仅用直接 `node:http` 请求固定 loopback endpoint；不使用环境代理、重定向、动态路径或重试。
+连接文件的全部父目录必须可信，禁止其他普通账户替换既有路径；读端在所有平台复用 Go 校验句柄、owner/DACL/目录链和私密读取权限。Node 启动器通过受限 helper 私有 stdout pipe 获取三字段连接记录，Windows 不再只依赖 mode 位。连接文件新建、不覆盖；Unix 0600，Windows 创建时设受保护当前用户 DACL。SIGINT/SIGTERM 清理与当前进程匹配的文件；强杀/崩溃可能留下旧文件，必须确认旧服务已结束后显式处理，不自动覆盖。Node 启动器只读取一次固定连接文件（开发模式需要 Go；可用 `PASSME_MANAGEMENT_EXECUTABLE` 指定预编译 helper 的绝对路径），运行时仅用直接 `node:http` 请求固定 loopback endpoint；不使用环境代理、重定向、动态路径或重试。
 
 浏览器使用独立 256-bit 一次性连接码（从启动起 5 分钟，最多 12 次尝试）交换 30 分钟随机会话，HttpOnly/Secure/SameSite=Strict host-only cookie；会话仅在单个常驻 Node 进程内有效，重启失效，退出撤销。写路由校验精确 Host/Origin/Fetch Metadata，登录体积/时长有界；代码不进 URL。cookie不按端口隔离，同一 OS 用户的其他本机进程属于上述本机信任边界。到期、读取失败、发起退出时清空已显示的元数据；退出响应丢失也不保留旧名单。
 
@@ -20,13 +20,13 @@ Go 仅监听 `127.0.0.1` 随机端口，独立 256-bit bearer，仅固定 `GET /
 
 ## 实际验证
 
-失败先行：`/tmp/locklark-validation/management-broker-red.log`（缺少 broker API）、`management-web-red.log`（缺少会话边界模块）。
+失败先行：`/tmp/passme-validation/management-broker-red.log`（缺少 broker API）、`management-web-red.log`（缺少会话边界模块）。
 
 本地通过：Go broker 单元/竞态、真实签名目录投影与 checkpoint 回滚拒绝；配置权限与连接文件不覆盖；TypeScript、8 项 Web 安全测试、生产 `next build`。使用真实合成签名目录及真实 Go broker → Next.js → 浏览器，Chrome for Testing 156（Playwright Chromium）和 Firefox 157 已跑通登录、一次码重放拒绝、成员/设备筛选、390px布局、目录损坏/恢复、断开服务端已撤销但响应丢失、cookie撤销、跨源/伪造Host/直接broker拒绝。不是 mock 数据源，也不是用户真实团队。
 
 截图在 `web/.test-state/`（忽略提交）：connect、overview、mobile-devices。自动扫描 SSR HTML、客户端 bundle、状态响应不含 runtime bearer/连接码/合成金库字段。增量修复后 Chromium 17.1s、Firefox 13.1s 的完整流程通过，包括真实 SIGTERM/SIGINT 清理和同路径重启。曾有一轮 Chromium 在 page fixture 冷启动阶段超时，测试上限改为 60 秒后重跑通过，没有更改请求/断言超时。
 
-PR #25 的 `4390f75` 已通过远端 Ubuntu、Windows 和 macOS 检查及 Luna/max 复审。CI run `42055665540` 的 Web job 在 `npx playwright install --with-deps chromium firefox` 下载 APT 字体和 codec 依赖约 20 分钟后被人工取消；日志反复出现 `http://azure.archive.ubuntu.com/ubuntu` 下载 `Ign`，尚未进入浏览器断言，不属于产品断言失败。取消日志保存在 `/tmp/locklark-validation/management-ci-install.log`。
+PR #25 的 `4390f75` 已通过远端 Ubuntu、Windows 和 macOS 检查及 Luna/max 复审。CI run `42055665540` 的 Web job 在 `npx playwright install --with-deps chromium firefox` 下载 APT 字体和 codec 依赖约 20 分钟后被人工取消；日志反复出现 `http://azure.archive.ubuntu.com/ubuntu` 下载 `Ign`，尚未进入浏览器断言，不属于产品断言失败。取消日志保存在 `/tmp/passme-validation/management-ci-install.log`。
 
 为此仅在 Web job 的一次性 runner 上，将 APT 传统源、deb822 源及 mirror list 中的上述 Azure HTTP URI 换为官方 `https://archive.ubuntu.com/ubuntu`，保留其他源及 Ubuntu 签名校验；HTTP/HTTPS 下载超时设为 30 秒、重试 2 次，完整 Playwright 浏览器和系统依赖安装步骤上限为 10 分钟。Chromium 与 Firefox 的真实端到端步骤继续执行。此 CI 配置更改只完成本地静态、Shell 语法与精确替换验证，尚无更改后的远端 CI 通过结论。
 
@@ -34,6 +34,6 @@ PR #25 的 `4390f75` 已通过远端 Ubuntu、Windows 和 macOS 检查及 Luna/m
 
 ## 尚未完成
 
-最终交付：PR #25 的 `f67f34edf4e0a0b8bb745911ff9e565c1e4312d7` 已经 Luna/max 增量复审，并在 run [42060380427](https://github.com/jihuayu/locklark/actions/runs/42060380427) 通过 Ubuntu Go（3m22s）、Windows Go（7m21s）、macOS desktop（48s）和 Web（1m28s，含 Chromium/Firefox）四项检查；squash 提交 `dcc52d04cd8bcf5e17e8d9e2aedd98c92056bacb` 已在远端 main。上面的“尚待 CI”描述保留为网络安装故障时的历史阶段，最终结果以本段为准。
+最终交付：PR #25 的 `f67f34edf4e0a0b8bb745911ff9e565c1e4312d7` 已经 Luna/max 增量复审，并在 run [42060380427](https://github.com/jihuayu/passme/actions/runs/42060380427) 通过 Ubuntu Go（3m22s）、Windows Go（7m21s）、macOS desktop（48s）和 Web（1m28s，含 Chromium/Firefox）四项检查；squash 提交 `dcc52d04cd8bcf5e17e8d9e2aedd98c92056bacb` 已在远端 main。上面的“尚待 CI”描述保留为网络安装故障时的历史阶段，最终结果以本段为准。
 
 公网多用户部署、团队创建/邀请/吊销的原生签署流程、远端密文同步与新鲜度、浏览器扩展配对/填充/保存/更新、Safari 实测及手机系统集成继续保留。这个本机只读浏览器界面不授予解锁、签署或字段读取权限。

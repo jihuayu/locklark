@@ -126,7 +126,7 @@ func (c *HIBPClient) Lookup(ctx context.Context, prefix string) (map[string]int,
 		return nil, ErrHIBP
 	}
 	req.Header.Set("Add-Padding", "true")
-	req.Header.Set("User-Agent", "Locklark-Watchtower/1.0")
+	req.Header.Set("User-Agent", "Passme-Watchtower/1.0")
 	req.Header.Set("Accept", "text/plain")
 	resp, err := c.client.Do(req)
 	if err != nil {

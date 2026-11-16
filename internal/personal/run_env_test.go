@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -24,11 +24,11 @@ func runRequest(t *testing.T) RunRequest {
 	if e != nil {
 		t.Fatal(e)
 	}
-	return RunRequest{Program: exe, Args: []string{"-test.run=^TestRunEnvChild$", "--", "", "two words", "$(echo hidden)", "a;b", "probe"}, Directory: t.TempDir(), Name: "LOCKLARK_TEST_VALUE", TimeoutSeconds: 10}
+	return RunRequest{Program: exe, Args: []string{"-test.run=^TestRunEnvChild$", "--", "", "two words", "$(echo hidden)", "a;b", "probe"}, Directory: t.TempDir(), Name: "PASSME_TEST_VALUE", TimeoutSeconds: 10}
 }
 
 func TestRunEnvChild(t *testing.T) {
-	value, ok := os.LookupEnv("LOCKLARK_TEST_VALUE")
+	value, ok := os.LookupEnv("PASSME_TEST_VALUE")
 	if !ok {
 		return
 	}
@@ -37,7 +37,7 @@ func TestRunEnvChild(t *testing.T) {
 	fmt.Fprint(os.Stderr, value)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != "LOCKLARK_TEST_VALUE" && !(runtime.GOOS == "windows" && strings.EqualFold(name, "SystemRoot")) {
+		if name != "PASSME_TEST_VALUE" && !(runtime.GOOS == "windows" && strings.EqualFold(name, "SystemRoot")) {
 			os.Exit(23)
 		}
 	}
@@ -57,7 +57,7 @@ func TestRunEnvChild(t *testing.T) {
 	if mode == "exit" {
 		os.Exit(7)
 	}
-	if os.Getenv("LOCKLARK_PARENT_ONLY") != "" {
+	if os.Getenv("PASSME_PARENT_ONLY") != "" {
 		os.Exit(20)
 	}
 	if value != "private-value\t\"quoted\"\n" {
@@ -112,7 +112,7 @@ func TestRunEnvIntentPrecedesProcess(t *testing.T) {
 		t.Fatal("missing intent")
 	}
 	encoded, _ := json.Marshal([]any{receipt, events})
-	for _, s := range []string{"private-value", request.Program, request.Directory, "LOCKLARK_TEST_VALUE"} {
+	for _, s := range []string{"private-value", request.Program, request.Directory, "PASSME_TEST_VALUE"} {
 		if bytes.Contains(encoded, []byte(s)) {
 			t.Fatal("private value/target exposed")
 		}
@@ -121,7 +121,7 @@ func TestRunEnvIntentPrecedesProcess(t *testing.T) {
 	if e != nil || rows[0].Revision != target.Revision {
 		t.Fatal("run changed revision", e)
 	}
-	backup := filepath.Join(t.TempDir(), "backup.llb")
+	backup := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, e := Backup(path, backup, "fixture", key)
 	if e != nil {
 		t.Fatal(e)
@@ -131,7 +131,7 @@ func TestRunEnvIntentPrecedesProcess(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer clear(fresh)
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	if e = Restore(backup, restored, "fixture", key, kit, fresh); e != nil {
 		t.Fatal("restore run history", e)
 	}
@@ -230,7 +230,7 @@ func TestRunEnvFailuresAndBinding(t *testing.T) {
 
 func TestRunEnvProcessAndValidation(t *testing.T) {
 	request := runRequest(t)
-	t.Setenv("LOCKLARK_PARENT_ONLY", "must-not-inherit")
+	t.Setenv("PASSME_PARENT_ONLY", "must-not-inherit")
 	t.Setenv("PATHEXT", ".POISON")
 	for _, mode := range []string{"probe", "exit", "sleep"} {
 		r := request

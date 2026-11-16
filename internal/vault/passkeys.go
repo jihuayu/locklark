@@ -6,15 +6,15 @@ import (
 	"encoding/json"
 	"io"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 // itemPasskeysSlot is the protected KDBX slot holding the versioned passkey
-// collection. It is deliberately distinct from the legacy "Locklark.Passkey"
+// collection. It is deliberately distinct from the legacy "Passme.Passkey"
 // single-record slot: KDBX readers that predate this slot reject unknown
 // protected fields, so a collection is never silently hidden inside the legacy
 // blob and never silently dropped by an older client.
-const itemPasskeysSlot = "Locklark.Passkeys"
+const itemPasskeysSlot = "Passme.Passkeys"
 
 // passkeyCollectionVersion is the only accepted collection envelope version.
 const passkeyCollectionVersion = 1

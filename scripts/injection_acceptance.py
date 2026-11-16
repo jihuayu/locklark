@@ -11,7 +11,7 @@ from personal_acceptance import invoke
 def check(binary):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path, dest = str(root / "owner.ll"), root / "private-output.json"
+        path, dest = str(root / "owner.pm"), root / "private-output.json"
         pw, secret = "synthetic-master-password", 'private-quoted"value\\with-tab\tand-unicode-密钥'
         _, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw), ("重新输入刚保存的 Secret Key", None)], issue=True)
         factors = [("主密码", pw), ("Secret Key", key)]
@@ -51,7 +51,7 @@ def check(binary):
         assert injections[0]["link"] == receipt["destination_digest"] == injections[1]["link"]
         assert injections[0]["session"] == receipt["session"]
         assert all("link" not in e for e in injections[2:])
-        assert not list(root.glob(".locklark-inject-*"))
+        assert not list(root.glob(".passme-inject-*"))
     print("PASS: explicit JSON injection, escaping, no overwrite, stale/trash refusal, private file and bound audit")
 
 

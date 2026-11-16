@@ -2,7 +2,7 @@
 
 后续更新：本记录对应 PR #44，已合并为 `main` `e2561be`，最终 head `faf4732` 六项 CI 成功。下文保留当批范围与历史排查；独立 Passkey 删除和跨条目多账号管理已在后续实现并完成本地三浏览器验收，最新边界与检查见 [Passkey 管理验收](passkey-management-validation.md)。
 
-日期：2026-11-07。起点 `main` `4abecb8e869a255920f0104ce69977d87150feef`；工作分支 `codex/plugin-completion`，[PR #44](https://github.com/jihuayu/locklark/pull/44)。本记录区分本地独立验收、组件契约、真实浏览器流程及最终远端 CI；合并回执以 [PR #44 的 Checks](https://github.com/jihuayu/locklark/pull/44/checks) 和 timeline 为准，旧 PR 的绿色检查不代替本次 head。
+日期：2026-11-07。起点 `main` `4abecb8e869a255920f0104ce69977d87150feef`；工作分支 `codex/plugin-completion`，[PR #44](https://github.com/jihuayu/passme/pull/44)。本记录区分本地独立验收、组件契约、真实浏览器流程及最终远端 CI；合并回执以 [PR #44 的 Checks](https://github.com/jihuayu/passme/pull/44/checks) 和 timeline 为准，旧 PR 的绿色检查不代替本次 head。
 
 ## 本批范围
 
@@ -48,7 +48,7 @@
 
 首轮远端 head `a80802b` 为 169 通过、36 pending、1 失败：T2_F7_05 没有收到拒绝响应。修正测试请求发出后立即关闭 stdin 的行为：有效请求明确等待完整回复，畸形/截断帧仍保留 EOF 检测；所有等待有截止时间，桌面及宿主探针清理自建进程组，避免包装进程退出后遗留子进程。新增回归覆盖迟到回复与 EOF 竞争、提前退出的包装进程、忽略 SIGTERM 的子进程、无权进程组保护。原拒绝断言保留，不把失败改为 pending。修正后主代理独立重跑 T2_F7_05 通过；worker 重跑全部 206 项仍为 170 通过、36 pending、0 失败（113.893 秒，复用冻结二进制，报告 `/workspace/plugin-completion-e2e-probes.json`）；最终远端结果以本 PR Checks 为准，不能沿用首轮其他平台的绿色结果。第二轮远端 `200658d` 同项仍然超时，因此 stdin 生命周期问题不能被视为已经证明的 CI 根因。进一步使 Linux GUI 探针自行创建 D-Bus/Xvfb 会话，并在 CI 清除前序步骤继承的 DISPLAY/Wayland/D-Bus 环境；保留显式提供且可用的用户会话。等待回复的截止时间和拒绝断言不放宽，缺少所需工具记 validation-blocked 失败，超时只输出退出码、字节数、帧类型和截断 stderr 等诊断。本地随后复现为 stdout 161 字节、0 个有效帧：服务控制台输出与 native stdout 混用，单纯补 D-Bus 不足以修复。通过固定 argv 和独立 fd 9 保留宿主协议管道，将启动器/辅助服务输出导向 stderr；fd 3 被真实 xvfb-run 占用并关闭，不能用于保留协议管道。未修改严格帧解析器；回归要求带公开服务横幅的启动器产生的 stdout 精确等于一个协议帧，横幅只在 stderr。主代理在自建 D-Bus/Xvfb 环境独立重跑 T2_F7_05 通过（12.166 秒），43 项检测回归全部通过（31.536 秒）。最终确认属于本 PR 最新 head 的 CI。Web CI 同时保存 JSON 报告 artifact（14 天）。
 
-复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/locklark-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
+复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/passme-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
 
 ## CLI 外部验收与后台遥测
 
@@ -60,7 +60,7 @@
 
 固定失败码及受限元数据不包含因子、token、参数、正文或异常文本；14 项控制器/隐私测试通过。修正后 worker 用新建 fixture 和官方 `gh 2.103.3` 完整运行四次（前两次固定 CPU 0）：每次退出 0、11 个阶段通过、临时目录和 device-id 残留均为 0。主代理独立重建 fixture 并再次完整通过，日志 `/workspace/plugin-cli-telemetry-independent.log`。修正前只读复核未证明控制器的正常拒绝路径存在竞态，四轮先前未复现的压力运行也未被当作根因证据。
 
-最终远端确认见 [PR #44](https://github.com/jihuayu/locklark/pull/44)；未取得同一最终 head 的六项成功结果前不合并。
+最终远端确认见 [PR #44](https://github.com/jihuayu/passme/pull/44)；未取得同一最终 head 的六项成功结果前不合并。
 
 ## 已实现与真实剩余范围的区分
 

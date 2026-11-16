@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/gateway"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/gateway"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
 func liveRequest() LivePullRequest {
-	return LivePullRequest{Repository: gateway.Repository{ID: "1445507532", Owner: "jihuayu", Name: "locklark"}, Number: 18, Address: "140.82.112.6"}
+	return LivePullRequest{Repository: gateway.Repository{ID: "1445507532", Owner: "jihuayu", Name: "passme"}, Number: 18, Address: "140.82.112.6"}
 }
 func TestLivePullIntentPrecedesUpstream(t *testing.T) {
 	path, key, target := revealFixture(t)
@@ -68,7 +68,7 @@ func TestLivePullIntentPrecedesUpstream(t *testing.T) {
 	if e != nil || rows[0].Revision != target.Revision {
 		t.Fatal("invoke changed item revision", e)
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, e := Backup(path, archive, "fixture", key)
 	if e != nil {
 		t.Fatal(e)
@@ -78,7 +78,7 @@ func TestLivePullIntentPrecedesUpstream(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer clear(fresh)
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	if e = Restore(archive, restored, "fixture", key, kit, fresh); e != nil {
 		t.Fatal("restore with live intent", e)
 	}

@@ -12,13 +12,13 @@ function prepareFields() {
   window.addEventListener("message", event => {
     if (event.source !== window || event.origin !== location.origin) return;
     const value = event.data;
-    if (value?.source === "locklark-request-v1" && value.type === "get" && value.conditional === true)
+    if (value?.source === "passme-request-v1" && value.type === "get" && value.conditional === true)
       window.conditionalBridgeFacts.requests++;
-    if (value?.source === "locklark-capability-v1")
+    if (value?.source === "passme-capability-v1")
       window.conditionalBridgeFacts.capability = value.conditional === true;
-    if (value?.source === "locklark-result-v1" && value.fallback === true)
+    if (value?.source === "passme-result-v1" && value.fallback === true)
       window.conditionalBridgeFacts.fallback = true;
-    if (String(value?.source || "").startsWith("locklark-") &&
+    if (String(value?.source || "").startsWith("passme-") &&
         ["passkeys", "candidates", "user_name", "display_name", "item_id", "revision"]
           .some(key => Object.hasOwn(value, key))) window.conditionalMetadataExposed = true;
   });
@@ -41,7 +41,7 @@ function readConditional() {
   return {
     result: window.conditionalResult, error: window.conditionalError,
     metadataExposed: window.conditionalMetadataExposed,
-    lightDOMChoices: document.querySelectorAll("[data-locklark-passkey-choice]").length,
+    lightDOMChoices: document.querySelectorAll("[data-passme-passkey-choice]").length,
   };
 }
 
@@ -54,7 +54,7 @@ export async function acceptConditionalSibling({
   focusPage, navigate, eventually, input, observe, phase,
 }) {
   const rp = new URL(origin).hostname;
-  assert.equal(rp, "login.locklark.test", "Controlled conditional RP required");
+  assert.equal(rp, "login.passme.test", "Controlled conditional RP required");
   const hint = id => id.slice(0, 6) + "…" + id.slice(-4);
   const firstLabel = "Synthetic user · passkey-test · " + hint(first.id);
   const secondLabel = "Synthetic user · passkey-test · " + hint(second.id);
@@ -142,7 +142,7 @@ export async function acceptConditionalPasskey({
   focusPage, navigate, eventually, input, observe, phase, inspectConditional, openPopup, reconnect,
 }) {
   const rp = new URL(origin).hostname;
-  assert.equal(rp, "login.locklark.test", "Controlled conditional RP required");
+  assert.equal(rp, "login.passme.test", "Controlled conditional RP required");
   const label = "Synthetic user · passkey-test";
   const nativeChoice = () => passkeyChoiceLabel({ rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: first.id });
   const noApproval = () => {
@@ -242,8 +242,8 @@ export async function acceptConditionalPasskey({
   const publicKey = createPublicKey({ key: Buffer.from(first.response.publicKey, "base64url"), format: "der", type: "spki" });
   assert(verify("sha256", Buffer.concat([auth, createHash("sha256").update(clientBytes).digest()]),
     publicKey, Buffer.from(response.response.signature, "base64url")), "Conditional RP rejected the signature");
-  if (process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) {
-    const server = createRequire(import.meta.url)(process.env.LOCKLARK_TEST_WEBAUTHN_SERVER);
+  if (process.env.PASSME_TEST_WEBAUTHN_SERVER) {
+    const server = createRequire(import.meta.url)(process.env.PASSME_TEST_WEBAUTHN_SERVER);
     const registration = await server.verifyRegistrationResponse({ response: first,
       expectedChallenge: JSON.parse(Buffer.from(first.response.clientDataJSON, "base64url")).challenge,
       expectedOrigin: origin, expectedRPID: rp, requireUserVerification: true });

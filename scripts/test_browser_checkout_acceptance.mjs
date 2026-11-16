@@ -10,8 +10,8 @@ import {
   chooseChildOrigin,
 } from "./browser_checkout_acceptance.mjs";
 
-const TOP_ORIGIN = "https://login.locklark.test:8443";
-const CARD_ORIGIN = "https://checkout.locklark.test:8443";
+const TOP_ORIGIN = "https://login.passme.test:8443";
+const CARD_ORIGIN = "https://checkout.passme.test:8443";
 const OTHER_ORIGIN = "https://checkout.other.test:8443";
 const TOP_LABEL = TOP_ORIGIN + "（当前页面）";
 const FRAME_SUFFIX = "（页面中的表单框架）";
@@ -22,7 +22,7 @@ function countMatches(text, pattern) {
 
 test("default checkout fixture keeps the original host and no sandbox", () => {
   const html = checkoutTopHTML(8443);
-  assert.match(html, /src="https:\/\/checkout\.locklark\.test:8443\/card"/);
+  assert.match(html, /src="https:\/\/checkout\.passme\.test:8443\/card"/);
   assert.equal(countMatches(html, /sandbox=/g), 0);
   assert.match(html, /id="checkout-card-frame"/);
   assert.match(html, /id="top-card-pin"/);
@@ -32,11 +32,11 @@ test("default checkout fixture keeps the original host and no sandbox", () => {
 test("cross-site and sandbox variants are allowlisted exactly", () => {
   const cross = checkoutTopHTML(8443, { host: "checkout.other.test" });
   assert.match(cross, /src="https:\/\/checkout\.other\.test:8443\/card"/);
-  assert.doesNotMatch(cross, /checkout\.locklark\.test/);
+  assert.doesNotMatch(cross, /checkout\.passme\.test/);
   assert.equal(countMatches(cross, /sandbox=/g), 0);
 
   const sandbox = checkoutTopHTML(8443, { sandbox: true });
-  assert.match(sandbox, /src="https:\/\/checkout\.locklark\.test:8443\/card"/);
+  assert.match(sandbox, /src="https:\/\/checkout\.passme\.test:8443\/card"/);
   assert.equal(countMatches(sandbox, /sandbox="allow-scripts"/g), 1);
   assert.doesNotMatch(sandbox, /allow-same-origin/);
 
@@ -50,7 +50,7 @@ test("cross-site and sandbox variants are allowlisted exactly", () => {
 });
 
 test("variant options and ephemeral ports are strictly bounded", () => {
-  for (const bad of ["evil.test", "", "checkout.locklark.test.evil"])
+  for (const bad of ["evil.test", "", "checkout.passme.test.evil"])
     assert.throws(
       () => checkoutTopHTML(8443, { host: bad }),
       /Unsupported checkout card host/,
@@ -69,7 +69,7 @@ test("variant options and ephemeral ports are strictly bounded", () => {
       /Ephemeral checkout HTTPS port required/,
     );
   assert.throws(
-    () => checkoutFrameOrigin("http://login.locklark.test:8443"),
+    () => checkoutFrameOrigin("http://login.passme.test:8443"),
     /Checkout top origin must be an ephemeral HTTPS origin/,
   );
   assert.equal(

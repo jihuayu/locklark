@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA = "locklark.browser-parity-evidence.v1"
+SCHEMA = "passme.browser-parity-evidence.v1"
 CHECKLIST_REL = "docs/browser-parity-checklist.md"
 EVIDENCE_REL = "docs/browser-parity-evidence.json"
 EXPECTED_ROW_COUNT = 65

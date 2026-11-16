@@ -5,8 +5,8 @@ import (
 	"io"
 	"io/fs"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const inspectionAction = "migration.inspect.1pux"

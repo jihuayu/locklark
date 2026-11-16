@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 const testNow = int64(1700000000)
@@ -128,7 +128,7 @@ func hexID(fill byte) string {
 // personal-layer HMAC revision digests. It is deliberately not a counter: the
 // codec must transport these strings byte-for-byte.
 func opaqueRevision(label string) string {
-	d := sha256.Sum256([]byte("locklark/passkey-transfer/test/revision\x00" + label))
+	d := sha256.Sum256([]byte("passme/passkey-transfer/test/revision\x00" + label))
 	return hex.EncodeToString(d[:])
 }
 

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 export function proxy(request: NextRequest) {
-  const origin = process.env.LOCKLARK_WEB_ORIGIN;
+  const origin = process.env.PASSME_WEB_ORIGIN;
   if (!origin || request.headers.get("host") !== new URL(origin).host)
     return new NextResponse("Forbidden", { status: 403 });
   const nonce = randomBytes(24).toString("base64");

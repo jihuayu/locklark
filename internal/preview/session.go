@@ -15,14 +15,14 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/edwards25519"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 	bolt "go.etcd.io/bbolt"
 )
 
 var errSession = errors.New("invalid, unregistered or inactive agent session")
 
-const proofDomain = "locklark/agent-request/v1\x00"
-const registryDomain = "locklark/agent-registration/v1\x00"
+const proofDomain = "passme/agent-request/v1\x00"
+const registryDomain = "passme/agent-registration/v1\x00"
 
 var registryBucket = []byte("agent-sessions-v1")
 
@@ -36,7 +36,7 @@ type registryHead struct {
 }
 
 func headMessage(n uint64, h [32]byte) []byte {
-	msg := binary.BigEndian.AppendUint64([]byte("locklark/agent-head/v1\x00"), n)
+	msg := binary.BigEndian.AppendUint64([]byte("passme/agent-head/v1\x00"), n)
 	return append(msg, h[:]...)
 }
 

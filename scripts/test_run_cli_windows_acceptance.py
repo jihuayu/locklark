@@ -14,7 +14,7 @@ import run_cli_windows_acceptance as acceptance
 class WindowsCLIOracleTests(unittest.TestCase):
     def test_approved_diagnosis_returns_only_fixed_subchecks(self):
         result={"exit_code":95,"timed_out":False,"console_available":True,"console_mode_before":7,"console_mode_after":7}
-        error=b"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code=known-folder-parent\nowned Windows CLI fixture failed at artifact-security\nPrivateSyntheticValue"
+        error=b"PASSME_WINDOWS_CHILD_ROOT=REFUSED code=known-folder-parent\nowned Windows CLI fixture failed at artifact-security\nPrivateSyntheticValue"
         observed=acceptance.approved_diagnosis(result,{},b"",error,"missing")
         self.assertEqual(observed["cli_exit_code"],95)
         self.assertEqual(observed["child_record"],"missing")

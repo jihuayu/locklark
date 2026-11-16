@@ -21,11 +21,11 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/sshagent"
 	"github.com/oneo-me/onevra/source/shells/plain"
 	"github.com/oneo-me/onevra/source/theme"
 )
@@ -663,7 +663,7 @@ func (a *App) View(c *ui.Context) {
 	ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(14).Children(func() {
 		if !a.onevra.shellActive {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
-				ui.Text(c, "LOCKLARK").FontSize(22).Bold().TextColor(t.Text)
+				ui.Text(c, "PASSME").FontSize(22).Bold().TextColor(t.Text)
 				ui.Text(c, "本地金库").TextColor(t.TextMuted).Grow(1)
 				if a.browser == nil {
 					ui.Button(c, "快捷搜索").OnClick(a.showQuickSearch)
@@ -729,7 +729,7 @@ func (a *App) lockView(c *ui.Context) {
 				})
 			}
 		}
-		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
+		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("PM1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
 		if a.create {
 			ui.Row(c).Gap(8).Children(func() {
 				ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVaultFile)
@@ -1019,7 +1019,7 @@ func (a *App) transferView(c *ui.Context) {
 					})
 				})
 			})
-			ui.Text(c, "1Password 8：选择金库 → 导出 → 1PUX；Locklark 不接收 1Password 主密码或 Secret Key。").FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "1Password 8：选择金库 → 导出 → 1PUX；Passme 不接收 1Password 主密码或 Secret Key。").FontSize(12).TextColor(t.TextMuted)
 			ui.Text(c, "1Password 7 的 .opvault 目录不能直接导入；请先导出为 .1pux。").FontSize(12).TextColor(t.TextMuted)
 			ui.Text(c, "1PUX 是未加密导出文件；导入完成后请安全删除。").FontSize(12).TextColor(t.Warning)
 			if a.report != "" {
@@ -1083,7 +1083,7 @@ func Run() error {
 	}
 	a.startBackgroundLoop()
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
-	mygo.App.SetName("Locklark")
+	mygo.App.SetName("Passme")
 	mygo.App.WhenReady(func() {
 		if classicLayoutRequested() {
 			// Keep the classic layout on its original window and header. The
@@ -1091,7 +1091,7 @@ func Run() error {
 			// "安全设置" controls, which breaks accessibility and the native
 			// acceptance driver's unique-label requirement.
 			a.win = mygo.NewWindow(mygo.WindowOptions{
-				Title:     "Locklark · 本地金库",
+				Title:     "Passme · 本地金库",
 				Width:     1100,
 				Height:    820,
 				MinWidth:  900,
@@ -1101,12 +1101,12 @@ func Run() error {
 		} else {
 			a.onevra.shellActive = true
 			shell := plain.NewShell(plain.ShellOptions{
-				Title:         "Locklark · 本地金库",
+				Title:         "Passme · 本地金库",
 				Width:         1240,
 				Height:        820,
 				MinWidth:      980,
 				MinHeight:     680,
-				StateKey:      "locklark.main",
+				StateKey:      "passme.main",
 				Theme:         theme.Onevra,
 				HeaderLeading: a.onevraHeaderLeading,
 				HeaderActions: a.onevraHeaderActions,
@@ -1134,7 +1134,7 @@ func Run() error {
 		}
 		var pngIcon bytes.Buffer
 		_ = png.Encode(&pngIcon, icon)
-		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
+		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "passme", Icon: pngIcon.Bytes(), ToolTip: "Passme", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
 	})
 	err := mygo.App.Run()
 	a.stopBackgroundLoop()
@@ -1213,17 +1213,16 @@ func (a *App) securityView(c *ui.Context) {
 	})
 }
 
-
 func (a *App) chooseVault() {
 	win, create := a.win, a.create
 	a.run(func() outcome {
 		var path string
 		var e error
 		if create {
-			path, e = mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: win, Title: "创建金库", DefaultPath: "personal.ll", Filters: []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}}})
+			path, e = mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: win, Title: "创建金库", DefaultPath: "personal.pm", Filters: []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}}})
 		} else {
 			var paths []string
-			paths, e = mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择金库", Filters: []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}}})
+			paths, e = mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择金库", Filters: []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}}})
 			if len(paths) == 1 {
 				path = paths[0]
 			}

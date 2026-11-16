@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestConnectionMetadataRefusalKeepsPairing(t *testing.T) {
@@ -72,7 +72,7 @@ func (b *memoryPipe) responses(t *testing.T) []Response {
 func reqID(n int) string { return fmt.Sprintf("%032x", n) }
 func paired(t *testing.T) (*Connection, *personal.Session, *memoryPipe, Request) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "host.ll")
+	path := filepath.Join(t.TempDir(), "host.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

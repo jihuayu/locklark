@@ -2,15 +2,15 @@ import { spawn, execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile, mkdtemp, access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-const state = await mkdtemp(join(tmpdir(), "locklark-web-test-"));
+const state = await mkdtemp(join(tmpdir(), "passme-web-test-"));
 const root = resolve("..");
-const go = process.env.LOCKLARK_GO || "go";
+const go = process.env.PASSME_GO || "go";
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 const binary = join(
   state,
   process.platform === "win32" ? "management.exe" : "management",
 );
-execFileSync(go, ["build", "-o", binary, "./cmd/locklark-management"], {
+execFileSync(go, ["build", "-o", binary, "./cmd/passme-management"], {
   cwd: root,
   env,
   stdio: "inherit",
@@ -91,7 +91,7 @@ const web = spawn(process.execPath, ["scripts/serve.mjs"], {
   env: {
     ...process.env,
     PORT: "3417",
-    LOCKLARK_MANAGEMENT_CONNECTION: join(state, "connection.json"),
+    PASSME_MANAGEMENT_CONNECTION: join(state, "connection.json"),
   },
   stdio: ["ignore", "pipe", "inherit"],
 });

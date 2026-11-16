@@ -83,7 +83,7 @@ class RefusalTests(unittest.TestCase):
 
     def test_refuses_changed_firefox_identity(self):
         support.patch_build(
-            self.root, 'id: "browser@locklark.local"', 'id: "other@example.invalid"'
+            self.root, 'id: "browser@passme.local"', 'id: "other@example.invalid"'
         )
         support.commit(self.root)
         self.refuse_prepare("firefox")

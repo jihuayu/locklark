@@ -2,30 +2,30 @@
 import PackageDescription
 
 let package = Package(
-    name: "LocklarkSafari",
+    name: "PassmeSafari",
     platforms: [.macOS(.v13)],
     products: [
         .library(
-            name: "LocklarkSafariShared",
-            targets: ["LocklarkSafariShared"]
+            name: "PassmeSafariShared",
+            targets: ["PassmeSafariShared"]
         )
     ],
     targets: [
         .target(
-            name: "LocklarkSafariShared",
+            name: "PassmeSafariShared",
             path: "Shared/Sources"
         ),
         // Standalone native probe: verifies the SIGPIPE policy under the
         // default disposition in its own process, never in the XCTest host.
         .executableTarget(
-            name: "LocklarkSafariSIGPipeProbe",
-            dependencies: ["LocklarkSafariShared"],
+            name: "PassmeSafariSIGPipeProbe",
+            dependencies: ["PassmeSafariShared"],
             path: "TestProbe/Sources"
         ),
         .testTarget(
-            name: "LocklarkSafariSharedTests",
-            dependencies: ["LocklarkSafariShared"],
-            path: "Tests/LocklarkSafariSharedTests"
+            name: "PassmeSafariSharedTests",
+            dependencies: ["PassmeSafariShared"],
+            path: "Tests/PassmeSafariSharedTests"
         ),
     ]
 )

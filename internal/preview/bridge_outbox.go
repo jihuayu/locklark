@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 )
 
 type outbox struct {
@@ -21,7 +21,7 @@ type outbox struct {
 
 func mac(seed []byte, v any) []byte {
 	m := hmac.New(sha256.New, seed)
-	m.Write(message("locklark/private-outbox/v1\x00", v))
+	m.Write(message("passme/private-outbox/v1\x00", v))
 	return m.Sum(nil)
 }
 func (o outbox) signature(seed []byte) []byte { o.MAC = nil; return mac(seed, o) }

@@ -43,11 +43,11 @@ def check(binary):
                     "runtime": "bun-1.4.4/bundled-v1", "capabilities": ["github.pulls.get"],
                     "dependencies": [{"name": "synthetic-dependency", "version": "1.2.3", "sha256": hashlib.sha256(b"synthetic source").hexdigest()}],
                     "bundle": base64.b64encode(("await Bun.write(" + json.dumps(str(sentinel)) + ", 'executed');").encode()).decode(), "signature": None}
-            data["signature"] = base64.b64encode(eddsa.new(key, "rfc8032").sign(b"locklark/plugin-package/signature/v1\0" + encoded(data))).decode()
+            data["signature"] = base64.b64encode(eddsa.new(key, "rfc8032").sign(b"passme/plugin-package/signature/v1\0" + encoded(data))).decode()
             raw = encoded(data)
             path = root / (str(version) + ".llplugin")
             path.write_bytes(raw)
-            return path, hashlib.sha256(b"locklark/plugin-package/digest/v1\0" + raw).hexdigest()
+            return path, hashlib.sha256(b"passme/plugin-package/digest/v1\0" + raw).hexdigest()
 
         def install(parent, path, digest, ok=True):
             return invoke("install", "--file", catalog, "--parent", parent, "--pins", pins_file, "--package", path,

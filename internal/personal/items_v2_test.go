@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const v2OTPConfig = "otpauth://totp/Example?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&period=3600&digits=6"
@@ -22,7 +22,7 @@ const v2OTPConfig = "otpauth://totp/Example?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3
 func v2Session(t *testing.T) (*Session, string, []byte) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "v2.ll")
+	path := filepath.Join(dir, "v2.pm")
 	key := bytes.Repeat([]byte{41}, 16)
 	if err := Create(path, "v2-fixture", key); err != nil {
 		t.Fatal(err)

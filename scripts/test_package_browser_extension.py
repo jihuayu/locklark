@@ -26,7 +26,7 @@ import package_browser_extension as packaging  # noqa: E402
 class PreparationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-package-test-")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="passme-package-test-")
         cls.root = Path(cls.temporary.name)
         cls.chromium_out = cls.root / "chromium-out"
         cls.firefox_out = cls.root / "firefox-out"
@@ -54,7 +54,7 @@ class PreparationTests(unittest.TestCase):
         return code
 
     def _artifact(self, product, output):
-        name = f"locklark-browser-extension-{product}-unsigned.zip"
+        name = f"passme-browser-extension-{product}-unsigned.zip"
         return output / name
 
     def _manifest(self, product):
@@ -65,14 +65,14 @@ class PreparationTests(unittest.TestCase):
         first = self._artifact("chromium", self.chromium_out).read_bytes()
         first_receipt = (
             self.chromium_out
-            / "locklark-browser-extension-chromium-unsigned.receipt.json"
+            / "passme-browser-extension-chromium-unsigned.receipt.json"
         ).read_bytes()
         second_out = self.root / "chromium-repeat"
         second_out.mkdir()
         self._run_main("chromium", second_out)
         second = self._artifact("chromium", second_out).read_bytes()
         second_receipt = (
-            second_out / "locklark-browser-extension-chromium-unsigned.receipt.json"
+            second_out / "passme-browser-extension-chromium-unsigned.receipt.json"
         ).read_bytes()
         self.assertEqual(first, second)
         self.assertEqual(first_receipt, second_receipt)
@@ -85,7 +85,7 @@ class PreparationTests(unittest.TestCase):
             first_receipt,
             (
                 self.chromium_out
-                / "locklark-browser-extension-chromium-unsigned.receipt.json"
+                / "passme-browser-extension-chromium-unsigned.receipt.json"
             ).read_bytes(),
         )
 
@@ -288,8 +288,8 @@ class PreparationTests(unittest.TestCase):
             "APPDATA": str(sentinel),
             "LOCALAPPDATA": str(sentinel),
             "XDG_CONFIG_HOME": str(sentinel),
-            "LOCKLARK_PROFILE": str(sentinel),
-            "LOCKLARK_VAULT": str(sentinel / "vault.kdbx"),
+            "PASSME_PROFILE": str(sentinel),
+            "PASSME_VAULT": str(sentinel / "vault.kdbx"),
         }
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
             packaging.subprocess, "run", wraps=subprocess.run
@@ -304,7 +304,7 @@ class PreparationTests(unittest.TestCase):
             for name in archive.namelist():
                 self.assertNotIn(str(sentinel), name)
         receipt = (
-            output / "locklark-browser-extension-chromium-unsigned.receipt.json"
+            output / "passme-browser-extension-chromium-unsigned.receipt.json"
         ).read_text(encoding="utf-8")
         self.assertNotIn(str(sentinel), receipt)
         self.assertNotIn("vault.kdbx", receipt)
@@ -333,11 +333,11 @@ class PreparationTests(unittest.TestCase):
         tampered = self.root / "tampered-output"
         tampered.mkdir()
         for name in (
-            "locklark-browser-extension-chromium-unsigned.zip",
-            "locklark-browser-extension-chromium-unsigned.receipt.json",
+            "passme-browser-extension-chromium-unsigned.zip",
+            "passme-browser-extension-chromium-unsigned.receipt.json",
         ):
             shutil.copyfile(self.chromium_out / name, tampered / name)
-        receipt_path = tampered / "locklark-browser-extension-chromium-unsigned.receipt.json"
+        receipt_path = tampered / "passme-browser-extension-chromium-unsigned.receipt.json"
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         receipt["artifact"]["sha256"] = "0" * 64
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
@@ -379,7 +379,7 @@ class PreparationTests(unittest.TestCase):
         receipt = json.loads(
             (
                 self.chromium_out
-                / "locklark-browser-extension-chromium-unsigned.receipt.json"
+                / "passme-browser-extension-chromium-unsigned.receipt.json"
             ).read_text(encoding="utf-8")
         )
         self.assertTrue(receipt["unsigned"])
@@ -389,8 +389,8 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(
             {entry.name for entry in self.chromium_out.iterdir()},
             {
-                "locklark-browser-extension-chromium-unsigned.zip",
-                "locklark-browser-extension-chromium-unsigned.receipt.json",
+                "passme-browser-extension-chromium-unsigned.zip",
+                "passme-browser-extension-chromium-unsigned.receipt.json",
             },
         )
 

@@ -17,8 +17,8 @@ import native_acceptance_contract as contract
 LABEL = "确认连接此扩展"
 OTHER_LABEL = "解锁"
 PRIVATE = "synthetic-private-canary-value"
-TITLE = "Locklark · 浏览器原生确认"
-EXE = "/opt/locklark/test-browser"
+TITLE = "Passme · 浏览器原生确认"
+EXE = "/opt/passme/test-browser"
 WINDOW = {"id": 0x200003, "pid": 4242, "title": TITLE, "executable": EXE, "trusted": True,
           "visible": True, "onscreen": True, "secure": False,
           "bounds": {"x": 100, "y": 100, "width": 800, "height": 600},
@@ -130,9 +130,9 @@ class RequestValidationTests(unittest.TestCase):
 
     def test_title_prefix_popup_form_and_preserve_focus(self):
         plan = contract.parse_request(json.dumps(
-            {"title_prefix": "Locklark acceptance", "actions": [{"key": "Escape"}],
+            {"title_prefix": "Passme acceptance", "actions": [{"key": "Escape"}],
              "preserve_focus": True}))
-        self.assertEqual(plan["title_prefix"], "Locklark acceptance")
+        self.assertEqual(plan["title_prefix"], "Passme acceptance")
         self.assertEqual(plan["actions"][0]["key"], ("Escape",))
 
     def test_unknown_request_and_action_keys_rejected(self):
@@ -161,7 +161,7 @@ class RequestValidationTests(unittest.TestCase):
             {"title": TITLE, "executable": "relative/browser"},
             {"title": TITLE, "actions": "click"},
             {"title": TITLE, "inspect": "yes"},
-            {"title": TITLE, "title_prefix": "Locklark"},
+            {"title": TITLE, "title_prefix": "Passme"},
             {"actions": [{"click_label": LABEL}]},
         ]
         for document in cases:
@@ -316,9 +316,9 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result["clicks"][0]["evidence"], "posted")
 
     def test_preserve_focus_never_steals_focus(self):
-        adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")], focus=999)
+        adapter = SpyAdapter(windows=[dict(WINDOW, title="Passme acceptance popup")], focus=999)
         self.assert_refused(adapter, "preserve-focus-lost", title=None,
-                            title_prefix="Locklark acceptance", preserve_focus=True)
+                            title_prefix="Passme acceptance", preserve_focus=True)
         self.assertEqual(adapter.activations, 0)
 
     def test_capability_refusal_precedes_every_observation(self):
@@ -509,14 +509,14 @@ class OutputSafetyTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, out)
 
     def test_success_output_contains_no_request_title_or_prefix(self):
-        adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")])
+        adapter = SpyAdapter(windows=[dict(WINDOW, title="Passme acceptance popup")])
         with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
             status, out, err = self.run_driver(
                 adapter,
-                request(title=None, title_prefix="Locklark acceptance").encode())
+                request(title=None, title_prefix="Passme acceptance").encode())
         self.assertEqual(status, 0, err)
         self.assertNotIn("title", json.loads(out))
-        self.assertNotIn("Locklark acceptance", out)
+        self.assertNotIn("Passme acceptance", out)
 
     def test_unknown_platform_name_in_failure_line_is_neutralised(self):
         line = contract.failure_line(contract.ContractError("request-invalid"), PRIVATE, PRIVATE, PRIVATE)

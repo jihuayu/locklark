@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Owned passkey-transfer acceptance driver.
 
-This script builds the actual standalone ``locklark`` CLI and drives the real
+This script builds the actual standalone ``passme`` CLI and drives the real
 ``personal passkey-invite/export/plan/import`` commands under a genuine
 controlling PTY.  The two-factor password and Secret Key are written to the
 hidden console only after each prompt has been printed (so terminal raw mode is
@@ -87,7 +87,7 @@ def credential_id(value):
 
 def format_secret(raw: bytes) -> str:
     require(len(raw) == 16, "secret_length")
-    return "LL1-" + base64.b32encode(raw).decode("ascii").rstrip("=")
+    return "PM1-" + base64.b32encode(raw).decode("ascii").rstrip("=")
 
 
 def selection_document(item_id: str, parent_revision: str, cred_id: str, child_revision: str) -> bytes:
@@ -196,7 +196,7 @@ def make_private_root(artifacts: str | None) -> Path:
         os.chmod(parent, 0o700)
         root = Path(tempfile.mkdtemp(prefix="passkey-transfer-", dir=parent))
     else:
-        root = Path(tempfile.mkdtemp(prefix="locklark-passkey-transfer-"))
+        root = Path(tempfile.mkdtemp(prefix="passme-passkey-transfer-"))
     os.chmod(root, 0o700)
     for name in ("bin", "home", "tmp"):
         (root / name).mkdir(mode=0o700)
@@ -269,10 +269,10 @@ def build_products(root: Path) -> tuple[Path, Path]:
     go = go_binary()
     env = dict(os.environ)
     env.update({"GOPROXY": "off", "GOTOOLCHAIN": "local", "GOFLAGS": ""})
-    cli = root / "bin" / "locklark"
+    cli = root / "bin" / "passme"
     fixture = root / "bin" / "passkey-transfer-fixture"
     for output, target, code in (
-        (cli, "./cmd/locklark", "build_cli"),
+        (cli, "./cmd/passme", "build_cli"),
         (fixture, "./scripts/passkey_transfer_fixture", "build_fixture"),
     ):
         try:
@@ -679,7 +679,7 @@ def accept(args) -> int:
     try:
         os.umask(0o077)
         require(Path(GO_DEFAULT).is_file() or shutil.which("go") is not None, "go_missing")
-        require((REPO_ROOT / "cmd" / "locklark" / "main.go").is_file(), "repo_missing")
+        require((REPO_ROOT / "cmd" / "passme" / "main.go").is_file(), "repo_missing")
         require((REPO_ROOT / "scripts" / "passkey_transfer_fixture" / "main.go").is_file(), "fixture_missing")
         recorder.stage("prerequisites")
 

@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/localpath"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/localpath"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func desktopFrame(raw []byte) []byte {
@@ -82,7 +82,7 @@ func (c *desktopRelay) recvType(t *testing.T, want string) map[string]any {
 
 func desktopFixture(t *testing.T) (string, []byte, string, personal.Row) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "desktop.ll")
+	path := filepath.Join(t.TempDir(), "desktop.pm")
 	key := bytes.Repeat([]byte{3}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -122,7 +122,7 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 
 	dir := t.TempDir()
 	if _, e := localpath.TrustedTemporaryParent(dir); e == nil {
-		t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
+		t.Setenv("PASSME_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
 		// The relay dials once; start its listener before launching the client.
 		a.startBrowserBroker()
 		if a.broker == nil {

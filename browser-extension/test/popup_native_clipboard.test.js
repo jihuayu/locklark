@@ -82,7 +82,7 @@ function harness(options = {}) {
   const state = () => ({ connected: true, origin: "https://example.test/", candidates: [], vaultItems: [],
     generatorDefaults: { mode: "random", length: 24 }, attachmentsSupported: true, clipboardClearSeconds: 30 });
   const context = {
-    LocklarkCore: core, document,
+    PassmeCore: core, document,
     navigator: { clipboard: { value: "", writeText(value) { clipboardWrites.push(value); this.value = value; return Promise.resolve(); } } },
     chrome: { runtime: {
       sendMessage(message) {

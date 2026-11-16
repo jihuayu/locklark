@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"path/filepath"
 	"reflect"
@@ -199,12 +199,12 @@ func TestTrashBackupRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, err := Backup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(t.TempDir(), "restored.ll")
+	dest := filepath.Join(t.TempDir(), "restored.pm")
 	fresh := bytes.Repeat([]byte{9}, 16)
 	if err = Restore(archive, dest, "fixture", key, kit, fresh); err != nil {
 		t.Fatal(err)

@@ -11,8 +11,8 @@ import (
 	"errors"
 	"net/netip"
 
-	"github.com/jihuayu/locklark/internal/gateway"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/gateway"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const livePullAction = "item.invoke.github-pull"
@@ -47,7 +47,7 @@ func (r LivePullRequest) Validate() error {
 	return nil
 }
 func (r LivePullRequest) binding(secret []byte) (string, error) {
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/live-pull/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/live-pull/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

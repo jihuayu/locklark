@@ -1,6 +1,6 @@
 # MyGo 桌面快捷搜索
 
-基线 main `20e27aa48b6ac855e027cc7abde64fc3c56591f7`，分支 `codex/desktop-quick-search`。前批 [PR #29](https://github.com/jihuayu/locklark/pull/29) 已经精确head `ced61e5391c19d761e3ded615d5afd4074b20906` 的四项 [CI 42133038819](https://github.com/jihuayu/locklark/actions/runs/42133038819) 通过并正常squash合入。本文记录本批实现约定，实际验收与合并状态见 [验收记录](desktop-quick-search-validation.md)。主代理负责设计/独立验收；Sol xhigh实现；Luna max review。
+基线 main `20e27aa48b6ac855e027cc7abde64fc3c56591f7`，分支 `codex/desktop-quick-search`。前批 [PR #29](https://github.com/jihuayu/passme/pull/29) 已经精确head `ced61e5391c19d761e3ded615d5afd4074b20906` 的四项 [CI 42133038819](https://github.com/jihuayu/passme/actions/runs/42133038819) 通过并正常squash合入。本文记录本批实现约定，实际验收与合并状态见 [验收记录](desktop-quick-search-validation.md)。主代理负责设计/独立验收；Sol xhigh实现；Luna max review。
 
 用户流程：通过既有 CmdOrCtrl+Shift+L、托盘“快捷搜索”或原生界面按钮唤起MyGo窗口中的快捷搜索面板。解锁会话内聚焦标题搜索框，Enter或显式搜索按钮提交，显示仅活动登录的标题元数据；用户选定结果后进入既有条目详情，再显式显示/复制。退出面板回到原页面，未提交编辑草稿保留。打开面板清除已有敏感显示及本应用所有权下的剪贴板，不自动读字段、取码、复制、填充或提交网站。
 

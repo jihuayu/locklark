@@ -12,18 +12,18 @@
 #include "store_darwin.h"
 
 #if __has_feature(objc_arc)
-#define LL_CONTEXT_RETAIN(context) CFBridgingRetain(context)
-#define LL_OBJC_RELEASE(object) ((void)(object))
+#define PM_CONTEXT_RETAIN(context) CFBridgingRetain(context)
+#define PM_OBJC_RELEASE(object) ((void)(object))
 #else
-#define LL_CONTEXT_RETAIN(context) ((CFTypeRef)CFRetain((CFTypeRef)(context)))
-#define LL_OBJC_RELEASE(object) [(object) release]
+#define PM_CONTEXT_RETAIN(context) ((CFTypeRef)CFRetain((CFTypeRef)(context)))
+#define PM_OBJC_RELEASE(object) [(object) release]
 #endif
 
 // One scoped quick-unlock record in the data protection keychain. The
 // kSecUseDataProtectionKeychain flag is explicit: access-control items and
 // keychain access groups are macOS data protection keychain features, not
 // legacy login-keychain features.
-static CFMutableDictionaryRef ll_unlock_query(const char *id) {
+static CFMutableDictionaryRef pm_unlock_query(const char *id) {
 	CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	if (!query) return NULL;
 	CFStringRef account = CFStringCreateWithCString(NULL, id, kCFStringEncodingUTF8);
@@ -32,15 +32,15 @@ static CFMutableDictionaryRef ll_unlock_query(const char *id) {
 		return NULL;
 	}
 	CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
-	CFDictionarySetValue(query, kSecAttrService, CFSTR("app.locklark.unlock.v1"));
+	CFDictionarySetValue(query, kSecAttrService, CFSTR("app.passme.unlock.v1"));
 	CFDictionarySetValue(query, kSecAttrAccount, account);
 	CFDictionarySetValue(query, kSecUseDataProtectionKeychain, kCFBooleanTrue);
 	CFRelease(account);
 	return query;
 }
 
-int ll_unlock_store(const char *id, const unsigned char *value, long n) {
-	if (!id || !value || n <= 0 || n > LL_UNLOCK_MAX) return errSecParam;
+int pm_unlock_store(const char *id, const unsigned char *value, long n) {
+	if (!id || !value || n <= 0 || n > PM_UNLOCK_MAX) return errSecParam;
 	CFErrorRef error = NULL;
 	SecAccessControlRef acl = SecAccessControlCreateWithFlags(NULL, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, kSecAccessControlUserPresence, &error);
 	if (error) CFRelease(error);
@@ -50,7 +50,7 @@ int ll_unlock_store(const char *id, const unsigned char *value, long n) {
 		CFRelease(acl);
 		return errSecAllocate;
 	}
-	CFMutableDictionaryRef query = ll_unlock_query(id);
+	CFMutableDictionaryRef query = pm_unlock_query(id);
 	if (!query) {
 		CFRelease(data);
 		CFRelease(acl);
@@ -101,7 +101,7 @@ int ll_unlock_store(const char *id, const unsigned char *value, long n) {
 	return status;
 }
 
-int ll_unlock_load(const char *id, unsigned char **value, long *n) {
+int pm_unlock_load(const char *id, unsigned char **value, long *n) {
 	if (!id || !value || !n) return errSecParam;
 	*value = NULL;
 	*n = 0;
@@ -110,10 +110,10 @@ int ll_unlock_load(const char *id, unsigned char **value, long *n) {
 	// is released so it can never authenticate another operation.
 	LAContext *context = [[LAContext alloc] init];
 	if (!context) return errSecInternalComponent;
-	context.localizedReason = @"解锁 Locklark";
+	context.localizedReason = @"解锁 Passme";
 	context.touchIDAuthenticationAllowableReuseDuration = 0;
-	CFTypeRef contextRef = LL_CONTEXT_RETAIN(context);
-	CFMutableDictionaryRef query = ll_unlock_query(id);
+	CFTypeRef contextRef = PM_CONTEXT_RETAIN(context);
+	CFMutableDictionaryRef query = pm_unlock_query(id);
 	CFTypeRef item = NULL;
 	OSStatus status = errSecParam;
 	if (contextRef && query) {
@@ -126,7 +126,7 @@ int ll_unlock_load(const char *id, unsigned char **value, long *n) {
 				status = errSecParam;
 			} else {
 				CFIndex length = CFDataGetLength((CFDataRef)item);
-				if (length <= 0 || length > LL_UNLOCK_MAX) {
+				if (length <= 0 || length > PM_UNLOCK_MAX) {
 					status = errSecParam;
 				} else {
 					unsigned char *copy = malloc((size_t)length);
@@ -146,13 +146,13 @@ int ll_unlock_load(const char *id, unsigned char **value, long *n) {
 	if (contextRef) CFRelease(contextRef);
 	// Invalidate before release so this context can never authenticate again.
 	[context invalidate];
-	LL_OBJC_RELEASE(context);
+	PM_OBJC_RELEASE(context);
 	return status;
 }
 
-int ll_unlock_delete(const char *id) {
+int pm_unlock_delete(const char *id) {
 	if (!id) return errSecParam;
-	CFMutableDictionaryRef query = ll_unlock_query(id);
+	CFMutableDictionaryRef query = pm_unlock_query(id);
 	if (!query) return errSecParam;
 	OSStatus status = SecItemDelete(query);
 	CFRelease(query);
@@ -160,7 +160,7 @@ int ll_unlock_delete(const char *id) {
 	return status;
 }
 
-int ll_biometry_available(void) {
+int pm_biometry_available(void) {
 	// canEvaluatePolicy is a capability query, not an authentication request;
 	// it neither prompts nor marks a context as authenticated. Each context is
 	// invalidated and released immediately.
@@ -169,7 +169,7 @@ int ll_biometry_available(void) {
 	NSError *error = nil;
 	BOOL touchID = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&error];
 	[context invalidate];
-	LL_OBJC_RELEASE(context);
+	PM_OBJC_RELEASE(context);
 	if (touchID) return 2;
 
 	context = [[LAContext alloc] init];
@@ -177,11 +177,11 @@ int ll_biometry_available(void) {
 	error = nil;
 	BOOL owner = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&error];
 	[context invalidate];
-	LL_OBJC_RELEASE(context);
+	PM_OBJC_RELEASE(context);
 	return owner ? 1 : 0;
 }
 
-void ll_unlock_clear_free(unsigned char *value, long n) {
+void pm_unlock_clear_free(unsigned char *value, long n) {
 	if (!value) return;
 	volatile unsigned char *p = value;
 	while (n-- > 0) *p++ = 0;

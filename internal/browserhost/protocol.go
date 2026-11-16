@@ -15,16 +15,16 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/watchtower"
 )
 
-const HostName = "org.locklark.browser"
+const HostName = "org.passme.browser"
 const ChromiumID = "geldnhjapnackobgknocomedmjgphnpe"
-const FirefoxID = "browser@locklark.local"
-const SafariID = "org.locklark.browser.safari.Extension"
+const FirefoxID = "browser@passme.local"
+const SafariID = "org.passme.browser.safari.Extension"
 const MaxInput = 256 << 10
 const MaxOutput = 256 << 10
 
@@ -407,32 +407,32 @@ type StagedSave struct {
 }
 
 type Response struct {
-	Credential        string             `json:"credential,omitempty"`
-	CredentialID      string             `json:"credential_id,omitempty"`
-	QuickFill         bool               `json:"quick_fill,omitempty"`
-	Code              string             `json:"code,omitempty"`
-	Nonce             string             `json:"nonce,omitempty"`
-	ItemID            string             `json:"item_id,omitempty"`
-	Revision          string             `json:"revision,omitempty"`
-	V                 int                `json:"v"`
-	ID                string             `json:"id,omitempty"`
-	Type              string             `json:"type"`
-	Capability        string             `json:"capability,omitempty"`
-	GeneratedPassword string             `json:"generated_password,omitempty"`
-	HistoryID         string             `json:"history_id,omitempty"`
+	Credential        string                `json:"credential,omitempty"`
+	CredentialID      string                `json:"credential_id,omitempty"`
+	QuickFill         bool                  `json:"quick_fill,omitempty"`
+	Code              string                `json:"code,omitempty"`
+	Nonce             string                `json:"nonce,omitempty"`
+	ItemID            string                `json:"item_id,omitempty"`
+	Revision          string                `json:"revision,omitempty"`
+	V                 int                   `json:"v"`
+	ID                string                `json:"id,omitempty"`
+	Type              string                `json:"type"`
+	Capability        string                `json:"capability,omitempty"`
+	GeneratedPassword string                `json:"generated_password,omitempty"`
+	HistoryID         string                `json:"history_id,omitempty"`
 	History           []BrowserHistoryEntry `json:"entries,omitempty"`
-	Candidates        []personal.Row     `json:"candidates,omitempty"`
-	Capabilities      []string           `json:"capabilities,omitempty"`
-	NeverOrigins      []string           `json:"never_origins,omitempty"`
-	Identity          map[string]string  `json:"identity,omitempty"`
-	Card              map[string]string  `json:"card,omitempty"`
-	Category          string             `json:"category,omitempty"`
-	Profile           *GeneratedProfile  `json:"profile,omitempty"`
-	Staged            *StagedSave        `json:"staged_save,omitempty"`
-	Watchtower        *watchtower.Report `json:"watchtower,omitempty"`
-	Username          string             `json:"username,omitempty"`
-	Password          string             `json:"password,omitempty"`
-	Error             string             `json:"error,omitempty"`
+	Candidates        []personal.Row        `json:"candidates,omitempty"`
+	Capabilities      []string              `json:"capabilities,omitempty"`
+	NeverOrigins      []string              `json:"never_origins,omitempty"`
+	Identity          map[string]string     `json:"identity,omitempty"`
+	Card              map[string]string     `json:"card,omitempty"`
+	Category          string                `json:"category,omitempty"`
+	Profile           *GeneratedProfile     `json:"profile,omitempty"`
+	Staged            *StagedSave           `json:"staged_save,omitempty"`
+	Watchtower        *watchtower.Report    `json:"watchtower,omitempty"`
+	Username          string                `json:"username,omitempty"`
+	Password          string                `json:"password,omitempty"`
+	Error             string                `json:"error,omitempty"`
 
 	DesktopConnected bool   `json:"desktop_connected,omitempty"`
 	Unlocked         bool   `json:"unlocked,omitempty"`

@@ -6,7 +6,7 @@
 
 - [Signal APIs](passkey-signals-design.md)：仅包装已有标准方法，保持浏览器原 Promise；原生只读审阅、owner 确认、全部条目精确修订的一次事务、独立审计动作及立即取消。具体组件和真实交互见[Signal 验收](passkey-signals-validation.md)。
 - [逐次系统验证](passkey-system-verification-design.md)：Windows/macOS 通过每次新鲜系统保护 capsule 释放进行 Passkey 验证；普通解锁或已有会话不能充当本次 UV。OS 等待不持 Session/Connection 锁，返回后重验原请求/期限/修订/撤销。Linux 保持完整因素路径；fake adapter 通过不代表 Hello/Touch ID 真机通过。
-- 相关来源 RP 提示及非规范/非本域 RP 请求交给浏览器，原 options 不变，由浏览器处理相关来源规则与错误。Locklark 不自行下载 .well-known，不宣称实现所有高级扩展。
+- 相关来源 RP 提示及非规范/非本域 RP 请求交给浏览器，原 options 不变，由浏览器处理相关来源规则与错误。Passme 不自行下载 .well-known，不宣称实现所有高级扩展。
 - [未签名发布准备](browser-release-preparation.md)：固定 11 个文件白名单、确定性 ZIP/公开 SHA 回执、身份/权限/CSP/frame/world 校验与输出路径防护；CI 上传未签名 artifact。商店身份、签名、真实安装和升级仍需单独完成。
 - 代表性公共站点输入兼容性：2026-11-07 09:31:07 UTC 实际读取 GitHub /login 与 webauthn.io 的公开非隐藏输入属性，保留精简自建 fixture 与 provenance.json。未保存整页、动态 token、值或品牌素材。真实三浏览器执行当前 core.probe/capture/fill，检查用户名/密码映射、隐藏诱饵不改、无意外提交。三项日志 public-site-{chromium,firefox,edge}.log 均通过；这是受控 HTTPS DOM 组件验收，不能冒充真实站点账户登录或完整原生连接旅程。
 
@@ -36,8 +36,8 @@
 
 | 文件 | 字节 | SHA-256 |
 | --- | --- | --- |
-| locklark-browser-extension-chromium-unsigned.zip | 578152 | 1cc031ef3b7da68f3625080390660bec2b5e82fe28bb0260aab8f649dd32023b |
-| locklark-browser-extension-firefox-unsigned.zip | 577844 | d0237c6fc3c87576a6401c559fbdb81ca695ead89f3a36c752d16bb1bbe0adf1 |
+| passme-browser-extension-chromium-unsigned.zip | 578152 | 1cc031ef3b7da68f3625080390660bec2b5e82fe28bb0260aab8f649dd32023b |
+| passme-browser-extension-firefox-unsigned.zip | 577844 | d0237c6fc3c87576a6401c559fbdb81ca695ead89f3a36c752d16bb1bbe0adf1 |
 
 本地运行仅证明 Linux 未签名准备与可重复性。不能据此声称商店签名、商店身份衔接或 Windows 上执行打包工具已经验证。
 

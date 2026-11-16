@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -364,7 +364,7 @@ func readVaultReceipt(t *testing.T, path string) vaultReceipt {
 	}
 	var receipt vaultReceipt
 	e = db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("locklark.personal/v1"))
+		b := tx.Bucket([]byte("passme.personal/v1"))
 		if b == nil {
 			return errors.New("vault bucket missing")
 		}

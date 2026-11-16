@@ -1,6 +1,6 @@
 # M6 集成修复与后续复刻验收
 
-日期：2026-11-07（香港时间）。接续 main `eccd32650eac6e2bf9fa7f44f4a555a8cf2d57e7` 与 [PR #43](https://github.com/jihuayu/locklark/pull/43) 原 head `8141d5ed276928b72e2f8b97b79f2779381a7fb4`。本记录区分实现、实际运行与仍待对照的范围，不把 E2E 的 pending feature 当成通过。
+日期：2026-11-07（香港时间）。接续 main `eccd32650eac6e2bf9fa7f44f4a555a8cf2d57e7` 与 [PR #43](https://github.com/jihuayu/passme/pull/43) 原 head `8141d5ed276928b72e2f8b97b79f2779381a7fb4`。本记录区分实现、实际运行与仍待对照的范围，不把 E2E 的 pending feature 当成通过。
 
 ## 架构与实现
 
@@ -14,7 +14,7 @@
 
 ## DeepSeek worker 分工
 
-按用户要求安装 `jihuayu/skills` 的独立 `deepseek-subagent`，来源提交 `9a63f2539c6fde1e85978c8e0ea166de73af0cab`，安装器与运行状态不加入 Locklark 仓库。harness 的 14 项测试通过；请求模型为 `auto/deepseek-v4.1-flash`，服务返回 `group/auto-deepseek-v4-1-flash`。
+按用户要求安装 `jihuayu/skills` 的独立 `deepseek-subagent`，来源提交 `9a63f2539c6fde1e85978c8e0ea166de73af0cab`，安装器与运行状态不加入 Passme 仓库。harness 的 14 项测试通过；请求模型为 `auto/deepseek-v4.1-flash`，服务返回 `group/auto-deepseek-v4-1-flash`。
 
 主代理制定数据、事务、协议和会话边界；外部 worker 并行完成浏览器/CLI/桌面调研、实现与定向测试。达到轮次上限的任务在检查实际文件后续接；一次大范围复核遇到连接重置，不能计为成功。重新以冻结的 broker/CLI diff 进行独立复核，未发现已证明的阻塞；其指出的旧会话批准发布窗口另补会话/代次校验及锁库负测。worker 报告不替代下列主代理独立运行。
 
@@ -32,7 +32,7 @@
 | CLI 外部验收 | 原 runner 的 F16：10 项通过、6 项场景 pending、0 失败；其中包含已过时的能力检测，不能据此断言六项功能不存在，更新结果见[插件收尾验收](plugin-completion-validation.md)。顶层/各子命令帮助及 shell 诊断通过。16 profile、DeepSeek 明确程序/前台限制、绑定和 pin、shell function、免因素帮助路径、拒绝、输出与绑定秘密扫描通过；5 项验收控制器测试通过。 |
 | 扩展 Node | 151/151 通过；含 null 参数、真实 Go DTO、显式取值、原值不进入快照、填充过程中提交的保存竞态、真实 textarea 只读属性、保存后的 busy 交接和未读取备注保留。 |
 | Web | 8 项单测、typecheck、production build 与 Chromium/Firefox 的真实目录→Go broker→Next.js 只读流程均通过。 |
-| 真实弹窗编辑 | Chromium 实际点击新建、输入、保存至 Go 原生库、遮蔽/按次显示、仅改标题后密码与备注保留通过；已纳入 Web CI。外部脚本 `LOCKLARK_TEST_POPUP_VAULT=1` 启用，产物扫描不记录原值。 |
+| 真实弹窗编辑 | Chromium 实际点击新建、输入、保存至 Go 原生库、遮蔽/按次显示、仅改标题后密码与备注保留通过；已纳入 Web CI。外部脚本 `PASSME_TEST_POPUP_VAULT=1` 启用，产物扫描不记录原值。 |
 | 原生 Chromium / Firefox | 两引擎完整填充、保存、更新与 OTP 流程通过；Chromium 另通过 Passkey 创建、断言、独立签名验证与取消。使用冻结可执行文件，避免验收期间重建正在运行的程序。 |
 | MyGo 原生日常 GUI | 创建/生成、精确再生成、系统剪贴板所有权及外部 owner、独立 HMAC 的 TOTP/原窗口到期、锁库和完整私有产物/控制器扫描通过。 |
 

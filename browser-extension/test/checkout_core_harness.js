@@ -25,7 +25,7 @@ function makeProbeHarness(options = {}) {
     console: {},
   };
   if (Object.prototype.hasOwnProperty.call(options, "fence"))
-    context.LocklarkCheckoutFence = options.fence;
+    context.PassmeCheckoutFence = options.fence;
   context.globalThis = context;
   const fn = compile(core.checkoutProbe.toString(), context);
   return { context, fn, call: () => ({ ...fn() }) };
@@ -165,7 +165,7 @@ function makeFillHarness(options = {}) {
     console: {},
   };
   if (options.fence !== null)
-    context.LocklarkCheckoutFence =
+    context.PassmeCheckoutFence =
       options.fence ||
       (() => ({
         document_stable: options.stable !== false,

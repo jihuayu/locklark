@@ -11,7 +11,7 @@ Use JDK 21, Android SDK platform 36, build-tools 36.0.0 and NDK
 8.13.2 and Kotlin 2.2.21 are pinned in the root build file. Build the real Go AAR
 first using the core's binding script, including `android/arm64` for phones and
 `android/amd64` for the x86_64 emulator. Its default location is
-`mobile/core/build/mobilecore.aar`; `LOCKLARK_MOBILE_AAR` can select another
+`mobile/core/build/mobilecore.aar`; `PASSME_MOBILE_AAR` can select another
 explicit artifact. Missing bindings fail the build.
 
 ```sh
@@ -25,7 +25,7 @@ the two mandatory native UI/core tests and privately scans their logs:
 
 ```sh
 ANDROID_HOME=/path/to/android-sdk ANDROID_SERIAL=emulator-5554 \
-  LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
+  PASSME_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
 ```
 
 After the independent host UI gate has produced exactly one completed private

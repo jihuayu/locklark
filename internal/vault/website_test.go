@@ -3,7 +3,7 @@ package vault
 import (
 	"bytes"
 	"encoding/json"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"testing"
 )
 

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // desktopKnowledgeStore implements only the quick-unlock adapter contract; it
@@ -57,7 +57,7 @@ func (s *desktopVerificationStore) LoadForPasskeyVerification(string) ([]byte, e
 // reviewed passkey-create request, exactly like the native confirmation window.
 func desktopPasskeyFixture(t *testing.T) (*App, *browserhost.Connection, *personal.Session) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "passkey-system.ll")
+	path := filepath.Join(t.TempDir(), "passkey-system.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

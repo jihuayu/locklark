@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type markedStdout struct{ once sync.Once }
@@ -102,7 +102,7 @@ func TestOTPWaitingForWriterSlotIsCancellableWithoutGrant(t *testing.T) {
 }
 
 func TestNativeWriterBlockingStdoutExit(t *testing.T) {
-	if os.Getenv("LOCKLARK_TEST_BLOCKING_STDOUT") == "1" {
+	if os.Getenv("PASSME_TEST_BLOCKING_STDOUT") == "1" {
 		if forceBlockingStdout() != nil {
 			os.Exit(75)
 		}
@@ -125,7 +125,7 @@ func TestNativeWriterBlockingStdoutExit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeWriterBlockingStdoutExit$", "-test.count=1")
-	command.Env = append(os.Environ(), "LOCKLARK_TEST_BLOCKING_STDOUT=1")
+	command.Env = append(os.Environ(), "PASSME_TEST_BLOCKING_STDOUT=1")
 	command.Stdout = writer
 	var diagnostic bytes.Buffer
 	command.Stderr = &diagnostic // fixed marker only; stdout is never read

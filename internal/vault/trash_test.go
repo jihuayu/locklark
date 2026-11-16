@@ -3,7 +3,7 @@ package vault
 import (
 	"bytes"
 	"encoding/json"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"testing"
 )
 
@@ -30,7 +30,7 @@ func TestNativeTrashState(t *testing.T) {
 			t.Fatal("invalid trash combination")
 		}
 	}
-	for _, value := range []kdbx.ValueData{slot("Locklark.PreviousState", "", false), slot("Locklark.PreviousState", "active", false), slot("Locklark.PreviousState", "archived", true)} {
+	for _, value := range []kdbx.ValueData{slot("Passme.PreviousState", "", false), slot("Passme.PreviousState", "active", false), slot("Passme.PreviousState", "archived", true)} {
 		db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
 		if err := writeItems(db, nil, []Item{{ID: "test", Kind: "login", State: "trashed", PreviousState: "archived"}}); err != nil {
 			t.Fatal(err)

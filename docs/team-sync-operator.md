@@ -1,6 +1,6 @@
 # 团队同步服务：构建与运维
 
-当前入口是 `locklark-team-sync` HTTPS 排序服务与 `internal/teamsync` Go 客户端库。该库受 Go `internal` 导入边界限制，仅供仓库内应用集成；尚未发布外部可导入的稳定 SDK。普通用户的团队创建、邀请、配对、草稿和冲突处理界面尚未提供；Android/iOS 应用当前操作个人离线库，未接入团队同步。不存在 `locklark team-sync read` 命令。个人库 `owner.ll` 也不能直接当作团队目录上传。
+当前入口是 `passme-team-sync` HTTPS 排序服务与 `internal/teamsync` Go 客户端库。该库受 Go `internal` 导入边界限制，仅供仓库内应用集成；尚未发布外部可导入的稳定 SDK。普通用户的团队创建、邀请、配对、草稿和冲突处理界面尚未提供；Android/iOS 应用当前操作个人离线库，未接入团队同步。不存在 `passme team-sync read` 命令。个人库 `owner.pm` 也不能直接当作团队目录上传。
 
 ## 启动前准备
 
@@ -32,11 +32,11 @@ sequencer 的 **32 字节 Ed25519 seed** 由操作员另行安全保管；启动
     "version": 0,
     "hash": ""
   },
-  "directory": "/srv/locklark/team.db",
-  "anchor": "/srv/locklark/server.anchor",
+  "directory": "/srv/passme/team.db",
+  "anchor": "/srv/passme/server.anchor",
   "listen": "127.0.0.1:8443",
-  "certificate": "/srv/locklark/tls/server.crt",
-  "tls_key": "/srv/locklark/tls/server.key"
+  "certificate": "/srv/passme/tls/server.crt",
+  "tls_key": "/srv/passme/tls/server.key"
 }
 ```
 
@@ -49,14 +49,14 @@ sequencer 的 **32 字节 Ed25519 seed** 由操作员另行安全保管；启动
 在仓库根目录构建：
 
 ```sh
-go build -o locklark-team-sync ./cmd/locklark-team-sync
+go build -o passme-team-sync ./cmd/passme-team-sync
 ```
 
 完成自己的配置和已签名团队目录准备后，仅首次明确初始化服务端检查点：
 
 ```sh
-./locklark-team-sync init-anchor --config /srv/locklark/server.json
-./locklark-team-sync serve --config /srv/locklark/server.json
+./passme-team-sync init-anchor --config /srv/passme/server.json
+./passme-team-sync serve --config /srv/passme/server.json
 ```
 
 `init-anchor` 只把配置中的独立 `minimum` 写入新的私有检查点，不创建团队库，不覆盖现有检查点。`serve` 要求检查点已经存在；隐藏输入 sequencer seed 并核对公钥后才监听。成功输出 `Team sync HTTPS server ready.`。无控制终端时拒绝启动；不要用 `echo seed | ...`、命令行或环境变量绕过。
@@ -106,9 +106,9 @@ client.Close()
 这些命令创建临时合成团队并注入故障，**不是生产建库、邀请或配对工具**：
 
 ```sh
-go test ./internal/directory ./internal/teamsync ./cmd/locklark-team-sync -count=1
-go build -o /tmp/locklark-team-sync-fixture ./scripts/team_sync_fixture
-python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/locklark-team-sync-fixture
+go test ./internal/directory ./internal/teamsync ./cmd/passme-team-sync -count=1
+go build -o /tmp/passme-team-sync-fixture ./scripts/team_sync_fixture
+python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/passme-team-sync-fixture
 ```
 
 验收临时材料有意包含合成因素，保持私有，不上传原始日志或材料。当前实际结果、失败轮和平台边界见[团队与移动端验收](team-mobile-validation.md)，协议见[架构约定](team-mobile-design.md)。

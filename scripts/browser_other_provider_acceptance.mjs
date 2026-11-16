@@ -136,7 +136,7 @@ export async function acceptOtherProvider({
   assert(page && typeof page.evaluate === "function", "Browser page required");
   assert(cdp && typeof cdp.send === "function", "Browser CDP session required");
   assert(typeof first?.id === "string" && first.id.length > 0,
-    "Existing Locklark credential required");
+    "Existing Passme credential required");
   const rp = new URL(origin).hostname;
   assert(rp, "Controlled relying-party origin required");
   const createChallenge = randomBytes(32).toString("base64url");
@@ -205,9 +205,9 @@ export async function acceptOtherProvider({
       "Other-provider public key must be P-256");
     let server = null;
     let serverCredential = null;
-    if (process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) {
+    if (process.env.PASSME_TEST_WEBAUTHN_SERVER) {
       server = createRequire(import.meta.url)(
-        process.env.LOCKLARK_TEST_WEBAUTHN_SERVER,
+        process.env.PASSME_TEST_WEBAUTHN_SERVER,
       );
       const checked = await server.verifyRegistrationResponse({
         response: created.json,
@@ -221,7 +221,7 @@ export async function acceptOtherProvider({
       serverCredential = checked.registrationInfo?.credential;
       assert(serverCredential, "Independent WebAuthn credential missing");
     }
-    phase("other-provider:locklark-fallback-prompt");
+    phase("other-provider:passme-fallback-prompt");
     await page.bringToFront();
     await page.evaluate(pageStartGet, {
       rp, challenge: getChallenge, credentialId: created.json.id,
@@ -275,7 +275,7 @@ export async function acceptOtherProvider({
     assert(digest(after.otp_events).equals(digest(before.otp_events)),
       "Other-provider coexistence changed OTP history");
     console.log(
-      "PASS: real Chromium/Edge other-provider coexistence with a software virtual authenticator, explicit Locklark fallback, independently verified assertion and unchanged vault",
+      "PASS: real Chromium/Edge other-provider coexistence with a software virtual authenticator, explicit Passme fallback, independently verified assertion and unchanged vault",
     );
   } finally {
     if (authenticatorId) {

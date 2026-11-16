@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
@@ -89,7 +89,7 @@ func searchRows(items []vault.Item, revisions map[string]string, r searchRequest
 	return rows, nil
 }
 func (r searchRequest) binding(secret []byte) (string, error) {
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/search/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/search/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

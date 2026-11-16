@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 const desktopPasskeyCreateOptions = `{"challenge":"Y2hhbGxlbmdlLTAxMjM0NTY3ODk","rp":{"id":"example.test","name":"Example"},"user":{"id":"dXNlcjE","name":"alice","displayName":"Alice"},"pubKeyCredParams":[{"type":"public-key","alg":-7}]}`
@@ -68,7 +68,7 @@ func desktopFrameResponses(t *testing.T, out *browserPipe) []browserhost.Respons
 // empty allowCredentials list.
 func desktopMultiPasskeyFixture(t *testing.T) (*App, *browserhost.Connection, *browserPipe, []desktopCredential) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "passkey-multi.ll")
+	path := filepath.Join(t.TempDir(), "passkey-multi.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

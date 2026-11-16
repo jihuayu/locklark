@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -188,7 +188,7 @@ func TestMapArchiveV2CategoryFeatureAndAttachmentMapping(t *testing.T) {
 		t.Fatalf("ssh public key invalid: %v", err)
 	}
 	for _, item := range mapped.Items {
-		if !strings.Contains(string(item.ImportSource), "locklark/1pux-source/v1") || !strings.Contains(string(item.ImportSource), "account-1") {
+		if !strings.Contains(string(item.ImportSource), "passme/1pux-source/v1") || !strings.Contains(string(item.ImportSource), "account-1") {
 			t.Fatal("import provenance lost")
 		}
 	}

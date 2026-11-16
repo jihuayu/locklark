@@ -1,10 +1,10 @@
 plugins { id("com.android.application"); kotlin("android") }
-val coreAar = file(providers.environmentVariable("LOCKLARK_MOBILE_AAR").orElse("../../core/build/mobilecore.aar").get())
+val coreAar = file(providers.environmentVariable("PASSME_MOBILE_AAR").orElse("../../core/build/mobilecore.aar").get())
 android {
-    namespace = "org.locklark.android"
+    namespace = "org.passme.android"
     compileSdk = 36
     defaultConfig {
-        applicationId = "org.locklark.android"
+        applicationId = "org.passme.android"
         minSdk = 30
         targetSdk = 36
         versionCode = 1

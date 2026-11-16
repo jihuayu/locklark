@@ -171,7 +171,7 @@ var deniedPassthroughExact = map[string]bool{
 	"PGPASSWORD": true, "NETRC": true,
 }
 
-var deniedPassthroughPrefixes = []string{"LD_", "DYLD_", "_", "XDG_", "LOCKLARK_"}
+var deniedPassthroughPrefixes = []string{"LD_", "DYLD_", "_", "XDG_", "PASSME_"}
 
 var deniedPassthroughSuffixes = []string{"_PROXY", "_TOKEN", "_API_KEY", "_SECRET", "_PASSWORD", "_ACCESS_KEY", "_PRIVATE_KEY"}
 

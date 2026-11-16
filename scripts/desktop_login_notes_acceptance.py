@@ -31,7 +31,7 @@ def notes_events(snapshot, action, item_id):
 class NotesAcceptance(Acceptance):
     def __init__(self):
         super().__init__()
-        self.cli = str(Path(os.environ["LOCKLARK_CLI_HOST"]).resolve(strict=True))
+        self.cli = str(Path(os.environ["PASSME_CLI_HOST"]).resolve(strict=True))
         self.reader = None
         self.owner = None
         self.owner_healthy = True
@@ -39,7 +39,7 @@ class NotesAcceptance(Acceptance):
         self.last_metadata = {}
         self.export_sequence = 0
         self.last_clipboard = {}
-        self.baseline = os.environ.get("LOCKLARK_TEST_NOTES_BASELINE") == "1"
+        self.baseline = os.environ.get("PASSME_TEST_NOTES_BASELINE") == "1"
 
     def phase(self, value):
         self.stage = value
@@ -162,7 +162,7 @@ class NotesAcceptance(Acceptance):
                [("新导出密码（至少 12 字符）", self.fixture["ExportPassword"]),
                 ("再次输入导出密码", self.fixture["ExportPassword"]), ("输入 SAVE 确认加密导出", "SAVE")],
                options=("--out", str(target)), forbidden=tuple(self.values))
-        python = os.environ.get("LOCKLARK_TEST_PYKEEPASS", sys.executable)
+        python = os.environ.get("PASSME_TEST_PYKEEPASS", sys.executable)
         result = json.loads(self.command([python, str(ROOT / "scripts/login_notes_fixture.py"), "check",
                                           str(self.fixture_path), str(target), alias]))
         require(result == {"notes_exact": True, "protected_notes": alias != "empty", "source_unchanged": True, "id_matches": True})
@@ -305,13 +305,13 @@ class NotesAcceptance(Acceptance):
                 controls = self.controls()
                 self.reason = "baseline-notes-actions-absent" if controls["显示密码"]["enabled"] and all(not controls[label]["present"] for label in ("显示备注", "复制备注", "编辑备注")) else "unexpected-baseline-support"
                 raise AcceptanceFailure()
-            if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
+            if os.environ.get("PASSME_TEST_FAILURE_STAGE") == "probe-input":
                 self.phase("private-notes-probe-failure")
                 self.click("显示备注")
                 self.eventually(lambda: self.display(expected=[visible_notes(self.fixture["NotesOriginal"])])["matches"] == [True])
                 self.probe_request({"op": "unsupported", "private": list(self.values)})
                 raise AcceptanceFailure()
-            require(not os.environ.get("LOCKLARK_TEST_FAILURE_STAGE"))
+            require(not os.environ.get("PASSME_TEST_FAILURE_STAGE"))
             self.scenarios()
             success = True
         except Exception as error:

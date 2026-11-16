@@ -14,16 +14,16 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
 // FullProfileV2 is the profile tag for the full 1PUX v3 category mapping.
 const FullProfileV2 = "1pux-full-v2"
 
-const importItemDomain = "locklark/import/1pux/item/v2\x00"
-const importAttachmentDomain = "locklark/import/1pux/attachment/v2\x00"
+const importItemDomain = "passme/import/1pux/item/v2\x00"
+const importAttachmentDomain = "passme/import/1pux/attachment/v2\x00"
 
 var categoryV2 = map[string]vault.ItemCategory{
 	"001": vault.CategoryLogin,
@@ -126,7 +126,7 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 				for n := range item.Attachments {
 					item.Attachments[n].ID = attachmentID(item.ID, item.Attachments[n].FileName, item.Attachments[n].Content)
 				}
-				item.ImportSource, e = json.Marshal(map[string]any{"format": "locklark/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
+				item.ImportSource, e = json.Marshal(map[string]any{"format": "passme/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
 				if e != nil {
 					return MappedLogins{}, ErrInvalid
 				}

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -152,7 +152,7 @@ func TestInspectionReceiptAuditAndRecovery(t *testing.T) {
 	if !bytes.Equal(raw, after) {
 		t.Fatal("source changed")
 	}
-	backup, err := PrepareBackup(path, filepath.Join(t.TempDir(), "backup.llb"), "fixture", key)
+	backup, err := PrepareBackup(path, filepath.Join(t.TempDir(), "backup.pmb"), "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestInspectionReceiptAuditAndRecovery(t *testing.T) {
 	if err = backup.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	recovery, err := PrepareRestore(backup.dest, restored, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 	bolt "go.etcd.io/bbolt"
 )
 

@@ -3,9 +3,9 @@ package personal
 import (
 	"encoding/hex"
 	"errors"
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/totp"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/totp"
+	"github.com/jihuayu/passme/internal/vault"
 	"strings"
 )
 

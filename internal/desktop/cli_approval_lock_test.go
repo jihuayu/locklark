@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 func TestCLIRunApprovalCannotPublishAfterLock(t *testing.T) {

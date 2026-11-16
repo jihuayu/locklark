@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/totp"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/totp"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -205,7 +205,7 @@ func TestOTPConcurrentEditAndRecovery(t *testing.T) {
 	} else if !errors.Is(readErr, ErrConflict) || output.Len() != 0 {
 		t.Fatal("unexpected race result", readErr)
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	backup, err := PrepareBackup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestOTPConcurrentEditAndRecovery(t *testing.T) {
 	if err = backup.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	recovery, err := PrepareRestore(archive, restored, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)

@@ -6,7 +6,7 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type nativeNotesDraft struct {

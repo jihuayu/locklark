@@ -29,11 +29,11 @@ def make_material(directory):
     edited="  修改后的备注🌿\n"+entropy[24:48]+"\nline three stays separate\n尾部空格  \n"
     rejected="Cancelled synthetic notes\n"+entropy[48:]+"\n不应保存🔒\n"
     item={"uuid":"notes-first","categoryUuid":"001","state":"active","createdAt":123,
-          "overview":{"title":"Notes imported login","url":"https://notes.locklark.test/login"},
+          "overview":{"title":"Notes imported login","url":"https://notes.passme.test/login"},
           "details":{"notesPlain":original,"loginFields":[
               {"designation":"username","type":"T","value":"Notes-user-"+entropy[:16]},
               {"designation":"password","type":"P","value":"Notes-password-"+entropy[16:40]}]}}
-    f={"Path":str(directory/"synthetic.ll"),"Password":"Notes-master-"+entropy[40:56],"Secret":"",
+    f={"Path":str(directory/"synthetic.pm"),"Password":"Notes-master-"+entropy[40:56],"Secret":"",
        "Username":item["details"]["loginFields"][0]["value"],"Value":item["details"]["loginFields"][1]["value"],
        "URL":item["overview"]["url"],"NotesOriginal":original,"NotesEdited":edited,"NotesRejected":rejected,
        "ExportPassword":"Notes-export-"+entropy[56:],"NotesConflict":"Independent-notes-"+entropy[12:40],"SourceItem":item,"Archive":str(directory/"notes.1pux"),
@@ -103,10 +103,10 @@ def check_export(fixture_path,exported,expected):
     if (entry.notes or "")!=notes:raise NotesFixtureFailure()
     if notes and not entry._is_property_protected("Notes"):raise NotesFixtureFailure()
     if not notes and "Notes" in entry._get_string_field_keys():raise NotesFixtureFailure()
-    if not entry.is_custom_property_protected("Locklark.ImportSource"):raise NotesFixtureFailure()
-    provenance=json.loads(base64.b64decode(entry.get_custom_property("Locklark.ImportSource")))
+    if not entry.is_custom_property_protected("Passme.ImportSource"):raise NotesFixtureFailure()
+    provenance=json.loads(base64.b64decode(entry.get_custom_property("Passme.ImportSource")))
     if provenance["item"]!=f["SourceItem"] or provenance["item"]["details"]["notesPlain"]!=f["NotesOriginal"]:raise NotesFixtureFailure()
-    if entry.get_custom_property("Locklark.ID")!=f["IDs"]["notes"]:raise NotesFixtureFailure()
+    if entry.get_custom_property("Passme.ID")!=f["IDs"]["notes"]:raise NotesFixtureFailure()
     print(json.dumps({"notes_exact":True,"protected_notes":bool(notes),"source_unchanged":True,"id_matches":True}))
 
 

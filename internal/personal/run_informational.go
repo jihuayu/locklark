@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/cliprofile"
 )
 
 // RunCLIInformational runs a pinned tool without opening the vault or rendering
@@ -45,7 +45,7 @@ func runCLIInformational(ctx context.Context, request RunBundleRequest, targets 
 	// Only explicitly selected non-secret passthrough values are inherited.
 	// In particular, no profile slot, generated credential file, ambient token,
 	// loader setting, or parent HOME/config path is available to this child.
-	env := []string{"LOCKLARK_CLI_ACTIVE=" + tool}
+	env := []string{"PASSME_CLI_ACTIVE=" + tool}
 	for name, value := range request.Passthrough {
 		if strings.ContainsRune(value, 0) {
 			return 0, ErrRunTarget

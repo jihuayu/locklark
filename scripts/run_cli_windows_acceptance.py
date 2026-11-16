@@ -72,7 +72,7 @@ def approved_diagnosis(result, child, stdout, stderr, record):
     code = result.get("exit_code")
     before, after = result.get("console_mode_before"), result.get("console_mode_after")
     child_mode = child.get("console_mode")
-    root_code = re.search(rb"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code=([a-z-]+)",stderr)
+    root_code = re.search(rb"PASSME_WINDOWS_CHILD_ROOT=REFUSED code=([a-z-]+)",stderr)
     allowed_root = {"known-folder","known-folder-parent","user-token","walk","reparse","path","attributes","descriptor","owner","dacl","root-protection"}
     return {
         "cli_exit_code":code if type(code) is int and -1 <= code < 2**32 else None,
@@ -81,8 +81,8 @@ def approved_diagnosis(result, child, stdout, stderr, record):
         "console_mode_restored":before == after if type(before) is int and type(after) is int else None,
         "child_console_matches":before == child_mode if type(before) is int and type(child_mode) is int else None,
         "child_record":record if record in {"present","missing","invalid"} else "invalid",
-        "child_marker":bool(child) or b"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED" in stderr or b"owned Windows CLI fixture failed at " in stderr,
-        "artifact_private_policy":False if b"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED" in stderr else boolean(child.get("artifact_private_policy")),
+        "child_marker":bool(child) or b"PASSME_WINDOWS_CHILD_ROOT=REFUSED" in stderr or b"owned Windows CLI fixture failed at " in stderr,
+        "artifact_private_policy":False if b"PASSME_WINDOWS_CHILD_ROOT=REFUSED" in stderr else boolean(child.get("artifact_private_policy")),
         "artifact_policy_reason":root_code[1].decode() if root_code and root_code[1].decode() in allowed_root else "unknown",
         "stdin_pipe":boolean(child.get("stdin_pipe")), "stdout_pipe":boolean(child.get("stdout_pipe")),
         "stderr_pipe":boolean(child.get("stderr_pipe")), "stdin_matches":boolean(child.get("stdin_matches")),
@@ -131,7 +131,7 @@ class Acceptance:
         (self.root / "setup-controller.log").write_bytes(result.stdout+result.stderr)
         fixture = self.read_json("fixture-private.json")
         require(set(fixture) == {"master", "key", "token", "username", "id", "revision"})
-        require(bool(re.fullmatch(r"LL1-[A-Z2-7]{26}", fixture["key"])))
+        require(bool(re.fullmatch(r"PM1-[A-Z2-7]{26}", fixture["key"])))
         require(bool(re.fullmatch(r"[a-f0-9]{32}", fixture["id"])) and bool(re.fullmatch(r"[a-f0-9]{64}", fixture["revision"])))
         self.values = [fixture[name] for name in ("master", "key", "token", "username")]
         self.factors = fixture

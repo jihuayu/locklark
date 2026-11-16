@@ -1,5 +1,5 @@
 /* Shared pure policy and static isolated-world injection functions. */
-globalThis.LocklarkCore = (() => {
+globalThis.PassmeCore = (() => {
   "use strict";
   const IDENTITY_FIELDS = [
     "full_name",
@@ -466,20 +466,20 @@ globalThis.LocklarkCore = (() => {
       })
     );
   }
-  // Paste-time protection. A Secret Key (LL1-, LLR2- recovery material) is only
-  // ever entered inside the Locklark app, so pasting one into a web page is
+  // Paste-time protection. A Secret Key (PM1-, PMR2- recovery material) is only
+  // ever entered inside the Passme app, so pasting one into a web page is
   // always refused by default. The phishing warning is narrower: it needs
   // positive knowledge that this origin has no saved login (siteLinked ===
   // false). An unknown site state, a locked vault or a disconnected host must
   // never block or warn on a paste.
   const SECRET_KEY_PATTERNS = Object.freeze([
-    /^LL1-[A-Z2-7]{26}$/,
-    /^LLR2-[A-Z2-7]{52}$/,
-    /^LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}$/,
+    /^PM1-[A-Z2-7]{26}$/,
+    /^PMR2-[A-Z2-7]{52}$/,
+    /^PMR2-[A-Z2-7]{52}-[A-Z2-7]{52}$/,
   ]);
   const SECRET_KEY_MIN_LENGTH = 30;
   const SECRET_KEY_MAX_LENGTH = 110;
-  function looksLikeLocklarkSecret(text) {
+  function looksLikePassmeSecret(text) {
     if (typeof text !== "string") return false;
     const value = text.trim();
     if (
@@ -493,7 +493,7 @@ globalThis.LocklarkCore = (() => {
     if (!raw || typeof raw !== "object" || raw.enabled === false) return "";
     const text = typeof raw.text === "string" ? raw.text : "";
     if (!text.trim()) return "";
-    if (looksLikeLocklarkSecret(text)) return "secret-key";
+    if (looksLikePassmeSecret(text)) return "secret-key";
     if (raw.isPasswordField === true && raw.siteLinked === false)
       return "phishing";
     return "";
@@ -2958,7 +2958,7 @@ globalThis.LocklarkCore = (() => {
       documentStable = false,
       sandboxEver = true;
     try {
-      const fence = globalThis.LocklarkCheckoutFence;
+      const fence = globalThis.PassmeCheckoutFence;
       if (typeof fence === "function") {
         const snap = fence();
         if (snap && typeof snap === "object") {
@@ -3186,7 +3186,7 @@ globalThis.LocklarkCore = (() => {
     if (isTop !== (allowTop === true)) return refuse();
     let fence = null;
     try {
-      fence = globalThis.LocklarkCheckoutFence;
+      fence = globalThis.PassmeCheckoutFence;
     } catch {
       fence = null;
     }
@@ -3393,9 +3393,9 @@ globalThis.LocklarkCore = (() => {
           el.disabled ||
           el.readOnly ||
           el.matches(":disabled") ||
-          el.matches("[data-1p-ignore],[data-locklark-ignore]") ||
+          el.matches("[data-1p-ignore],[data-passme-ignore]") ||
           el.closest(
-            '[hidden],[inert],[aria-hidden="true"],[data-1p-ignore],[data-locklark-ignore]',
+            '[hidden],[inert],[aria-hidden="true"],[data-1p-ignore],[data-passme-ignore]',
           )
         )
           return false;
@@ -3711,9 +3711,9 @@ globalThis.LocklarkCore = (() => {
           el.disabled ||
           el.readOnly ||
           el.matches(":disabled") ||
-          el.matches("[data-1p-ignore],[data-locklark-ignore]") ||
+          el.matches("[data-1p-ignore],[data-passme-ignore]") ||
           el.closest(
-            '[hidden],[inert],[aria-hidden="true"],[data-1p-ignore],[data-locklark-ignore]',
+            '[hidden],[inert],[aria-hidden="true"],[data-1p-ignore],[data-passme-ignore]',
           )
         )
           return false;
@@ -5946,10 +5946,10 @@ globalThis.LocklarkCore = (() => {
     validClearFields,
     nativeOriginalFieldAny,
     generatePasswordString,
-    looksLikeLocklarkSecret,
+    looksLikePassmeSecret,
     pasteWarning,
     parseOTPAuthTOTP,
     identityProviderFor,
   };
 })();
-if (typeof module !== "undefined") module.exports = globalThis.LocklarkCore;
+if (typeof module !== "undefined") module.exports = globalThis.PassmeCore;

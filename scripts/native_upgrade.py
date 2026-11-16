@@ -13,7 +13,7 @@ def run(exe, *args, succeeds=True):
 
 
 def check(old, new):
-    with tempfile.TemporaryDirectory(prefix="locklark-native-upgrade-") as directory:
+    with tempfile.TemporaryDirectory(prefix="passme-native-upgrade-") as directory:
         root = Path(directory)
         for tag, exe in (("legacy", old), ("native", new)):
             case = root / tag

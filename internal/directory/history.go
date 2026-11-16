@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 

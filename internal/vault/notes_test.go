@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 func TestLoginNotesProtectedRoundtripAndLegacyOmission(t *testing.T) {

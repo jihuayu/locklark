@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	w "github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	w "github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 // Binaries Stores a slice of binaries in the metadata header of a database

@@ -33,8 +33,8 @@ def expected_failure(returncode, raw):
 
 def main():
     root = Path(__file__).resolve().parent.parent
-    state = Path(tempfile.mkdtemp(prefix="locklark-notes-privacy-"))
-    environment = dict(os.environ, LOCKLARK_TEST_FAILURE_STAGE="probe-input")
+    state = Path(tempfile.mkdtemp(prefix="passme-notes-privacy-"))
+    environment = dict(os.environ, PASSME_TEST_FAILURE_STAGE="probe-input")
     with (state / "controller.log").open("xb") as log:
         os.chmod(log.name, 0o600)
         process = subprocess.Popen([sys.executable, str(root / "scripts/desktop_login_notes_acceptance.py")],
@@ -52,7 +52,7 @@ def main():
     raw = (state / "controller.log").read_bytes()
     if not expected_failure(process.returncode, raw):
         raise ValueError("privacy-failure-stage")
-    match = re.search(rb"Desktop login notes private state: (/tmp/locklark-desktop-acceptance-[a-zA-Z0-9_]+)", raw)
+    match = re.search(rb"Desktop login notes private state: (/tmp/passme-desktop-acceptance-[a-zA-Z0-9_]+)", raw)
     if not match:
         raise ValueError("privacy-state")
     private = Path(match[1].decode("ascii"))

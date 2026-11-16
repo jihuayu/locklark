@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -16,7 +16,7 @@ const nativeTestOTP = "otpauth://totp/Test?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3P
 
 func nativeTestVault(t *testing.T) (string, []byte) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "native.ll")
+	path := filepath.Join(t.TempDir(), "native.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)

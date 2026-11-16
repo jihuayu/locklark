@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
+	"github.com/jihuayu/passme/internal/osunlock"
 )
 
 // The security page is the only place that tells the user which OS

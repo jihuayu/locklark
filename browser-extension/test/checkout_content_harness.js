@@ -116,7 +116,7 @@ function makeContentHarness(options = {}) {
     observerTargets: observers.map((observer) => observer.target),
     documentListeners,
     snapshot() {
-      const fence = context.LocklarkCheckoutFence;
+      const fence = context.PassmeCheckoutFence;
       return typeof fence === "function" ? { ...fence() } : null;
     },
     emit(records) {
@@ -129,7 +129,7 @@ function makeContentHarness(options = {}) {
     descriptor() {
       return Object.getOwnPropertyDescriptor(
         context,
-        "LocklarkCheckoutFence",
+        "PassmeCheckoutFence",
       );
     },
   };

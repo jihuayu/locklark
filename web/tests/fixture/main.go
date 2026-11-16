@@ -9,9 +9,9 @@ import (
 	"filippo.io/age"
 	"flag"
 	"fmt"
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/management"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/management"
+	"github.com/jihuayu/passme/internal/vault"
 	"os"
 	"path/filepath"
 )

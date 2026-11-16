@@ -1,6 +1,6 @@
 # Native mobile core contract
 
-Go import: `github.com/jihuayu/locklark/mobile/core`; package name: `mobilecore`.
+Go import: `github.com/jihuayu/passme/mobile/core`; package name: `mobilecore`.
 Gomobile Java package: `mobilecore`; Objective-C module is `Mobilecore` with
 `gomobile bind -prefix Mobilecore`. Generated language signatures are authoritative.
 

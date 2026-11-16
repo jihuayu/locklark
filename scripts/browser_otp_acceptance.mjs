@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 export const otpHTML =
-  '<!doctype html><html><title>Locklark OTP acceptance</title><body><form id="otp-form" action="/verify"><input id="otp-code" autocomplete="one-time-code"><button>Verify</button></form><script>window.submits=0;document.addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
+  '<!doctype html><html><title>Passme OTP acceptance</title><body><form id="otp-form" action="/verify"><input id="otp-code" autocomplete="one-time-code"><button>Verify</button></form><script>window.submits=0;document.addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
 
 export async function acceptBrowserOTP(driver) {
   const {
@@ -202,7 +202,7 @@ export async function acceptBrowserOTP(driver) {
         received.submits === 0,
       "OTP did not match independent HMAC or submitted a form",
     );
-    if (env.LOCKLARK_TEST_FAILURE_STAGE === "otp-page-arguments") {
+    if (env.PASSME_TEST_FAILURE_STAGE === "otp-page-arguments") {
       step("driver-arguments-failure");
       await pageEval((code) => {
         document.querySelector("#otp-code").value = code;

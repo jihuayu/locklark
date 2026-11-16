@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
 )
 
 const (
@@ -19,7 +19,7 @@ const (
 	passkeyTransferRevokeAction  = "vault.passkey.transfer.revoke"
 	passkeyTransferConsumeAction = "vault.passkey.transfer.consume"
 
-	passkeyTransferInviteLinkDomain = "locklark/personal/passkey-transfer/invite/v1\x00"
+	passkeyTransferInviteLinkDomain = "passme/personal/passkey-transfer/invite/v1\x00"
 	maxPasskeyTransferInvitation    = 16 << 10
 )
 

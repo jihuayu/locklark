@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Locklark</string>
+    <string name="app_name">Passme</string>
     <string name="security_badge">本机零知识加密 · 离线安全金库</string>
     <string name="opening_vault">正在打开此设备的本地金库…</string>
     <string name="locking_vault">正在完成锁定…</string>
-    <string name="page_locked_cover">Locklark 已锁定</string>
-    <string name="page_locked_vault">Locklark · 本机离线金库</string>
+    <string name="page_locked_cover">Passme 已锁定</string>
+    <string name="page_locked_vault">Passme · 本机离线金库</string>
     <string name="page_create_vault">创建本机金库</string>
-    <string name="page_vault_list">Locklark · 登录</string>
+    <string name="page_vault_list">Passme · 登录</string>
     <string name="page_new_login">新建登录</string>
     <string name="page_edit_field">编辑登录字段</string>
     <string name="page_regenerate_password">确认重新生成本地密码</string>

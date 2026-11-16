@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 	"os"
 	"path/filepath"
 	"testing"

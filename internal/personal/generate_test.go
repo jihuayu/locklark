@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
 func TestGenerateSavedLoginAndAudit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owner.ll")
+	path := filepath.Join(t.TempDir(), "owner.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestGenerationHistoryRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := readStoredItems(t, path, "fixture", key)
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	backup, err := PrepareBackup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestGenerationHistoryRecovery(t *testing.T) {
 	if err = backup.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	recovery, err := PrepareRestore(archive, restored, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)

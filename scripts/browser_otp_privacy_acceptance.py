@@ -36,9 +36,9 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     script = "browser_native_acceptance.mjs" if args.engine == "chromium" else "browser_firefox_native_acceptance.mjs"
-    state = Path(tempfile.mkdtemp(prefix="locklark-browser-otp-privacy-"))
+    state = Path(tempfile.mkdtemp(prefix="passme-browser-otp-privacy-"))
     os.chmod(state, 0o700)
-    environment = dict(os.environ, LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments")
+    environment = dict(os.environ, PASSME_TEST_FAILURE_STAGE="otp-page-arguments")
     first = time.time()
     with (state / "controller.log").open("xb") as log:
         os.chmod(log.name, 0o600)
@@ -59,8 +59,8 @@ def main():
     text = raw.decode("utf-8", errors="replace")
     if process.returncode != 1 or "otp-6:positive:driver-arguments-failure" not in text:
         raise ValueError("privacy-failure-stage")
-    marker = (r"Synthetic diagnostic directory: (/tmp/locklark-browser-acceptance-[A-Za-z0-9]+)/(diagnostics-[A-Za-z0-9]+)"
-              if args.engine == "chromium" else r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)")
+    marker = (r"Synthetic diagnostic directory: (/tmp/passme-browser-acceptance-[A-Za-z0-9]+)/(diagnostics-[A-Za-z0-9]+)"
+              if args.engine == "chromium" else r"Private diagnostic files: (/tmp/passme-firefox-native-[A-Za-z0-9]+)")
     match = re.search(marker, text)
     if not match:
         raise ValueError("privacy-state")
@@ -71,7 +71,7 @@ def main():
     if len(diagnostics) != 1 or any(diagnostics[0].glob("*.png")):
         raise ValueError("privacy-otp-screenshot")
     if args.engine == "firefox":
-        manifest = Path.home() / ".mozilla/native-messaging-hosts/org.locklark.browser.json"
+        manifest = Path.home() / ".mozilla/native-messaging-hosts/org.passme.browser.json"
         if manifest.exists() or manifest.is_symlink():
             raise ValueError("privacy-manifest")
     print("PASS: real " + args.engine + " OTP argument failure exits 1; full controller canary scan, no OTP screenshots")

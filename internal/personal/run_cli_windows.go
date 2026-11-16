@@ -43,7 +43,7 @@ func createRunCLITemp() (string, error) {
 			if e != nil {
 				return "", e
 			}
-			path := filepath.Join(parent, "locklark-run-cli-"+id)
+			path := filepath.Join(parent, "passme-run-cli-"+id)
 			name, e := windows.UTF16PtrFromString(path)
 			if e != nil {
 				return "", e

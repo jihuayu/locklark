@@ -14,8 +14,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -40,7 +40,7 @@ func importArchive(t *testing.T) []byte {
 func importFixture(t *testing.T) (string, []byte, string, []byte) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "owner.ll")
+	path := filepath.Join(dir, "owner.pm")
 	source := filepath.Join(dir, "private.1pux")
 	key := bytes.Repeat([]byte{4}, 16)
 	if e := Create(path, "fixture", key); e != nil {
@@ -62,7 +62,7 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	if plan.Report.SourceDigest == hex.EncodeToString(publicHash[:]) {
 		t.Fatal("plan exposes an unkeyed source fingerprint")
 	}
-	other := filepath.Join(t.TempDir(), "other.ll")
+	other := filepath.Join(t.TempDir(), "other.pm")
 	if e := Create(other, "fixture", key); e != nil {
 		t.Fatal(e)
 	}
@@ -125,7 +125,7 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	if strings.Contains(string(encoded), "private-") {
 		t.Fatal("source leaked into receipt/audit")
 	}
-	backup := filepath.Join(t.TempDir(), "backup.ll")
+	backup := filepath.Join(t.TempDir(), "backup.pm")
 	prep, e := PrepareBackup(path, backup, "fixture", key)
 	if e != nil {
 		t.Fatal(e)
@@ -135,7 +135,7 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	if e = prep.Publish(); e != nil {
 		t.Fatal(e)
 	}
-	dest := filepath.Join(t.TempDir(), "restored.ll")
+	dest := filepath.Join(t.TempDir(), "restored.pm")
 	fresh := bytes.Repeat([]byte{8}, 16)
 	e = Restore(backup, dest, "fixture", key, material, fresh)
 	if e != nil {

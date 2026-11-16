@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 // signalAttachCredentials registers n additional real ES256 credentials for one

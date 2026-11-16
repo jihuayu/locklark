@@ -145,7 +145,7 @@ def _plan_multi_category(ctx, vault):
 def t1_f1_01(ctx):
     ready = f1_passkey_ready(ctx)
     gate(ctx, "F1", ready, "extension webauthn.js and native passkey protocol are not present")
-    vault = make_vault(ctx, ["Prod Bastion SSH", "login.locklark.test"])
+    vault = make_vault(ctx, ["Prod Bastion SSH", "login.passme.test"])
     rows = list_rows(ctx, vault)
     assert len(rows) == 2, rows
     for row in rows:
@@ -172,7 +172,7 @@ def t1_f1_03(ctx):
     ready = f1_passkey_ready(ctx)
     gate(ctx, "F1", ready, "passkey vault artifacts are absent; mixed backup cannot be verified")
     vault = make_vault(ctx, ["Prod Bastion SSH", "passkey-login"])
-    backup = ctx.temp_dir / "mixed-backup.ll"
+    backup = ctx.temp_dir / "mixed-backup.pm"
     created = pty(
         ctx,
         ["personal", "backup", "--file", str(vault["path"]), "--out", str(backup)],
@@ -183,7 +183,7 @@ def t1_f1_03(ctx):
     assert created.returncode == 0, created.transcript[-1200:]
     assert created.issued and backup.is_file()
     assert backup.stat().st_mode & 0o077 == 0
-    restored = ctx.temp_dir / "mixed-restored.ll"
+    restored = ctx.temp_dir / "mixed-restored.pm"
     restored_result = pty(
         ctx,
         ["personal", "restore", "--file", str(backup), "--out", str(restored)],
@@ -234,7 +234,7 @@ def t1_f1_05(ctx):
     gate(ctx, "F1", ready, "Firefox auto-submit implementation is absent from the built core.js")
     chromium, firefox = built_extension(ctx)
     manifest = json.loads((firefox / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["browser_specific_settings"]["gecko"]["id"] == "browser@locklark.local"
+    assert manifest["browser_specific_settings"]["gecko"]["id"] == "browser@passme.local"
     assert "submit" in core.lower()
     node_test(ctx, "browser-extension/test/core.test.js")
 
@@ -243,12 +243,12 @@ def t1_f1_05(ctx):
 def t1_f1_06(ctx):
     ready = f1_passkey_ready(ctx)
     gate(ctx, "F1", ready, "mixed ssh-key/passkey vault projection is unavailable on this branch")
-    vault = make_vault(ctx, ["login.locklark.test"])
+    vault = make_vault(ctx, ["login.passme.test"])
     from .support import edit_url, match_logins
 
     item_id, revision = vault["items"][0]["id"], vault["items"][0]["revision"]
-    revision = edit_url(ctx, vault, item_id, revision, "https://login.locklark.test/login")
-    rows = match_logins(ctx, vault, "https://login.locklark.test")
+    revision = edit_url(ctx, vault, item_id, revision, "https://login.passme.test/login")
+    rows = match_logins(ctx, vault, "https://login.passme.test")
     assert len(rows) == 1 and rows[0]["kind"] == "login", rows
     assert rows[0]["id"] == item_id
 
@@ -360,7 +360,7 @@ def t1_f2_07(ctx):
 @e2e_test("T1_F3_01", 1, ["F3"], "Team sync init-anchor/serve starts a TLS sequencer with hidden seed input")
 def t1_f3_01(ctx):
     ready = f3_team_sync_ready(ctx)
-    gate(ctx, "F3", ready, "cmd/locklark-team-sync is not present in this checkout")
+    gate(ctx, "F3", ready, "cmd/passme-team-sync is not present in this checkout")
     output = _run_team_sync_help(ctx)
     assert "team" in output.lower() or "usage" in output.lower(), output
 
@@ -413,7 +413,7 @@ def t1_f3_05(ctx):
 @e2e_test("T1_F4_01", 1, ["F4"], "Server prepare-identity and owner team create verify mutual fingerprints")
 def t1_f4_01(ctx):
     ready = f4_team_cli_ready(ctx)
-    gate(ctx, "F4", ready, "locklark team command is absent (CLI reports unknown command)")
+    gate(ctx, "F4", ready, "passme team command is absent (CLI reports unknown command)")
     result = ctx.run_cli(["team", "status"])
     assert "unknown command" not in (result.stderr or "").lower()
 
@@ -567,17 +567,17 @@ def _terminal_command_ready(ctx, args):
 
     result = ctx.run_cli(args)
     text = (result.stdout or "") + (result.stderr or "")
-    return "interactive terminal" in text and "usage: locklark personal" not in text
+    return "interactive terminal" in text and "usage: passme personal" not in text
 
 
 def _add_item_ready(ctx):
     return _terminal_command_ready(
-        ctx, ["personal", "add-item", "--file", "unused.ll", "--input", "unused.json"]
+        ctx, ["personal", "add-item", "--file", "unused.pm", "--input", "unused.json"]
     )
 
 
 def _references_ready(ctx):
-    return _terminal_command_ready(ctx, ["personal", "references", "--file", "unused.ll"])
+    return _terminal_command_ready(ctx, ["personal", "references", "--file", "unused.pm"])
 
 
 def _row_by_id(rows, item_id):
@@ -901,7 +901,7 @@ def t1_f6_04(ctx):
     for canary in (*F6_TAGS, F6_TAG_FIELD_CANARY):
         ctx.assert_no_canary_leak(canary, vault_bytes)
 
-    backup = ctx.temp_dir / "tags-backup.ll"
+    backup = ctx.temp_dir / "tags-backup.pm"
     created_backup = pty(
         ctx,
         ["personal", "backup", "--file", str(vault["path"]), "--out", str(backup)],
@@ -913,7 +913,7 @@ def t1_f6_04(ctx):
     assert backup.is_file()
     ctx.assert_no_canary_leak(F6_TAG_FIELD_CANARY, backup.read_bytes())
 
-    restored = ctx.temp_dir / "tags-restored.ll"
+    restored = ctx.temp_dir / "tags-restored.pm"
     restored_result = pty(
         ctx,
         ["personal", "restore", "--file", str(backup), "--out", str(restored)],

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/totp"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/totp"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 	"unicode"
@@ -511,5 +511,3 @@ func (a *App) largeTypeView(c *ui.Context) {
 		})
 	})
 }
-
-

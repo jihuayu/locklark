@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	w "github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	w "github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 // xmlChild is the kind of a child element of a group or an entry, which can
