@@ -32,11 +32,16 @@ var (
 
 const (
 	genesisIntentKey           = "genesis-intent"
+	genesisAttemptKey          = "genesis-attempt"
 	genesisIntentMagic         = "LLGI"
 	genesisIntentVersion       = uint16(1)
 	genesisIntentPrefix        = 4 + 2 + 2 + 1 + 1 + 1 + 8 + 4 + 32 + 32
 	genesisIntentDigestSize    = sha256.Size
 	genesisIntentDigestDomain  = "locklark vault-file genesis intent v1\x00"
+	genesisAttemptMagic        = "LLGA"
+	genesisAttemptVersion      = uint16(1)
+	genesisAttemptRecordSize   = 4 + 2 + sha256.Size
+	genesisAttemptDigestDomain = "locklark vault-file genesis attempt v1\x00"
 	MaxGenesisIntentRecordSize = genesisIntentPrefix + vaultfilebackend.MaxNameSize + 3*MaxOperationIDBytes + MaxProposalBytes + genesisIntentDigestSize
 )
 
@@ -130,12 +135,25 @@ func decodeGenesisIntent(raw []byte) (GenesisIntent, error) {
 
 func genesisIntentPresent(tx *bolt.Tx) bool {
 	b := tx.Bucket([]byte(bucketName))
-	return b != nil && (b.Get([]byte(genesisIntentKey)) != nil || b.Bucket([]byte(genesisIntentKey)) != nil)
+	return b != nil && (b.Get([]byte(genesisIntentKey)) != nil || b.Bucket([]byte(genesisIntentKey)) != nil ||
+		b.Get([]byte(genesisAttemptKey)) != nil || b.Bucket([]byte(genesisAttemptKey)) != nil)
 }
 
-// readGenesisIntentOnly requires one top-level journal bucket with exactly one
-// value, so no old or unknown writer state can coexist with this lifecycle.
-func readGenesisIntentOnly(tx *bolt.Tx) (GenesisIntent, error) {
+func encodeGenesisAttempt(intentRaw []byte) []byte {
+	buf := make([]byte, genesisAttemptRecordSize)
+	copy(buf[:4], genesisAttemptMagic)
+	binary.BigEndian.PutUint16(buf[4:6], genesisAttemptVersion)
+	h := sha256.New()
+	_, _ = h.Write([]byte(genesisAttemptDigestDomain))
+	_, _ = h.Write(intentRaw)
+	copy(buf[6:], h.Sum(nil))
+	return buf
+}
+
+// readGenesisIntentState accepts exactly the old single intent value, or that
+// value plus a versioned attempt marker bound to its full canonical encoding.
+// An isolated, malformed or foreign marker is never a fresh attempt.
+func readGenesisIntentState(tx *bolt.Tx) (GenesisIntent, bool, error) {
 	count := 0
 	if err := tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
 		if !bytes.Equal(name, []byte(bucketName)) {
@@ -144,20 +162,39 @@ func readGenesisIntentOnly(tx *bolt.Tx) (GenesisIntent, error) {
 		count++
 		return nil
 	}); err != nil || count != 1 {
-		return GenesisIntent{}, ErrCorrupt
+		return GenesisIntent{}, false, ErrCorrupt
 	}
 	b := tx.Bucket([]byte(bucketName))
-	count = 0
+	var intentRaw, attemptRaw []byte
 	if err := b.ForEach(func(k, v []byte) error {
-		if !bytes.Equal(k, []byte(genesisIntentKey)) || v == nil {
+		if v == nil {
 			return ErrCorrupt
 		}
-		count++
+		switch {
+		case bytes.Equal(k, []byte(genesisIntentKey)):
+			intentRaw = v
+		case bytes.Equal(k, []byte(genesisAttemptKey)):
+			attemptRaw = v
+		default:
+			return ErrCorrupt
+		}
 		return nil
-	}); err != nil || count != 1 {
-		return GenesisIntent{}, ErrCorrupt
+	}); err != nil || intentRaw == nil {
+		return GenesisIntent{}, false, ErrCorrupt
 	}
-	return decodeGenesisIntent(b.Get([]byte(genesisIntentKey)))
+	intent, err := decodeGenesisIntent(intentRaw)
+	if err != nil || !bytes.Equal(encodeGenesisIntent(intent), intentRaw) {
+		return GenesisIntent{}, false, ErrCorrupt
+	}
+	if attemptRaw != nil && !bytes.Equal(attemptRaw, encodeGenesisAttempt(intentRaw)) {
+		return GenesisIntent{}, false, ErrCorrupt
+	}
+	return intent, attemptRaw != nil, nil
+}
+
+func readGenesisIntentOnly(tx *bolt.Tx) (GenesisIntent, error) {
+	intent, _, err := readGenesisIntentState(tx)
+	return intent, err
 }
 
 func (j *Journal) initializeGenesisIntent(intent GenesisIntent) error {
@@ -186,6 +223,15 @@ func CreateNewGenesisIntent(path string, intent GenesisIntent) error {
 
 // IntentJournal exposes no legacy Save, InitializeState or working edit API.
 type IntentJournal struct{ journal *Journal }
+
+// GenesisAttemptResult is a verdict from the journal's atomic claim, not a
+// caller assertion. Only NewlyClaimed permits this invocation to call Create.
+type GenesisAttemptResult uint8
+
+const (
+	GenesisAttemptNewlyClaimed GenesisAttemptResult = iota + 1
+	GenesisAttemptPreviouslyClaimed
+)
 
 // OpenExistingIntent opens only an existing, strict single-intent journal.
 func OpenExistingIntent(path string) (*IntentJournal, error) {
@@ -225,6 +271,60 @@ func (g *IntentJournal) Load() (GenesisIntent, error) {
 		return err
 	})
 	return intent, err
+}
+
+// ClaimGenesisAttempt atomically binds a one-time Create attempt to the exact
+// pending intent. A committed marker survives restart; subsequent calls must
+// only read and resolve, never Create again. If the commit result is an error,
+// the caller cannot know whether the marker committed and must not Create.
+// The crash window after marker commit but before Create remains Unknown:
+// safety deliberately does not imply that publication will eventually occur.
+func (g *IntentJournal) ClaimGenesisAttempt(expected GenesisIntent) (GenesisAttemptResult, error) {
+	return g.claimGenesisAttemptWithUpdate(expected, nil)
+}
+
+// update is a private deterministic commit-result seam; production uses Bolt.
+func (g *IntentJournal) claimGenesisAttemptWithUpdate(expected GenesisIntent, update func(func(*bolt.Tx) error) error) (GenesisAttemptResult, error) {
+	if g == nil || g.journal == nil {
+		return 0, ErrClosed
+	}
+	if !validGenesisIntent(expected) {
+		return 0, ErrInvalid
+	}
+	expected = cloneGenesisIntent(expected)
+	defer clear(expected.SealedBytes)
+	j := g.journal
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return 0, ErrClosed
+	}
+	if update == nil {
+		update = j.db.Update
+	}
+	var result GenesisAttemptResult
+	err := update(func(tx *bolt.Tx) error {
+		stored, attempted, err := readGenesisIntentState(tx)
+		if err != nil {
+			return err
+		}
+		if !sameGenesisIntent(stored, expected) {
+			return ErrGenesisMismatch
+		}
+		if attempted {
+			result = GenesisAttemptPreviouslyClaimed
+			return nil
+		}
+		if err := tx.Bucket([]byte(bucketName)).Put([]byte(genesisAttemptKey), encodeGenesisAttempt(encodeGenesisIntent(stored))); err != nil {
+			return err
+		}
+		result = GenesisAttemptNewlyClaimed
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return result, nil
 }
 
 // AckGenesis is local bookkeeping only. The caller must independently verify
@@ -275,6 +375,9 @@ func (g *IntentJournal) ackGenesisWithUpdate(expected GenesisIntent, readback []
 			RemoteRevision: revision, Generation: 0,
 		})); err != nil {
 			return fmt.Errorf("vault file journal: ack genesis state: %w", err)
+		}
+		if err := b.Delete([]byte(genesisAttemptKey)); err != nil {
+			return fmt.Errorf("vault file journal: ack genesis attempt: %w", err)
 		}
 		return b.Delete([]byte(genesisIntentKey))
 	})
