@@ -205,6 +205,38 @@ export async function acceptBrowserRotation(driver) {
       newAuthentication.authorized && newAuthentication.status === 200,
     "Rotation website must reject the old credential and accept the generated credential");
 
+    // The generator stages its proposal natively before the update. Approve
+    // only that temporary staging here: the product still has a separate
+    // commit-staged-save approval, and this ordinary update uses the legacy
+    // popup [data-action="update"] save-update path below.
+    step("stage-save:observe-before");
+    const beforeStaging = observe();
+    step("stage-save:wait");
+    input([{ wait_label: "批准本次暂存" }]);
+    const stagingControls = input([], true, true).controls;
+    assert(stagingControls?.["批准本次暂存"]?.present === true &&
+      stagingControls["批准本次暂存"].enabled === true &&
+      stagingControls["批准本次暂存"].showing === true &&
+      stagingControls?.["批准本次保存"]?.present !== true,
+    "Rotation must approve only the temporary staging control");
+    step("stage-save:approve");
+    input([{ click_label: "批准本次暂存" }]);
+    await wait(() => {
+      const controls = input([], true, true)?.controls;
+      const control = controls?.["批准本次暂存"];
+      return !!controls && (!control || control.present === false || control.showing === false);
+    }, "Rotation staging approval did not clear");
+    step("stage-save:unchanged");
+    const afterStaging = observe();
+    assert(afterStaging.snapshot_digest === beforeStaging.snapshot_digest,
+      "Rotation staging changed the vault snapshot before any commit");
+    assert.deepEqual(afterStaging.save_events, beforeStaging.save_events,
+      "Rotation staging persisted a save event before any commit");
+    assert.deepEqual(afterStaging.rows, beforeStaging.rows,
+      "Rotation staging changed candidate rows or the target revision");
+    assert(afterStaging.rows.find((row) => row.id === itemID)?.revision === r0,
+      "Rotation staging must not advance the original target revision");
+
     step("update-r0:baseline-observe");
     const beforeUpdate = observe();
     const { popup: updatePopup, selected } = await exactCandidate(itemID, r0, true);
@@ -239,17 +271,27 @@ export async function acceptBrowserRotation(driver) {
     assert(site.snapshot().loginAccepted === 2 && site.snapshot().loginRejected === 0,
       "Rotation stored R1 did not authenticate through the actual login form");
     popup = await openPopup();
-    if ((await popup.count("#pending-save-banner:not([hidden])")) === 1) {
+    // A form-submit draft may also be pending locally alongside the generated
+    // proposal. Both are temporary and both must be dismissed; a third would
+    // fail the fixed two-entry bound instead of being silently accepted.
+    for (let attempts = 0;
+      attempts < 2 && (await popup.count("#pending-save-banner:not([hidden])")) === 1;
+      attempts++) {
+      await wait(async () => (await popup.disabled("#dismiss-staged-save")) === false,
+        "Rotation generated draft dismissal unavailable");
       await popup.click("#dismiss-staged-save");
-      await wait(async () => (await popup.count("#pending-save-banner:not([hidden])")) === 0,
-        "Rotation generated draft was not dismissed");
+      await wait(async () => (await popup.count("#pending-save-banner:not([hidden])")) === 0 ||
+        (await popup.disabled("#dismiss-staged-save")) === false,
+      "Rotation generated draft was not dismissed");
     }
+    assert((await popup.count("#pending-save-banner:not([hidden])")) === 0,
+      "Rotation generated drafts were not dismissed");
     const counts = site.snapshot();
     assert(!counts.countersCapped && counts.observerFailures === 0 && counts.registrations === 1 &&
       counts.passwordChanges === 1 && counts.basicAccepted === 2 && counts.basicRejected === 1,
     "Rotation website evidence must describe one continuous account journey");
     receipt = { registered: true, savedR0: true, loginR0: true, generatedAndFilled: true,
-      changedByPOST: true, oldRejected: true, newAccepted: true, sameItem: true, baseR0: true,
+      stagedWithoutCommit: true, changedByPOST: true, oldRejected: true, newAccepted: true, sameItem: true, baseR0: true,
       revisionAdvanced: true, refillLoginR1: true, laterScreenshotsDisabled: true,
       tlsConnections: counts.tlsConnections, requests: counts.requests, registrations: counts.registrations,
       loginAccepted: counts.loginAccepted, passwordChanges: counts.passwordChanges,

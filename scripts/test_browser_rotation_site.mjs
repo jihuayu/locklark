@@ -443,6 +443,53 @@ test("static rotation integration encloses actual generator input and read in th
     "Failure and cleanup must preserve the last fixed stage without exposing an exception payload");
 });
 
+test("rotation approves temporary staging before refreshing the exact legacy-update row", () => {
+  const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
+  const generator = source.indexOf('step("generator")');
+  const staging = source.indexOf('step("stage-save:observe-before")');
+  const update = source.indexOf('step("update-r0:baseline-observe")');
+  assert(generator >= 0 && staging > generator && update > staging,
+    "Staging approval must sit between the generator and the exact legacy update");
+  const beforeApproval = source.slice(generator, staging);
+  assert(!beforeApproval.includes("exactCandidate(") && !beforeApproval.includes('popup.click("#refresh")'),
+    "Rotation must not refresh candidates while the generated staging approval is pending");
+  const block = source.slice(staging, update);
+  const ordered = [
+    'step("stage-save:observe-before")', "const beforeStaging = observe()",
+    'input([{ wait_label: "批准本次暂存" }])',
+    'stagingControls?.["批准本次暂存"]?.present === true',
+    'stagingControls?.["批准本次保存"]?.present !== true',
+    'input([{ click_label: "批准本次暂存" }])',
+    'await wait(() => {', "const afterStaging = observe()",
+    "afterStaging.snapshot_digest === beforeStaging.snapshot_digest",
+    "assert.deepEqual(afterStaging.save_events, beforeStaging.save_events,",
+    "assert.deepEqual(afterStaging.rows, beforeStaging.rows,",
+    "afterStaging.rows.find((row) => row.id === itemID)?.revision === r0",
+  ];
+  let previous = -1;
+  for (const token of ordered) {
+    const position = block.indexOf(token, previous + 1);
+    assert(position > previous, "Actual staging approval, control check and unchanged-vault proof must stay ordered");
+    previous = position;
+  }
+  assert(!block.includes("exactCandidate(") && !block.includes('popup.click("#refresh")') &&
+    !block.includes("#commit-staged-save") && !block.includes('click_label: "批准本次保存"') &&
+    !block.includes('wait_label: "批准本次保存"'),
+    "Temporary staging must never become the separate commit-staged-save approval");
+  assert(source.includes('updatePopup.click(selected + \' [data-action="update"]\')') &&
+    (source.match(/wait_label: "批准更新登录"/g) || []).length === 1 &&
+    (source.match(/click_label: "批准更新登录"/g) || []).length === 1 &&
+    !source.includes("#commit-staged-save"),
+    "The exact update control must remain the product legacy save-update approval");
+  const popup = readFileSync(new URL("../browser-extension/popup.js", import.meta.url), "utf8");
+  const start = popup.indexOf('update.dataset.action = "update"');
+  const end = popup.indexOf('const otp = document.createElement("button")', start);
+  assert(start >= 0 && end > start, "Product exact-update control must exist");
+  const updateControl = popup.slice(start, end);
+  assert(updateControl.includes('type: "save-update"') && !updateControl.includes("commit-staged-save"),
+    "Product update control must use legacy save-update, not commit-staged-save");
+});
+
 test("static rotation hook runs once and keeps the remaining invocation free of screenshots", () => {
   const source = readFileSync(new URL("./browser_native_acceptance.mjs", import.meta.url), "utf8");
   assert((source.match(/await acceptBrowserRotation\(/g) || []).length === 1,
