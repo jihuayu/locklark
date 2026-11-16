@@ -167,13 +167,18 @@ func (op *localVaultFileRefreshOperation) finiteOutcome() localVaultFileRefreshO
 // launches one worker that calls that wrapper's real Summary. The wrapper is
 // never handed to candidate ownership and is never closed here.
 func (a *App) beginLocalVaultFileRefresh(scope localVaultFileSessionScope) *localVaultFileRefreshOperation {
-	if a.session == nil {
+	if a.session == nil || scope.configPath == "" ||
+		a.localVaultFiles.selected == "" ||
+		a.localVaultFiles.selected != scope.configPath {
 		return nil
 	}
 	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive {
 		return nil
 	}
 	state := &a.localVaultFiles
+	if state.selected != scope.configPath {
+		return nil
+	}
 	slot := state.sessionSlots[scope]
 	if slot == nil || slot.retiring || slot.session == nil ||
 		slot.scope != scope || slot.parent != a.session ||
@@ -191,11 +196,9 @@ func (a *App) beginLocalVaultFileRefresh(scope localVaultFileSessionScope) *loca
 	if slot.refresh != nil {
 		a.cancelLocalVaultFileRefreshExact(slot.refresh)
 	}
-	if state.selected == scope.configPath {
-		// Only one projection read may belong to the current view, even if an
-		// older alias slot for the same selected path still exists.
-		a.cancelLocalVaultFileRefreshViewReads(state.selected, state.viewSequence)
-	}
+	// Only one projection read may belong to the current view, even if an
+	// older alias slot for the same selected path still exists.
+	a.cancelLocalVaultFileRefreshViewReads(state.selected, state.viewSequence)
 	slot.refreshSequence++
 	op := &localVaultFileRefreshOperation{
 		slot:         slot,
@@ -209,8 +212,7 @@ func (a *App) beginLocalVaultFileRefresh(scope localVaultFileSessionScope) *loca
 		readSequence: slot.refreshSequence,
 	}
 	slot.refresh = op
-	if state.selected == scope.configPath &&
-		state.viewVerification == localVaultFileViewFresh {
+	if state.viewVerification == localVaultFileViewFresh {
 		// A started attempt cannot leave the previous success masquerading
 		// as this attempt's result.
 		state.viewVerification = localVaultFileViewCached
@@ -355,14 +357,18 @@ func (a *App) localVaultFileRefreshCurrentExact(op *localVaultFileRefreshOperati
 }
 
 // localVaultFileRefreshViewCurrent checks the delivered view ownership. The
-// view must still be the selected frozen scope at the same sequence and the
-// slot must still own this exact read operation.
+// operation's frozen path, its frozen selected path, and the current selected
+// path must all be the same scope at the same sequence, and the slot must still
+// own this exact read operation.
 func (a *App) localVaultFileRefreshViewCurrent(op *localVaultFileRefreshOperation) bool {
 	if op == nil || op.slot == nil || op.slot.refresh != op {
 		return false
 	}
 	state := &a.localVaultFiles
-	return state.selected == op.viewSelected &&
+	return op.scope.configPath != "" &&
+		op.viewSelected == op.scope.configPath &&
+		state.selected == op.viewSelected &&
+		state.selected == op.scope.configPath &&
 		state.viewSequence == op.viewSequence
 }
 

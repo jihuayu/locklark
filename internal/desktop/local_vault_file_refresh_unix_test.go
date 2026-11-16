@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 )
 
@@ -520,5 +521,118 @@ func TestDesktopLocalVaultRefreshBusyWithholdsProjection(t *testing.T) {
 	}
 	if !f.parent.Unlocked() {
 		t.Fatal("LOCAL_REFRESH_BUSY_LOCKED_PARENT")
+	}
+}
+
+// TestDesktopLocalVaultRefreshRejectsNonSelectedScope proves a refresh may
+// begin only for the currently selected exact scope. Selecting A and passing
+// B's scope must reject without touching B's wrapper, resetting A's caption or
+// overwriting A's projection. Empty selection rejects as well, and a valid B
+// refresh after selecting B still performs a real borrowed wrapper Summary.
+func TestDesktopLocalVaultRefreshRejectsNonSelectedScope(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	f.openVault(t, q, bScope)
+	aSlot := f.app.localVaultFiles.sessionSlots[aScope]
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if aSlot == nil || bSlot == nil || aSlot.session == nil || bSlot.session == nil {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_SETUP_FAILED")
+	}
+	aSession, bSession := aSlot.session, bSlot.session
+	if aSession == bSession {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_WRAPPERS_NOT_DISTINCT")
+	}
+
+	// Establish a real, selected A projection so a rejected B start has an
+	// observable A projection, caption and fresh evidence to preserve.
+	localVaultRefreshSelect(t, f, aScope)
+	aOp := f.app.beginLocalVaultFileRefresh(aScope)
+	if aOp == nil {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_A_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if aOp.finiteOutcome() != localVaultFileRefreshOutcomeVerified ||
+		f.app.localVaultFiles.viewVerification != localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileFreshCaption {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_A_NOT_FRESH")
+	}
+	aItems := append([]personal.VaultFileBaselineItem(nil), f.app.localVaultFiles.items...)
+	aCaption := f.app.localVaultFileRefreshCaption()
+	bSummaryBefore := bSlot.summary.VaultID
+
+	// B is adopted, but A is selected. The B-scope start must reject before it
+	// cancels, launches or stages anything.
+	if op := f.app.beginLocalVaultFileRefresh(bScope); op != nil {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_B_BEGIN_ACCEPTED")
+	}
+	if bSlot.refresh != nil || len(q.launches) != 0 || len(q.dispatches) != 0 {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_STARTED_WORK")
+	}
+	state := &f.app.localVaultFiles
+	if state.selected != aScope.configPath ||
+		state.viewVerification != localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != aCaption {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_CHANGED_A_FEEDBACK")
+	}
+	if len(state.items) != len(aItems) {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_OVERWROTE_A_PROJECTION")
+	}
+	for i := range aItems {
+		if state.items[i] != aItems[i] {
+			t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_OVERWROTE_A_PROJECTION")
+		}
+	}
+	if aSlot.session != aSession || bSlot.session != bSession ||
+		bSlot.summary.VaultID != bSummaryBefore {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_TOUCHED_WRAPPER")
+	}
+	if summary, err := aSession.Summary(); err != nil || summary.VaultID != aManifest.VaultID {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_LOST_A_WRAPPER")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_LOST_B_WRAPPER")
+	}
+
+	// Empty selection is not a wildcard either.
+	f.app.closeLocalVaultFileView()
+	if op := f.app.beginLocalVaultFileRefresh(bScope); op != nil {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_EMPTY_BEGIN_ACCEPTED")
+	}
+	if state.selected != "" || state.items != nil ||
+		state.viewVerification == localVaultFileViewFresh ||
+		bSlot.refresh != nil || len(q.launches) != 0 || len(q.dispatches) != 0 {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_EMPTY_CHANGED_STATE")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_EMPTY_LOST_B_WRAPPER")
+	}
+
+	// Selecting B still permits a real B refresh on the same wrapper.
+	localVaultRefreshSelect(t, f, bScope)
+	bOp := f.app.beginLocalVaultFileRefresh(bScope)
+	if bOp == nil || bOp.wrapper != bSession {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_VALID_B_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if bOp.finiteOutcome() != localVaultFileRefreshOutcomeVerified ||
+		state.viewVerification != localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileFreshCaption {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_VALID_B_NOT_FRESH")
+	}
+	if bSlot.session != bSession || bSlot.summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_VALID_B_LOST_WRAPPER")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_VALID_B_SUMMARY_FAILED")
+	}
+	if !f.parent.Unlocked() {
+		t.Fatal("LOCAL_REFRESH_SCOPE_GUARD_LOCKED_PARENT")
 	}
 }
