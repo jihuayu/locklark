@@ -66,6 +66,19 @@ CONTROL_LABELS = (
     "关闭本地基线视图", "已验证本地初始版本 · 远端状态未核实",
 )
 
+# Pinned mygo@v0.7.4 maps the ui.RoleText primitive to the ATK role name
+# "label" (ui/access.go reports Text as platform.RoleText; internal/linux/
+# surface_access.go maps platform.RoleText to "label"). Only the reviewed fixed
+# status lines below are rendered as that primitive in these flows. The
+# snapshot accepts "label" for exactly these names; form labels such as
+# "Secret Key" keep their entry/button roles and are not widened here, so the
+# ordinary same-name uniqueness checks remain intact. This records the pinned
+# source mapping only; it is not evidence that a real GUI run passed.
+LABEL_ROLE_STATUS_LABELS = frozenset({
+    "恢复码未逐字匹配",
+    "已验证本地初始版本 · 远端状态未核实",
+})
+
 # Exact grammar of the reviewed multi-credential choice labels. The account
 # list is closed; the credential hint is eight public Base64URL characters and
 # an ellipsis. Labels are still matched by full equality, never by substring.
@@ -1488,7 +1501,13 @@ class NativeControls:
             if not control_label_allowed(label):
                 return True
             role = self.string(self.at.atspi_accessible_get_role_name, node)
-            if role not in ("push button", "button", "text", "password text", "entry"):
+            if role == "label":
+                # Pinned MyGo exposes ui.Text as ATK "label". Accept that role
+                # only for the fixed status lines; never as a general alias for
+                # form labels or editable text.
+                if label not in LABEL_ROLE_STATUS_LABELS:
+                    return True
+            elif role not in ("push button", "button", "text", "password text", "entry"):
                 return True
             state = self.at.atspi_accessible_get_state_set(node)
             if not state:
@@ -1523,11 +1542,14 @@ class NativeControls:
         return controls
 
     def recovery(self):
-        """Read exactly one visible text accessible name matching the kit.
+        """Read exactly one visible label-role accessible name matching the kit.
 
-        This uses only the public name/role/state metadata. It never calls a
-        Value or Text accessor, never retains names that do not match, and
-        never emits anything; the caller owns the one returned value.
+        Pinned mygo@v0.7.4 maps ui.RoleText to the ATK role name "label", so
+        the private reader requires that exact role; "text"/"entry" controls
+        are unrelated and must not satisfy it. This uses only the public
+        name/role/state metadata. It never calls a Value or Text accessor,
+        never retains names that do not match, and never emits anything; the
+        caller owns the one returned value.
         """
         windows = self.window_refs()
         if not windows:
@@ -1536,7 +1558,8 @@ class NativeControls:
 
         def text(node, _depth):
             role = self.string(self.at.atspi_accessible_get_role_name, node)
-            if role != "text":
+            # Exact pinned role only: mygo@v0.7.4 RoleText -> ATK "label".
+            if role != "label":
                 return True
             state = self.at.atspi_accessible_get_state_set(node)
             if not state:
