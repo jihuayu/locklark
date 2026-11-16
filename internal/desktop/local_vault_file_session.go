@@ -382,6 +382,12 @@ type localVaultFileSessionSlot struct {
 	operation     *localVaultFileSessionOperation
 	session       *vaultfileclient.LocalGenesisSession
 	summary       vaultfileclient.LocalGenesisBaseline
+	// refresh is the narrow projection-only operation borrowing session. It
+	// never owns or closes that wrapper and is cancelled on every detach,
+	// replace, retire and parent-clear boundary. refreshSequence is the
+	// delivery read identity for the exact current operation.
+	refresh         *localVaultFileRefreshOperation
+	refreshSequence uint64
 	// retiring marks a slot retained as an ordering tail after its cache,
 	// wrapper and current operation were detached. It is never cache-readable
 	// and is purged only after all tail operations settle.
@@ -465,6 +471,11 @@ func (a *App) clearLocalVaultFileSessions() {
 		if slot == nil {
 			continue
 		}
+		// Projection-only refresh work is cancelled even when there is no
+		// generic candidate operation. It never closes the borrowed wrapper;
+		// the established close below is the wrapper's only terminal owner.
+		a.cancelLocalVaultFileRefreshExact(slot.refresh)
+		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
 		if slot.operation != nil {
 			a.cancelLocalVaultFileSessionOperationExact(slot.operation)
 		}
@@ -482,6 +493,9 @@ func (a *App) clearLocalVaultFileSessions() {
 	state.sessionSlots = nil
 	state.sessionParent = nil
 	state.sessionGeneration = 0
+	if state.viewVerification == localVaultFileViewFresh {
+		state.viewVerification = localVaultFileViewCached
+	}
 }
 
 // beginLocalVaultFileSession reserves one operation and immediately starts the
@@ -544,6 +558,11 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		}
 		state.sessionSlots[scope] = slot
 	} else {
+		// Reusing a live slot replaces its wrapper. Cancel the borrowed refresh
+		// before the old wrapper is detached, even when no generic candidate
+		// operation is pending.
+		a.cancelLocalVaultFileRefreshExact(slot.refresh)
+		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
 		if old := slot.session; old != nil {
 			slot.session = nil
 			clearLocalVaultFileSessionSummary(&slot.summary)
@@ -750,6 +769,10 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 	}
 	if valid {
 		slot := op.slot
+		// Adoption replaces the slot's exact wrapper; any borrowed projection
+		// read for the prior wrapper ends with that wrapper.
+		a.cancelLocalVaultFileRefreshExact(slot.refresh)
+		a.invalidateLocalVaultFileRefreshFresh(slot.scope)
 		if old := slot.session; old != nil && old != result.candidate {
 			a.launch(func() { _ = old.Close() })
 		}
@@ -881,7 +904,14 @@ func (a *App) closeLocalVaultFileSession(scope localVaultFileSessionScope) {
 }
 
 func (a *App) retireLocalVaultFileSessionSlot(slot *localVaultFileSessionSlot) {
-	if slot == nil || slot.retiring {
+	if slot == nil {
+		return
+	}
+	// Every retire/detach boundary cancels a borrowed projection read, even
+	// when the slot has no generic candidate operation.
+	a.cancelLocalVaultFileRefreshExact(slot.refresh)
+	a.invalidateLocalVaultFileRefreshFresh(slot.scope)
+	if slot.retiring {
 		return
 	}
 	state := &a.localVaultFiles

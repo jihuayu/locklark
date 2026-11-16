@@ -35,6 +35,13 @@ type localVaultFileState struct {
 	listSequence uint64
 	cancel       context.CancelFunc
 
+	// Projection provenance for the local vault-file view. This is controller
+	// state only; the view layer renders the caption from it. viewSequence
+	// invalidates pending delivery and fresh evidence on navigation, while an
+	// adopted child and its bounded cache summary stay alive.
+	viewSequence     uint64
+	viewVerification localVaultFileViewVerification
+
 	// Owned-session lifecycle state. It is reset on lock and never survives a
 	// parent or App generation boundary. The wrapper itself is opaque here.
 	sessionSlots      map[localVaultFileSessionScope]*localVaultFileSessionSlot
@@ -61,6 +68,11 @@ type localVaultFileState struct {
 	// capability.
 	sessionPredecessorWaitForTest        func()
 	sessionPostBarrierCancelPauseForTest func()
+	// refreshSummaryPauseForTest runs in the refresh worker immediately after
+	// the real borrowed wrapper Summary returns and before the projection is
+	// staged. It is parameterless, nil in production and captured before
+	// launch; it never receives a factor, key, handle or capability.
+	refreshSummaryPauseForTest func()
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
@@ -127,6 +139,9 @@ func (a *App) refreshLocalVaultFiles() {
 }
 
 func (a *App) closeLocalVaultFileView() {
+	// Navigation invalidates fresh view evidence and only this view's pending
+	// refresh delivery. The adopted child and its cache summary remain alive.
+	a.cancelLocalVaultFileRefreshView()
 	state := &a.localVaultFiles
 	state.sequence++
 	if state.cancel != nil {
