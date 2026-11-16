@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import select
+import stat
 import struct
 import subprocess
 import sys
@@ -60,6 +61,14 @@ LOCAL_PROJECTION_FIELDS = (
     "manifest_digest", "journal_present", "archive_present",
     "private_modes", "backend_hash_matches", "factors_absent",
 )
+LOCAL_PROFILE_ENTRY_LIMIT = 128
+LOCAL_PROFILE_FILE_LIMIT = 64 << 10
+LOCAL_VAULT_ID = re.compile(r"^[0-9a-f]{32}$")
+LOCAL_VAULT_LABEL_SEPARATOR = " · "
+LOCAL_VAULT_BIDI_CONTROLS = frozenset({
+    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2066, 0x2067, 0x2068, 0x2069,
+})
 PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
 CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
@@ -71,6 +80,203 @@ class AcceptanceFailure(Exception):
 def require(condition):
     if not condition:
         raise AcceptanceFailure()
+
+
+def local_vault_valid_name(value):
+    """Exact reviewed backend ValidName shape for private display derivation."""
+    if type(value) is not str:
+        return False
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    if not 1 <= len(raw) <= 255 or b"\x00" in raw:
+        return False
+    if value in (".", "..") or value[0] in ". " or value[-1] in ". ":
+        return False
+    for char in value:
+        codepoint = ord(char)
+        if char in "/\\" or codepoint < 0x20 or codepoint == 0x7f:
+            return False
+    return True
+
+
+def local_vault_display_name(value):
+    """Reviewed helper display copy: visible bidi escapes plus backslash escape."""
+    out = []
+    for char in value:
+        codepoint = ord(char)
+        if codepoint in LOCAL_VAULT_BIDI_CONTROLS:
+            out.append("\\u%04X" % codepoint)
+        elif char == "\\":
+            out.append("\\\\")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def local_vault_display_labels(manifests):
+    """Whole-list reviewed normal labels; duplicates/invalid shapes refuse."""
+    if type(manifests) not in (list, tuple) or not manifests:
+        raise AcceptanceFailure()
+    ids, names = [], []
+    seen_ids = set()
+    for manifest in manifests:
+        if type(manifest) is not dict:
+            raise AcceptanceFailure()
+        vault_id, name = manifest.get("vault_id"), manifest.get("name")
+        if type(vault_id) is not str or LOCAL_VAULT_ID.fullmatch(vault_id) is None:
+            raise AcceptanceFailure()
+        if not local_vault_valid_name(name):
+            raise AcceptanceFailure()
+        if vault_id in seen_ids:
+            raise AcceptanceFailure()
+        seen_ids.add(vault_id)
+        ids.append(vault_id)
+        names.append(name)
+    labels = []
+    for vault_id, name in zip(ids, names):
+        prefix_len = 8
+        for other in ids:
+            if other == vault_id:
+                continue
+            common = 0
+            for left, right in zip(vault_id, other):
+                if left != right:
+                    break
+                common += 1
+            prefix_len = max(prefix_len, min(common + 1, 32))
+        labels.append(local_vault_display_name(name) + LOCAL_VAULT_LABEL_SEPARATOR + vault_id[:prefix_len])
+    if len(set(labels)) != len(labels):
+        raise AcceptanceFailure()
+    return labels
+
+
+def local_vault_wrong_secret(secret):
+    """One different canonical LL1 secret for a real wrong-factor attempt."""
+    if type(secret) is not str or not secret.startswith("LL1-"):
+        raise AcceptanceFailure()
+    body = list(secret[4:])
+    for index, char in enumerate(body):
+        if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567":
+            body[index] = "A" if char != "A" else "B"
+            candidate = "LL1-" + "".join(body)
+            if candidate != secret:
+                return candidate
+            break
+    raise AcceptanceFailure()
+
+
+def local_vault_profile_dir(settings_path, personal_path):
+    """Exact product profile root for this private settings/personal pair."""
+    base = pathlib.Path(settings_path).parent / "vaultfile-workspace"
+    digest = hashlib.sha256(str(personal_path).encode("utf-8")).hexdigest()
+    return base / "profiles" / digest
+
+
+def _local_vault_manifest_json(raw):
+    def reject_constant(value):
+        raise AcceptanceFailure()
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise AcceptanceFailure() from None
+    return value
+
+
+def read_local_vault_manifests(profile_dir):
+    """Bounded read of this run's private profile manifests only."""
+    profile_dir = pathlib.Path(profile_dir)
+    try:
+        info = os.lstat(profile_dir)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise AcceptanceFailure()
+    try:
+        entries = list(os.scandir(profile_dir))
+    except OSError:
+        raise AcceptanceFailure() from None
+    if len(entries) > LOCAL_PROFILE_ENTRY_LIMIT:
+        raise AcceptanceFailure()
+    manifests = []
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise AcceptanceFailure()
+        try:
+            entry_info = entry.stat(follow_symlinks=False)
+        except OSError:
+            raise AcceptanceFailure() from None
+        if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_size > LOCAL_PROFILE_FILE_LIMIT:
+            raise AcceptanceFailure()
+        try:
+            descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            raise AcceptanceFailure() from None
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as source:
+                raw = source.read(LOCAL_PROFILE_FILE_LIMIT + 1)
+        except OSError:
+            raise AcceptanceFailure() from None
+        if len(raw) > LOCAL_PROFILE_FILE_LIMIT:
+            raise AcceptanceFailure()
+        record = _local_vault_manifest_json(raw)
+        required = {"version", "kind", "vault_id", "personal_file", "backend_root",
+                    "name", "journal", "archive"}
+        if type(record) is not dict or set(record) != required:
+            raise AcceptanceFailure()
+        if type(record.get("version")) is not int or record["version"] != 1 or \
+                record.get("kind") != "vault_file_create":
+            raise AcceptanceFailure()
+        if type(record.get("vault_id")) is not str or LOCAL_VAULT_ID.fullmatch(record["vault_id"]) is None:
+            raise AcceptanceFailure()
+        if not local_vault_valid_name(record.get("name")):
+            raise AcceptanceFailure()
+        for field in ("personal_file", "backend_root", "journal", "archive"):
+            value = record.get(field)
+            if type(value) is not str or not os.path.isabs(value) or os.path.normpath(value) != value:
+                raise AcceptanceFailure()
+        manifests.append({"path": entry.path, "name": record["name"],
+                          "vault_id": record["vault_id"]})
+    manifests.sort(key=lambda item: item["path"])
+    return manifests
+
+
+def parse_local_vault_target_response(action, target_index, result):
+    """Strict finite response for one dedicated local-vault target action."""
+    if type(result) is not dict:
+        raise AcceptanceFailure()
+    if action == "select-sidebar":
+        if set(result) != {"action", "target_index", "clicks"} or \
+                result.get("action") != "select-sidebar" or \
+                type(result.get("target_index")) is not int or \
+                result["target_index"] != target_index:
+            raise AcceptanceFailure()
+        clicks = result.get("clicks")
+        if type(clicks) is not list or len(clicks) != 1 or type(clicks[0]) is not dict:
+            raise AcceptanceFailure()
+        return result
+    if action == "wait-title":
+        if set(result) != {"action", "matched"} or result.get("action") != "wait-title" or \
+                type(result.get("matched")) is not bool or result["matched"] is not True:
+            raise AcceptanceFailure()
+        return result
+    raise AcceptanceFailure()
+
+
+def parse_local_vault_pair_projection(result):
+    """Strict exactly-two-manifest, nine-true-boolean pair observer result."""
+    expected = {"manifest_count", *LOCAL_PROJECTION_FIELDS}
+    if type(result) is not dict or set(result) != expected:
+        raise AcceptanceFailure()
+    if type(result.get("manifest_count")) is not int or result["manifest_count"] != 2:
+        raise AcceptanceFailure()
+    for field in LOCAL_PROJECTION_FIELDS:
+        if type(result.get(field)) is not bool or result[field] is not True:
+            raise AcceptanceFailure()
+    return result
 
 
 def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
@@ -560,6 +766,192 @@ class Acceptance:
             require(type(result.get(field)) is bool and result[field] is True)
         return result
 
+    def local_vault_profile_dir(self):
+        return local_vault_profile_dir(self.settings_path, self.fixture["Path"])
+
+    def read_local_vault_manifests(self):
+        try:
+            return read_local_vault_manifests(self.local_vault_profile_dir())
+        except AcceptanceFailure:
+            self.reason = "local-pair-profile"
+            raise
+
+    def local_vault_labels(self, manifests):
+        try:
+            return local_vault_display_labels(manifests)
+        except AcceptanceFailure:
+            self.reason = "local-pair-profile"
+            raise
+
+    def record_local_vault_a(self):
+        manifests = self.read_local_vault_manifests()
+        require(len(manifests) == 1)
+        labels = self.local_vault_labels(manifests)
+        self.local_a_manifest = manifests[0]
+        self.local_a_label = labels[0]
+        for manifest, label in zip(manifests, labels):
+            self.values.update((manifest["vault_id"], manifest["name"], label))
+
+    def record_local_vault_b(self):
+        manifests = self.read_local_vault_manifests()
+        require(len(manifests) == 2)
+        a_path = self.local_a_manifest.get("path")
+        a_index = next((index for index, manifest in enumerate(manifests)
+                        if manifest.get("path") == a_path), None)
+        require(a_index is not None)
+        b_index = 1 - a_index
+        require(manifests[a_index]["vault_id"] != manifests[b_index]["vault_id"])
+        labels = self.local_vault_labels(manifests)
+        require(len(set(labels)) == 2)
+        self.local_manifests = manifests
+        self.local_a_index, self.local_b_index = a_index, b_index
+        self.local_a_label, self.local_b_label = labels[a_index], labels[b_index]
+        self.local_labels = [self.local_a_label, self.local_b_label]
+        for manifest, label in zip(manifests, labels):
+            self.values.update((manifest["vault_id"], manifest["name"], label))
+
+    def local_vault_target(self, action, labels, index):
+        require(action in ("select-sidebar", "wait-title"))
+        require(type(labels) in (list, tuple) and 1 <= len(labels) <= 2)
+        require(type(index) is int and 0 <= index < len(labels))
+        request = {"title": TITLE, "executable": str(self.host),
+                   "expected_pid": self.app.pid,
+                   "local_vault_target": {"action": action,
+                                          "known_labels": list(labels),
+                                          "target_index": index}}
+        self.native_action = ("local-vault-select" if action == "select-sidebar"
+                              else "local-vault-wait")
+        self.native_failed_index = None
+        self.native_x_error_codes = []
+        started = time.monotonic()
+        try:
+            result = json.loads(self.command(
+                [sys.executable, str(ROOT / "scripts/browser_native_x11.py")],
+                json.dumps(request).encode(), timeout=15))
+        except json.JSONDecodeError:
+            self.reason = "native-response-json"
+            raise AcceptanceFailure() from None
+        finally:
+            self.native_elapsed_ms = round((time.monotonic() - started) * 1000)
+        try:
+            parsed = parse_local_vault_target_response(action, index, result)
+        except AcceptanceFailure:
+            self.reason = "native-response-schema"
+            raise
+        if action == "select-sidebar":
+            self.last_native_click = safe_click_record(parsed["clicks"][0])
+        return parsed
+
+    def select_local_vault(self, labels, index, phase):
+        self.phase(phase)
+        self.local_vault_target("select-sidebar", labels, index)
+        # Click ACK is not selection proof. This is the separate exact-title
+        # boolean proof after the target click.
+        self.local_vault_target("wait-title", labels, index)
+
+    def refresh_local_vault(self, labels, index, phase):
+        self.select_local_vault(labels, index, phase)
+        self.wait("显示上次验证结果")
+        self.click("刷新本地文件库")
+        self.wait("本次刷新已验证")
+
+    def create_local_vault_b(self):
+        """Second real Onevra create through the same UI and fresh recovery."""
+        self.phase("local-pair-create-b-open")
+        self.wait("新建独立文件库")
+        self.click("新建独立文件库")
+        self.wait("主密码")
+        self.wait("Secret Key")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("准备创建")
+        self.wait("重新输入恢复码")
+        kit_b = self.read_recovery()
+        require(kit_b != self.local_kit_a)
+        self.phase("local-pair-create-b-publish")
+        self.fill("重新输入恢复码", kit_b)
+        self.click("确认并发布备份")
+        self.wait("备份恢复码")
+        self.phase("local-pair-create-b-complete")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.fill("备份恢复码", kit_b)
+        self.click("完成创建")
+        self.wait("关闭本地基线视图")
+        self.wait("已验证本地初始版本 · 远端状态未核实")
+        require(self.controls()["关闭本地基线视图"]["present"] is True)
+        self.record_local_vault_b()
+
+    def local_vault_pair_flow(self):
+        labels = self.local_labels
+        a_index, b_index = self.local_a_index, self.local_b_index
+        self.refresh_local_vault(labels, a_index, "local-pair-refresh-a")
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b")
+
+        self.select_local_vault(labels, a_index, "local-pair-select-a-lock")
+        self.wait("显示上次验证结果")
+        self.click("锁定本地文件库")
+        self.wait("本地文件库已锁定")
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b-after-lock")
+
+        self.select_local_vault(labels, a_index, "local-pair-select-a-unlock")
+        self.wait("解锁本地文件库")
+        self.click("解锁本地文件库")
+        self.wait("解锁独立文件库")
+        wrong_password = self.fixture["Password"] + "-wrong"
+        wrong_secret = local_vault_wrong_secret(self.fixture["Secret"])
+        require(wrong_password != self.fixture["Password"] and wrong_secret != self.fixture["Secret"])
+        self.values.update((wrong_password, wrong_secret))
+        self.fill("主密码", wrong_password)
+        self.fill("Secret Key", wrong_secret)
+        self.click("完整验证并解锁")
+        self.wait("完整验证失败；请重新输入")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("完整验证并解锁")
+        self.eventually(lambda: self.controls().get("解锁独立文件库", {}).get("present") is False)
+        self.local_vault_target("wait-title", labels, a_index)
+        self.wait("显示上次验证结果")
+        self.click("刷新本地文件库")
+        self.wait("本次刷新已验证")
+
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b-after-unlock")
+        self.phase("local-pair-close-view")
+        self.click("关闭本地基线视图")
+        self.select_local_vault(labels, a_index, "local-pair-navigate-back-a")
+        self.wait("显示上次验证结果")
+
+    def verify_local_vault_pair(self):
+        workspace = self.settings_dir / "vaultfile-workspace"
+        try:
+            result = json.loads(self.command(
+                [str(self.fixture_binary), "-fixture", str(self.fixture_path),
+                 "-verify-local-pair", str(workspace)]))
+        except json.JSONDecodeError:
+            self.reason = "local-pair-observer-json"
+            raise AcceptanceFailure() from None
+        try:
+            return parse_local_vault_pair_projection(result)
+        except AcceptanceFailure:
+            self.reason = "local-pair-observer"
+            raise
+
+    def final_local_vault_pair_validation(self, before_ids):
+        self.phase("local-pair-observer")
+        self.verify_local_vault_pair()
+        after = self.observe()
+        require(after.get("audit_safe") is True)
+        after_ids = sorted(item["id"] for item in after["items"])
+        require(after_ids == before_ids)
+        self.phase("local-pair-account-lock")
+        self.click("立即锁定")
+        self.wait("使用应急资料…")
+        controls = self.controls()
+        require(controls.get("使用应急资料…", {}).get("present") is True)
+        for label in ("刷新本地文件库", "锁定本地文件库",
+                      "解锁本地文件库", "关闭本地基线视图"):
+            require(controls.get(label, {}).get("present") is False)
+
     def local_vault_file_create(self):
         """One real Onevra A closure; no product method or fixture create."""
         self.phase("local-create-open")
@@ -594,12 +986,17 @@ class Acceptance:
         self.wait("关闭本地基线视图")
         self.wait("已验证本地初始版本 · 远端状态未核实")
         require(self.controls()["关闭本地基线视图"]["present"] is True)
+        self.local_kit_a = kit
+        self.record_local_vault_a()
         self.phase("local-create-baseline")
         after = self.observe()
         require(before["audit_safe"] is True and after["audit_safe"] is True)
         after_ids = sorted(item["id"] for item in after["items"])
         require(len(before_ids) == len(after_ids) and before_ids == after_ids)
         self.verify_local_vault()
+        self.create_local_vault_b()
+        self.local_vault_pair_flow()
+        self.final_local_vault_pair_validation(before_ids)
 
     def build_fixture(self):
         if self.fixture_prebuilt:
@@ -1137,7 +1534,7 @@ class Acceptance:
                 success_label = {
                     "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
                     "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
-                    LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A create, wrong-kit refusal, literal recovery confirmation and local baseline",
+                    LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A/B create, wrong-kit refusal, fresh recovery, pair observer, lock/refresh/unlock and cached navigation",
                 }.get(scenario,"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
                 # Only now, after the scan passed, may the fixed success line
                 # enter the transcript. A rewrite failure also yields no PASS.
