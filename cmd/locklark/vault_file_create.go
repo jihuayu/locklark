@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -229,7 +230,8 @@ func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateMani
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
 		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
-		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
+		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) ||
+		!vaultFileCreateCasefoldSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
 	}
 	if requireID {
@@ -249,6 +251,42 @@ func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateMani
 	}
 	if journalMustBeNew && teamfiles.CheckNew(manifest.Journal) != nil {
 		return false
+	}
+	return true
+}
+
+// Missing leaves cannot be compared with os.SameFile. Reserve case-only names
+// conservatively on every filesystem, after resolving each existing parent.
+// This also reserves the backend namespace before its first directory exists.
+func vaultFileCreateCasefoldSeparate(backendRoot string, paths ...string) bool {
+	canonical := make([]string, 0, len(paths))
+	for _, path := range paths {
+		resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return false
+		}
+		leaf := filepath.Join(resolvedParent, filepath.Base(path))
+		for _, prior := range canonical {
+			if strings.EqualFold(leaf, prior) {
+				return false
+			}
+		}
+		canonical = append(canonical, leaf)
+	}
+	resolvedRootParent, err := filepath.EvalSymlinks(filepath.Dir(backendRoot))
+	if err != nil {
+		return false
+	}
+	namespace := filepath.Join(resolvedRootParent, filepath.Base(backendRoot), "vaultfile-backend")
+	for _, leaf := range canonical {
+		for ancestor := leaf; ; ancestor = filepath.Dir(ancestor) {
+			if strings.EqualFold(ancestor, namespace) {
+				return false
+			}
+			if ancestor == filepath.Dir(ancestor) {
+				break
+			}
+		}
 	}
 	return true
 }
