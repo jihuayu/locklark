@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -402,6 +403,42 @@ func TestLocalVaultFileReadObserverForeignBinding(t *testing.T) {
 		t.Fatal("OBSERVER_FOREIGN_BINDING_ACCEPTED")
 	}
 	assertNotAllTrue(t, report)
+}
+
+func TestRunFlagParseErrorsUseFixedFailure(t *testing.T) {
+	const synthetic = "synthetic-invalid-bool-value"
+	cases := [][]string{
+		{"-fixture", "unused", "-private-pipe=" + synthetic},
+		{"-fixture", "unused", "-unknown-" + synthetic},
+	}
+	for _, args := range cases {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal("OBSERVER_FLAG_STDERR_PIPE_FAILED")
+		}
+		old := os.Stderr
+		os.Stderr = writer
+		runErr := run(args)
+		if runErr != nil {
+			fmt.Fprintln(os.Stderr, failureMessage)
+		}
+		os.Stderr = old
+		writer.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(reader, 4096))
+		reader.Close()
+		if readErr != nil {
+			t.Fatal("OBSERVER_FLAG_STDERR_READ_FAILED")
+		}
+		if runErr == nil {
+			t.Fatal("OBSERVER_FLAG_PARSE_ERROR_ACCEPTED")
+		}
+		if bytes.Contains(raw, []byte(synthetic)) {
+			t.Fatal("OBSERVER_FLAG_PARSE_VALUE_LEAKED")
+		}
+		if string(raw) != failureMessage+"\n" {
+			t.Fatal("OBSERVER_FLAG_FAILURE_LINE_INVALID")
+		}
+	}
 }
 
 func TestLocalVaultFileReadObserverOperationExclusion(t *testing.T) {

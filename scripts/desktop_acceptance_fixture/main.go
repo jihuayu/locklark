@@ -632,8 +632,11 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 	return report, nil
 }
 
+const failureMessage = "Synthetic desktop fixture operation failed"
+
 func run(args []string) error {
 	flags := flag.NewFlagSet("desktop_acceptance_fixture", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
 	out := flags.String("out", "", "new synthetic fixture directory")
 	input := flags.String("fixture", "", "private synthetic fixture file")
 	privatePipe := flags.Bool("private-pipe", false, "observe authenticated copy through private pipe only")
@@ -708,7 +711,7 @@ func run(args []string) error {
 
 func main() {
 	if run(os.Args[1:]) != nil {
-		fmt.Fprintln(os.Stderr, "Synthetic desktop fixture operation failed")
+		fmt.Fprintln(os.Stderr, failureMessage)
 		os.Exit(1)
 	}
 }
