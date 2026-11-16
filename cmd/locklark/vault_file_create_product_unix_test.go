@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -21,10 +22,14 @@ func TestVaultFileCreatePrepareProductPTY(t *testing.T) {
 	if err != nil {
 		t.Fatal("CREATE_PREPARE_PTY_RUNTIME_UNAVAILABLE")
 	}
+	root := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal("CREATE_PREPARE_PRIVATE_FIXTURE_FAILED")
+	}
 	request, err := json.Marshal(struct {
 		Product string `json:"product"`
 		Root    string `json:"root"`
-	}{Product: product, Root: t.TempDir()})
+	}{Product: product, Root: root})
 	if err != nil {
 		t.Fatal("CREATE_PREPARE_PTY_REQUEST_FAILED")
 	}
