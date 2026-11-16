@@ -523,25 +523,34 @@ class RecoveryReaderTests(unittest.TestCase):
         controls.string = string
         return controls
 
-    def test_one_visible_text_name_is_returned(self):
-        controls = self.controls({"node": {"name": self.KIT, "role": "text", "state": "visible"}})
+    def test_one_visible_label_role_name_is_returned(self):
+        controls = self.controls({"node": {"name": self.KIT, "role": "label", "state": "visible"}})
         result = controls.recovery()
         self.assertTrue(result is not None)
         self.assertTrue(len(result) == 110)
 
-    def test_non_text_hidden_and_nonmatching_names_are_ignored(self):
+    def test_old_text_and_entry_roles_are_rejected(self):
+        for role in ("text", "entry"):
+            with self.subTest(role=role):
+                controls = self.controls({
+                    "node": {"name": self.KIT, "role": role, "state": "visible"},
+                })
+                with self.assertRaisesRegex(RuntimeError, "Native recovery material not ready"):
+                    controls.recovery()
+
+    def test_non_label_hidden_and_nonmatching_names_are_ignored(self):
         controls = self.controls({
             "button": {"name": self.KIT, "role": "push button", "state": "visible"},
-            "hidden": {"name": self.KIT, "role": "text", "state": "hidden"},
-            "other": {"name": "LLR2-" + "A" * 51 + "-" + "B" * 52, "role": "text", "state": "visible"},
+            "hidden": {"name": self.KIT, "role": "label", "state": "hidden"},
+            "other": {"name": "LLR2-" + "A" * 51 + "-" + "B" * 52, "role": "label", "state": "visible"},
         })
         with self.assertRaisesRegex(RuntimeError, "Native recovery material not ready"):
             controls.recovery()
 
-    def test_duplicate_visible_text_names_fail_closed(self):
+    def test_duplicate_visible_label_names_fail_closed(self):
         controls = self.controls({
-            "one": {"name": self.KIT, "role": "text", "state": "visible"},
-            "two": {"name": self.KIT, "role": "text", "state": "visible"},
+            "one": {"name": self.KIT, "role": "label", "state": "visible"},
+            "two": {"name": self.KIT, "role": "label", "state": "visible"},
         })
         with self.assertRaisesRegex(RuntimeError, "Native recovery material must be unique"):
             controls.recovery()
@@ -562,6 +571,81 @@ class RecoveryReaderTests(unittest.TestCase):
             with self.assertRaises(Exception) as caught:
                 controls.recovery()
             self.assertEqual(native.failure_reason(caught.exception), reason)
+
+
+class NativeSnapshotLabelRoleTests(unittest.TestCase):
+    """Pinned MyGo RoleText is ATK "label"; only fixed statuses accept it."""
+
+    STATUS_LABELS = ("恢复码未逐字匹配", "已验证本地初始版本 · 远端状态未核实")
+
+    def controls(self, nodes):
+        controls = native.NativeControls.__new__(native.NativeControls)
+        controls.title = "synthetic-window"
+        controls.pid = None
+        controls.go = Mock()
+        controls.window_refs = Mock(return_value=["window"])
+        controls.walk = Mock(side_effect=lambda _root, visit: [visit(node, 0) for node in nodes])
+        names = {node: value["name"] for node, value in nodes.items()}
+        roles = {node: value["role"] for node, value in nodes.items()}
+        states = {node: value.get("state") for node, value in nodes.items()}
+        rects = {node: types.SimpleNamespace(
+            contents=types.SimpleNamespace(x=value["x"], y=0, width=10, height=5))
+                 for node, value in nodes.items()}
+        controls.at = types.SimpleNamespace(
+            atspi_accessible_get_name=object(),
+            atspi_accessible_get_role_name=object(),
+            atspi_accessible_get_state_set=Mock(side_effect=lambda node: states[node]),
+            atspi_state_set_contains=Mock(
+                side_effect=lambda state, bit: state == "visible" and bit in (8, 24, 25, 30)),
+            atspi_accessible_get_component_iface=Mock(side_effect=lambda node: node),
+            atspi_component_get_extents=Mock(side_effect=lambda node, _coord: rects[node]),
+            atspi_rect_free=Mock(),
+        )
+        controls.checked = lambda function, *args: function(*args)
+
+        def string(function, node):
+            if function is controls.at.atspi_accessible_get_name:
+                return names[node]
+            if function is controls.at.atspi_accessible_get_role_name:
+                return roles[node]
+            raise AssertionError("unexpected accessibility accessor")
+
+        controls.string = string
+        return controls
+
+    def test_fixed_status_label_roles_are_observable(self):
+        nodes = {label: {"name": label, "role": "label", "state": "visible", "x": index}
+                 for index, label in enumerate(self.STATUS_LABELS)}
+        snapshot = self.controls(nodes).snapshot()
+        self.assertEqual(set(snapshot), set(self.STATUS_LABELS))
+        for label in self.STATUS_LABELS:
+            self.assertEqual(len(snapshot[label]), 1)
+            self.assertTrue(snapshot[label][0]["enabled"])
+            self.assertTrue(snapshot[label][0]["showing"])
+
+    def test_label_role_allowlist_is_exactly_the_two_statuses(self):
+        self.assertEqual(native.LABEL_ROLE_STATUS_LABELS, frozenset(self.STATUS_LABELS))
+        self.assertNotIn("Secret Key", native.LABEL_ROLE_STATUS_LABELS)
+        self.assertIn("Secret Key", native.CONTROL_LABELS)
+
+    def test_secret_key_label_role_is_ignored_and_entry_stays_unique(self):
+        only = self.controls({
+            "label": {"name": "Secret Key", "role": "label", "state": "visible", "x": 11},
+        }).snapshot()
+        self.assertNotIn("Secret Key", only)
+        both = self.controls({
+            "label": {"name": "Secret Key", "role": "label", "state": "visible", "x": 11},
+            "entry": {"name": "Secret Key", "role": "entry", "state": "visible", "x": 22},
+        }).snapshot()
+        self.assertEqual(len(both["Secret Key"]), 1)
+        self.assertEqual(both["Secret Key"][0]["x"], 22)
+
+    def test_ordinary_entry_and_button_roles_remain_accepted(self):
+        snapshot = self.controls({
+            "entry": {"name": "主密码", "role": "entry", "state": "visible", "x": 1},
+            "button": {"name": "解锁", "role": "push button", "state": "visible", "x": 2},
+        }).snapshot()
+        self.assertEqual(set(snapshot), {"主密码", "解锁"})
 
 
 class RecoveryDriverBoundaryTests(unittest.TestCase):
