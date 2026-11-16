@@ -405,6 +405,70 @@ func TestLocalVaultFileReadObserverForeignBinding(t *testing.T) {
 	assertNotAllTrue(t, report)
 }
 
+func captureRunStreams(t *testing.T, args []string) ([]byte, []byte, error) {
+	t.Helper()
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal("OBSERVER_HELP_STDOUT_PIPE_FAILED")
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		stdoutReader.Close()
+		stdoutWriter.Close()
+		t.Fatal("OBSERVER_HELP_STDERR_PIPE_FAILED")
+	}
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+	runErr := run(args)
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+	stdoutWriter.Close()
+	stderrWriter.Close()
+	stdout, stdoutErr := io.ReadAll(io.LimitReader(stdoutReader, 8192))
+	stdoutReader.Close()
+	stderr, stderrErr := io.ReadAll(io.LimitReader(stderrReader, 8192))
+	stderrReader.Close()
+	if stdoutErr != nil || stderrErr != nil {
+		t.Fatal("OBSERVER_HELP_STREAM_READ_FAILED")
+	}
+	return stdout, stderr, runErr
+}
+
+func TestRunHelpUsesFixedUsageAndSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	fixtureArg := filepath.Join(dir, "missing-fixture.json")
+	workspaceArg := filepath.Join(dir, "missing-workspace")
+	cases := [][]string{
+		{"-fixture", fixtureArg, "-h"},
+		{"-fixture", fixtureArg, "-help"},
+		{"-verify-local", workspaceArg, "-h"},
+		{"-verify-local", workspaceArg, "-help"},
+	}
+	for _, args := range cases {
+		stdout, stderr, runErr := captureRunStreams(t, args)
+		if runErr != nil {
+			t.Fatal("OBSERVER_HELP_NOT_SUCCESS")
+		}
+		if len(stderr) != 0 {
+			t.Fatal("OBSERVER_HELP_STDERR_NOT_EMPTY")
+		}
+		if string(stdout) != usageText {
+			t.Fatal("OBSERVER_HELP_USAGE_NOT_FIXED")
+		}
+		if bytes.Contains(stdout, []byte(fixtureArg)) || bytes.Contains(stdout, []byte(workspaceArg)) {
+			t.Fatal("OBSERVER_HELP_LEAKED_INPUT")
+		}
+		for _, option := range []string{"-out", "-fixture", "-private-pipe", "-stale", "-hold-readonly", "-verify-local"} {
+			if !bytes.Contains(stdout, []byte(option)) {
+				t.Fatal("OBSERVER_HELP_MISSING_OPTION")
+			}
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 0 {
+			t.Fatal("OBSERVER_HELP_PERFORMED_IO")
+		}
+	}
+}
+
 func TestRunFlagParseErrorsUseFixedFailure(t *testing.T) {
 	const synthetic = "synthetic-invalid-bool-value"
 	cases := [][]string{
