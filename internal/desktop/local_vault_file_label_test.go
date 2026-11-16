@@ -87,6 +87,84 @@ func localVaultFileTestBidiControl(s string) bool {
 	return false
 }
 
+func TestLocalVaultFileDisplayLabelsGlobalPrefixAcrossDifferentNames(t *testing.T) {
+	first := localVaultFileRef{
+		path:    "/synthetic/global-prefix-first",
+		name:    "Alpha",
+		vaultID: "01234567000000000000000000000000",
+	}
+	second := localVaultFileRef{
+		path:    "/synthetic/global-prefix-second",
+		name:    "Beta",
+		vaultID: "01234567111111111111111111111111",
+	}
+	out := localVaultFileDisplayLabels([]localVaultFileRef{first, second})
+	if len(out) != 2 {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_PREFIX_COUNT_FAILED")
+	}
+	if out[0].label != "Alpha · 012345670" || out[1].label != "Beta · 012345671" {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_PREFIX_NOT_EXTENDED")
+	}
+}
+
+func TestLocalVaultFileDisplayLabelsGlobalDuplicateAcrossNames(t *testing.T) {
+	duplicateID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	refs := []localVaultFileRef{
+		{path: "/synthetic/global-duplicate-vault", name: "Vault", vaultID: duplicateID},
+		{path: "/synthetic/global-duplicate-zwsp", name: "Va\u200blt", vaultID: duplicateID},
+		{path: "/synthetic/global-duplicate-other", name: "库🙂\u200d名", vaultID: duplicateID},
+	}
+	before := append([]localVaultFileRef(nil), refs...)
+	out := localVaultFileDisplayLabels(refs)
+	if len(out) != len(refs) {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_DUPLICATE_COUNT_FAILED")
+	}
+	wants := []string{"Vault · ", "Va\u200blt · ", "库🙂\u200d名 · "}
+	for i := range refs {
+		if refs[i] != before[i] || out[i].ref != before[i] {
+			t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_DUPLICATE_REF_CHANGED")
+		}
+		if !strings.HasPrefix(out[i].label, wants[i]) {
+			t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_DUPLICATE_NAME_CHANGED")
+		}
+		if !strings.HasSuffix(out[i].label, localVaultFileDuplicateSuffix) {
+			t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_DUPLICATE_NOT_MARKED")
+		}
+	}
+}
+
+func TestLocalVaultFileDisplayLabelsGlobalPrefixCountsInvalidNameID(t *testing.T) {
+	normal := localVaultFileRef{
+		path:    "/synthetic/global-count-normal",
+		name:    "Alpha",
+		vaultID: "01234567000000000000000000000000",
+	}
+	other := localVaultFileRef{
+		path:    "/synthetic/global-count-other",
+		name:    "Beta",
+		vaultID: "ffffffffffffffffffffffffffffffff",
+	}
+	badName := localVaultFileRef{
+		path:    "/synthetic/global-count-bad-name",
+		name:    "bad/name",
+		vaultID: "01234567111111111111111111111111",
+	}
+	refs := []localVaultFileRef{normal, other, badName}
+	out := localVaultFileDisplayLabels(refs)
+	if len(out) != len(refs) {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_COUNT_FAILED")
+	}
+	if out[0].label != "Alpha · 012345670" {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_COUNT_OMITTED_INVALID_NAME_ID")
+	}
+	if out[1].label != "Beta · ffffffff" {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_COUNT_OVEREXTENDED_UNIQUE_ID")
+	}
+	if out[2].label != localVaultFileReviewLabel || out[2].ref != badName {
+		t.Fatal("LOCAL_VAULT_LABEL_GLOBAL_COUNT_FALLBACK_CHANGED")
+	}
+}
+
 func TestLocalVaultFileDisplayLabelsDuplicateAndInvalidRefsDegrade(t *testing.T) {
 	duplicateID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	first := localVaultFileRef{path: "/synthetic/duplicate-first", name: "Same", vaultID: duplicateID}

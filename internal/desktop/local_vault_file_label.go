@@ -22,35 +22,32 @@ type localVaultFileDisplayLabel struct {
 	label string
 }
 
-// localVaultFileDisplayLabels preserves every input ref and its order. Valid
-// refs get "Name · prefix", where same-display-name groups extend each distinct
-// ID's prefix only as far as needed to distinguish it from the other full IDs.
-// Bidi controls are replaced in the display copy only. Duplicate displayed
-// name/full-ID refs share one marked label rather than gaining a fabricated
-// unique suffix. Multiple invalid shapes use deterministic display indexes in a
-// fixed review fallback; they are not stable identities.
+// localVaultFileDisplayLabels preserves every input ref and its order. Every
+// distinct format-valid VaultID, including one on an invalid-name row, takes
+// part in whole-list prefix extension. Valid display rows get "Name · prefix".
+// Bidi controls are replaced in the display copy only. Any repeated valid full
+// ID makes its normal-label rows duplicate/review, regardless of name. Multiple
+// invalid shapes use deterministic display indexes in a fixed review fallback;
+// they are not stable identities.
 func localVaultFileDisplayLabels(refs []localVaultFileRef) []localVaultFileDisplayLabel {
 	out := make([]localVaultFileDisplayLabel, len(refs))
-	idCounts := make(map[string]map[string]int)
+	idCounts := make(map[string]int)
 	displayNames := make([]string, len(refs))
 	invalid := make([]bool, len(refs))
 	reviewCount := 0
 
 	for i, ref := range refs {
 		out[i].ref = ref
-		if !vaultfileclient.ValidID(ref.vaultID) || !vaultfilebackend.ValidName(ref.name) {
+		validID := vaultfileclient.ValidID(ref.vaultID)
+		if validID {
+			idCounts[ref.vaultID]++
+		}
+		if !validID || !vaultfilebackend.ValidName(ref.name) {
 			invalid[i] = true
 			reviewCount++
 			continue
 		}
-		displayName := localVaultFileDisplayName(ref.name)
-		displayNames[i] = displayName
-		counts := idCounts[displayName]
-		if counts == nil {
-			counts = make(map[string]int)
-			idCounts[displayName] = counts
-		}
-		counts[ref.vaultID]++
+		displayNames[i] = localVaultFileDisplayName(ref.name)
 	}
 
 	for i, ref := range refs {
@@ -63,7 +60,7 @@ func localVaultFileDisplayLabels(refs []localVaultFileRef) []localVaultFileDispl
 		}
 		displayName := displayNames[i]
 		prefixLen := localVaultFileLabelMinPrefix
-		for otherID := range idCounts[displayName] {
+		for otherID := range idCounts {
 			if otherID == ref.vaultID {
 				continue
 			}
@@ -76,7 +73,7 @@ func localVaultFileDisplayLabels(refs []localVaultFileRef) []localVaultFileDispl
 			}
 		}
 		label := displayName + " · " + ref.vaultID[:prefixLen]
-		if idCounts[displayName][ref.vaultID] > 1 {
+		if idCounts[ref.vaultID] > 1 {
 			label += localVaultFileDuplicateSuffix
 		}
 		out[i].label = label
