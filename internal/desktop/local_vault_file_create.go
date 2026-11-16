@@ -404,11 +404,17 @@ func (a *App) localCreateComplete() {
 			}
 			state := &a.localCreate
 			state.cancel, state.busy, state.child = nil, false, nil
-			if childOp != nil && childOp.finiteOutcome() == localVaultFileSessionOutcomeOpened &&
-				a.presentAdoptedLocalVaultFileSession(childOp) {
+			childOpened := childOp != nil && childOp.finiteOutcome() == localVaultFileSessionOutcomeOpened
+			switch {
+			case childOpened && a.presentAdoptedLocalVaultFileSession(childOp):
 				state.phase, state.status = "done", "已验证本地初始版本 · 远端状态未核实"
 				state.open = false
-			} else {
+			case childOpened:
+				// The child was really opened but the current cache authority
+				// cannot deliver its projection. Keep the finite message in the
+				// creation dialog; do not select or copy withheld metadata.
+				state.phase, state.status = "done", "已创建；本地视图暂不可用，请稍后核查"
+			default:
 				state.phase, state.status = "done", "已创建，尚未打开；请核查本地状态"
 				state.open = false
 				a.presentUnopenedLocalVaultFile(scope)
@@ -445,16 +451,37 @@ func (a *App) finishLocalVaultFileCreateFailure(childOp *localVaultFileSessionOp
 	}
 }
 
-// presentAdoptedLocalVaultFileSession shows the verified baseline read from the
-// exact adopted slot. It never calls the legacy global-proof opener and never
-// unwraps the wrapper.
+// presentAdoptedLocalVaultFileSession shows an adopted child only while the
+// exact operation still owns the exact current slot and the existing C1 cache
+// getter authorizes delivery. It never clones the slot summary directly, calls
+// the legacy global-proof opener, unwraps the wrapper or copies withheld
+// metadata into the UI. Failure leaves the current local projection untouched.
 func (a *App) presentAdoptedLocalVaultFileSession(op *localVaultFileSessionOperation) bool {
-	if op == nil || op.slot == nil || op.slot.session == nil ||
+	if op == nil || op.slot == nil ||
 		op.finiteOutcome() != localVaultFileSessionOutcomeOpened {
 		return false
 	}
-	summary := localVaultFileSessionSummaryClone(op.slot.summary)
-	if summary.VaultID != op.scope.vaultID {
+	slot := op.slot
+	if op.scope.configPath == "" || op.scope.vaultID == "" || op.scope.backendRoot == "" ||
+		slot.scope != op.scope || slot.sequence != op.sequence ||
+		slot.operation != nil || slot.parent != op.parent ||
+		slot.appGeneration != op.generation || slot.session == nil ||
+		a.session != op.parent || a.generation != op.generation ||
+		a.localVaultFiles.sessionSlots[op.scope] != slot {
+		return false
+	}
+	summary, ok := a.readLocalVaultFileSession(op.scope)
+	if !ok || summary.VaultID != op.scope.vaultID {
+		clearLocalVaultFileSessionSummary(&summary)
+		return false
+	}
+	// The getter can synchronize a parent/cache boundary. Recheck the exact
+	// operation ownership before copying the local projection into the UI.
+	if op.slot != slot || a.localVaultFiles.sessionSlots[op.scope] != slot ||
+		slot.scope != op.scope || slot.sequence != op.sequence ||
+		slot.operation != nil || slot.parent != op.parent ||
+		slot.appGeneration != op.generation || slot.session == nil ||
+		a.session != op.parent || a.generation != op.generation {
 		clearLocalVaultFileSessionSummary(&summary)
 		return false
 	}

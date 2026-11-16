@@ -752,3 +752,86 @@ func TestDesktopCreateDialogExplicitCancelClearsConfirmState(t *testing.T) {
 		t.Fatal("DESKTOP_CREATE_DIALOG_CANCEL_RETAINED_TEMP")
 	}
 }
+
+func TestDesktopCreatedChildPresentationRejectsLockedParent(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	configPath, manifest := f.createVault(t)
+	scope := f.scope(configPath, manifest)
+	op := f.openVault(t, q, scope)
+	generation := f.app.generation
+	if f.app.localVaultFiles.selected != "" || f.app.localVaultFiles.status != "" ||
+		len(f.app.localVaultFiles.items) != 0 {
+		t.Fatal("DESKTOP_PRESENTATION_LOCK_SETUP_UI_CHANGED")
+	}
+	f.parent.Lock()
+	if f.app.session != f.parent || f.app.generation != generation {
+		t.Fatal("DESKTOP_PRESENTATION_LOCK_BOUNDARY_CHANGED")
+	}
+	if f.app.presentAdoptedLocalVaultFileSession(op) {
+		t.Fatal("DESKTOP_PRESENTATION_LOCK_ACCEPTED")
+	}
+	if f.app.localVaultFiles.selected != "" || f.app.localVaultFiles.status != "" ||
+		len(f.app.localVaultFiles.items) != 0 {
+		t.Fatal("DESKTOP_PRESENTATION_LOCK_CHANGED_UI")
+	}
+	q.drain(t)
+}
+
+func TestDesktopCreatedChildPresentationWithholdsUnderBusy(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	bOp := f.openVault(t, q, bScope)
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if bSlot == nil || bSlot.session == nil || bSlot.operation != nil {
+		t.Fatal("DESKTOP_PRESENTATION_BUSY_SETUP_FAILED")
+	}
+	bSession := bSlot.session
+	release := holdDesktopParentDBBusy(t, f)
+	if f.app.presentAdoptedLocalVaultFileSession(bOp) {
+		t.Fatal("DESKTOP_PRESENTATION_BUSY_ACCEPTED")
+	}
+	if f.app.localVaultFiles.selected != "" || f.app.localVaultFiles.status != "" ||
+		len(f.app.localVaultFiles.items) != 0 {
+		t.Fatal("DESKTOP_PRESENTATION_BUSY_CHANGED_UI")
+	}
+	if f.app.localVaultFiles.sessionSlots[bScope] != bSlot || bSlot.session != bSession ||
+		bSlot.operation != nil || len(f.app.localVaultFiles.sessionSlots) != 2 {
+		t.Fatal("DESKTOP_PRESENTATION_BUSY_DROPPED_SIBLING")
+	}
+	release()
+	summary, err := bSession.Summary()
+	if err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("DESKTOP_PRESENTATION_BUSY_SIBLING_LOST")
+	}
+	q.drain(t)
+}
+
+func TestDesktopCreatedChildPresentationRejectsReplacedSlot(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	configPath, manifest := f.createVault(t)
+	scope := f.scope(configPath, manifest)
+	oldOp := f.openVault(t, q, scope)
+	newOp := f.app.beginLocalVaultFileSession(scope, []byte(f.password), f.key)
+	if newOp == nil || newOp == oldOp || oldOp.slot != newOp.slot ||
+		newOp.sequence <= oldOp.sequence {
+		t.Fatal("DESKTOP_PRESENTATION_REPLACED_SETUP_FAILED")
+	}
+	if f.app.presentAdoptedLocalVaultFileSession(oldOp) {
+		t.Fatal("DESKTOP_PRESENTATION_REPLACED_OP_ACCEPTED")
+	}
+	if f.app.localVaultFiles.selected != "" || f.app.localVaultFiles.status != "" ||
+		len(f.app.localVaultFiles.items) != 0 {
+		t.Fatal("DESKTOP_PRESENTATION_REPLACED_CHANGED_UI")
+	}
+	f.app.closeLocalVaultFileSession(scope)
+	q.drain(t)
+}
