@@ -190,9 +190,18 @@ func (op *localVaultFileSessionOperation) take() (localVaultFileSessionResult, b
 }
 
 // takeCancelled makes an unsettled operation terminal and returns any
-// undelivered result to the caller for exact cleanup. It returns active=false
-// for an already settled operation so a late cancellation can never overwrite
-// a settled outcome.
+// undelivered result to the caller for exact cleanup. A settled Opened
+// operation is preserved exactly: its finite outcome is not rewritten, its
+// adopted child is not closed here, and its observer is not repeated.
+//
+// A settled non-Opened operation may still hold a no-candidate result that was
+// staged before markProcessingFinished settled it and before the UI take ran.
+// Cancellation must terminalize that pending handoff and clear the undelivered
+// projection so a stale callback takes nothing and cannot turn the final
+// Cancelled outcome back into Failed. A settled operation has no outstanding
+// candidate by definition; the defensive candidate return below exists only so
+// an impossible inconsistent result would use the existing cleanup caller
+// contract rather than being silently dropped.
 func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSessionResult, bool, bool) {
 	if op == nil {
 		return localVaultFileSessionResult{}, false, false
@@ -200,14 +209,22 @@ func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSession
 	op.handoffMu.Lock()
 	defer op.handoffMu.Unlock()
 	if op.settled {
-		// A settled opening already transferred its candidate to the slot; a
-		// later cancellation must not rewrite that finite outcome. A settled
-		// no-candidate failure still records the cancel outcome expected by the
-		// existing creation failure path.
-		if op.outcome != localVaultFileSessionOutcomeOpened {
-			op.outcome = localVaultFileSessionOutcomeCancelled
+		if op.outcome == localVaultFileSessionOutcomeOpened {
+			return localVaultFileSessionResult{}, false, false
 		}
-		return localVaultFileSessionResult{}, false, false
+		op.outcome = localVaultFileSessionOutcomeCancelled
+		op.handoffTerminal = true
+		if !op.handoffReady {
+			return localVaultFileSessionResult{}, false, false
+		}
+		result := op.handoffResult
+		op.handoffResult = localVaultFileSessionResult{}
+		op.handoffReady = false
+		if result.candidate == nil {
+			clearLocalVaultFileSessionSummary(&result.summary)
+			return localVaultFileSessionResult{}, false, false
+		}
+		return result, true, false
 	}
 	op.handoffTerminal = true
 	op.outcome = localVaultFileSessionOutcomeCancelled
@@ -805,7 +822,10 @@ func (a *App) cancelLocalVaultFileSessionOperation(slot *localVaultFileSessionSl
 // cancelLocalVaultFileSessionOperationExact cancels this exact operation, never
 // whatever operation the slot may hold later. It closes only an undelivered
 // staged candidate; an already adopted wrapper is left for explicit close or
-// replacement so a stale callback cannot close a valid current child.
+// replacement so a stale callback cannot close a valid current child. A settled
+// non-Opened operation has already cleared its no-candidate handoff in
+// takeCancelled; an impossible inconsistent candidate result still follows the
+// same exact cleanup launch instead of being retained.
 func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessionOperation) {
 	if op == nil {
 		return
@@ -825,9 +845,6 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 	// the exact binding ended. The pending candidate cleanup below is product
 	// work and is not awaited by the UI observer.
 	a.notifyLocalVaultFileSessionCompletion(op)
-	if !active {
-		return
-	}
 	if !pending {
 		return
 	}
@@ -835,7 +852,9 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 	if result.candidate != nil {
 		closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
 		a.launch(func() { closeLocalVaultFileSessionCandidate(op, result.candidate, closePause) })
-	} else {
+		return
+	}
+	if active {
 		op.markCandidateResolved()
 	}
 }
