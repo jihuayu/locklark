@@ -7550,11 +7550,13 @@ if (typeof importScripts === "function") importScripts("core.js");
         pendingSave,
       });
     };
-    run().then(respondState, () => {
+    run().then(respondState, (error) => {
       if (requestEpoch === epoch)
         status = unconfirmedSave
           ? SAVE_UNKNOWN
-          : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
+          : message.type === "match" && error?.knownRefusal === true
+            ? "原生宿主拒绝读取候选"
+            : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
       return respondState();
     });
     return true;

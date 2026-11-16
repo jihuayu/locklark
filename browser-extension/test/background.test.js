@@ -91,7 +91,10 @@ function harness(options = {}) {
             capabilities,
           }),
         );
-      if (r.type === "match")
+      if (r.type === "match" && typeof options.matchReply === "function") {
+        const reply = options.matchReply(r);
+        if (reply) queueMicrotask(() => portMessage(reply));
+      } else if (r.type === "match")
         queueMicrotask(() =>
           portMessage({
             v: 1,
@@ -566,6 +569,65 @@ async function ready(h) {
   assert.equal(state.connected, true);
   await h.send({ type: "match" });
 }
+test("match known native refusal has a fixed hint without copying its payload", async () => {
+  const payload = "private-native-refusal-payload";
+  const h = harness({ matchReply: (r) => ({ v: 1, id: r.id, type: "error", error: "refused" }) });
+  try {
+    await ready(h);
+    const state = await h.send({ type: "state" });
+    assert.equal(state.status, "原生宿主拒绝读取候选");
+    assert.equal(state.candidates.length, 0);
+    assert.equal(JSON.stringify(state).includes(payload), false);
+  } finally { await h.send({ type: "disconnect" }); }
+  const malformed = harness({ matchReply: (r) => ({ v: 1, id: r.id, type: "error", error: payload }) });
+  try {
+    await ready(malformed);
+    const state = await malformed.send({ type: "state" });
+    assert.equal(state.status, "原生协议错误，请重新连接");
+    assert.equal(JSON.stringify(state).includes(payload), false);
+  } finally { await malformed.send({ type: "disconnect" }); }
+});
+test("match probe failure retains the generic refusal without a native match request", async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    const before = h.sent.filter((r) => r.type === "match").length;
+    h.api.scripting.executeScript = async () => { throw Error("private-probe-failure-payload"); };
+    const state = await h.send({ type: "match" });
+    assert.equal(state.status, "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面");
+    assert.equal(state.candidates.length, 0);
+    assert.equal(h.sent.filter((r) => r.type === "match").length, before);
+  } finally { await h.send({ type: "disconnect" }); }
+});
+test("match successful empty candidates retain the normal empty result", async () => {
+  const h = harness({ matchReply: (r) => ({ v: 1, id: r.id, type: "candidates", candidates: [] }) });
+  try {
+    await ready(h);
+    const state = await h.send({ type: "state" });
+    assert.equal(state.status, "0 个当前网站登录");
+    assert.equal(state.candidates.length, 0);
+  } finally { await h.send({ type: "disconnect" }); }
+});
+test("match known native refusal cannot replace an uncertain save warning", async () => {
+  const h = harness({ matchReply: (r) => ({ v: 1, id: r.id, type: "error", error: "refused" }) });
+  try {
+    const commit = await committingSave(h);
+    h.deliver({ v: 1, id: commit.id, type: "unknown" });
+    for (let i = 0; i < 4; i++) await tick();
+    const state = await h.send({ type: "match" });
+    assert.equal(state.saveBlocked, true);
+    assert.equal(state.status, "结果未确认，请在金库核实，勿重复保存");
+  } finally { await h.send({ type: "disconnect" }); }
+});
+test("known native refusal in another operation retains the generic refusal", async () => {
+  const h = harness({ onRequest: (r) => r.type === "watchtower"
+    ? { v: 1, id: r.id, type: "error", error: "refused" } : undefined });
+  try {
+    await ready(h);
+    const state = await h.send({ type: "watchtower" });
+    assert.equal(state.status, "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面");
+  } finally { await h.send({ type: "disconnect" }); }
+});
 // The exact production text of one top-level function in background.js,
 // cut at its matching closing brace so following listeners never leak in.
 async function waitForSource(header) {

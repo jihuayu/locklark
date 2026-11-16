@@ -39,8 +39,9 @@ async function readRotationReadiness(popup, itemID, revision) {
         count + row.querySelectorAll('[data-action="' + action + '"]').length, 0));
       const status = document.querySelector('#status')?.textContent;
       const statusClass = status === '0 个当前网站登录' ? 'EMPTY_MATCH' :
-        status === '操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面' ? 'REFUSED' :
-          status === '页面或活动标签已变化，请重新读取候选' ? 'CONTEXT_CHANGED' : 'UNKNOWN';
+        status === '原生宿主拒绝读取候选' ? 'NATIVE_REFUSED' :
+          status === '操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面' ? 'REFUSED' :
+            status === '页面或活动标签已变化，请重新读取候选' ? 'CONTEXT_CHANGED' : 'UNKNOWN';
       return { probeAvailable: true, refreshDisabled: document.querySelector('#refresh')?.disabled !== false,
         rowCount: cap(rows.length), sameIDCount: cap(sameID.length), exactRevisionCount: cap(exact.length),
         fillCount: controls('fill'), updateCount: controls('update'), statusClass, failure: 'none' };
@@ -49,7 +50,7 @@ async function readRotationReadiness(popup, itemID, revision) {
     const keys = ["probeAvailable", "refreshDisabled", ...counts, "statusClass", "failure"].sort().join(",");
     assert(observation && Object.keys(observation).sort().join(",") === keys &&
       observation.probeAvailable === true && typeof observation.refreshDisabled === "boolean" &&
-      ["EMPTY_MATCH", "REFUSED", "CONTEXT_CHANGED", "UNKNOWN"].includes(observation.statusClass) &&
+      ["EMPTY_MATCH", "NATIVE_REFUSED", "REFUSED", "CONTEXT_CHANGED", "UNKNOWN"].includes(observation.statusClass) &&
       observation.failure === "none" && counts.every(name => Number.isSafeInteger(observation[name]) &&
         observation[name] >= 0 && observation[name] <= 100), "Rotation readiness projection refused");
     return Object.freeze(observation);
