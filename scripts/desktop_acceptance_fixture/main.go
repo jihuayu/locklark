@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	bolt "go.etcd.io/bbolt"
 )
@@ -39,6 +40,21 @@ type observation struct {
 	Items     []item           `json:"items"`
 	Events    []personal.Event `json:"events"`
 	AuditSafe bool             `json:"audit_safe"`
+}
+
+// localProjection is deliberately limited to bounded local byte/mode facts.
+// It carries no path, manifest, ciphertext, recovery kit, identity or factor.
+type localProjection struct {
+	ManifestCount      int  `json:"manifest_count"`
+	ManifestPersonal   bool `json:"manifest_personal"`
+	ManifestBackend    bool `json:"manifest_backend"`
+	CompanionPresent   bool `json:"companion_present"`
+	ManifestDigest     bool `json:"manifest_digest"`
+	JournalPresent     bool `json:"journal_present"`
+	ArchivePresent     bool `json:"archive_present"`
+	PrivateModes       bool `json:"private_modes"`
+	BackendHashMatches bool `json:"backend_hash_matches"`
+	FactorsAbsent      bool `json:"factors_absent"`
 }
 
 func setup(out string) error {
@@ -242,26 +258,363 @@ func observe(f fixture, key []byte) error {
 	return json.NewEncoder(os.Stdout).Encode(out)
 }
 
-func run() error {
-	out := flag.String("out", "", "new synthetic fixture directory")
-	input := flag.String("fixture", "", "private synthetic fixture file")
-	privatePipe := flag.Bool("private-pipe", false, "observe authenticated copy through private pipe only")
-	stale := flag.String("stale", "", "independent local-owner URL edit for exact-target conflict test")
-	hold := flag.Bool("hold-readonly", false, "hold a read-only original-file lock until private stdin closes")
-	flag.Parse()
+// localProfileDir mirrors localVaultFilePaths: the expected profile is derived
+// only from the current fixture's personal path, never from a directory scan.
+func localProfileDir(workspace, personalPath string) string {
+	sum := sha256.Sum256([]byte(personalPath))
+	return filepath.Join(workspace, "profiles", hex.EncodeToString(sum[:]))
+}
+
+func localBackendRoot(workspace string) string {
+	return filepath.Join(workspace, "backend")
+}
+
+// realDirectory accepts only an existing real directory. A missing path is
+// reported as absent so the caller can emit bounded false facts instead of
+// exploring any other directory.
+func realDirectory(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, errors.New("invalid local workspace directory")
+	}
+	return true, nil
+}
+
+func boundedRegularFile(path string, limit int64) ([]byte, bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, false, errors.New("local workspace file is not a real regular file")
+	}
+	if info.Size() > limit {
+		return nil, false, errors.New("local workspace file exceeds bound")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(raw)) > limit {
+		clear(raw)
+		return nil, false, errors.New("local workspace file exceeds bound")
+	}
+	return raw, true, nil
+}
+
+type localBackendRecord struct {
+	raw, path, digest string
+	valid             bool
+}
+
+// decodeLocalBackendRecord reads the documented directory-backend record
+// shape. It proves only that the stored payload matches the record's own
+// digest; it does not authenticate a signature, permission or remote head.
+func decodeLocalBackendRecord(raw []byte) ([]byte, bool) {
+	const magic = "LLVFREV1"
+	if len(raw) < len(magic)+4 || string(raw[:len(magic)]) != magic {
+		return nil, false
+	}
+	p := len(magic)
+	readU32 := func() (uint32, bool) {
+		if len(raw)-p < 4 {
+			return 0, false
+		}
+		value := uint32(raw[p]) | uint32(raw[p+1])<<8 | uint32(raw[p+2])<<16 | uint32(raw[p+3])<<24
+		p += 4
+		return value, true
+	}
+	vlen, ok := readU32()
+	if !ok || vlen == 0 || vlen > 1024 || uint64(vlen) > uint64(len(raw)-p) {
+		return nil, false
+	}
+	p += int(vlen)
+	dlen, ok := readU32()
+	if !ok || dlen != sha256.Size || uint64(dlen) > uint64(len(raw)-p) {
+		return nil, false
+	}
+	digest := raw[p : p+int(dlen)]
+	p += int(dlen)
+	value := raw[p:]
+	if len(value) == 0 || len(value) > 32<<20 {
+		return nil, false
+	}
+	sum := sha256.Sum256(value)
+	if !bytes.Equal(sum[:], digest) {
+		return nil, false
+	}
+	return value, true
+}
+
+func readBackendObject(backendRoot, name string) (localBackendRecord, bool, error) {
+	var zero localBackendRecord
+	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+	version := filepath.Join(namespace, "v1")
+	data := filepath.Join(version, "data")
+	for _, dir := range []string{backendRoot, namespace, version, data} {
+		exists, err := realDirectory(dir)
+		if err != nil {
+			return zero, false, err
+		}
+		if !exists {
+			return zero, false, nil
+		}
+	}
+	entries, err := os.ReadDir(data)
+	if err != nil {
+		return zero, false, err
+	}
+	sum := sha256.Sum256([]byte(name))
+	want := hex.EncodeToString(sum[:])
+	if len(entries) != 1 || entries[0].Name() != want {
+		return zero, false, nil
+	}
+	path := filepath.Join(data, want)
+	raw, found, err := boundedRegularFile(path, int64(32<<20)+4096)
+	if err != nil {
+		return zero, false, err
+	}
+	if !found {
+		return zero, false, nil
+	}
+	record := localBackendRecord{raw: string(raw), path: path}
+	if value, valid := decodeLocalBackendRecord(raw); valid {
+		digest := sha256.Sum256(value)
+		record.digest, record.valid = hex.EncodeToString(digest[:]), true
+	}
+	return record, true, nil
+}
+
+func localPrivateModes(f fixture, workspace, profiles, profileDir, backendRoot, config, companion, journal, archive, objectPath string, objectFound bool, entries []os.DirEntry) bool {
+	ok := true
+	requireDir := func(path string) {
+		if path == "" {
+			return
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0700 {
+			ok = false
+		}
+	}
+	requireFile := func(path string) {
+		if path == "" {
+			return
+		}
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			ok = false
+		}
+	}
+	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+	version := filepath.Join(namespace, "v1")
+	for _, dir := range []string{workspace, profiles, profileDir, backendRoot, namespace, version,
+		filepath.Join(version, "tmp"), filepath.Join(version, "data")} {
+		requireDir(dir)
+	}
+	for _, path := range []string{f.Path, config, companion, journal, archive} {
+		requireFile(path)
+	}
+	if objectFound {
+		requireFile(objectPath)
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			ok = false
+		}
+	}
+	if info, err := os.Lstat(filepath.Join(version, ".locklark-vaultfile.lock")); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			ok = false
+		}
+	}
+	return ok
+}
+
+func factorsAbsent(f fixture, raws ...[]byte) bool {
+	values := []string{f.Password, f.Secret, f.Username, f.Value, f.OTPSeed, f.OTPConfig, f.ProviderCanary, f.ProviderValue}
+	for _, raw := range raws {
+		for _, value := range values {
+			if value != "" && bytes.Contains(raw, []byte(value)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// verifyLocalWorkspace is a bounded read-only observer for one exact existing
+// local create profile. It never opens the product session, backend, journal
+// or archive, never creates or publishes, and never unlocks the personal file.
+// A matching hash proves byte equality only.
+func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) {
+	var report localProjection
+	if f.Path == "" || !filepath.IsAbs(f.Path) || filepath.Clean(f.Path) != f.Path {
+		return report, errors.New("invalid local fixture path")
+	}
+	if workspace == "" || !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
+		return report, errors.New("invalid local workspace")
+	}
+	exists, err := realDirectory(workspace)
+	if err != nil || !exists {
+		return report, errors.New("invalid local workspace")
+	}
+	profiles := filepath.Join(workspace, "profiles")
+	profileDir := localProfileDir(workspace, f.Path)
+	backendRoot := localBackendRoot(workspace)
+	if _, err := realDirectory(profiles); err != nil {
+		return report, err
+	}
+	profileExists, err := realDirectory(profileDir)
+	if err != nil {
+		return report, err
+	}
+	if _, err := realDirectory(backendRoot); err != nil {
+		return report, err
+	}
+	personalInfo, personalErr := os.Lstat(f.Path)
+	if personalErr != nil && !os.IsNotExist(personalErr) {
+		return report, personalErr
+	}
+	if personalErr == nil && (personalInfo.Mode()&os.ModeSymlink != 0 || !personalInfo.Mode().IsRegular()) {
+		return report, errors.New("invalid local fixture path")
+	}
+
+	var entries []os.DirEntry
+	if profileExists {
+		entries, err = os.ReadDir(profileDir)
+		if err != nil {
+			return report, err
+		}
+		if len(entries) > 128 {
+			return report, errors.New("local profile exceeds bound")
+		}
+	}
+	count := 0
+	config := ""
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return report, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return report, errors.New("local profile contains a symlink")
+		}
+		if strings.HasSuffix(entry.Name(), ".json") {
+			if !info.Mode().IsRegular() {
+				return report, errors.New("invalid local manifest")
+			}
+			count++
+			config = filepath.Join(profileDir, entry.Name())
+		}
+	}
+	report.ManifestCount = count
+	if count != 1 {
+		report.PrivateModes = localPrivateModes(f, workspace, profiles, profileDir, backendRoot, "", "", "", "", "", false, entries)
+		return report, nil
+	}
+
+	companionPath, err := vaultfileclient.CompanionPath(config)
+	if err != nil {
+		return report, errors.New("invalid local companion path")
+	}
+	report.PrivateModes = localPrivateModes(f, workspace, profiles, profileDir, backendRoot, config, companionPath, "", "", "", false, entries)
+	manifest, manifestExists, err := vaultfileclient.ReadManifest(config)
+	if err != nil || !manifestExists {
+		return report, nil
+	}
+	if personalErr == nil && manifest.PersonalFile == f.Path {
+		report.ManifestPersonal = true
+	}
+	report.ManifestBackend = manifest.BackendRoot == backendRoot
+
+	base := strings.TrimSuffix(filepath.Base(config), ".json")
+	expectedJournal := filepath.Join(profileDir, base+".journal")
+	expectedArchive := filepath.Join(profileDir, base+".llb")
+	bound := manifest.Name == base+".llv" && manifest.Journal == expectedJournal && manifest.Archive == expectedArchive
+
+	digest, digestErr := vaultfileclient.ReadManifestDigest(config, manifest)
+	companion, companionExists, companionErr := vaultfileclient.ReadCompanion(config, manifest)
+	if digestErr == nil && companionErr == nil && companionExists && bound &&
+		report.ManifestPersonal && report.ManifestBackend &&
+		companion.ManifestSHA256 == digest && companion.Resume.PersonalFile == f.Path &&
+		companion.Resume.BackendRoot == backendRoot {
+		report.CompanionPresent = true
+		report.ManifestDigest = true
+	}
+
+	journalRaw, journalFound, journalErr := boundedRegularFile(expectedJournal, int64(32<<20))
+	if journalErr != nil {
+		return report, journalErr
+	}
+	if bound && journalFound && len(journalRaw) > 0 {
+		report.JournalPresent = true
+	}
+	archiveRaw, archiveFound, archiveErr := boundedRegularFile(expectedArchive, int64(32<<20))
+	if archiveErr != nil {
+		return report, archiveErr
+	}
+	if bound && archiveFound && len(archiveRaw) > 0 {
+		report.ArchivePresent = true
+	}
+
+	record, recordFound, recordErr := readBackendObject(backendRoot, manifest.Name)
+	if recordErr != nil {
+		return report, recordErr
+	}
+	if report.CompanionPresent && recordFound && record.valid && record.digest == companion.GenesisSHA256 {
+		report.BackendHashMatches = true
+	}
+	report.PrivateModes = localPrivateModes(f, workspace, profiles, profileDir, backendRoot, config, companionPath,
+		expectedJournal, expectedArchive, record.path, recordFound, entries)
+
+	manifestRaw, manifestFound, manifestRawErr := boundedRegularFile(config, 64<<10)
+	if manifestRawErr != nil {
+		return report, manifestRawErr
+	}
+	companionRaw, companionFound, companionRawErr := boundedRegularFile(companionPath, 64<<10)
+	if companionRawErr != nil {
+		return report, companionRawErr
+	}
+	if bound && manifestFound && companionFound && journalFound && archiveFound && recordFound && record.valid {
+		report.FactorsAbsent = factorsAbsent(f, manifestRaw, companionRaw, journalRaw, archiveRaw, []byte(record.raw))
+	}
+	return report, nil
+}
+
+func run(args []string) error {
+	flags := flag.NewFlagSet("desktop_acceptance_fixture", flag.ContinueOnError)
+	out := flags.String("out", "", "new synthetic fixture directory")
+	input := flags.String("fixture", "", "private synthetic fixture file")
+	privatePipe := flags.Bool("private-pipe", false, "observe authenticated copy through private pipe only")
+	stale := flags.String("stale", "", "independent local-owner URL edit for exact-target conflict test")
+	hold := flags.Bool("hold-readonly", false, "hold a read-only original-file lock until private stdin closes")
+	verifyLocalDir := flags.String("verify-local", "", "read-only bounded local create workspace verification")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
 	if *out != "" {
-		if *input != "" || *privatePipe || *stale != "" || *hold || flag.NArg() != 0 {
+		if *input != "" || *privatePipe || *stale != "" || *hold || *verifyLocalDir != "" || flags.NArg() != 0 {
 			return errors.New("one operation required")
 		}
 		return setup(*out)
 	}
 	operations := 0
-	for _, enabled := range []bool{*privatePipe, *stale != "", *hold} {
+	for _, enabled := range []bool{*privatePipe, *stale != "", *hold, *verifyLocalDir != ""} {
 		if enabled {
 			operations++
 		}
 	}
-	if *input == "" || flag.NArg() != 0 || operations != 1 {
+	if *input == "" || flags.NArg() != 0 || operations != 1 {
 		return errors.New("one operation required")
 	}
 	raw, err := os.ReadFile(*input)
@@ -272,6 +625,13 @@ func run() error {
 	var f fixture
 	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(*input), "synthetic.ll") {
 		return errors.New("invalid fixture path")
+	}
+	if *verifyLocalDir != "" {
+		report, err := verifyLocalWorkspace(f, *verifyLocalDir)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(report)
 	}
 	if *hold {
 		stat, err := os.Stdout.Stat()
@@ -306,7 +666,7 @@ func run() error {
 }
 
 func main() {
-	if run() != nil {
+	if run(os.Args[1:]) != nil {
 		fmt.Fprintln(os.Stderr, "Synthetic desktop fixture operation failed")
 		os.Exit(1)
 	}
