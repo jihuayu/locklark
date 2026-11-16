@@ -281,3 +281,45 @@ test("generation failure discards unknown output and reports only a fixed error"
     scan(fixture);
   } finally { console.log = originalLog; console.error = originalError; }
 });
+
+test("static rotation integration encloses actual generator input and read in the output barrier", () => {
+  const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("const generated = await captureRotationValue(async () => {");
+  const end = source.indexOf("    });\n    assert(generated", start);
+  assert(start >= 0 && end > start, "Real generator producer must have a bounded source block");
+  const producer = source.slice(start, end);
+  const click = producer.indexOf('generator.click("#gen-regenerate")');
+  const fill = producer.indexOf('generator.click("#gen-fill")');
+  const close = producer.indexOf("await closePopups()", fill);
+  const read = producer.indexOf('return page.locator("#new-password").inputValue()');
+  assert(click >= 0 && fill > click && close > fill && read > close,
+    "Generator click, generated fill, popup closure and actual page read must remain inside the producer");
+  assert(!/\.value\s*=(?!=)/.test(source) && !source.includes(".fill(") &&
+    !source.includes("runtime.sendMessage") && !source.includes("performClick"),
+    "Rotation must not replace real product fill with page mutation or authorization hooks");
+  assert(source.includes('page.locator("#confirm-password").press("Enter")') &&
+    source.includes('response.request().method() === "POST"') &&
+    source.includes("oldAuthentication.status === 401") && source.includes("newAuthentication.status === 200") &&
+    source.includes("updateEvent.item_id === itemID") && source.includes("updateEvent.base_revision === r0") &&
+    source.includes("await fillAndLogin(itemID, r1)"),
+    "Browser POST, independent website authentication, exact native update and actual refill login must remain required");
+});
+
+test("static rotation hook runs once and keeps the remaining invocation free of screenshots", () => {
+  const source = readFileSync(new URL("./browser_native_acceptance.mjs", import.meta.url), "utf8");
+  assert((source.match(/await acceptBrowserRotation\(/g) || []).length === 1,
+    "Existing Chromium invocation must contain exactly one rotation subjourney");
+  const save = source.lastIndexOf("await acceptBrowserSave(acceptanceDriver)");
+  const rotation = source.indexOf("await acceptBrowserRotation(", save);
+  const otp = source.indexOf("await acceptBrowserOTP(acceptanceDriver)", rotation);
+  assert(save >= 0 && rotation > save && otp > rotation,
+    "Rotation must reuse the current invocation between save and OTP");
+  assert(source.includes("scanController.captureRotationValue(fixture, state, produce)") &&
+    source.includes('process.env.LOCKLARK_BROWSER_REQUIRE_PREBUILT === "1"'),
+    "Rotation must use the reviewed barrier and same-run prebuilt artifacts");
+  assert((source.match(/rotationScreenshotsBlocked = false/g) || []).length === 1 &&
+    source.indexOf("rotationScreenshotsBlocked = true", save) < rotation &&
+    source.includes("!rotationScreenshotsBlocked && browserScreenshotsAllowed(stage)") &&
+    (source.match(/screenshotsAllowed\(\)/g) || []).length === 3,
+    "Rotation must latch screenshot suppression across every later failure path");
+});
