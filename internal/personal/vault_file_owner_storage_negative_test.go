@@ -376,7 +376,50 @@ func TestVaultFileOwnerCustodySignedArchiveTamper(t *testing.T) {
 	}
 }
 
-func TestVaultFileOwnerCustodyRestoreTransactionRollback(t *testing.T) {
+func TestVaultFileOwnerCustodyRestoreCleansProductTempOnTransactionFailure(t *testing.T) {
+	path, key, password, session, _ := ownerCustodySource(t)
+	session.Lock()
+	archive := filepath.Join(t.TempDir(), "source.llb")
+	kit, err := Backup(path, archive, password, key)
+	if err != nil {
+		t.Fatal("OWNER_CLEANUP_BACKUP_FAILED")
+	}
+	before, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal("OWNER_CLEANUP_ARCHIVE_READ_FAILED")
+	}
+	destDir := t.TempDir()
+	dest := filepath.Join(destDir, "restored.ll")
+	if afterOwnerRestoreWriteTestFault != nil {
+		t.Fatal("OWNER_CLEANUP_FAULT_ALREADY_SET")
+	}
+	injected := errors.New("owned restore transaction failure")
+	reached, sawProductTemp := false, false
+	afterOwnerRestoreWriteTestFault = func() error {
+		reached = true
+		matches, err := filepath.Glob(filepath.Join(destDir, ".locklark-personal-*"))
+		sawProductTemp = err == nil && len(matches) == 1
+		return injected
+	}
+	defer func() { afterOwnerRestoreWriteTestFault = nil }()
+	err = Restore(archive, dest, password, key, kit, bytes.Repeat([]byte{0x65}, 16))
+	if !reached || !sawProductTemp || !errors.Is(err, injected) {
+		t.Fatal("OWNER_CLEANUP_REAL_RESTORE_FAULT_NOT_REACHED")
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("OWNER_CLEANUP_DEST_CREATED")
+	}
+	matches, err := filepath.Glob(filepath.Join(destDir, ".locklark-personal-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatal("OWNER_CLEANUP_PRODUCT_TEMP_REMAINED")
+	}
+	after, err := os.ReadFile(archive)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("OWNER_CLEANUP_SOURCE_ARCHIVE_CHANGED")
+	}
+}
+
+func TestVaultFileOwnerCustodyRestoreBoltTransactionRollback(t *testing.T) {
 	path, key, password, session, _ := ownerCustodySource(t)
 	session.Lock()
 	archive := filepath.Join(t.TempDir(), "source.llb")
@@ -393,11 +436,9 @@ func TestVaultFileOwnerCustodyRestoreTransactionRollback(t *testing.T) {
 		t.Fatal("OWNER_ROLLBACK_ARCHIVE_DECODE_FAILED")
 	}
 	defer clearVaultFileOwners(p.VaultFileOwners)
-	// The test owns this incomplete destination and forces an error after
-	// initializeRecovered has written the chain, capsule and second snapshot
-	// inside one real bbolt transaction. No product fault callback is added.
-	dest := filepath.Join(t.TempDir(), "refused.ll")
-	temp := filepath.Join(filepath.Dir(dest), ".owned-restore-temp")
+	// This direct bbolt fixture proves rollback of the chain, capsule and
+	// second snapshot. Product temporary-file cleanup is tested separately.
+	temp := filepath.Join(t.TempDir(), ".owned-restore-temp")
 	db, err := bolt.Open(temp, 0600, nil)
 	if err != nil {
 		t.Fatal("OWNER_ROLLBACK_TEMP_OPEN_FAILED")
@@ -440,15 +481,6 @@ func TestVaultFileOwnerCustodyRestoreTransactionRollback(t *testing.T) {
 		return nil
 	}) != nil || db.Close() != nil {
 		t.Fatal("OWNER_ROLLBACK_TRANSACTION_PERSISTED")
-	}
-	if os.Remove(temp) != nil {
-		t.Fatal("OWNER_ROLLBACK_TEMP_REMOVE_FAILED")
-	}
-	if _, err := os.Stat(dest); !os.IsNotExist(err) {
-		t.Fatal("OWNER_ROLLBACK_DEST_CREATED")
-	}
-	if _, err := os.Stat(temp); !os.IsNotExist(err) {
-		t.Fatal("OWNER_ROLLBACK_TEMP_REMAINED")
 	}
 	after, err := os.ReadFile(archive)
 	if err != nil || !bytes.Equal(before, after) {

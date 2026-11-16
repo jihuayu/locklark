@@ -477,6 +477,11 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 
 var archiveKey = []byte("archived-audit/v1")
 
+// A nil-by-default, parameterless fault point for the custody restore test.
+// It runs inside the new database transaction after the capsule, second
+// snapshot and signed custody event have been written, before commit.
+var afterOwnerRestoreWriteTestFault func() error
+
 func loadChains(b *bolt.Bucket, i identity, anchor string) ([]Chain, error) {
 	raw := b.Get(archiveKey)
 	if anchor == "" {
@@ -571,6 +576,11 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 		ev, e = appendLinked(b, i, auditTipAfter(ev, s, anchor), s, vaultFileOwnerRestoreAction, "", "succeeded", "", digest)
 		if e != nil {
 			return e
+		}
+		if afterOwnerRestoreWriteTestFault != nil {
+			if e = afterOwnerRestoreWriteTestFault(); e != nil {
+				return e
+			}
 		}
 	}
 	for _, it := range p.Items {
