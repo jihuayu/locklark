@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
@@ -81,7 +82,10 @@ func TestDesktopCreateTwoIndependentFilesWithConfirmedRecovery(t *testing.T) {
 		a.localCreate.password, a.localCreate.secret, a.localCreate.kit = password, secret, kit
 		a.localCreateComplete()
 		if a.localCreate.open || a.localVaultFiles.selected != configPath ||
-			a.localVaultFiles.status != "已验证本地初始版本 · 远端状态未核实" {
+			a.localVaultFiles.status != "已验证本地初始版本 · 远端状态未核实" ||
+			a.localCreate.issued != "" || a.localCreate.confirm != "" || a.localCreate.password != "" ||
+			a.localCreate.secret != "" || a.localCreate.kit != "" || a.localCreate.backup != nil ||
+			a.localCreate.publish != nil {
 			t.Fatal("DESKTOP_CREATE_LOCAL_BASELINE_NOT_SELECTED")
 		}
 		companion, exists, err := vaultfileclient.ReadCompanion(configPath, manifest)
@@ -411,5 +415,100 @@ func TestDesktopCreateCompleteRejectsWrongBackendBeforePublish(t *testing.T) {
 	}
 	if desktopCreateDirDigest(t, f.backendRoot) != correctBackend {
 		t.Fatal("DESKTOP_CREATE_COMPLETE_WRONG_BACKEND_CORRECT_ROOT_CHANGED")
+	}
+}
+
+func TestDesktopCreatePublishCancelBeforeStartDoesNotPublish(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	var queued []func()
+	f.app.launch = func(fn func()) { queued = append(queued, fn) }
+	runNext := func() {
+		fn := queued[0]
+		queued = queued[1:]
+		fn()
+	}
+	f.app.openLocalVaultFileCreate("")
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreatePrepare()
+	if len(queued) != 1 {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_PREPARE_NOT_QUEUED")
+	}
+	runNext()
+	if f.app.localCreate.phase != "confirm" || f.app.localCreate.backup == nil || f.app.localCreate.issued == "" {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_CONFIRM_SETUP_FAILED")
+	}
+	manifest, exists, err := vaultfileclient.ReadManifest(f.app.localCreate.configPath)
+	if err != nil || !exists {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_MANIFEST_MISSING")
+	}
+	archive := manifest.Archive
+	f.app.localCreate.confirm = f.app.localCreate.issued
+	f.app.localCreatePublishBackup()
+	if f.app.localCreate.publish == nil || f.app.localCreate.backup != nil {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_GATE_NOT_QUEUED")
+	}
+	if len(queued) != 2 {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_WORKER_NOT_QUEUED")
+	}
+	f.app.cancelLocalVaultFileCreate()
+	if f.app.localCreate.open || f.app.localCreate.phase != "" || f.app.localCreate.configPath != "" ||
+		f.app.localCreate.issued != "" || f.app.localCreate.confirm != "" ||
+		f.app.localCreate.password != "" || f.app.localCreate.secret != "" || f.app.localCreate.kit != "" ||
+		f.app.localCreate.backup != nil || f.app.localCreate.publish != nil {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_CANCEL_RETAINED_STATE")
+	}
+	if _, err := os.Lstat(archive); !os.IsNotExist(err) {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_ARCHIVE_PUBLISHED_BEFORE_START")
+	}
+	if temps, _ := filepath.Glob(filepath.Join(f.profileDir, ".locklark-backup-*")); len(temps) != 0 {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_TEMP_RETAINED")
+	}
+	for len(queued) > 0 {
+		runNext()
+	}
+	if _, err := os.Lstat(archive); !os.IsNotExist(err) {
+		t.Fatal("DESKTOP_CREATE_PUBLISH_ARCHIVE_PUBLISHED_AFTER_CANCEL")
+	}
+}
+
+func TestDesktopCreateDialogExplicitCancelClearsConfirmState(t *testing.T) {
+	f := newDesktopCreateResumeFixture(t)
+	f.app.openLocalVaultFileCreate("")
+	f.app.localCreate.password, f.app.localCreate.secret = f.password, f.secret
+	f.app.localCreatePrepare()
+	if f.app.localCreate.phase != "confirm" || f.app.localCreate.backup == nil || f.app.localCreate.issued == "" {
+		t.Fatal("DESKTOP_CREATE_DIALOG_CONFIRM_SETUP_FAILED")
+	}
+	manifest, exists, err := vaultfileclient.ReadManifest(f.app.localCreate.configPath)
+	if err != nil || !exists {
+		t.Fatal("DESKTOP_CREATE_DIALOG_MANIFEST_MISSING")
+	}
+	archive := manifest.Archive
+	tester := ui.NewTester(func(c *ui.Context) {
+		f.app.onevraLocalVaultFileCreateDialog(c)
+	}, 600, 500)
+	tester.SetPreferences(ui.Preferences{ReduceMotion: true})
+	tester.Frame()
+	tester.ClickAt(2, 2)
+	tester.Key(0, ui.KeyEscape)
+	tester.Frame()
+	if !f.app.localCreate.open || f.app.localCreate.phase != "confirm" ||
+		f.app.localCreate.backup == nil || f.app.localCreate.issued == "" {
+		t.Fatal("DESKTOP_CREATE_DIALOG_IMPLICIT_CLOSE_BYPASSED_CLEANUP")
+	}
+	if err := tester.Click("取消"); err != nil {
+		t.Fatal(err)
+	}
+	if f.app.localCreate.open || f.app.localCreate.phase != "" || f.app.localCreate.configPath != "" ||
+		f.app.localCreate.issued != "" || f.app.localCreate.confirm != "" ||
+		f.app.localCreate.password != "" || f.app.localCreate.secret != "" || f.app.localCreate.kit != "" ||
+		f.app.localCreate.backup != nil || f.app.localCreate.publish != nil {
+		t.Fatal("DESKTOP_CREATE_DIALOG_CANCEL_RETAINED_STATE")
+	}
+	if _, err := os.Lstat(archive); !os.IsNotExist(err) {
+		t.Fatal("DESKTOP_CREATE_DIALOG_CANCEL_PUBLISHED_ARCHIVE")
+	}
+	if temps, _ := filepath.Glob(filepath.Join(f.profileDir, ".locklark-backup-*")); len(temps) != 0 {
+		t.Fatal("DESKTOP_CREATE_DIALOG_CANCEL_RETAINED_TEMP")
 	}
 }

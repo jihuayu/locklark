@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -28,9 +29,45 @@ type localVaultFileCreateState struct {
 	confirm    string
 	issued     string
 	backup     *personal.BackupPreparation
+	publish    *localVaultFilePublishGate
 	status     string
 	sequence   uint64
 	cancel     context.CancelFunc
+}
+
+// localVaultFilePublishGate is the one-shot start/cancel boundary for a queued
+// backup publish. Cancel before start closes the unpublished preparation and
+// no Publish call follows. Once start wins, cancel never closes or rolls back
+// the preparation; the worker completes Publish and only late result delivery
+// is rejected.
+type localVaultFilePublishGate struct {
+	mu       sync.Mutex
+	backup   *personal.BackupPreparation
+	started  bool
+	canceled bool
+}
+
+func (g *localVaultFilePublishGate) start() (*personal.BackupPreparation, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.started || g.canceled || g.backup == nil {
+		return nil, false
+	}
+	g.started = true
+	return g.backup, true
+}
+
+func (g *localVaultFilePublishGate) cancel() {
+	g.mu.Lock()
+	g.canceled = true
+	backup, started := g.backup, g.started
+	if !started {
+		g.backup = nil
+	}
+	g.mu.Unlock()
+	if !started && backup != nil {
+		backup.Close()
+	}
 }
 
 func (a *App) openLocalVaultFileCreate(configPath string) {
@@ -47,6 +84,9 @@ func (a *App) openLocalVaultFileCreate(configPath string) {
 func (a *App) cancelLocalVaultFileCreate() {
 	state := &a.localCreate
 	state.sequence++
+	if state.publish != nil {
+		state.publish.cancel()
+	}
 	if state.cancel != nil {
 		state.cancel()
 	}
@@ -240,14 +280,19 @@ func (a *App) localCreatePublishBackup() {
 		state.status = "恢复码未逐字匹配"
 		return
 	}
-	backup := state.backup
+	gate := &localVaultFilePublishGate{backup: state.backup}
 	state.backup, state.confirm, state.issued = nil, "", ""
+	state.publish = gate
 	state.busy = true
 	state.sequence++
 	sequence, generation, session := state.sequence, a.generation, a.session
 	ctx, cancel := context.WithCancel(context.Background())
 	state.cancel = cancel
 	a.launch(func() {
+		backup, ok := gate.start()
+		if !ok {
+			return
+		}
 		err := backup.Publish()
 		backup.Close()
 		a.dispatch(func() {
@@ -257,7 +302,7 @@ func (a *App) localCreatePublishBackup() {
 				return
 			}
 			state := &a.localCreate
-			state.cancel, state.busy = nil, false
+			state.cancel, state.busy, state.publish = nil, false, nil
 			if err != nil {
 				state.phase, state.status = "unknown", "备份结果待核查；不会自动重试"
 			} else {
@@ -277,6 +322,7 @@ func (a *App) localCreateComplete() {
 	}
 	password, secret, kit := []byte(state.password), []byte(state.secret), []byte(state.kit)
 	state.password, state.secret, state.kit = "", "", ""
+	state.confirm, state.issued = "", ""
 	state.busy = true
 	state.sequence++
 	sequence, generation, session := state.sequence, a.generation, a.session
@@ -353,7 +399,11 @@ func (a *App) localCreateComplete() {
 
 func (a *App) onevraLocalVaultFileCreateDialog(c *ui.Context) {
 	state := &a.localCreate
-	oneui.Dialog(c, &state.open, oneui.DialogOptions{Label: "创建独立文件库"}, func(panel ui.Element) {
+	oneui.Dialog(c, &state.open, oneui.DialogOptions{
+		Label:                "创建独立文件库",
+		DisableBackdropClose: true,
+		DisableEscapeClose:   true,
+	}, func(panel ui.Element) {
 		t := c.Theme()
 		panel.Width(460).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))
 		panel.Children(func() {
