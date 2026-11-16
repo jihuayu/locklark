@@ -1,13 +1,14 @@
 package vaultfileclient
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 )
 
-// LocalGenesisSession is the narrow, opaque client wrapper around one owned
+// localGenesisSessionState is the narrow, opaque state behind one owned
 // vault-file child. It retains only the exact parent Session, the opaque child
 // token and a frozen public locator made of the strict create manifest and its
 // companion. It never retains a password, Secret Key, recovery kit, account
@@ -25,7 +26,7 @@ import (
 // handed to personal.Session.LockVaultFileChild and the wrapper never revives.
 // Close is idempotent and waits for that real child close. Closing one wrapper
 // does not lock the parent Session or any sibling child.
-type LocalGenesisSession struct {
+type localGenesisSessionState struct {
 	mu sync.Mutex
 
 	parent *personal.Session
@@ -41,6 +42,14 @@ type LocalGenesisSession struct {
 	closed    bool
 	closeErr  error
 	closeDone chan struct{}
+}
+
+// LocalGenesisSession is a lightweight public handle. It contains only one
+// private state pointer, so copying the handle or dereferencing it for
+// formatting cannot copy a mutex, token or independently revivable state. A
+// value copy shares the exact same terminal flag and child-close barrier.
+type LocalGenesisSession struct {
+	state *localGenesisSessionState
 }
 
 // These parameterless private seams are nil in production. They let tests
@@ -76,7 +85,7 @@ func OpenLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 		return nil, empty, err
 	}
 
-	session := &LocalGenesisSession{
+	session := &LocalGenesisSession{state: &localGenesisSessionState{
 		parent:         s,
 		configPath:     configPath,
 		manifest:       manifest,
@@ -85,13 +94,13 @@ func OpenLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 		revision:       revision,
 		token:          token,
 		closeDone:      make(chan struct{}),
-	}
-	summary, err := session.initialSummary(initial)
+	}}
+	summary, err := session.state.initialSummary(initial)
 	if err != nil {
 		// The initial proof is never delivered on a failed posterior. close
 		// waits for the real child close and leaves siblings and the parent
 		// untouched.
-		_ = session.close()
+		_ = session.state.close()
 		return nil, empty, err
 	}
 	return session, summary, nil
@@ -102,25 +111,29 @@ func OpenLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 // state, and the narrow target-only ownership revalidation succeeds. Every
 // failure is terminal for this wrapper and closes only this child.
 func (l *LocalGenesisSession) Summary() (LocalGenesisBaseline, error) {
-	empty := LocalGenesisBaseline{}
-	if l == nil {
-		return empty, ErrLocalReview
+	if l == nil || l.state == nil {
+		return LocalGenesisBaseline{}, ErrLocalReview
 	}
-	l.mu.Lock()
-	closed := l.closed
-	token := l.token
-	l.mu.Unlock()
-	if closed || l.parent == nil {
+	return l.state.summary()
+}
+
+func (s *localGenesisSessionState) summary() (LocalGenesisBaseline, error) {
+	empty := LocalGenesisBaseline{}
+	s.mu.Lock()
+	closed := s.closed
+	token := s.token
+	s.mu.Unlock()
+	if closed || s.parent == nil {
 		return empty, ErrLocalReview
 	}
 
-	if err := l.revalidateLocator(); err != nil {
-		_ = l.close()
+	if err := s.revalidateLocator(); err != nil {
+		_ = s.close()
 		return empty, err
 	}
-	items, err := l.parent.ReadVaultFileChild(token, personal.VaultFileChildOptions{})
+	items, err := s.parent.ReadVaultFileChild(token, personal.VaultFileChildOptions{})
 	if err != nil {
-		_ = l.close()
+		_ = s.close()
 		return empty, err
 	}
 
@@ -128,51 +141,55 @@ func (l *LocalGenesisSession) Summary() (LocalGenesisBaseline, error) {
 		localGenesisSummaryReadyForTest()
 	}
 
-	if err := l.revalidateLocator(); err != nil {
+	if err := s.revalidateLocator(); err != nil {
 		clearLocalGenesisItems(items)
-		_ = l.close()
+		_ = s.close()
 		return empty, err
 	}
-	if err := l.parent.RevalidateVaultFileChildOwnership(token); err != nil {
+	if err := s.parent.RevalidateVaultFileChildOwnership(token); err != nil {
 		clearLocalGenesisItems(items)
-		_ = l.close()
+		_ = s.close()
 		return empty, err
 	}
-	if err := l.revalidateLocator(); err != nil {
+	if err := s.revalidateLocator(); err != nil {
 		clearLocalGenesisItems(items)
-		_ = l.close()
+		_ = s.close()
 		return empty, err
 	}
 
-	l.mu.Lock()
-	open := !l.closed && l.token == token
-	l.mu.Unlock()
+	s.mu.Lock()
+	open := !s.closed && s.token == token
+	s.mu.Unlock()
 	if !open {
 		clearLocalGenesisItems(items)
 		return empty, ErrLocalReview
 	}
-	return LocalGenesisBaseline{VaultID: l.manifest.VaultID, Items: items}, nil
+	return LocalGenesisBaseline{VaultID: s.manifest.VaultID, Items: items}, nil
 }
 
 // Close is idempotent. It marks this wrapper terminal before waiting for the
 // exact child generation's real close completion. It never locks the parent or
 // a sibling, and a concurrent closer joins the same completion.
 func (l *LocalGenesisSession) Close() error {
-	if l == nil {
+	if l == nil || l.state == nil {
 		return nil
 	}
-	return l.close()
+	return l.state.close()
 }
 
-// String, GoString and MarshalJSON are fixed redactions. They never show a
-// frozen path, journal, VaultID, checkpoint or token.
-func (*LocalGenesisSession) String() string   { return "[local genesis session]" }
-func (*LocalGenesisSession) GoString() string { return "[local genesis session]" }
-func (*LocalGenesisSession) MarshalJSON() ([]byte, error) {
+// String, GoString, MarshalJSON and Format are fixed redactions for both the
+// pointer and the dereferenced value. Format also covers a nil *Session: it
+// ignores the receiver and never dereferences the private state.
+func (LocalGenesisSession) String() string   { return "[local genesis session]" }
+func (LocalGenesisSession) GoString() string { return "[local genesis session]" }
+func (LocalGenesisSession) MarshalJSON() ([]byte, error) {
 	return []byte("{}"), nil
 }
+func (*LocalGenesisSession) Format(w fmt.State, _ rune) {
+	_, _ = w.Write([]byte("[local genesis session]"))
+}
 
-func (l *LocalGenesisSession) initialSummary(initial []personal.VaultFileBaselineItem) (LocalGenesisBaseline, error) {
+func (s *localGenesisSessionState) initialSummary(initial []personal.VaultFileBaselineItem) (LocalGenesisBaseline, error) {
 	empty := LocalGenesisBaseline{}
 	// The constructor's first proof is intentionally discarded: the delivered
 	// projection must come from a real post-open read.
@@ -180,55 +197,55 @@ func (l *LocalGenesisSession) initialSummary(initial []personal.VaultFileBaselin
 	if localGenesisCandidateReadyForTest != nil {
 		localGenesisCandidateReadyForTest()
 	}
-	if err := l.revalidateLocator(); err != nil {
+	if err := s.revalidateLocator(); err != nil {
 		return empty, err
 	}
-	items, err := l.parent.ReadVaultFileChild(l.token, personal.VaultFileChildOptions{})
+	items, err := s.parent.ReadVaultFileChild(s.token, personal.VaultFileChildOptions{})
 	if err != nil {
 		return empty, err
 	}
-	if err := l.revalidateLocator(); err != nil {
+	if err := s.revalidateLocator(); err != nil {
 		clearLocalGenesisItems(items)
 		return empty, err
 	}
-	if err := l.parent.RevalidateVaultFileChildOwnership(l.token); err != nil {
+	if err := s.parent.RevalidateVaultFileChildOwnership(s.token); err != nil {
 		clearLocalGenesisItems(items)
 		return empty, err
 	}
-	if err := l.revalidateLocator(); err != nil {
+	if err := s.revalidateLocator(); err != nil {
 		clearLocalGenesisItems(items)
 		return empty, err
 	}
-	return LocalGenesisBaseline{VaultID: l.manifest.VaultID, Items: items}, nil
+	return LocalGenesisBaseline{VaultID: s.manifest.VaultID, Items: items}, nil
 }
 
-func (l *LocalGenesisSession) revalidateLocator() error {
-	if l == nil || l.parent == nil {
+func (s *localGenesisSessionState) revalidateLocator() error {
+	if s == nil || s.parent == nil {
 		return ErrLocalReview
 	}
-	if !l.parent.Unlocked() {
+	if !s.parent.Unlocked() {
 		return personal.ErrSessionLocked
 	}
-	manifest, digest, companion, err := readLocalGenesisLocator(l.parent, l.configPath, l.manifest.BackendRoot, l.manifest.VaultID)
+	manifest, digest, companion, err := readLocalGenesisLocator(s.parent, s.configPath, s.manifest.BackendRoot, s.manifest.VaultID)
 	if err != nil {
 		return err
 	}
-	if manifest != l.manifest || digest != l.manifestSHA256 || !SameCompanion(companion, l.companion) {
+	if manifest != s.manifest || digest != s.manifestSHA256 || !SameCompanion(companion, s.companion) {
 		return ErrLocalReview
 	}
 	// Repeat the complete field comparison explicitly. SameCompanion covers
 	// the same values, but this makes every frozen binding visible at the
 	// recheck boundary.
-	if companion.ManifestSHA256 != l.manifestSHA256 ||
-		companion.GenesisSHA256 != l.companion.GenesisSHA256 ||
-		companion.OperationID != l.companion.OperationID ||
-		!sameLocalGenesisCheckpoint(companion.Resume.Checkpoint, l.companion.Resume.Checkpoint) {
+	if companion.ManifestSHA256 != s.manifestSHA256 ||
+		companion.GenesisSHA256 != s.companion.GenesisSHA256 ||
+		companion.OperationID != s.companion.OperationID ||
+		!sameLocalGenesisCheckpoint(companion.Resume.Checkpoint, s.companion.Resume.Checkpoint) {
 		return ErrLocalReview
 	}
-	if companion.Resume.BackendRoot != l.manifest.BackendRoot ||
-		companion.Resume.Name != l.manifest.Name ||
-		companion.Resume.Journal != l.manifest.Journal ||
-		companion.Resume.PersonalFile != l.manifest.PersonalFile {
+	if companion.Resume.BackendRoot != s.manifest.BackendRoot ||
+		companion.Resume.Name != s.manifest.Name ||
+		companion.Resume.Journal != s.manifest.Journal ||
+		companion.Resume.PersonalFile != s.manifest.PersonalFile {
 		return ErrLocalReview
 	}
 	checkpoint, revision, err := verifyLocalGenesisCompanion(manifest, companion)
@@ -236,42 +253,42 @@ func (l *LocalGenesisSession) revalidateLocator() error {
 		return err
 	}
 	clearLocalGenesisCheckpoint(checkpoint)
-	if revision != l.revision {
+	if revision != s.revision {
 		return ErrLocalReview
 	}
 	return nil
 }
 
-func (l *LocalGenesisSession) close() error {
-	l.mu.Lock()
-	if l.closed {
-		done := l.closeDone
-		l.mu.Unlock()
+func (s *localGenesisSessionState) close() error {
+	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
 		if done != nil {
 			<-done
 		}
-		l.mu.Lock()
-		err := l.closeErr
-		l.mu.Unlock()
+		s.mu.Lock()
+		err := s.closeErr
+		s.mu.Unlock()
 		return err
 	}
-	l.closed = true
-	done := l.closeDone
+	s.closed = true
+	done := s.closeDone
 	if done == nil {
 		done = make(chan struct{})
-		l.closeDone = done
+		s.closeDone = done
 	}
-	token := l.token
-	parent := l.parent
-	l.mu.Unlock()
+	token := s.token
+	parent := s.parent
+	s.mu.Unlock()
 
 	var err error
 	if parent != nil {
 		err = parent.LockVaultFileChild(token)
 	}
-	l.mu.Lock()
-	l.closeErr = err
-	l.mu.Unlock()
+	s.mu.Lock()
+	s.closeErr = err
+	s.mu.Unlock()
 	close(done)
 	return err
 }

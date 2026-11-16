@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -149,32 +148,78 @@ func TestLocalGenesisSessionTwoVaultsIndependentCloseAndSiblingRead(t *testing.T
 	a, summaryA := f.open(t, f.firstConfig, f.firstVaultID)
 	assertLocalGenesisSummary(t, summaryA, f.firstVaultID)
 
-	// Formatting and JSON must not disclose the frozen locator or token.
-	if got := fmt.Sprintf("%v", a); got != "[local genesis session]" {
-		t.Fatal("LOCAL_GENESIS_SESSION_STRING_NOT_REDACTED")
+	// Pointer, dereferenced value, zero value and nil pointer must all have a
+	// fixed safe representation. Failures never print the formatted result.
+	const redacted = "[local genesis session]"
+	for _, formatted := range []struct {
+		name string
+		got  string
+	}{
+		{"POINTER_V", fmt.Sprintf("%v", a)},
+		{"POINTER_PLUS_V", fmt.Sprintf("%+v", a)},
+		{"POINTER_SHARP_V", fmt.Sprintf("%#v", a)},
+		{"VALUE_V", fmt.Sprintf("%v", *a)},
+		{"VALUE_PLUS_V", fmt.Sprintf("%+v", *a)},
+		{"VALUE_SHARP_V", fmt.Sprintf("%#v", *a)},
+		{"ZERO_V", fmt.Sprintf("%v", LocalGenesisSession{})},
+		{"ZERO_PLUS_V", fmt.Sprintf("%+v", LocalGenesisSession{})},
+		{"ZERO_SHARP_V", fmt.Sprintf("%#v", LocalGenesisSession{})},
+		{"NIL_V", fmt.Sprintf("%v", (*LocalGenesisSession)(nil))},
+		{"NIL_PLUS_V", fmt.Sprintf("%+v", (*LocalGenesisSession)(nil))},
+		{"NIL_SHARP_V", fmt.Sprintf("%#v", (*LocalGenesisSession)(nil))},
+	} {
+		if formatted.got != redacted {
+			t.Fatalf("LOCAL_GENESIS_SESSION_FORMAT_NOT_REDACTED_%s", formatted.name)
+		}
 	}
-	if got := fmt.Sprintf("%#v", a); got != "[local genesis session]" {
-		t.Fatal("LOCAL_GENESIS_SESSION_GOSTRING_NOT_REDACTED")
+	for _, encoded := range []struct {
+		name  string
+		value any
+	}{
+		{"POINTER", a},
+		{"VALUE", *a},
+		{"ZERO", LocalGenesisSession{}},
+	} {
+		raw, err := json.Marshal(encoded.value)
+		if err != nil || string(raw) != "{}" {
+			t.Fatalf("LOCAL_GENESIS_SESSION_JSON_EXPOSED_PRIVATE_FIELDS_%s", encoded.name)
+		}
 	}
-	encoded, err := json.Marshal(a)
-	if err != nil || string(encoded) != "{}" {
-		t.Fatal("LOCAL_GENESIS_SESSION_JSON_EXPOSED_PRIVATE_FIELDS")
+	if raw, err := json.Marshal((*LocalGenesisSession)(nil)); err != nil || string(raw) != "null" {
+		t.Fatal("LOCAL_GENESIS_SESSION_JSON_NIL_NOT_SAFE")
 	}
-	if strings.Contains(fmt.Sprintf("%#v", a), f.firstVaultID) {
-		t.Fatal("LOCAL_GENESIS_SESSION_DISPLAY_EXPOSED_VAULT_ID")
+	zero := LocalGenesisSession{}
+	if _, err := zero.Summary(); err == nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_ZERO_SUMMARIZED")
+	}
+	if err := zero.Close(); err != nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_ZERO_CLOSE_FAILED")
+	}
+	var nilSession *LocalGenesisSession
+	if _, err := nilSession.Summary(); err == nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_NIL_SUMMARIZED")
+	}
+	if err := nilSession.Close(); err != nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_NIL_CLOSE_FAILED")
 	}
 
 	b, summaryB := f.open(t, f.secondConfig, f.secondVaultID)
 	assertLocalGenesisSummary(t, summaryB, f.secondVaultID)
 
-	if err := a.Close(); err != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_CLOSE_A_FAILED")
+	// A plain value copy shares the exact state and close barrier. Closing the
+	// copy must close the original; it must not create a fresh usable wrapper.
+	copyValue := *a
+	if err := copyValue.Close(); err != nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_CLOSE_COPY_FAILED")
 	}
 	if err := a.Close(); err != nil {
 		t.Fatal("LOCAL_GENESIS_SESSION_CLOSE_A_NOT_IDEMPOTENT")
 	}
 	if _, err := a.Summary(); err == nil {
 		t.Fatal("LOCAL_GENESIS_SESSION_CLOSED_A_SUMMARIZED")
+	}
+	if _, err := copyValue.Summary(); err == nil {
+		t.Fatal("LOCAL_GENESIS_SESSION_CLOSED_COPY_REVIVED")
 	}
 	if !f.session.Unlocked() {
 		t.Fatal("LOCAL_GENESIS_SESSION_CLOSE_A_LOCKED_PARENT")
