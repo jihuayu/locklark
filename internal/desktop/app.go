@@ -467,6 +467,10 @@ func (a *App) Lock() {
 	a.lockStart()
 	a.cancelLocalVaultFileCreate()
 	a.closeLocalVaultFileView()
+	// Child wrappers are detached and closed at the same established App.Lock
+	// boundary, before the parent RequestLock/Lock work below. Each close is
+	// launched and does not block UI state or the parent lock.
+	a.clearLocalVaultFileSessions()
 	a.localVaultFiles.refs = nil
 	a.stopSSHAgent()
 	a.sshRows = nil

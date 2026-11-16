@@ -32,6 +32,15 @@ type localVaultFileState struct {
 	sequence     uint64
 	listSequence uint64
 	cancel       context.CancelFunc
+
+	// Owned-session lifecycle state. It is reset on lock and never survives a
+	// parent or App generation boundary. The wrapper itself is opaque here.
+	sessionSlots      map[localVaultFileSessionScope]*localVaultFileSessionSlot
+	sessionParent     *personal.Session
+	sessionGeneration uint64
+	// sessionCandidateForTest observes a real candidate after the production
+	// factory returned. Production leaves it nil.
+	sessionCandidateForTest func(*localVaultFileSessionOperation, *vaultfileclient.LocalGenesisSession)
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
