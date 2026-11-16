@@ -271,10 +271,12 @@ func (a *App) collectLocalVaultFileSessionPredecessors(scope localVaultFileSessi
 }
 
 // waitLocalVaultFileSessionPredecessors blocks the producer until every
-// captured predecessor settles. If the producer's own context is cancelled
-// while waiting, onCancel runs promptly (to clear worker-owned material) but
-// the wait still completes. Settlement is not signalled here; callers mark
-// processing finished only after this returns.
+// captured predecessor settles. Either the passed outer context or the
+// operation's own context may cancel while waiting; the first cancellation runs
+// onCancel promptly and at most once (to clear worker-owned material), but the
+// wait still completes. Generic callers pass the same context twice. Settlement
+// is not signalled here; callers mark processing finished only after this
+// returns.
 func waitLocalVaultFileSessionPredecessors(op *localVaultFileSessionOperation, ctx context.Context, onCancel func()) {
 	if op == nil || len(op.waitFor) == 0 {
 		return
@@ -289,7 +291,14 @@ func waitLocalVaultFileSessionPredecessors(op *localVaultFileSessionOperation, c
 			onCancel()
 		}
 	}
-	if ctx.Err() != nil {
+	var outerDone, ownDone <-chan struct{}
+	if ctx != nil {
+		outerDone = ctx.Done()
+	}
+	if op.ctx != nil {
+		ownDone = op.ctx.Done()
+	}
+	if (ctx != nil && ctx.Err() != nil) || (op.ctx != nil && op.ctx.Err() != nil) {
 		clearOnCancel()
 	}
 	done := make(chan struct{})
@@ -301,9 +310,15 @@ func waitLocalVaultFileSessionPredecessors(op *localVaultFileSessionOperation, c
 	}()
 	select {
 	case <-done:
-	case <-ctx.Done():
+	case <-outerDone:
 		clearOnCancel()
 		<-done
+	case <-ownDone:
+		clearOnCancel()
+		<-done
+	}
+	if !cleared && ((ctx != nil && ctx.Err() != nil) || (op.ctx != nil && op.ctx.Err() != nil)) {
+		clearOnCancel()
 	}
 }
 
