@@ -1,43 +1,28 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/teamfiles"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"golang.org/x/term"
-	"golang.org/x/text/unicode/norm"
 )
 
 // This provisional manifest is deliberately distinct from the v1 resume
 // config: it has no policy checkpoint and cannot authorize a backend read or
 // write. The path itself is the stable create entry on every invocation.
-type vaultFileCreateManifest struct {
-	Version      int    `json:"version"`
-	Kind         string `json:"kind"`
-	VaultID      string `json:"vault_id"`
-	PersonalFile string `json:"personal_file"`
-	BackendRoot  string `json:"backend_root"`
-	Name         string `json:"name"`
-	Journal      string `json:"journal"`
-	Archive      string `json:"archive"`
-}
+type vaultFileCreateManifest = vaultfileclient.Manifest
 
-const vaultFileCreateKind = "vault_file_create"
+const vaultFileCreateKind = vaultfileclient.CreateKind
 
 func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -80,30 +65,9 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		if !initial {
 			return errVaultFileLocalReview
 		}
-		if teamfiles.CheckNew(input.Journal) != nil {
-			return errVaultFileLocalReview
-		}
-		var selector [16]byte
-		if _, err := rand.Read(selector[:]); err != nil {
-			return errVaultFileLocalUnknown
-		}
-		input.VaultID = hex.EncodeToString(selector[:])
-		encoded, err := json.Marshal(input)
+		manifest, err = vaultfileclient.ReserveManifest(*config, input)
 		if err != nil {
-			return errVaultFileLocalUnknown
-		}
-		defer clear(encoded)
-		if err := teamfiles.WriteNew(*config, encoded); err != nil {
-			// Another invocation may have won O_EXCL. Only the exact same
-			// independently validated manifest can be used on this path.
-			manifest, exists, err = readVaultFileCreateManifest(*config)
-			if err != nil || !exists || manifest.PersonalFile != input.PersonalFile ||
-				manifest.BackendRoot != input.BackendRoot || manifest.Name != input.Name ||
-				manifest.Journal != input.Journal || manifest.Archive != input.Archive {
-				return errVaultFileLocalUnknown
-			}
-		} else {
-			manifest = input
+			return err
 		}
 	}
 	// No backend is opened and no sealed file or key leaves this phase.
@@ -204,96 +168,9 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 }
 
 func readVaultFileCreateManifest(path string) (vaultFileCreateManifest, bool, error) {
-	var manifest vaultFileCreateManifest
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		return manifest, false, nil
-	} else if err != nil {
-		return manifest, false, err
-	}
-	raw, err := teamfiles.Read(path, 64<<10, true)
-	if err != nil {
-		return manifest, true, err
-	}
-	defer clear(raw)
-	if teamfiles.JSON(raw, &manifest) != nil || !validVaultFileCreateManifestPhase(path, manifest, true, false) {
-		return vaultFileCreateManifest{}, true, errVaultFileLocalReview
-	}
-	return manifest, true, nil
+	return vaultfileclient.ReadManifest(path)
 }
 
 func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateManifest, requireID, journalMustBeNew bool) bool {
-	companionPath, err := vaultFileCreateCompanionPath(path)
-	if err != nil {
-		return false
-	}
-	if manifest.Version != 1 || manifest.Kind != vaultFileCreateKind ||
-		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
-		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
-		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
-		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
-		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) ||
-		!vaultFileCreateNormalizedSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
-		return false
-	}
-	if requireID {
-		id, err := hex.DecodeString(manifest.VaultID)
-		if err != nil || len(id) != 16 || hex.EncodeToString(id) != manifest.VaultID {
-			return false
-		}
-	} else if manifest.VaultID != "" {
-		return false
-	}
-	info, err := os.Lstat(manifest.PersonalFile)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-		return false
-	}
-	if separateVaultFileStatusState(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
-		return false
-	}
-	if journalMustBeNew && teamfiles.CheckNew(manifest.Journal) != nil {
-		return false
-	}
-	return true
-}
-
-// Missing leaves cannot be compared with os.SameFile. Reserve case-only and
-// canonically equivalent Unicode names on every filesystem, after resolving
-// each existing parent. This also reserves the backend namespace before its
-// first directory exists.
-func vaultFileCreateNormalizedSeparate(backendRoot string, paths ...string) bool {
-	canonical := make([]string, 0, len(paths))
-	for _, path := range paths {
-		resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path))
-		if err != nil {
-			return false
-		}
-		leaf := norm.NFC.String(filepath.Join(resolvedParent, filepath.Base(path)))
-		for _, prior := range canonical {
-			if strings.EqualFold(leaf, prior) {
-				return false
-			}
-		}
-		canonical = append(canonical, leaf)
-	}
-	resolvedRootParent, err := filepath.EvalSymlinks(filepath.Dir(backendRoot))
-	if err != nil {
-		return false
-	}
-	namespace := norm.NFC.String(filepath.Join(resolvedRootParent, filepath.Base(backendRoot), "vaultfile-backend"))
-	for _, leaf := range canonical {
-		for ancestor := leaf; ; ancestor = filepath.Dir(ancestor) {
-			if strings.EqualFold(ancestor, namespace) {
-				return false
-			}
-			if ancestor == filepath.Dir(ancestor) {
-				break
-			}
-		}
-	}
-	return true
-}
-
-func privateVaultFileCreateParent(path string) bool {
-	info, err := os.Lstat(path)
-	return err == nil && info.IsDir() && info.Mode().Perm()&0077 == 0
+	return vaultfileclient.ValidManifestPhase(path, manifest, requireID, journalMustBeNew)
 }

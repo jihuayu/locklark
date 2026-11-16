@@ -5,50 +5,25 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"os"
 
 	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/teamfiles"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
-// A companion is an immutable local proposal binding, created before any
-// backend Create. It cannot prove publication or freshness. Its nested resume
-// config is used only after live Session verification of the same G and pin.
-type vaultFileCreateCompanion struct {
-	Version        int                   `json:"version"`
-	Kind           string                `json:"kind"`
-	ManifestSHA256 string                `json:"manifest_sha256"`
-	GenesisSHA256  string                `json:"genesis_sha256"`
-	OperationID    string                `json:"operation_id"`
-	Resume         vaultFileResumeConfig `json:"resume"`
-}
+// The CLI keeps its existing type and function names while the strict local
+// metadata codec lives in the shared client package.
+type vaultFileCreateCompanion = vaultfileclient.Companion
 
-const vaultFileCreateCompanionKind = "vault_file_create_baseline"
+const vaultFileCreateCompanionKind = vaultfileclient.CompanionKind
 
 func vaultFileCreateCompanionPath(configPath string) (string, error) {
-	path := configPath + ".baseline"
-	if !teamfiles.ValidPath(path) {
-		return "", errVaultFileConfig
-	}
-	return path, nil
+	return vaultfileclient.CompanionPath(configPath)
 }
 
 func readVaultFileCreateManifestDigest(path string, expected vaultFileCreateManifest) (string, error) {
-	raw, err := teamfiles.Read(path, 64<<10, true)
-	if err != nil {
-		return "", errVaultFileLocalReview
-	}
-	defer clear(raw)
-	var actual vaultFileCreateManifest
-	if teamfiles.JSON(raw, &actual) != nil || actual != expected || !validVaultFileCreateManifestPhase(path, actual, true, false) {
-		return "", errVaultFileLocalReview
-	}
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:]), nil
+	return vaultfileclient.ReadManifestDigest(path, expected)
 }
 
 func expectedVaultFileCreateResume(manifest vaultFileCreateManifest, public personal.VaultFileGenesisPublic) (vaultFileResumeConfig, error) {
@@ -65,63 +40,11 @@ func expectedVaultFileCreateResume(manifest vaultFileCreateManifest, public pers
 }
 
 func sameVaultFileCreateResume(a, b vaultFileResumeConfig) bool {
-	if a.Version != b.Version || a.BackendRoot != b.BackendRoot || a.Name != b.Name ||
-		a.Journal != b.Journal || a.PersonalFile != b.PersonalFile || a.Checkpoint == nil || b.Checkpoint == nil {
-		return false
-	}
-	x, y := a.Checkpoint, b.Checkpoint
-	return x.VaultID == y.VaultID && x.OwnerRootKeyID == y.OwnerRootKeyID &&
-		x.OwnerRootPublicKey == y.OwnerRootPublicKey && x.PolicySeq != nil && y.PolicySeq != nil &&
-		*x.PolicySeq == *y.PolicySeq && x.PolicyDigest == y.PolicyDigest
+	return vaultfileclient.SameResume(a, b)
 }
 
 func readVaultFileCreateCompanion(configPath string, manifest vaultFileCreateManifest) (vaultFileCreateCompanion, bool, error) {
-	var companion vaultFileCreateCompanion
-	path, err := vaultFileCreateCompanionPath(configPath)
-	if err != nil {
-		return companion, false, err
-	}
-	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		return companion, false, nil
-	} else if err != nil {
-		return companion, false, errVaultFileLocalReview
-	}
-	raw, err := teamfiles.Read(path, 64<<10, true)
-	if err != nil {
-		return companion, true, errVaultFileLocalReview
-	}
-	defer clear(raw)
-	if teamfiles.JSON(raw, &companion) != nil || companion.Version != 1 || companion.Kind != vaultFileCreateCompanionKind ||
-		!validVaultFileCreateHex32(companion.ManifestSHA256) || !validVaultFileCreateHex32(companion.GenesisSHA256) ||
-		!validVaultFileCreateID(companion.OperationID) || !teamfiles.Distinct(path, configPath, manifest.PersonalFile, manifest.Journal, manifest.Archive, manifest.BackendRoot) {
-		return vaultFileCreateCompanion{}, true, errVaultFileLocalReview
-	}
-	digest, err := readVaultFileCreateManifestDigest(configPath, manifest)
-	if err != nil || digest != companion.ManifestSHA256 {
-		return vaultFileCreateCompanion{}, true, errVaultFileLocalReview
-	}
-	resumeBytes, err := json.Marshal(companion.Resume)
-	if err != nil {
-		return vaultFileCreateCompanion{}, true, errVaultFileLocalReview
-	}
-	defer clear(resumeBytes)
-	parsed, _, err := decodeVaultFileResumeConfig(resumeBytes)
-	if err != nil || !sameVaultFileCreateResume(parsed, companion.Resume) ||
-		parsed.BackendRoot != manifest.BackendRoot || parsed.Name != manifest.Name || parsed.Journal != manifest.Journal ||
-		parsed.PersonalFile != manifest.PersonalFile || parsed.Checkpoint.VaultID != manifest.VaultID || *parsed.Checkpoint.PolicySeq != 0 {
-		return vaultFileCreateCompanion{}, true, errVaultFileLocalReview
-	}
-	return companion, true, nil
-}
-
-func validVaultFileCreateHex32(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
-}
-
-func validVaultFileCreateID(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == value
+	return vaultfileclient.ReadCompanion(configPath, manifest)
 }
 
 func validateVaultFileCreateCompanionPublic(companion vaultFileCreateCompanion, manifest vaultFileCreateManifest, public personal.VaultFileGenesisPublic) error {
@@ -191,29 +114,9 @@ func ensureVaultFileCreateCompanion(configPath string, manifest vaultFileCreateM
 		}
 		return current, nil
 	}
-	encoded, err := json.Marshal(want)
-	if err != nil {
-		return zero, errVaultFileLocalUnknown
-	}
-	defer clear(encoded)
-	path, err := vaultFileCreateCompanionPath(configPath)
-	if err != nil {
-		return zero, err
-	}
-	if err := teamfiles.WriteNew(path, encoded); err != nil {
-		if errors.Is(err, teamfiles.ErrPublicationUnknown) {
-			return zero, errVaultFileLocalUnknown
-		}
-		return zero, errVaultFileLocalReview
-	}
-	current, exists, err = readVaultFileCreateCompanion(configPath, manifest)
-	if err != nil || !exists || !sameVaultFileCreateCompanion(current, want) {
-		return zero, errVaultFileLocalUnknown
-	}
-	return current, nil
+	return vaultfileclient.WriteCompanionNew(configPath, manifest, want)
 }
 
 func sameVaultFileCreateCompanion(a, b vaultFileCreateCompanion) bool {
-	return a.Version == b.Version && a.Kind == b.Kind && a.ManifestSHA256 == b.ManifestSHA256 &&
-		a.GenesisSHA256 == b.GenesisSHA256 && a.OperationID == b.OperationID && sameVaultFileCreateResume(a.Resume, b.Resume)
+	return vaultfileclient.SameCompanion(a, b)
 }

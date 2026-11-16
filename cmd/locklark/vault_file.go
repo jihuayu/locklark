@@ -105,8 +105,8 @@ var (
 	errVaultFileUnsupported  = errors.New("UNSUPPORTED")
 	errVaultFileUnconfirmed  = errors.New("RESUME_UNCONFIRMED")
 	errVaultFileInput        = errors.New("INPUT_REJECTED")
-	errVaultFileLocalReview  = errors.New("LOCAL_REVIEW")
-	errVaultFileLocalUnknown = errors.New("LOCAL_UNKNOWN")
+	errVaultFileLocalReview  = vaultfileclient.ErrLocalReview
+	errVaultFileLocalUnknown = vaultfileclient.ErrLocalUnknown
 	errVaultFileTargetExists = errors.New("TARGET_EXISTS")
 )
 
