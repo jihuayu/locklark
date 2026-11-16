@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -198,11 +200,10 @@ func TestPublishGenesisDirExactCollisionAndLostResponseAck(t *testing.T) {
 			}
 			var err error
 			if name == "lost-create-response" {
-				err = publishGenesisDirWith(ctx, f.dir, f.journal, f.pin, func(actual error) error {
+				err = publishGenesisDirWith(ctx, f.dir, f.journal, f.pin, func(actual error) {
 					if actual != nil {
 						t.Fatal("GENESIS_LOST_RESPONSE_CREATE_NOT_COMMITTED")
 					}
-					return vaultfilebackend.ErrUnknown
 				})
 			} else {
 				err = PublishGenesisDir(ctx, f.dir, f.journal, f.pin)
@@ -244,16 +245,15 @@ func TestPublishGenesisDirUnresolvedReadAndAckRemainUnknown(t *testing.T) {
 	for _, name := range []string{"read-unavailable", "ack-unavailable"} {
 		t.Run(name, func(t *testing.T) {
 			f := newGenesisDirFixture(t, nil)
-			err := publishGenesisDirWith(context.Background(), f.dir, f.journal, f.pin, func(actual error) error {
+			err := publishGenesisDirWith(context.Background(), f.dir, f.journal, f.pin, func(actual error) {
 				if actual != nil {
 					t.Fatal("GENESIS_UNKNOWN_FIXTURE_CREATE_FAILED")
 				}
 				if name == "read-unavailable" {
 					_ = f.dir.Close()
-					return vaultfilebackend.ErrUnknown
+					return
 				}
 				_ = f.journal.Close()
-				return nil
 			})
 			if !errors.Is(err, ErrGenesisUnknown) || errors.Is(err, ErrGenesisReview) {
 				t.Fatal("GENESIS_UNRESOLVED_OUTCOME_MISCLASSIFIED")
@@ -317,4 +317,72 @@ func TestPublishGenesisDirRequiresReopenedDurableIntentBeforeBackendCreate(t *te
 			assertGenesisIntentPending(t, f)
 		})
 	}
+}
+
+// A lost response can leave G remotely committed and the local intent
+// pending. If that remote object later disappears, reopening the intent must
+// not authorize a second Create of the same old G.
+func TestPublishGenesisDirReopenNeverRecreatesOldGAfterRemoteDeletion(t *testing.T) {
+	f := newGenesisDirFixture(t, nil)
+	ctx := context.Background()
+	err := publishGenesisDirWith(ctx, f.dir, f.journal, f.pin, func(actual error) {
+		if actual != nil {
+			t.Fatal("GENESIS_FIRST_CREATE_DID_NOT_COMMIT")
+		}
+		if err := f.dir.Close(); err != nil {
+			t.Fatal("GENESIS_FIRST_DIR_CLOSE_FAILED")
+		}
+	})
+	if !errors.Is(err, ErrGenesisUnknown) {
+		t.Fatal("GENESIS_FIRST_LOST_RESPONSE_NOT_UNKNOWN")
+	}
+	if err := f.journal.Close(); err != nil {
+		t.Fatal("GENESIS_FIRST_JOURNAL_CLOSE_FAILED")
+	}
+	// Delete only the committed record in this owned temporary Dir store;
+	// leave its namespace, lock and other state in place.
+	sum := sha256.Sum256([]byte(f.intent.Name))
+	record := filepath.Join(f.backendRoot, "vaultfile-backend", "v1", "data", hex.EncodeToString(sum[:]))
+	if err := os.Remove(record); err != nil {
+		t.Fatal("GENESIS_OWNED_REMOTE_DELETE_FAILED")
+	}
+	dir, err := vaultfilebackend.OpenExistingDir(f.backendRoot)
+	if err != nil {
+		t.Fatal("GENESIS_EMPTY_REMOTE_REOPEN_FAILED")
+	}
+	defer dir.Close()
+	j, err := vaultfilejournal.OpenExistingIntent(f.journalPath)
+	if err != nil {
+		t.Fatal("GENESIS_PENDING_JOURNAL_REOPEN_FAILED")
+	}
+	defer j.Close()
+	if err := PublishGenesisDir(ctx, dir, j, f.pin); !errors.Is(err, ErrGenesisUnknown) {
+		t.Fatal("GENESIS_REOPEN_RECREATED_OLD_G")
+	}
+	if _, err := dir.Read(ctx, f.intent.Name); !errors.Is(err, vaultfilebackend.ErrNotFound) {
+		t.Fatal("GENESIS_REOPEN_CREATED_REMOTE_VALUE")
+	}
+	f.journal = j
+	assertGenesisIntentPending(t, f)
+}
+
+func TestPublishGenesisDirClaimCommittedBeforeCreateOnlyReads(t *testing.T) {
+	f := newGenesisDirFixture(t, nil)
+	result, err := f.journal.ClaimGenesisAttempt(f.intent)
+	if err != nil || result != vaultfilejournal.GenesisAttemptNewlyClaimed || f.journal.Close() != nil {
+		t.Fatal("GENESIS_PRECREATE_CLAIM_FIXTURE_FAILED")
+	}
+	j, err := vaultfilejournal.OpenExistingIntent(f.journalPath)
+	if err != nil {
+		t.Fatal("GENESIS_PRECREATE_CLAIM_REOPEN_FAILED")
+	}
+	defer j.Close()
+	if err := PublishGenesisDir(context.Background(), f.dir, j, f.pin); !errors.Is(err, ErrGenesisUnknown) {
+		t.Fatal("GENESIS_PRECREATE_CLAIM_RECREATED_G")
+	}
+	if _, err := f.dir.Read(context.Background(), f.intent.Name); !errors.Is(err, vaultfilebackend.ErrNotFound) {
+		t.Fatal("GENESIS_PRECREATE_CLAIM_CREATED_REMOTE")
+	}
+	f.journal = j
+	assertGenesisIntentPending(t, f)
 }
