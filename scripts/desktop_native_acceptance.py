@@ -901,6 +901,30 @@ class Acceptance:
         with os.fdopen(os.open(path, flags, 0o600), "w") as output:
             output.write("\n".join(lines) + "\n")
 
+    @staticmethod
+    def replace_transcript(path, lines):
+        """Atomically replace a transcript with a fully written private temp."""
+        fd, temp_path = tempfile.mkstemp(dir=str(path.parent),
+                                         prefix=".controller-", suffix=".tmp")
+        try:
+            try:
+                output = os.fdopen(fd, "w")
+            except Exception:
+                os.close(fd)
+                raise
+            with output:
+                output.write("\n".join(lines) + "\n")
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                # Only the file created by this call is removed. The original
+                # transcript is left untouched until the atomic replace.
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
     def finish(self, success, cleanup_failure=None, scenario_failure=None):
         """Write the transcript, run the barrier, then project fixed lines."""
         try:
@@ -963,7 +987,7 @@ class Acceptance:
                     final.append(cleanup_line)
                 final.append(otp_line)
                 try:
-                    self.write_transcript(controller, self.output_lines + final, exclusive=False)
+                    self.replace_transcript(controller, self.output_lines + final)
                 except Exception:
                     privacy = "controller-write"
             lines = ["Desktop native private state: " + str(self.state),

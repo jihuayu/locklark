@@ -1188,6 +1188,81 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
         self.assertIn("Desktop native privacy scan failed", lines)
         self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "recovery-kit", lines)
 
+    def run_plain_success(self):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        with patch("builtins.print") as output, \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_success_writes_final_transcript_atomically(self):
+        acceptance, code, lines = self.run_plain_success()
+        self.assertEqual(code, 0)
+        self.assertTrue(any(line.startswith("PASS:") for line in lines))
+        transcript = (acceptance.state / "controller.log").read_text()
+        self.assertIn("Desktop native private artifact and controller scan: passed", transcript)
+        self.assertIn("PASS:", transcript)
+        self.assertEqual(list(acceptance.state.glob(".controller-*.tmp")), [])
+
+    def run_final_write_failure(self, mode):
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        error = self.SYNTHETIC_ERROR
+        real_fdopen = desktop.os.fdopen
+        calls = []
+
+        class FailingOutput:
+            def __init__(self, raw):
+                self.raw = raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                try:
+                    self.raw.close()
+                except Exception:
+                    pass
+
+            def write(self, text):
+                if mode == "write":
+                    self.raw.write(text[:len(text) // 2])
+                else:
+                    self.raw.write(text)
+                self.raw.flush()
+                raise OSError(error)
+
+        def fdopen(fd, *args, **kwargs):
+            raw = real_fdopen(fd, *args, **kwargs)
+            calls.append(True)
+            if len(calls) == 2:
+                return FailingOutput(raw)
+            return raw
+
+        with patch("builtins.print") as output, \
+             patch.object(desktop.os, "fdopen", side_effect=fdopen), \
+             patch.dict(desktop.os.environ, {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}, clear=False):
+            code = acceptance.run()
+        return acceptance, code, [item.args[0] for item in output.call_args_list]
+
+    def test_final_transcript_failure_keeps_private_provisional(self):
+        for mode in ("write", "flush"):
+            with self.subTest(mode=mode):
+                acceptance, code, lines = self.run_final_write_failure(mode)
+                text = "\n".join(lines)
+                self.assertEqual(code, 1)
+                self.assertFalse(any("PASS" in line for line in lines))
+                self.assertNotIn(self.SYNTHETIC_ERROR, text)
+                self.assertNotIn(self.KIT, text)
+                self.assertIn("Desktop native privacy scan failed", lines)
+                self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "controller-write", lines)
+                transcript = (acceptance.state / "controller.log").read_text()
+                self.assertIn("Desktop native private artifact and controller scan: pending", transcript)
+                self.assertNotIn("PASS", transcript)
+                self.assertNotIn("Desktop native private artifact and controller scan: passed", transcript)
+                self.assertEqual(list(acceptance.state.glob(".controller-*.tmp")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
