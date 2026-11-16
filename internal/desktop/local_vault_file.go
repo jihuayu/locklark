@@ -12,6 +12,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
@@ -40,11 +41,12 @@ func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backend
 }
 
 func listLocalVaultFileRefs(profileDir, backendRoot, personalPath string) ([]localVaultFileRef, error) {
-	info, err := os.Lstat(profileDir)
-	if os.IsNotExist(err) {
+	if _, err := os.Lstat(profileDir); os.IsNotExist(err) {
 		return nil, nil
+	} else if err != nil {
+		return nil, vaultfileclient.ErrLocalReview
 	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+	if teamfiles.ValidatePrivateParent(profileDir) != nil {
 		return nil, vaultfileclient.ErrLocalReview
 	}
 	entries, err := os.ReadDir(profileDir)

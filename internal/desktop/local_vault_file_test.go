@@ -1,38 +1,45 @@
 package desktop
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/theme"
 )
 
 func TestDesktopIndependentFileNavigationUsesOnePersonalAndWorkspace(t *testing.T) {
-	root := t.TempDir()
-	settingsPath := filepath.Join(root, "settings.json")
-	personalPath := filepath.Join(root, "personal.ll")
+	root := desktopPrivateTestRoot(t)
+	settingsDir := filepath.Join(root, "settings")
+	if err := teamfiles.EnsurePrivateWorkspace(settingsDir); err != nil {
+		t.Fatal("LOCAL_NAV_PRIVATE_ROOT_FAILED")
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	personalPath := filepath.Join(settingsDir, "personal.ll")
 	key := []byte("1234567890abcdef")
 	if err := personal.Create(personalPath, "navigation-factor", key); err != nil {
 		t.Fatal("LOCAL_NAV_PROFILE_CREATE_FAILED")
 	}
-	profileDir, backendRoot := localVaultFilePaths(settingsPath, personalPath)
-	if err := os.MkdirAll(profileDir, 0700); err != nil {
-		t.Fatal("LOCAL_NAV_PRIVATE_DIRECTORY_FAILED")
+	if err := teamfiles.ValidatePrivateFile(personalPath); err != nil {
+		t.Fatal("LOCAL_NAV_PRIVATE_PROFILE_FAILED")
 	}
-	journalDir := filepath.Join(root, "journals")
-	if err := os.Mkdir(journalDir, 0700); err != nil {
+	profileDir, backendRoot, err := ensureLocalVaultFileWorkspace(settingsPath, personalPath)
+	if err != nil {
+		t.Fatal("LOCAL_NAV_PRIVATE_WORKSPACE_FAILED")
+	}
+	journalDir := filepath.Join(settingsDir, "journals")
+	if err := teamfiles.EnsurePrivateWorkspace(journalDir); err != nil {
 		t.Fatal("LOCAL_NAV_JOURNAL_DIRECTORY_FAILED")
 	}
 	for _, name := range []string{"alpha", "beta"} {
 		proposal := vaultfileclient.Manifest{Version: 1, Kind: vaultfileclient.CreateKind,
 			PersonalFile: personalPath, BackendRoot: backendRoot, Name: name,
-			Journal: filepath.Join(journalDir, name+".journal"), Archive: filepath.Join(root, name+".llb")}
+			Journal: filepath.Join(journalDir, name+".journal"), Archive: filepath.Join(settingsDir, name+".llb")}
 		if _, err := vaultfileclient.ReserveManifest(filepath.Join(profileDir, name+".json"), proposal); err != nil {
 			t.Fatal("LOCAL_NAV_SELECTOR_RESERVATION_FAILED")
 		}
