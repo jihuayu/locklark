@@ -3,9 +3,12 @@ package personal
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"testing"
 
 	"filippo.io/age"
@@ -61,14 +64,50 @@ func TestVaultFileOwnerCapsulePublicAndDigest(t *testing.T) {
 	}
 	raw, err := json.Marshal(projection)
 	if err != nil || bytes.Contains(raw, records[0].OwnerRootSeed) ||
-		bytes.Contains(raw, records[0].RecoverySigningSeed) ||
-		bytes.Contains(raw, records[0].RecoveryAgeIdentity) {
+		bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(records[0].OwnerRootSeed))) ||
+		bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(records[0].RecoverySigningSeed))) ||
+		bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString(records[0].RecoveryAgeIdentity))) {
 		t.Fatal("OWNER_CAPSULE_PUBLIC_LEAK")
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) != 6 {
+		t.Fatal("OWNER_CAPSULE_PUBLIC_FIELDS_INVALID")
+	}
+	for _, key := range []string{"vault_id", "owner_root_key_id", "owner_root_public_key",
+		"recovery_device_id", "recovery_age_recipient", "recovery_content_signing_public_key"} {
+		if _, ok := fields[key]; !ok {
+			t.Fatal("OWNER_CAPSULE_PUBLIC_FIELDS_INVALID")
+		}
 	}
 	cloned[0].OwnerRootSeed[0] ^= 1
 	changed, err := vaultFileOwnersDigest(cloned)
 	if err != nil || changed == digest {
 		t.Fatal("OWNER_CAPSULE_DIGEST_DID_NOT_BIND_SEED")
+	}
+}
+
+func TestVaultFileOwnerCapsuleCanonicalDigestVector(t *testing.T) {
+	record, err := newVaultFileOwnerRecord()
+	if err != nil {
+		t.Fatal("OWNER_CAPSULE_VECTOR_CREATE_FAILED")
+	}
+	defer clearVaultFileOwners([]vaultFileOwnerRecord{record})
+	// Build the expected canonical wire text independently of the struct
+	// marshaler, pinning member order, base64 byte encoding and the v1 domain.
+	quote := strconv.Quote
+	expected := `[{"VaultID":` + quote(record.VaultID) + `,"OwnerRootKeyID":` + quote(record.OwnerRootKeyID) +
+		`,"OwnerRootSeed":` + quote(base64.StdEncoding.EncodeToString(record.OwnerRootSeed)) +
+		`,"RecoveryDeviceID":` + quote(record.RecoveryDeviceID) +
+		`,"RecoverySigningSeed":` + quote(base64.StdEncoding.EncodeToString(record.RecoverySigningSeed)) +
+		`,"RecoveryAgeIdentity":` + quote(base64.StdEncoding.EncodeToString(record.RecoveryAgeIdentity)) + `}]`
+	actualJSON, err := json.Marshal([]vaultFileOwnerRecord{record})
+	if err != nil || string(actualJSON) != expected {
+		t.Fatal("OWNER_CAPSULE_CANONICAL_JSON_CHANGED")
+	}
+	hash := sha256.Sum256(append([]byte("locklark/personal/vault-file-owner-digest/v1\x00"), []byte(expected)...))
+	got, err := vaultFileOwnersDigest([]vaultFileOwnerRecord{record})
+	if err != nil || got != hex.EncodeToString(hash[:]) {
+		t.Fatal("OWNER_CAPSULE_VERSIONED_DIGEST_CHANGED")
 	}
 }
 
@@ -96,6 +135,31 @@ func TestVaultFileOwnerCapsuleRejectsMalformedCollection(t *testing.T) {
 	invalid[0].RecoverySigningSeed = bytes.Clone(record.OwnerRootSeed)
 	if validVaultFileOwners(invalid) {
 		t.Fatal("OWNER_CAPSULE_KEY_REUSE_ACCEPTED")
+	}
+	invalid[0].RecoverySigningSeed = nil
+	if _, err := vaultFileOwnerPublic(invalid[0]); err == nil {
+		t.Fatal("OWNER_CAPSULE_SHORT_SEED_PUBLIC_ACCEPTED")
+	}
+	invalid[0].RecoverySigningSeed = bytes.Clone(record.RecoverySigningSeed)
+	invalid[0].VaultID = "not-a-vault-id"
+	if validVaultFileOwners(invalid) || func() bool { _, err := vaultFileOwnerPublic(invalid[0]); return err == nil }() {
+		t.Fatal("OWNER_CAPSULE_BAD_ID_ACCEPTED")
+	}
+	invalid[0].VaultID = record.VaultID
+	clear(invalid[0].RecoveryAgeIdentity)
+	invalid[0].RecoveryAgeIdentity = bytes.Repeat([]byte{'a'}, maxVaultFileOwnerAgeBytes+1)
+	if validVaultFileOwners(invalid) {
+		t.Fatal("OWNER_CAPSULE_AGE_BYTE_BOUND_ACCEPTED")
+	}
+	other, err := newVaultFileOwnerRecord()
+	if err != nil {
+		t.Fatal("OWNER_CAPSULE_GENERATE_FAILED")
+	}
+	defer clearVaultFileOwners([]vaultFileOwnerRecord{other})
+	unsorted := []vaultFileOwnerRecord{record, other}
+	sort.Slice(unsorted, func(i, j int) bool { return unsorted[i].VaultID > unsorted[j].VaultID })
+	if validVaultFileOwners(unsorted) {
+		t.Fatal("OWNER_CAPSULE_UNSORTED_ACCEPTED")
 	}
 	tooMany := make([]vaultFileOwnerRecord, maxVaultFileOwnerRecords+1)
 	if validVaultFileOwners(tooMany) {
