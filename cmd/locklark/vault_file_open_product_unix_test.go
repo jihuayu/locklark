@@ -38,6 +38,10 @@ type openBaselineProductCase struct {
 // author and owner root are independent fixture keys; the test never reads or
 // exports the personal device's age identity or signing seed.
 func newOpenBaselineProductCase(t *testing.T, personalPath string, reader map[string]string) openBaselineProductCase {
+	return newOpenBaselineProductCaseWithWriter(t, personalPath, reader, false)
+}
+
+func newOpenBaselineProductCaseWithWriter(t *testing.T, personalPath string, reader map[string]string, writer bool) openBaselineProductCase {
 	t.Helper()
 	readerPub, err := hex.DecodeString(reader["content_signing_public_key"])
 	if err != nil || len(readerPub) != ed25519.PublicKeySize {
@@ -60,12 +64,16 @@ func newOpenBaselineProductCase(t *testing.T, personalPath string, reader map[st
 	if err != nil {
 		t.Fatal("OPEN_AUTHOR_RECIPIENT_FAILED")
 	}
+	writers := []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}}
+	if writer {
+		writers = append(writers, vaultfile.Member{PrincipalID: "reader", Label: "Reader"})
+	}
 	policy := &vaultfile.Policy{
 		Format: vaultfile.Format, Version: vaultfile.Version, VaultID: "owned-open-vault", PolicySeq: 0,
 		OwnerRoot: vaultfile.OwnerRoot{KeyID: "owned-independent-root", Alg: vaultfile.PolicySigAlgEd25519,
 			PublicKey: rootPub, Owners: []vaultfile.Principal{{PrincipalID: "owner", Label: "Owner"}}},
 		Readers: []vaultfile.Member{{PrincipalID: "reader", Label: "Reader"}},
-		Writers: []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
+		Writers: writers,
 		Admins:  []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
 		Owners:  []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
 		Devices: []vaultfile.Device{
