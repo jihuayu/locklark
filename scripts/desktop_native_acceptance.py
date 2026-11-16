@@ -39,6 +39,27 @@ UNAVAILABLE = "unavailable"
 # digits 2-7 and "-" are unchanged by JSON string escaping and URL
 # percent-encoding, so this canonical byte pattern also covers those forms.
 RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
+RECOVERY_KIT_TEXT = re.compile(r"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
+LOCAL_SCENARIO = "local-vault-file-create"
+WRONG_RECOVERY_CONFIRMATION = "not-the-issued-recovery-code"
+LOCAL_SETTINGS_DEFAULTS = {
+    "security.autolock.minutes": 5,
+    "security.clipboard.clearAfterSeconds": 30,
+    "security.autolock.onSleep": True,
+    "security.autolock.onDeviceLock": True,
+    "security.autolock.onWindowClose": True,
+    "security.revealPasswords": False,
+    "privacy.checkHibp": False,
+    "appearance.theme": "system",
+    "appearance.interfaceDensity": "comfortable",
+    "app.keepInTray": True,
+    "app.defaultVaultForSaving": "",
+}
+LOCAL_PROJECTION_FIELDS = (
+    "manifest_personal", "manifest_backend", "companion_present",
+    "manifest_digest", "journal_present", "archive_present",
+    "private_modes", "backend_hash_matches", "factors_absent",
+)
 PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
 CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
@@ -81,7 +102,8 @@ class Acceptance:
         self.diagnostics.mkdir(mode=0o700)
         self.host = pathlib.Path(os.environ["LOCKLARK_DESKTOP_HOST"]).resolve(strict=True)
         require(bool(os.environ.get("DISPLAY")))
-        self.env = {**os.environ, "GOTOOLCHAIN": "go1.27.3"}
+        self.scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
+        self.env = self.scenario_env(self.scenario, os.environ)
         self.go = os.environ.get("LOCKLARK_GO", "go")
         fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
         self.fixture_prebuilt = bool(fixture)
@@ -115,6 +137,37 @@ class Acceptance:
         self.privacy_failure = None
         self.log = (self.state / "native.log").open("xb")
         os.chmod(self.state / "native.log", 0o600)
+
+    @staticmethod
+    def scenario_env(scenario, environ):
+        """Only the local-vault scenario releases classic for its child app."""
+        env = {**environ, "GOTOOLCHAIN": "go1.27.3"}
+        if scenario == LOCAL_SCENARIO:
+            env.pop("LOCKLARK_DESKTOP_LAYOUT", None)
+        return env
+
+    @staticmethod
+    def local_settings_document(vault_path):
+        """Real dotted non-secret defaults plus the one local vault path."""
+        return {**LOCAL_SETTINGS_DEFAULTS, "app.vaultPath": str(vault_path)}
+
+    def app_command(self):
+        if (getattr(self, "scenario", None) == LOCAL_SCENARIO
+                and getattr(self, "settings_path", None) is not None):
+            return [str(self.host), "--settings", str(self.settings_path)]
+        return [str(self.host)]
+
+    def write_private_settings(self):
+        self.settings_dir = self.state / "settings"
+        self.settings_dir.mkdir(mode=0o700)
+        os.chmod(self.settings_dir, 0o700)
+        self.settings_path = self.settings_dir / "settings.json"
+        raw = json.dumps(self.local_settings_document(self.fixture["Path"]),
+                         ensure_ascii=False).encode("utf-8")
+        with os.fdopen(os.open(self.settings_path,
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(raw)
 
     def phase(self, value):
         self.stage = value
@@ -457,6 +510,93 @@ class Acceptance:
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]}, {"click_label":"解锁"},
                     {"wait_label":"新建登录"}])
 
+    def unlock_onevra(self):
+        self.phase("unlock-onevra")
+        self.input([{"click_label":"使用应急资料…"},
+                    {"click_label":"主密码"}, {"text":self.fixture["Password"]},
+                    {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]},
+                    {"click_label":"解锁"},
+                    {"wait_label":"新建登录"}])
+
+    def read_recovery(self):
+        """Read one kit from the private pipe and register it immediately."""
+        request = {"title": TITLE, "executable": str(self.host),
+                   "expected_pid": self.app.pid, "preserve_focus": True,
+                   "read_recovery": True}
+        self.native_action = "read-recovery"
+        self.native_failed_index = None
+        self.native_x_error_codes = []
+        started = time.monotonic()
+        try:
+            result = json.loads(self.command(
+                [sys.executable, str(ROOT / "scripts/browser_native_x11.py")],
+                json.dumps(request).encode(), timeout=15))
+        except json.JSONDecodeError:
+            self.reason = "native-response-json"
+            raise AcceptanceFailure() from None
+        finally:
+            self.native_elapsed_ms = round((time.monotonic() - started) * 1000)
+        kit = result.get("recovery") if isinstance(result, dict) else None
+        # Establish that the pipe value is a kit, then register it before the
+        # only remaining shape check or any failing UI step. A non-kit string
+        # is never stored as a known value.
+        require(isinstance(result, dict) and type(kit) is str and
+                RECOVERY_KIT_TEXT.fullmatch(kit) is not None)
+        self.values.add(kit)
+        require(set(result) == {"recovery"})
+        return kit
+
+    def verify_local_vault(self):
+        """Bounded read-only local projection; no unlock, publish or session."""
+        workspace = self.settings_dir / "vaultfile-workspace"
+        result = json.loads(self.command(
+            [str(self.fixture_binary), "-fixture", str(self.fixture_path),
+             "-verify-local", str(workspace)]))
+        require(isinstance(result, dict) and
+                set(result) == {"manifest_count", *LOCAL_PROJECTION_FIELDS})
+        require(type(result.get("manifest_count")) is int and
+                result["manifest_count"] == 1)
+        for field in LOCAL_PROJECTION_FIELDS:
+            require(type(result.get(field)) is bool and result[field] is True)
+        return result
+
+    def local_vault_file_create(self):
+        """One real Onevra A closure; no product method or fixture create."""
+        self.phase("local-create-open")
+        before = self.observe()
+        before_ids = sorted(item["id"] for item in before["items"])
+        self.wait("新建独立文件库")
+        self.click("新建独立文件库")
+        self.wait("准备创建")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("准备创建")
+        self.wait("重新输入恢复码")
+        kit = self.read_recovery()
+        self.phase("local-create-wrong-confirm")
+        self.fill("重新输入恢复码", WRONG_RECOVERY_CONFIRMATION)
+        self.click("确认并发布备份")
+        self.wait("恢复码未逐字匹配")
+        require(self.controls()["备份恢复码"]["present"] is False)
+        self.phase("local-create-publish")
+        self.fill("重新输入恢复码", kit)
+        self.click("确认并发布备份")
+        self.wait("备份恢复码")
+        self.phase("local-create-complete")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.fill("备份恢复码", kit)
+        self.click("完成创建")
+        self.wait("关闭本地基线视图")
+        self.wait("已验证本地初始版本 · 远端状态未核实")
+        require(self.controls()["关闭本地基线视图"]["present"] is True)
+        self.phase("local-create-baseline")
+        after = self.observe()
+        require(before["audit_safe"] is True and after["audit_safe"] is True)
+        after_ids = sorted(item["id"] for item in after["items"])
+        require(len(before_ids) == len(after_ids) and before_ids == after_ids)
+        self.verify_local_vault()
+
     def build_fixture(self):
         if self.fixture_prebuilt:
             require(self.fixture_binary.is_file() and os.access(self.fixture_binary, os.X_OK))
@@ -468,13 +608,18 @@ class Acceptance:
         self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
         self.fixture = json.loads(self.fixture_path.read_bytes())
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "OTPSeed", "OTPConfig", "ProviderValue", "ProviderCanary"))
-        self.app = subprocess.Popen([str(self.host)], env=self.env, stdout=self.log, stderr=self.log)
+        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
+            self.write_private_settings()
+        self.app = subprocess.Popen(self.app_command(), env=self.env, stdout=self.log, stderr=self.log)
         self.probe = subprocess.Popen([sys.executable, str(ROOT / "scripts/desktop_native_probe.py")],
                                       env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=self.log, text=True, bufsize=1)
         require(bool(select.select([self.probe.stdout], [], [], 15)[0]))
         require(json.loads(self.probe.stdout.readline()).get("ready") is True)
-        self.unlock()
+        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
+            self.unlock_onevra()
+        else:
+            self.unlock()
         self.probe_request({"op":"own-clipboard", "marker":MARKER})
 
     def create(self, generated):
@@ -806,21 +951,31 @@ class Acceptance:
     def run(self):
         success = False
         close_failure = None
+        scenario = getattr(self, "scenario", None) or os.environ.get("LOCKLARK_TEST_SCENARIO")
         try:
             self.setup()
-            if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
+            failure_stage = os.environ.get("LOCKLARK_TEST_FAILURE_STAGE")
+            if failure_stage and scenario == LOCAL_SCENARIO:
+                # This scenario has no old probe-input body. An explicit fault
+                # request must fail closed, never be silently ignored into a
+                # PASS; the normal cleanup/finish barrier still runs.
+                self.reason = "local-vault-fault-stage"
+                self.phase("local-vault-fault-stage")
+                raise AcceptanceFailure()
+            if failure_stage == "probe-input":
                 # Add a genuinely newly generated password to the fault's
                 # private payload and final scan, alongside unlock/OTP factors.
                 self.create(True)
                 self.phase("private-probe-failure")
                 result = self.probe_request({"op":"unsupported", "private":list(self.values)})
                 require(result.get("ok") is True)
-            elif os.environ.get("LOCKLARK_TEST_FAILURE_STAGE"):
+            elif failure_stage:
                 raise AcceptanceFailure()
-            scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
             if scenario:
-                require(scenario in ("foreign-owner","provider"))
-                if scenario == "provider":
+                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO))
+                if scenario == LOCAL_SCENARIO:
+                    self.local_vault_file_create()
+                elif scenario == "provider":
                     self.provider_acceptance()
                 else:
                     self.foreign_lock_case()
@@ -859,13 +1014,17 @@ class Acceptance:
                 failure["controls"] = self.controls()
             except Exception:
                 failure["controls_unavailable"] = True
-            try:
-                failure["displays"] = {}
-                for name, otp in (("field", False), ("otp", True)):
-                    observed = self.display(otp=otp)
-                    failure["displays"][name] = {key:observed[key] for key in ("present", "empty")}
-            except Exception:
-                failure["displays_unavailable"] = True
+            if scenario != LOCAL_SCENARIO:
+                # The local-vault scenario never reuses the broad display probe
+                # after a kit may have appeared. Its failure projection stays
+                # on the fixed control allowlist above.
+                try:
+                    failure["displays"] = {}
+                    for name, otp in (("field", False), ("otp", True)):
+                        observed = self.display(otp=otp)
+                        failure["displays"][name] = {key:observed[key] for key in ("present", "empty")}
+                except Exception:
+                    failure["displays_unavailable"] = True
             self.reason, self.native_action = failure["reason"], failure["native_action"]
             # An artifact write must never change the failure line or exit code.
             try:
@@ -970,10 +1129,12 @@ class Acceptance:
             except Exception:
                 privacy = getattr(self, "privacy_failure", None) or "scan-error"
             if privacy == "passed":
+                scenario = getattr(self, "scenario", None) or os.environ.get("LOCKLARK_TEST_SCENARIO")
                 success_label = {
                     "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
                     "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
-                }.get(os.environ.get("LOCKLARK_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
+                    LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A create, wrong-kit refusal, literal recovery confirmation and local baseline",
+                }.get(scenario,"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
                 # Only now, after the scan passed, may the fixed success line
                 # enter the transcript. A rewrite failure also yields no PASS.
                 final = ["Desktop native private state: " + str(self.state),

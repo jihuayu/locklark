@@ -1292,5 +1292,352 @@ class RecoveryKitRunnerBarrierTests(unittest.TestCase):
                                      (1, 1, 0, 1, 1, 1))
 
 
+class LocalVaultScenarioContractTests(unittest.TestCase):
+    """Focused component contracts; no GUI, XTest, kit or product session."""
+
+    KIT = "LLR2-" + "A" * 52 + "-" + "B" * 52
+    FIXTURE = {"Path": "/synthetic/private/synthetic.ll",
+               "Password": "synthetic-master", "Secret": "synthetic-secret"}
+
+    def test_scenario_env_pops_classic_only_for_local_child(self):
+        parent = {"LOCKLARK_DESKTOP_LAYOUT": "classic",
+                  "HOME": "/synthetic/home", "XDG_CONFIG_HOME": "/synthetic/xdg"}
+        original = dict(parent)
+        classic = Acceptance.scenario_env(None, parent)
+        foreign = Acceptance.scenario_env("foreign-owner", parent)
+        local = Acceptance.scenario_env(desktop.LOCAL_SCENARIO, parent)
+        self.assertEqual(classic["LOCKLARK_DESKTOP_LAYOUT"], "classic")
+        self.assertEqual(foreign["LOCKLARK_DESKTOP_LAYOUT"], "classic")
+        self.assertNotIn("LOCKLARK_DESKTOP_LAYOUT", local)
+        self.assertEqual(parent, original)
+        self.assertEqual(local["GOTOOLCHAIN"], "go1.27.3")
+
+    def test_local_settings_document_has_real_dotted_defaults_and_path(self):
+        document = Acceptance.local_settings_document(self.FIXTURE["Path"])
+        self.assertEqual(set(document), set(desktop.LOCAL_SETTINGS_DEFAULTS) | {"app.vaultPath"})
+        for key, value in desktop.LOCAL_SETTINGS_DEFAULTS.items():
+            self.assertEqual(document[key], value)
+        self.assertEqual(document["app.vaultPath"], self.FIXTURE["Path"])
+        self.assertEqual(document["security.autolock.minutes"], 5)
+        self.assertEqual(document["security.clipboard.clearAfterSeconds"], 30)
+        self.assertEqual(document["appearance.theme"], "system")
+        self.assertEqual(document["appearance.interfaceDensity"], "comfortable")
+        for key in document:
+            self.assertNotIn(key.lower(), ("password", "secret", "kit", "recovery"))
+
+    def test_private_settings_file_and_directory_modes(self):
+        with tempfile.TemporaryDirectory() as root:
+            subject = Acceptance.__new__(Acceptance)
+            subject.state = pathlib.Path(root)
+            subject.fixture = dict(self.FIXTURE)
+            subject.write_private_settings()
+            self.assertEqual(subject.settings_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(subject.settings_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(subject.settings_path.read_text()),
+                             Acceptance.local_settings_document(self.FIXTURE["Path"]))
+
+    def test_app_command_uses_settings_only_for_local_scenario(self):
+        subject = Acceptance.__new__(Acceptance)
+        subject.host = pathlib.Path("/synthetic/native-host")
+        subject.settings_path = pathlib.Path("/synthetic/private/settings.json")
+        subject.scenario = desktop.LOCAL_SCENARIO
+        self.assertEqual(subject.app_command(),
+                         [str(subject.host), "--settings", str(subject.settings_path)])
+        subject.scenario = None
+        self.assertEqual(subject.app_command(), [str(subject.host)])
+
+    def test_onevra_unlock_uses_real_factors_without_path_field(self):
+        subject = Acceptance.__new__(Acceptance)
+        subject.fixture = dict(self.FIXTURE)
+        subject.phase = Mock()
+        boundary = NativeUnlockInputBoundary(self.FIXTURE["Password"], self.FIXTURE["Secret"])
+        subject.input = boundary
+        subject.unlock_onevra()
+        events = boundary.events
+        self.assertNotIn(("click", "金库文件"), events)
+        self.assertEqual(events.count(("click", "使用应急资料…")), 1)
+        self.assertLess(events.index(("click", "使用应急资料…")),
+                        events.index(("text", "Secret Key")))
+        self.assertEqual(events[-2:], [("click", "解锁"), ("wait", "新建登录")])
+        self.assertTrue(boundary.fields["主密码"] == self.FIXTURE["Password"])
+        self.assertTrue(boundary.fields["Secret Key"] == self.FIXTURE["Secret"])
+
+
+class LocalVaultPrivateReaderTests(unittest.TestCase):
+    """The reader request is exact and the returned kit is memory-only."""
+
+    KIT = LocalVaultScenarioContractTests.KIT
+
+    def subject(self, response):
+        subject = Acceptance.__new__(Acceptance)
+        subject.host = pathlib.Path("/synthetic/native-host")
+        subject.app = Mock(pid=4321)
+        subject.values = set()
+        subject.command = Mock(return_value=json.dumps(response).encode())
+        subject.reason = "acceptance"
+        subject.native_action = "none"
+        subject.native_failed_index = None
+        subject.native_x_error_codes = []
+        subject.native_elapsed_ms = 0
+        return subject
+
+    def test_exact_private_request_and_immediate_registration(self):
+        subject = self.subject({"recovery": self.KIT})
+        with patch("builtins.print") as output:
+            kit = subject.read_recovery()
+        self.assertTrue(kit in subject.values)
+        self.assertEqual(output.call_count, 0)
+        request = json.loads(subject.command.call_args.args[1])
+        self.assertEqual(set(request), {"title", "executable", "expected_pid",
+                                        "preserve_focus", "read_recovery"})
+        self.assertEqual(request["title"], desktop.TITLE)
+        self.assertTrue(request["preserve_focus"] is True)
+        self.assertTrue(request["read_recovery"] is True)
+        self.assertEqual(request["expected_pid"], 4321)
+        self.assertNotIn("actions", request)
+        self.assertNotIn("inspect", request)
+
+    def test_extra_pipe_key_registers_kit_before_rejection(self):
+        subject = self.subject({"recovery": self.KIT, "extra": True})
+        with self.assertRaises(AcceptanceFailure):
+            subject.read_recovery()
+        self.assertTrue(self.KIT in subject.values)
+
+    def test_invalid_recovery_is_not_silently_registered(self):
+        subject = self.subject({"recovery": "not-a-recovery-code"})
+        with self.assertRaises(AcceptanceFailure):
+            subject.read_recovery()
+        self.assertFalse(subject.values)
+
+    def test_reader_source_never_prints_or_writes_kit(self):
+        source = inspect.getsource(Acceptance.read_recovery)
+        for forbidden in ("print(", "self.emit(", "write_text(", "open(", "os.open("):
+            self.assertNotIn(forbidden, source)
+        self.assertIn("self.command(", source)
+        self.assertIn("stdout=subprocess.PIPE", inspect.getsource(Acceptance.command))
+
+
+class LocalVaultOracleTests(unittest.TestCase):
+    """Exact limited projection; each confirmation is bound to the UI state."""
+
+    def report(self):
+        return {"manifest_count": 1,
+                **{field: True for field in desktop.LOCAL_PROJECTION_FIELDS}}
+
+    def subject(self, report):
+        subject = Acceptance.__new__(Acceptance)
+        subject.settings_dir = pathlib.Path("/synthetic/private/settings")
+        subject.fixture_binary = pathlib.Path("/synthetic/fixture-observer")
+        subject.fixture_path = pathlib.Path("/synthetic/fixture.json")
+        subject.command = Mock(return_value=json.dumps(report).encode())
+        return subject
+
+    def test_exact_projection_is_accepted(self):
+        subject = self.subject(self.report())
+        result = subject.verify_local_vault()
+        self.assertTrue(result["manifest_count"] == 1)
+        args = subject.command.call_args.args[0]
+        self.assertIn("-verify-local", args)
+        self.assertIn(str(subject.settings_dir / "vaultfile-workspace"), args)
+
+    def test_each_boolean_must_be_exact_true(self):
+        for field in desktop.LOCAL_PROJECTION_FIELDS:
+            for value in (False, 1, "true"):
+                report = self.report()
+                report[field] = value
+                with self.assertRaises(AcceptanceFailure):
+                    self.subject(report).verify_local_vault()
+
+    def test_manifest_count_must_be_exact_int_one(self):
+        for value in (True, 2, "1"):
+            report = self.report()
+            report["manifest_count"] = value
+            with self.assertRaises(AcceptanceFailure):
+                self.subject(report).verify_local_vault()
+
+    def test_missing_extra_or_non_bool_projection_is_rejected(self):
+        report = self.report()
+        report["extra"] = True
+        with self.assertRaises(AcceptanceFailure):
+            self.subject(report).verify_local_vault()
+        for field in desktop.LOCAL_PROJECTION_FIELDS:
+            report = self.report()
+            del report[field]
+            with self.assertRaises(AcceptanceFailure):
+                self.subject(report).verify_local_vault()
+
+
+class LocalVaultFlowBoundary:
+    def __init__(self, kit):
+        self.kit, self.events, self.reader_calls = kit, [], 0
+
+    def phase(self, value):
+        self.events.append(("phase", value))
+
+    def wait(self, label):
+        self.events.append(("wait", label))
+
+    def click(self, label):
+        self.events.append(("click", label))
+
+    def fill(self, label, value):
+        if value == self.kit:
+            marker = "kit"
+        elif value == desktop.WRONG_RECOVERY_CONFIRMATION:
+            marker = "wrong"
+        else:
+            marker = "other"
+        self.events.append(("fill", label, marker))
+
+
+class LocalVaultFlowTests(unittest.TestCase):
+    """Real control order with the wrong-kit refusal kept intact."""
+
+    KIT = LocalVaultScenarioContractTests.KIT
+
+    def test_control_order_wrong_kit_then_literal_kit_and_baseline(self):
+        boundary = LocalVaultFlowBoundary(self.KIT)
+        subject = Acceptance.__new__(Acceptance)
+        subject.fixture = {"Password": "synthetic-master", "Secret": "synthetic-secret"}
+        subject.values = set()
+        subject.phase = boundary.phase
+        subject.wait, subject.click, subject.fill = boundary.wait, boundary.click, boundary.fill
+        subject.read_recovery = lambda: (boundary.events.append(("reader",)),
+                                         setattr(boundary, "reader_calls", boundary.reader_calls + 1),
+                                         subject.values.add(self.KIT), self.KIT)[-1]
+        subject.observe = Mock(side_effect=[
+            {"items": [{"id": "one"}, {"id": "two"}], "audit_safe": True},
+            {"items": [{"id": "one"}, {"id": "two"}], "audit_safe": True},
+        ])
+        subject.controls = Mock(side_effect=[
+            {"备份恢复码": {"present": False}, "关闭本地基线视图": {"present": True}},
+            {"备份恢复码": {"present": True}, "关闭本地基线视图": {"present": True}},
+        ])
+        subject.verify_local_vault = Mock()
+        subject.local_vault_file_create()
+        events = boundary.events
+        self.assertEqual(boundary.reader_calls, 1)
+        self.assertTrue(self.KIT in subject.values)
+        self.assertEqual(subject.observe.call_count, 2)
+        self.assertEqual(subject.controls.call_count, 2)
+        subject.verify_local_vault.assert_called_once_with()
+        self.assertLess(events.index(("wait", "重新输入恢复码")), events.index(("reader",)))
+        first_publish = [index for index, event in enumerate(events)
+                         if event == ("click", "确认并发布备份")][0]
+        second_publish = [index for index, event in enumerate(events)
+                          if event == ("click", "确认并发布备份")][1]
+        self.assertLess(events.index(("fill", "重新输入恢复码", "wrong")), first_publish)
+        self.assertLess(first_publish, events.index(("wait", "恢复码未逐字匹配")))
+        wrong_wait = events.index(("wait", "恢复码未逐字匹配"))
+        self.assertNotIn(("fill", "备份恢复码", "kit"), events[:wrong_wait])
+        self.assertLess(wrong_wait, events.index(("fill", "重新输入恢复码", "kit")))
+        self.assertLess(events.index(("fill", "重新输入恢复码", "kit")), second_publish)
+        self.assertLess(second_publish, events.index(("wait", "备份恢复码")))
+        self.assertLess(events.index(("wait", "备份恢复码")),
+                        events.index(("fill", "备份恢复码", "kit")))
+        self.assertLess(events.index(("fill", "备份恢复码", "kit")),
+                        events.index(("click", "完成创建")))
+        self.assertLess(events.index(("click", "完成创建")),
+                        events.index(("wait", "关闭本地基线视图")))
+        self.assertLess(events.index(("wait", "关闭本地基线视图")),
+                        events.index(("wait", "已验证本地初始版本 · 远端状态未核实")))
+
+
+class LocalVaultRunnerTests(unittest.TestCase):
+    """Runner component tests; fake UI only, never a real GUI or product kit."""
+
+    KIT = LocalVaultScenarioContractTests.KIT
+
+    def acceptance(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.state = pathlib.Path(root.name)
+        acceptance.diagnostics = acceptance.state / "diagnostics"
+        acceptance.diagnostics.mkdir()
+        acceptance.fixture_binary = acceptance.state / "fixture-observer"
+        acceptance.env, acceptance.host = {}, pathlib.Path("/synthetic-native-host")
+        acceptance.fixture_path = acceptance.state / "fixture.json"
+        acceptance.log = (acceptance.state / "native.log").open("w")
+        self.addCleanup(acceptance.log.close)
+        acceptance.values, acceptance.codes = set(), set()
+        acceptance.privacy_failure = None
+        acceptance.started = 0
+        acceptance.stage, acceptance.reason, acceptance.native_action = "privacy", "acceptance", "none"
+        acceptance.native_failed_index, acceptance.native_x_error_codes = None, []
+        acceptance.native_elapsed_ms, acceptance.probe_read_attempts_max = 0, 0
+        acceptance.probe_operation, acceptance.probe_elapsed_ms = "unsupported", 0
+        acceptance.probe_diagnostic, acceptance.last_native_click = {}, {}
+        acceptance.foreign_observations, acceptance.output_lines = [], []
+        acceptance.otp_copy, acceptance.otp_diagnostic = None, None
+        acceptance.phase = Mock()
+        acceptance.setup, acceptance.close = Mock(), Mock()
+        acceptance.probe, acceptance.app = Mock(), Mock()
+        acceptance.controls = Mock(return_value={})
+        acceptance.display = Mock(return_value={"present": False, "empty": True})
+        acceptance.emit = lambda message: acceptance.output_lines.append(str(message))
+        acceptance.scenario = desktop.LOCAL_SCENARIO
+        return acceptance
+
+    def env(self):
+        return {"LOCKLARK_TEST_SCENARIO": desktop.LOCAL_SCENARIO,
+                "LOCKLARK_TEST_FAILURE_STAGE": ""}
+
+    def test_local_failure_skips_display_probe_and_keeps_control_allowlist(self):
+        acceptance = self.acceptance()
+        acceptance.local_vault_file_create = Mock(side_effect=AcceptanceFailure())
+        with patch("builtins.print") as output, patch.dict(desktop.os.environ, self.env(), clear=False):
+            self.assertEqual(acceptance.run(), 1)
+        acceptance.display.assert_not_called()
+        acceptance.controls.assert_called()
+        failure = json.loads((acceptance.diagnostics / "failure.json").read_text())
+        self.assertNotIn("displays", failure)
+        self.assertIn("controls", failure)
+        lines = [item.args[0] for item in output.call_args_list]
+        self.assertFalse(any("PASS" in line for line in lines))
+
+    def test_local_success_label_is_only_a_local_baseline_claim(self):
+        acceptance = self.acceptance()
+        acceptance.local_vault_file_create = Mock()
+        with patch("builtins.print") as output, patch.dict(desktop.os.environ, self.env(), clear=False):
+            self.assertEqual(acceptance.run(), 0)
+        lines = [item.args[0] for item in output.call_args_list]
+        text = "\n".join(lines)
+        self.assertTrue(any("PASS:" in line for line in lines))
+        self.assertIn("Onevra independent local vault A create", text)
+        self.assertIn("local baseline", text)
+        self.assertNotIn("T4", text)
+        self.assertNotIn("sync", text)
+
+    def test_local_fault_env_fails_closed_and_still_scans(self):
+        acceptance = self.acceptance()
+        acceptance.local_vault_file_create = Mock()
+        environment = {**self.env(), "LOCKLARK_TEST_FAILURE_STAGE": "probe-input"}
+        with patch("builtins.print") as output, patch.dict(desktop.os.environ, environment, clear=False):
+            self.assertEqual(acceptance.run(), 1)
+        acceptance.local_vault_file_create.assert_not_called()
+        acceptance.display.assert_not_called()
+        lines = [item.args[0] for item in output.call_args_list]
+        text = "\n".join(lines)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertIn("local-vault-fault-stage", text)
+        self.assertIn("Desktop native private artifact and controller scan: passed", lines)
+        self.assertNotIn("Desktop native privacy scan failed", lines)
+
+    def test_local_failure_still_runs_unknown_kit_barrier(self):
+        acceptance = self.acceptance()
+        acceptance.local_vault_file_create = Mock(side_effect=AcceptanceFailure())
+        acceptance.log.write("failure " + self.KIT)
+        acceptance.log.flush()
+        with patch("builtins.print") as output, patch.dict(desktop.os.environ, self.env(), clear=False):
+            self.assertEqual(acceptance.run(), 1)
+        lines = [item.args[0] for item in output.call_args_list]
+        text = "\n".join(lines)
+        self.assertNotIn(self.KIT, text)
+        self.assertFalse(any("PASS" in line for line in lines))
+        self.assertIn("Desktop native privacy scan failed", lines)
+        self.assertIn(desktop.PRIVACY_FAILURE_PREFIX + "recovery-kit", lines)
+
+
 if __name__ == "__main__":
     unittest.main()

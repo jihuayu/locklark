@@ -546,6 +546,15 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+      - name: Test native Onevra independent local vault creation
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
+        timeout-minutes: 10
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
+        env:
+          LOCKLARK_GO: go
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_TEST_SCENARIO: local-vault-file-create
       - name: Test native desktop global quick search
         if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10

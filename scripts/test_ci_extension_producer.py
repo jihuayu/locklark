@@ -462,6 +462,7 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
     UPLOAD = "Preserve synthetic popup UI screenshots"
     READY_STEPS = (
         "Test native desktop daily tools and clipboard ownership",
+        "Test native Onevra independent local vault creation",
         "Test native desktop global quick search",
         PEER, CHROMIUM, FIREFOX,
     )
