@@ -634,6 +634,23 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 
 const failureMessage = "Synthetic desktop fixture operation failed"
 
+const usageText = `Usage: desktop_acceptance_fixture [options]
+  -out
+        new synthetic fixture directory
+  -fixture
+        private synthetic fixture file
+  -private-pipe
+        observe authenticated copy through private pipe only
+  -stale
+        independent local-owner URL edit for exact-target conflict test
+  -hold-readonly
+        hold a read-only original-file lock until private stdin closes
+  -verify-local
+        read-only bounded local create workspace verification
+  -h, -help
+        show this fixed help text
+`
+
 func run(args []string) error {
 	flags := flag.NewFlagSet("desktop_acceptance_fixture", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -644,6 +661,10 @@ func run(args []string) error {
 	hold := flags.Bool("hold-readonly", false, "hold a read-only original-file lock until private stdin closes")
 	verifyLocalDir := flags.String("verify-local", "", "read-only bounded local create workspace verification")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(os.Stdout, usageText)
+			return nil
+		}
 		return err
 	}
 	if *out != "" {
