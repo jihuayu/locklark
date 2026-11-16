@@ -131,13 +131,15 @@ type App struct {
 
 	// M2.4 desktop v2 state. It is reset on lock and never survives a
 	// session boundary; settings are non-secret and survive lock.
-	v2             v2State
-	v2Mode         bool
-	onevra         onevraUI
-	settings       Settings
-	settingsPath   string
-	settingsLoaded bool
-	lastActivity   time.Time
+	v2              v2State
+	localVaultFiles localVaultFileState
+	localCreate     localVaultFileCreateState
+	v2Mode          bool
+	onevra          onevraUI
+	settings        Settings
+	settingsPath    string
+	settingsLoaded  bool
+	lastActivity    time.Time
 	// clipboardClearSeconds mirrors security.clipboard.clearAfterSeconds for
 	// broker connection goroutines. Only settings mutations and UI start write
 	// it; the IPC factory and lease getter read it without touching a.settings.
@@ -463,6 +465,9 @@ func (a *App) lockStart() {
 func (a *App) Lock() {
 	// Revoke all session/broker authority before any other lock work.
 	a.lockStart()
+	a.cancelLocalVaultFileCreate()
+	a.closeLocalVaultFileView()
+	a.localVaultFiles.refs = nil
 	a.stopSSHAgent()
 	a.sshRows = nil
 	a.sshSelected = nil
@@ -591,6 +596,7 @@ func (a *App) unlock() {
 			_ = a.SetVaultPath(path)
 			a.touchActivity()
 			a.loadV2Metadata()
+			a.refreshLocalVaultFiles()
 			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
 			if rememberErr != nil {
 				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
