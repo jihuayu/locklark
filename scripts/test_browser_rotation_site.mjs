@@ -390,3 +390,45 @@ test("rotation ready assignments follow the complete real prelude and save retur
   assert(normal >= 0 && guard > normal && rotation > guard,
     "Rotation may start only after successful normal save and the runtime proof guard");
 });
+
+test("CI rotation wiring scopes one opt-in to the existing first Chromium invocation", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/check.yml", import.meta.url), "utf8");
+  const job = (name) => {
+    const start = workflow.indexOf("  " + name + ":\n");
+    assert(start >= 0, "Existing CI job must remain present");
+    const rest = workflow.slice(start);
+    const next = /\n  [A-Za-z0-9_-]+:\n/.exec(rest);
+    return next ? rest.slice(0, next.index) : rest;
+  };
+  const step = (job, name) => {
+    const marker = "      - name: " + name + "\n";
+    assert(job.split(marker).length === 2, "Existing CI step must remain unique");
+    const rest = job.slice(job.indexOf(marker));
+    const next = rest.indexOf("\n      - ");
+    return next < 0 ? rest : rest.slice(0, next);
+  };
+  const extension = step(job("web-core"), "Test browser extension");
+  assert(extension.split("\n").includes("        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs scripts/test_browser_rotation_site.mjs"),
+    "The existing cheap Node test invocation must retain every suite and append the frozen rotation file once");
+  assert((workflow.match(/scripts\/test_browser_rotation_site\.mjs/g) || []).length === 1,
+    "The frozen rotation test file must run once in the whole workflow");
+  const chromium = step(job("web-browsers"), "Test native browser approval, popup editing, fill, save and OTP");
+  const wrapper = "dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24'";
+  const commands = chromium.slice(chromium.indexOf("        run: |\n") + "        run: |\n".length)
+    .split("\n").filter((line) => line.startsWith("          ") && !line.trim().startsWith("#"))
+    .map((line) => line.trim()).filter((line) => line.startsWith("dbus-run-session "));
+  assert.deepEqual(commands, [
+    wrapper + " env LOCKLARK_TEST_BROWSER_ROTATION=1 node scripts/browser_native_acceptance.mjs",
+    wrapper + " python3 scripts/browser_otp_privacy_acceptance.py chromium",
+    wrapper + " env -u LOCKLARK_TEST_POPUP_VAULT LOCKLARK_TEST_ROUTE_DETAIL_READ=1 LOCKLARK_TEST_ROUTE_IDLE_TTL=1 node scripts/browser_native_acceptance.mjs",
+  ], "Only the first existing invocation may gain the rotation opt-in");
+  assert((workflow.match(/LOCKLARK_TEST_BROWSER_ROTATION=1/g) || []).length === 1 &&
+    !/LOCKLARK_TEST_BROWSER_ROTATION:/.test(workflow),
+    "Rotation opt-in must not become a step/job/global environment value or reach another invocation");
+  assert((workflow.match(/node scripts\/browser_native_acceptance\.mjs/g) || []).length === 3,
+    "Rotation must not add another Chromium browser invocation");
+  for (const name of ["POPUP_VAULT", "PASSKEY_MANAGEMENT", "PASSKEY_CONDITIONAL", "OTHER_PROVIDER", "PASSKEY_SIGNALS"])
+    assert(chromium.includes('LOCKLARK_TEST_' + name + ': "1"'), "Existing popup/attachment and Passkey coverage must remain enabled");
+  assert(chromium.includes("        timeout-minutes: 15\n") &&
+    !commands[0].includes("env -u"), "Rotation must preserve the native timeout and original environment");
+});

@@ -1519,7 +1519,7 @@ function stepRun(block) {
   return commands;
 }
 
-test("CI runs the Chromium route and idle TTL acceptance once, after the unchanged native and OTP journeys", () => {
+test("CI runs the Chromium route and idle TTL acceptance once, after native rotation and the original OTP journey", () => {
   const browsers = jobBlock("web-browsers");
   // The Chromium-only condition below is only meaningful while the job's own
   // matrix really schedules Chromium: a deleted entry would skip that step
@@ -1545,9 +1545,9 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   );
   assert.equal(Number(timeout), 15, `timeout-minutes must be 15, got: ${timeout}`);
 
-  // The original two commands stay verbatim and first; the route run is the
-  // only additional command, after them.
-  const native = `${BROWSER_WRAPPER} node scripts/browser_native_acceptance.mjs`;
+  // The same first native invocation gains one scoped rotation opt-in. The
+  // original OTP and route commands remain verbatim and in the same order.
+  const native = `${BROWSER_WRAPPER} env LOCKLARK_TEST_BROWSER_ROTATION=1 node scripts/browser_native_acceptance.mjs`;
   const otp = `${BROWSER_WRAPPER} python3 scripts/browser_otp_privacy_acceptance.py chromium`;
   const route =
     `${BROWSER_WRAPPER} env -u LOCKLARK_TEST_POPUP_VAULT ` +
@@ -1556,7 +1556,7 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   assert.deepEqual(
     stepRun(chromium.lines),
     [native, otp, route],
-    "the Chromium step must run the unchanged native and OTP commands, then one route command",
+    "the Chromium step must run native rotation and the original OTP command, then one route command",
   );
 
   // The route mode refuses the step-level popup-vault override, so exactly the
