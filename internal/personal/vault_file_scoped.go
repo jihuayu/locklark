@@ -136,6 +136,18 @@ var vaultFileChildReadHook func()
 // the same blocking Once.
 var vaultFileChildBeforeHandleClose func()
 
+// vaultFileChildBeforeRegister is a private no-argument seam after explicit
+// factor verification and before final parent/slot registration. It carries
+// no secret. Tests use it to replace the account slot on disk and prove the
+// final real-slot check rejects without leaving a candidate.
+var vaultFileChildBeforeRegister func()
+
+// vaultFileParentCheckCloseFault is a private fault-injection seam. The real
+// read transaction and account database are closed first; a non-nil error is
+// then appended by the test to model a close failure. Production leaves it nil,
+// so no claim is made that the filesystem itself produced the error.
+var vaultFileParentCheckCloseFault func() error
+
 // OpenVaultFileChild explicitly verifies the supplied full password and Secret
 // Key against the current account slot and material, authenticates the exact
 // existing journal BaseBytes under checkpoint, opens a real item summary once,
@@ -193,7 +205,11 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		s.lockVaultFileParent()
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	case factorErr != nil:
+		s.lockVaultFileParent()
 		return VaultFileChildToken{}, nil, ErrSessionLocked
+	}
+	if vaultFileChildBeforeRegister != nil {
+		vaultFileChildBeforeRegister()
 	}
 
 	// Parse the local account identity only after the factors are proven.
@@ -275,8 +291,10 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
 	}
 
-	// Final parent check and registration share the same short saveMu gate
-	// as RequestLock. No child lock is held and no IO occurs in this gate.
+	// Final registration holds Session.mu, then a real read-only account
+	// transaction, then the short saveMu/registry gate. Holding Session.mu
+	// freezes active/idle/material state, and the held read transaction stops
+	// a cooperating slot writer from crossing the check into registration.
 	s.mu.Lock()
 	if err := s.active(false); err != nil {
 		s.mu.Unlock()
@@ -292,12 +310,24 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		clearVaultFileChildItems(initialItems)
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
-	s.saveMu.Lock()
-	if s.vaultFileRevoked.Load() || s.lockRequested.Load() {
-		s.saveMu.Unlock()
+	parentCheck, err := s.openVaultFileParentCheckLocked()
+	if err != nil {
+		s.lock()
 		s.mu.Unlock()
 		_ = handle.Close()
 		clearVaultFileChildItems(initialItems)
+		return VaultFileChildToken{}, nil, ErrSessionLocked
+	}
+
+	now := time.Now()
+	s.saveMu.Lock()
+	if s.vaultFileRevoked.Load() || s.lockRequested.Load() || parentCheck.idleExpired(now) {
+		s.saveMu.Unlock()
+		s.mu.Unlock()
+		_ = parentCheck.close()
+		_ = handle.Close()
+		clearVaultFileChildItems(initialItems)
+		s.lockVaultFileParent()
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
 	s.vaultFileMu.Lock()
@@ -309,8 +339,13 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		s.vaultFileMu.Unlock()
 		s.saveMu.Unlock()
 		s.mu.Unlock()
+		closeErr := parentCheck.close()
 		_ = handle.Close()
 		clearVaultFileChildItems(initialItems)
+		if closeErr != nil {
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
 		return VaultFileChildToken{}, nil, ErrVaultFileScopedChild
 	}
 	token := VaultFileChildToken{path: journalPath, generation: generation}
@@ -339,6 +374,14 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	s.saveMu.Unlock()
 	s.mu.Unlock()
 
+	// DB close is outside saveMu. Any close failure must not leave the new
+	// candidate registered or return a plaintext summary.
+	if err := parentCheck.close(); err != nil {
+		clearVaultFileChildItems(initialItems)
+		s.lockVaultFileParent()
+		return VaultFileChildToken{}, nil, ErrSessionLocked
+	}
+
 	// Superseded candidates are closed, never merely dropped. This is outside
 	// every gate so a late reader can finish and observe the new generation.
 	if old != nil {
@@ -348,12 +391,15 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 }
 
 // ReadVaultFileChild returns bounded item summaries from the exact existing
-// journal BaseBytes of the current token. It rechecks the parent revocation
-// flag, the child deadline, the journal generation/revision/byte hashes and
-// pending state before and after the real summary, and then passes the final
-// disclosure through the same short saveMu gate as RequestLock. A revocation
-// that wins there clears the summaries and returns an error. A child-specific
-// lock, supersession or suite expiry invalidates only this child.
+// journal BaseBytes of the current token. Before the child is even classified
+// it rechecks current parent active state and the real account slot bytes, and
+// it repeats that check under a held read-only account transaction before the
+// final disclosure. It also rechecks the child deadline, the journal
+// generation/revision/byte hashes and pending state before and after the real
+// summary, and then passes the final disclosure through the same short saveMu
+// gate as RequestLock. Parent failure drains every child and clears the
+// summary; child-specific lock, supersession, journal drift or suite expiry
+// invalidates only this child.
 func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFileChildOptions) ([]VaultFileBaselineItem, error) {
 	if s == nil || token.generation == 0 || token.path == "" {
 		return nil, ErrVaultFileScopedChild
@@ -361,6 +407,27 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 	if s.vaultFileRevoked.Load() {
 		return nil, ErrSessionLocked
 	}
+
+	// Parent authority and the real slot digest are checked before the child's
+	// own deadline, so a failed parent drains every sibling even when this
+	// particular child also happens to be expired.
+	s.mu.Lock()
+	if err := s.active(false); err != nil {
+		s.mu.Unlock()
+		return nil, ErrSessionLocked
+	}
+	parentCheck, err := s.openVaultFileParentCheckLocked()
+	if err != nil {
+		s.lock()
+		s.mu.Unlock()
+		return nil, ErrSessionLocked
+	}
+	s.mu.Unlock()
+	if err := parentCheck.close(); err != nil {
+		s.lockVaultFileParent()
+		return nil, ErrSessionLocked
+	}
+
 	child, err := s.snapshotVaultFileChild(token)
 	if err != nil {
 		return nil, err
@@ -417,23 +484,51 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 		return nil, ErrVaultFileBaselineJournal
 	}
 
+	// Final parent authority is checked again under Session.mu with a real
+	// read-only account transaction held through the saveMu gate. This makes a
+	// late slot replacement or lowered idle deadline win over the already
+	// decrypted summary.
+	s.mu.Lock()
+	if err := s.active(false); err != nil {
+		s.mu.Unlock()
+		clearVaultFileChildItems(items)
+		return nil, ErrSessionLocked
+	}
+	parentCheck, err = s.openVaultFileParentCheckLocked()
+	if err != nil {
+		s.lock()
+		s.mu.Unlock()
+		clearVaultFileChildItems(items)
+		return nil, ErrSessionLocked
+	}
 	now := time.Now()
 	s.saveMu.Lock()
 	revoked := s.vaultFileRevoked.Load()
+	parentExpired := parentCheck.idleExpired(now)
 	s.vaultFileMu.Lock()
 	current := s.vaultFileChildren[token.path]
 	s.vaultFileMu.Unlock()
-	expired := child.expired(now)
 	s.saveMu.Unlock()
-	if revoked {
+	s.mu.Unlock()
+	if revoked || parentExpired {
 		clearVaultFileChildItems(items)
-		s.invalidateVaultFileChild(child)
+		_ = parentCheck.close()
+		s.lockVaultFileParent()
 		return nil, ErrSessionLocked
 	}
-	if current != child || expired {
+	if current != child || child.expired(now) {
 		clearVaultFileChildItems(items)
+		if closeErr := parentCheck.close(); closeErr != nil {
+			s.lockVaultFileParent()
+			return nil, ErrSessionLocked
+		}
 		s.invalidateVaultFileChild(child)
 		return nil, ErrVaultFileScopedChild
+	}
+	if err := parentCheck.close(); err != nil {
+		clearVaultFileChildItems(items)
+		s.lockVaultFileParent()
+		return nil, ErrSessionLocked
 	}
 	return items, nil
 }
@@ -496,9 +591,11 @@ func (s *Session) lockVaultFileParent() {
 	s.mu.Unlock()
 }
 
-// drainVaultFileChildren is called only by Session.lock, after cancelBrowserSave
-// has released saveMu. It releases the registry lock before closing any child,
-// so no registry or Session.mu lock is held while waiting on a child.
+// drainVaultFileChildren is called by Session.lock while Session.mu may be
+// held. It releases the registry lock before waiting on any child, and a child
+// close completion never re-acquires Session.mu. The prohibition is that
+// Close completion must not re-take parent.mu; it is not a claim that
+// Session.mu is never held during the drain.
 func (s *Session) drainVaultFileChildren() {
 	s.vaultFileMu.Lock()
 	children := make([]*vaultFileChild, 0, len(s.vaultFileAll))
@@ -604,7 +701,9 @@ func verifyVaultFileChildFactors(path string, slotDigest [32]byte, material, pas
 	}
 	db, err := existingWithReadOnly(path, true)
 	if err != nil {
-		return err
+		// The account slot cannot be read at all. This is parent failure, not
+		// an isolated wrong-factor attempt, so the caller must drain.
+		return errVaultFileChildInvalidSlot
 	}
 	viewErr := db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
@@ -632,11 +731,90 @@ func verifyVaultFileChildFactors(path string, slotDigest [32]byte, material, pas
 		}
 		return nil
 	})
-	closeErr := db.Close()
-	if viewErr != nil {
-		return viewErr
+	if closeErr := db.Close(); closeErr != nil {
+		// A close failure makes the slot result untrustworthy even when the
+		// factors looked wrong. Drain the parent; do not isolate it.
+		return errVaultFileChildInvalidSlot
 	}
-	return closeErr
+	if viewErr != nil {
+		if errors.Is(viewErr, errVaultFileChildWrongFactors) ||
+			errors.Is(viewErr, errVaultFileChildInvalidSlot) {
+			return viewErr
+		}
+		return errVaultFileChildInvalidSlot
+	}
+	return nil
+}
+
+// vaultFileParentCheck holds a real read-only account transaction open so a
+// cooperating writer cannot replace the slot between the digest check and the
+// short saveMu gate. It is created only while Session.mu is held (Session.mu ->
+// RO account DB); it is closed only after saveMu and Session.mu are released.
+type vaultFileParentCheck struct {
+	db           *bolt.DB
+	tx           *bolt.Tx
+	idleDeadline time.Time
+	hasIdle      bool
+}
+
+// openVaultFileParentCheckLocked reads the current slot bytes under an open
+// read transaction. The caller holds Session.mu and has already checked
+// active(false). The returned transaction must be closed outside saveMu.
+func (s *Session) openVaultFileParentCheckLocked() (*vaultFileParentCheck, error) {
+	db, err := existingWithReadOnly(s.path, true)
+	if err != nil {
+		return nil, ErrSessionLocked
+	}
+	tx, err := db.Begin(false)
+	if err != nil {
+		_ = db.Close()
+		return nil, ErrSessionLocked
+	}
+	b := tx.Bucket(bucket)
+	if b == nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		return nil, ErrSessionLocked
+	}
+	raw := b.Get(slotKey)
+	if len(raw) == 0 || len(raw) > 8192 || sha256.Sum256(raw) != s.slotDigest {
+		_ = tx.Rollback()
+		_ = db.Close()
+		return nil, ErrSessionLocked
+	}
+	idleDeadline, hasIdle := s.idleDeadline()
+	return &vaultFileParentCheck{db: db, tx: tx, idleDeadline: idleDeadline, hasIdle: hasIdle}, nil
+}
+
+// close releases the read transaction and account database. It must be called
+// with saveMu and Session.mu released. A real close error (or the private
+// test-injected close fault) is returned; callers then take the parent lock
+// boundary so no candidate or summary survives.
+func (c *vaultFileParentCheck) close() error {
+	if c == nil {
+		return nil
+	}
+	var err error
+	if c.tx != nil {
+		err = c.tx.Rollback()
+		c.tx = nil
+	}
+	if c.db != nil {
+		if closeErr := c.db.Close(); err == nil {
+			err = closeErr
+		}
+		c.db = nil
+	}
+	if vaultFileParentCheckCloseFault != nil {
+		if fault := vaultFileParentCheckCloseFault(); fault != nil {
+			err = fault
+		}
+	}
+	return err
+}
+
+func (c *vaultFileParentCheck) idleExpired(now time.Time) bool {
+	return c != nil && c.hasIdle && !now.Before(c.idleDeadline)
 }
 
 type vaultFileJournalBaseline struct {

@@ -235,6 +235,255 @@ func assertScopedChildHandleClosed(t *testing.T, handle *vaultfile.ScopedUnlock)
 	}
 }
 
+func openScopedChildPair(t *testing.T, fx *scopedChildFixture) (VaultFileChildToken, VaultFileChildToken, *vaultfile.ScopedUnlock, *vaultfile.ScopedUnlock) {
+	t.Helper()
+	tokenA, _, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+	if err != nil {
+		t.Fatalf("open A: %v", err)
+	}
+	tokenB, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+	if err != nil {
+		t.Fatalf("open B: %v", err)
+	}
+	childA := fx.child(fx.a.journal)
+	childB := fx.child(fx.b.journal)
+	if childA == nil || childB == nil {
+		t.Fatal("children not registered")
+	}
+	return tokenA, tokenB, childA.handle, childB.handle
+}
+
+func replaceScopedChildSlot(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatalf("open account db: %v", err)
+	}
+	updateErr := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucket).Put(slotKey, raw)
+	})
+	closeErr := db.Close()
+	if updateErr != nil || closeErr != nil {
+		t.Fatalf("replace account slot: %v / %v", updateErr, closeErr)
+	}
+}
+
+func deleteScopedChildSlot(t *testing.T, path string) {
+	t.Helper()
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatalf("open account db: %v", err)
+	}
+	updateErr := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucket).Delete(slotKey)
+	})
+	closeErr := db.Close()
+	if updateErr != nil || closeErr != nil {
+		t.Fatalf("delete account slot: %v / %v", updateErr, closeErr)
+	}
+}
+
+func makeScopedChildDBUnreadable(t *testing.T, path string) {
+	t.Helper()
+	moved := path + ".moved"
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatalf("move account db: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Rename(moved, path) })
+}
+
+func expireScopedParentIdle(t *testing.T, s *Session) {
+	t.Helper()
+	s.mu.Lock()
+	s.last = time.Now()
+	s.mu.Unlock()
+	if err := s.SetIdleTimeout(5 * time.Second); err != nil {
+		t.Fatalf("SetIdleTimeout: %v", err)
+	}
+	s.mu.Lock()
+	s.last = time.Now().Add(-6 * time.Second)
+	s.mu.Unlock()
+}
+
+func installScopedParentCloseFault(t *testing.T, failOn int32) *atomic.Int32 {
+	t.Helper()
+	var calls atomic.Int32
+	vaultFileParentCheckCloseFault = func() error {
+		if calls.Add(1) == failOn {
+			return errors.New("injected parent-check close failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { vaultFileParentCheckCloseFault = nil })
+	return &calls
+}
+
+func TestVaultFileChildReadRechecksParentAuthority(t *testing.T) {
+	checkDrained := func(t *testing.T, fx *scopedChildFixture, handleA, handleB *vaultfile.ScopedUnlock) {
+		t.Helper()
+		if fx.registryLen() != 0 || fx.session.Unlocked() {
+			t.Fatal("parent failure did not drain all children")
+		}
+		assertScopedChildHandleClosed(t, handleA)
+		assertScopedChildHandleClosed(t, handleB)
+	}
+
+	t.Run("slot-change", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		replaceScopedChildSlot(t, fx.session.path, []byte("not-a-slot"))
+		items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{})
+		if !errors.Is(err, ErrSessionLocked) || items != nil {
+			t.Fatalf("A read after slot change = %v / %v", items, err)
+		}
+		checkDrained(t, fx, handleA, handleB)
+	})
+
+	t.Run("missing-slot", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		deleteScopedChildSlot(t, fx.session.path)
+		items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{})
+		if !errors.Is(err, ErrSessionLocked) || items != nil {
+			t.Fatalf("A read after missing slot = %v / %v", items, err)
+		}
+		checkDrained(t, fx, handleA, handleB)
+	})
+
+	t.Run("unreadable-db", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		makeScopedChildDBUnreadable(t, fx.session.path)
+		items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{})
+		if !errors.Is(err, ErrSessionLocked) || items != nil {
+			t.Fatalf("A read with unreadable account = %v / %v", items, err)
+		}
+		checkDrained(t, fx, handleA, handleB)
+	})
+
+	t.Run("lowered-idle", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		expireScopedParentIdle(t, fx.session)
+		items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{})
+		if !errors.Is(err, ErrSessionLocked) || items != nil {
+			t.Fatalf("A read after lowered idle = %v / %v", items, err)
+		}
+		checkDrained(t, fx, handleA, handleB)
+	})
+}
+
+func TestVaultFileChildLateReadRechecksParentAuthority(t *testing.T) {
+	run := func(t *testing.T, mutate func(*scopedChildFixture)) {
+		t.Helper()
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		vaultFileChildReadHook = func() {
+			close(entered)
+			<-release
+		}
+		t.Cleanup(func() { vaultFileChildReadHook = nil })
+
+		type readResult struct {
+			count int
+			err   error
+		}
+		result := make(chan readResult, 1)
+		go func() {
+			items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{IncludeItemIDs: true})
+			result <- readResult{count: len(items), err: err}
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("read did not reach the post-decrypt seam")
+		}
+		mutate(fx)
+		close(release)
+		select {
+		case got := <-result:
+			if got.err == nil || got.count != 0 || !errors.Is(got.err, ErrSessionLocked) {
+				t.Fatalf("late read = count=%d err=%v", got.count, got.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("late read did not return")
+		}
+		if fx.registryLen() != 0 || fx.session.Unlocked() {
+			t.Fatal("late parent failure did not drain all children")
+		}
+		assertScopedChildHandleClosed(t, handleA)
+		assertScopedChildHandleClosed(t, handleB)
+	}
+
+	t.Run("slot-after-decrypt", func(t *testing.T) {
+		run(t, func(fx *scopedChildFixture) {
+			replaceScopedChildSlot(t, fx.session.path, []byte("not-a-slot"))
+		})
+	})
+	t.Run("idle-after-decrypt", func(t *testing.T) {
+		run(t, func(fx *scopedChildFixture) {
+			expireScopedParentIdle(t, fx.session)
+		})
+	})
+}
+
+func TestVaultFileChildOpenRechecksSlotBeforeRegister(t *testing.T) {
+	fx := newScopedChildFixture(t)
+	if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+		t.Fatalf("open B: %v", err)
+	}
+	childB := fx.child(fx.b.journal)
+	vaultFileChildBeforeRegister = func() {
+		replaceScopedChildSlot(t, fx.session.path, []byte("not-a-slot"))
+	}
+	t.Cleanup(func() { vaultFileChildBeforeRegister = nil })
+
+	token, items, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+	if !errors.Is(err, ErrSessionLocked) || token != (VaultFileChildToken{}) || items != nil {
+		t.Fatalf("A open after slot replacement = token=%v items=%v err=%v", token != (VaultFileChildToken{}), items, err)
+	}
+	if fx.child(fx.a.journal) != nil || fx.registryLen() != 0 || fx.session.Unlocked() {
+		t.Fatal("slot replacement left a registered candidate")
+	}
+	assertScopedChildHandleClosed(t, childB.handle)
+}
+
+func TestVaultFileChildParentCheckCloseErrorDrains(t *testing.T) {
+	t.Run("read-final-close", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		tokenA, _, handleA, handleB := openScopedChildPair(t, fx)
+		installScopedParentCloseFault(t, 2)
+		items, err := fx.session.ReadVaultFileChild(tokenA, VaultFileChildOptions{IncludeItemIDs: true})
+		if !errors.Is(err, ErrSessionLocked) || items != nil {
+			t.Fatalf("read with final close fault = %v / %v", items, err)
+		}
+		if fx.registryLen() != 0 || fx.session.Unlocked() {
+			t.Fatal("close fault left registered children")
+		}
+		assertScopedChildHandleClosed(t, handleA)
+		assertScopedChildHandleClosed(t, handleB)
+	})
+
+	t.Run("open-register-close", func(t *testing.T) {
+		fx := newScopedChildFixture(t)
+		if _, _, err := fx.session.OpenVaultFileChild(fx.b.journal, fx.b.checkpoint, fx.password, fx.key, VaultFileChildOptions{}); err != nil {
+			t.Fatalf("open B: %v", err)
+		}
+		childB := fx.child(fx.b.journal)
+		installScopedParentCloseFault(t, 1)
+		token, items, err := fx.session.OpenVaultFileChild(fx.a.journal, fx.a.checkpoint, fx.password, fx.key, VaultFileChildOptions{})
+		if !errors.Is(err, ErrSessionLocked) || token != (VaultFileChildToken{}) || items != nil {
+			t.Fatalf("open with final close fault = token=%v items=%v err=%v", token != (VaultFileChildToken{}), items, err)
+		}
+		if fx.child(fx.a.journal) != nil || fx.registryLen() != 0 || fx.session.Unlocked() {
+			t.Fatal("close fault left a registered candidate")
+		}
+		assertScopedChildHandleClosed(t, childB.handle)
+	})
+}
+
 func TestVaultFileChildLifecycleAndTokenGeneration(t *testing.T) {
 	fx := newScopedChildFixture(t)
 	open := func(v scopedChildVault) (VaultFileChildToken, []VaultFileBaselineItem) {
