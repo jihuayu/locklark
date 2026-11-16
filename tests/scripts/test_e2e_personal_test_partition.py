@@ -39,10 +39,18 @@ class PersonalTestPartitionWorkflowContract(unittest.TestCase):
             "python scripts/personal_test_partition.py",
             "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
         ])
-        minimum = "go test -count=1 -run '^TestVaultFileResumeProductMinimum$' ./cmd/locklark"
-        remaining = "go test -count=1 -skip '^TestVaultFileResumeProductMinimum$' ./..."
-        # All packages/cases remain covered: exactly the minimum runs first,
-        # and only that same case is excluded from the following full suite.
+        minimum_parents = (
+            "TestVaultFileResumeProductMinimum",
+            "TestVaultFileStatusProductMinimum",
+            "TestVaultFileStatusProductAbsentBackendMinimum",
+            "TestVaultFileDevicePublicProductMinimum",
+            "TestVaultFileOpenBaselineProductMinimum",
+        )
+        selector = "^(" + "|".join(minimum_parents) + ")$"
+        minimum = f"go test -count=1 -run '{selector}' ./cmd/locklark"
+        remaining = f"go test -count=1 -skip '{selector}' ./..."
+        # All packages/cases remain covered: the five exact minimum parents run
+        # first, and only those parents are excluded from the following suite.
         self.assertEqual(
             [line.strip() for line in linux.splitlines() if line.strip().startswith("go test ")],
             [minimum, remaining],
