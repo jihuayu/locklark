@@ -61,7 +61,7 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		Journal: *journal, Archive: *archive}
 	initial := input.PersonalFile != "" || input.BackendRoot != "" || input.Name != "" || input.Journal != "" || input.Archive != ""
 	if initial {
-		if !validVaultFileCreateManifest(*config, input, false) {
+		if !validVaultFileCreateManifestPhase(*config, input, false, false) {
 			return errVaultFileConfig
 		}
 	}
@@ -76,6 +76,9 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		}
 	} else {
 		if !initial {
+			return errVaultFileLocalReview
+		}
+		if teamfiles.CheckNew(input.Journal) != nil {
 			return errVaultFileLocalReview
 		}
 		var selector [16]byte
@@ -162,12 +165,37 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	if err != nil || projection.VaultID != manifest.VaultID {
 		return errVaultFileVerification
 	}
+	status := `{"status":"BACKUP_REQUIRED"}`
+	if _, err := os.Lstat(manifest.Archive); os.IsNotExist(err) {
+		companionPath, pathErr := vaultFileCreateCompanionPath(*config)
+		if pathErr != nil {
+			return pathErr
+		}
+		if _, journalErr := os.Lstat(manifest.Journal); !os.IsNotExist(journalErr) {
+			return errVaultFileLocalReview
+		}
+		if _, companionErr := os.Lstat(companionPath); !os.IsNotExist(companionErr) {
+			return errVaultFileLocalReview
+		}
+	} else if err != nil {
+		return errVaultFileLocalReview
+	} else {
+		kit, err := c.field("备份恢复码")
+		if err != nil {
+			return errVaultFileCancelled
+		}
+		defer clear(kit)
+		if err := completeVaultFileCreate(*config, manifest, session, password, key, kit); err != nil {
+			return err
+		}
+		status = `{"status":"LOCAL_BASELINE","remote_freshness":"UNVERIFIED"}`
+	}
 	session.Lock()
 	restore()
 	if resetErr != nil {
 		return errVaultFileLocalUnknown
 	}
-	if _, err := fmt.Fprintln(out, `{"status":"BACKUP_REQUIRED"}`); err != nil {
+	if _, err := fmt.Fprintln(out, status); err != nil {
 		return errVaultFileLocalUnknown
 	}
 	return nil
@@ -185,14 +213,10 @@ func readVaultFileCreateManifest(path string) (vaultFileCreateManifest, bool, er
 		return manifest, true, err
 	}
 	defer clear(raw)
-	if teamfiles.JSON(raw, &manifest) != nil || !validVaultFileCreateManifest(path, manifest, true) {
+	if teamfiles.JSON(raw, &manifest) != nil || !validVaultFileCreateManifestPhase(path, manifest, true, false) {
 		return vaultFileCreateManifest{}, true, errVaultFileLocalReview
 	}
 	return manifest, true, nil
-}
-
-func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest, requireID bool) bool {
-	return validVaultFileCreateManifestPhase(path, manifest, requireID, true)
 }
 
 func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateManifest, requireID, journalMustBeNew bool) bool {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/teamfiles"
+	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
 func TestVaultFileCreateCompanionLiveIntentAndExclusiveRetry(t *testing.T) {
@@ -99,5 +100,25 @@ func TestVaultFileCreateCompanionLiveIntentAndExclusiveRetry(t *testing.T) {
 		t.Fatal("CREATE_COMPANION_READ_FAILED")
 	} else if _, _, err := decodeVaultFileResumeConfig(raw); err == nil {
 		t.Fatal("CREATE_COMPANION_ACCEPTED_AS_LEGACY_CONFIG")
+	}
+	j, err := vaultfilejournal.OpenExistingIntent(manifest.Journal)
+	if err != nil {
+		t.Fatal("CREATE_CLAIMED_MISSING_INTENT_OPEN_FAILED")
+	}
+	intent, err := j.Load()
+	if err != nil {
+		t.Fatal("CREATE_CLAIMED_MISSING_INTENT_LOAD_FAILED")
+	}
+	defer clear(intent.SealedBytes)
+	claim, claimErr := j.ClaimGenesisAttempt(intent)
+	if claimErr != nil || claim != vaultfilejournal.GenesisAttemptNewlyClaimed || j.Close() != nil {
+		t.Fatal("CREATE_CLAIMED_MISSING_CLAIM_FAILED")
+	}
+	if err := completeVaultFileCreate(config, manifest, session, password, key, kit); !errors.Is(err, errVaultFileUnknown) {
+		t.Fatal("CREATE_CLAIMED_MISSING_RECREATED_OR_PASSED")
+	}
+	objects, err := os.ReadDir(filepath.Join(manifest.BackendRoot, "vaultfile-backend", "v1", "data"))
+	if err != nil || len(objects) != 0 {
+		t.Fatal("CREATE_CLAIMED_MISSING_WROTE_OBJECT")
 	}
 }

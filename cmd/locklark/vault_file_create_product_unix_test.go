@@ -16,7 +16,7 @@ import (
 
 // The existing product-binary gate supplies one independently built CLI.
 // Python's stdlib owns the PTY; only a finite verdict returns to this test.
-func TestVaultFileCreatePrepareProductPTY(t *testing.T) {
+func runVaultFileCreateProductPTY(t *testing.T, mode string) {
 	product := vaultFileProductBinary(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -29,7 +29,8 @@ func TestVaultFileCreatePrepareProductPTY(t *testing.T) {
 	request, err := json.Marshal(struct {
 		Product string `json:"product"`
 		Root    string `json:"root"`
-	}{Product: product, Root: root})
+		Mode    string `json:"mode"`
+	}{Product: product, Root: root, Mode: mode})
 	if err != nil {
 		t.Fatal("CREATE_PREPARE_PTY_REQUEST_FAILED")
 	}
@@ -56,10 +57,17 @@ func TestVaultFileCreatePrepareProductPTY(t *testing.T) {
 		// enough to locate the broken product boundary.
 		switch result.Stage {
 		case "SETUP", "PERSONAL_INIT", "FIRST_CREATE", "PRIVATE_MANIFEST", "EXACT_RETRY",
-			"BAD_FACTOR", "LEGACY_CONFIG", "UNSAFE_PARENT", "UNEXPECTED_PUBLICATION", "HARNESS_ERROR":
+			"BAD_FACTOR", "LEGACY_CONFIG", "UNSAFE_PARENT", "UNEXPECTED_PUBLICATION", "HARNESS_ERROR",
+			"BACKUP_PUBLISH", "GENESIS_PUBLISH", "COMPANION", "COMPANION_SECRET", "ACK_RESTART",
+			"STATUS_ADAPTER", "OPEN_BASELINE_ADAPTER", "WRONG_KIT", "BACKEND_OBJECT",
+			"FOREIGN_PREPARE", "FOREIGN_BACKUP", "FOREIGN_COLLISION":
 			t.Fatalf("CREATE_PREPARE_PRODUCT_%s", result.Stage)
 		default:
 			t.Fatal("CREATE_PREPARE_PTY_VERDICT_INVALID")
 		}
 	}
 }
+
+func TestVaultFileCreatePrepareProductPTY(t *testing.T) { runVaultFileCreateProductPTY(t, "prepare") }
+
+func TestVaultFileCreatePublishProductPTY(t *testing.T) { runVaultFileCreateProductPTY(t, "publish") }
