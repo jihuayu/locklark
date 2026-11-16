@@ -1,6 +1,7 @@
 """Exercise the real create-preparation CLI on owned PTYs; emit finite verdicts only."""
 
 import errno
+import hashlib
 import json
 import os
 import pathlib
@@ -17,7 +18,9 @@ MASTER = "主密码: ".encode()
 MASTER_AGAIN = "再次输入主密码: ".encode()
 SECRET = b"Secret Key: "
 ISSUED_KEY = re.compile(rb"LL1-[A-Z2-7]{26}")
+ISSUED_KIT = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 BACKUP_REQUIRED = b'"status":"BACKUP_REQUIRED"'
+LOCAL_BASELINE = b'"status":"LOCAL_BASELINE"'
 
 
 def verdict(stage):
@@ -90,7 +93,12 @@ def capture_key(match, values):
     return values["key"]
 
 
-def check(product, root):
+def capture_kit(match, values):
+    values["kit"] = match.group(0).decode("ascii")
+    return values["kit"]
+
+
+def check(product, root, mode):
     root = pathlib.Path(root)
     if not os.path.isabs(product) or not root.is_absolute() or root.stat().st_mode & 0o077:
         return "SETUP"
@@ -163,13 +171,76 @@ def check(product, root):
         return "UNSAFE_PARENT"
     if pathlib.Path(journal).exists() or pathlib.Path(backend).exists() or pathlib.Path(archive).exists():
         return "UNEXPECTED_PUBLICATION"
+    if mode == "prepare":
+        return "PASS"
+    if mode != "publish":
+        return "SETUP"
+
+    code, output, values = run_pty(product, ["personal", "backup", "--file", personal,
+                                              "--out", archive],
+                                   [(MASTER, password), (SECRET, key), (ISSUED_KIT, capture_kit)])
+    if code != 0 or b'"status":"backed-up"' not in output or not pathlib.Path(archive).is_file():
+        return "BACKUP_PUBLISH"
+    kit = values["kit"]
+    code, output, _ = run_pty(product, ["vault-file", "create", "--config", config],
+                              [(MASTER, password), (SECRET, key), ("备份恢复码: ".encode(), kit)])
+    if (code != 0 or LOCAL_BASELINE not in output or b'"remote_freshness":"UNVERIFIED"' not in output or
+            password.encode() in output or key.encode() in output or kit.encode() in output or
+            not pathlib.Path(journal).is_file() or not pathlib.Path(backend).is_dir()):
+        return "GENESIS_PUBLISH"
+    companion = pathlib.Path(config + ".baseline")
+    if not companion.is_file() or companion.stat().st_mode & 0o777 != 0o600:
+        return "COMPANION"
+    companion_bytes = companion.read_bytes()
+    if key.encode() in companion_bytes or kit.encode() in companion_bytes or password.encode() in companion_bytes:
+        return "COMPANION_SECRET"
+    code, output, _ = run_pty(product, ["vault-file", "create", "--config", config],
+                              [(MASTER, password), (SECRET, key), ("备份恢复码: ".encode(), kit)])
+    if code != 0 or LOCAL_BASELINE not in output or companion.read_bytes() != companion_bytes:
+        return "ACK_RESTART"
+    result = subprocess.run([product, "vault-file", "status", "--config", config],
+                            capture_output=True, timeout=10)
+    if result.returncode != 0 or b'"status":"CLEAN"' not in result.stdout or b'"remote_freshness":"UNVERIFIED"' not in result.stdout:
+        return "STATUS_ADAPTER"
+    code, output, _ = run_pty(product, ["vault-file", "open-baseline", "--config", config],
+                              [(MASTER, password), (SECRET, key)])
+    if code != 0 or LOCAL_BASELINE not in output or b'"remote_freshness":"UNVERIFIED"' not in output:
+        return "OPEN_BASELINE_ADAPTER"
+    code, output, _ = run_pty(product, ["vault-file", "create", "--config", config],
+                              [(MASTER, password), (SECRET, key), ("备份恢复码: ".encode(), "wrong-kit")])
+    if code == 0 or b"VERIFY_REJECTED" not in output or companion.read_bytes() != companion_bytes:
+        return "WRONG_KIT"
+    object_path = pathlib.Path(backend) / "vaultfile-backend" / "v1" / "data" / hashlib.sha256(b"owned-g").hexdigest()
+    if not object_path.is_file():
+        return "BACKEND_OBJECT"
+    original_object = object_path.read_bytes()
+    second_config = str(root / "config" / "second.json")
+    second_journal = str(root / "journal" / "second.journal")
+    second_archive = str(root / "archive" / "second.llb")
+    second_args = ["vault-file", "create", "--config", second_config, "--personal-file", personal,
+                   "--backend-root", backend, "--name", "owned-g", "--journal", second_journal,
+                   "--archive", second_archive]
+    code, output, _ = run_pty(product, second_args, steps)
+    if code != 0 or BACKUP_REQUIRED not in output:
+        return "FOREIGN_PREPARE"
+    code, output, values = run_pty(product, ["personal", "backup", "--file", personal,
+                                              "--out", second_archive],
+                                   [(MASTER, password), (SECRET, key), (ISSUED_KIT, capture_kit)])
+    if code != 0 or b'"status":"backed-up"' not in output:
+        return "FOREIGN_BACKUP"
+    code, output, _ = run_pty(product, ["vault-file", "create", "--config", second_config],
+                              [(MASTER, password), (SECRET, key), ("备份恢复码: ".encode(), values["kit"])])
+    if (code == 0 or b"LOCAL_REVIEW" not in output or
+            not pathlib.Path(second_journal).is_file() or
+            object_path.read_bytes() != original_object):
+        return "FOREIGN_COLLISION"
     return "PASS"
 
 
 def main():
     try:
         request = json.load(sys.stdin)
-        verdict(check(request["product"], request["root"]))
+        verdict(check(request["product"], request["root"], request.get("mode", "prepare")))
     except (KeyError, OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
         verdict("HARNESS_ERROR")
 

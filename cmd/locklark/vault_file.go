@@ -35,12 +35,18 @@ const vaultFileUsage = `USAGE
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
-Create currently prepares only a private, durable VaultID and local owner and
-recovery custody. BACKUP_REQUIRED means run locklark personal backup --file
-ABS_PERSONAL --out ABS_FUTURE_BACKUP, confirm its recovery kit on the terminal,
-and keep both archive and kit safe. Create does not yet seal or publish G.
-The same manifest path and VaultID are reused on retry. It is not an ordinary
-resume config until a later publication step supplies a verified checkpoint.
+Create first prepares a private, durable VaultID and local owner and recovery
+custody. BACKUP_REQUIRED means run locklark personal backup --file ABS_PERSONAL
+--out ABS_FUTURE_BACKUP, confirm its recovery kit on the terminal, and keep
+both archive and kit safe. Run create again with the same config path and enter
+the kit on the controlling terminal. Create persists one exact G and immutable
+local companion before any backend Create, then uses the Dir backend's
+claim/readback/Ack path. LOCAL_BASELINE reports a verified local genesis base
+with remote_freshness UNVERIFIED, not a current grant or remote head. Status and
+open-baseline accept the original create config after that local Ack.
+Create reserves config plus ".baseline" and the backend namespace. It rejects
+paths differing only by case or canonical Unicode (NFC) normalization, even
+on filesystems where those spellings are distinct.
 
 Status reads only the existing configured local journal's contents and prints
 exactly one of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW
@@ -206,10 +212,22 @@ func runVaultFile(args []string, out io.Writer) error {
 	}
 	defer clear(raw)
 	cfg, pin, err := decodeVaultFileResumeConfig(raw)
+	fromCreate := false
+	if err != nil && (args[0] == "status" || args[0] == "open-baseline") {
+		cfg, pin, err = resumeConfigFromCreateManifest(*configPath)
+		fromCreate = err == nil
+	}
 	if err != nil {
 		return errVaultFileConfig
 	}
 	paths := []string{*configPath, cfg.Journal}
+	if fromCreate {
+		companionPath, err := vaultFileCreateCompanionPath(*configPath)
+		if err != nil {
+			return errVaultFileConfig
+		}
+		paths = append(paths, companionPath)
+	}
 	if cfg.PersonalFile != "" {
 		paths = append(paths, cfg.PersonalFile)
 	}

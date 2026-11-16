@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"golang.org/x/term"
+	"golang.org/x/text/unicode/norm"
 )
 
 // This provisional manifest is deliberately distinct from the v1 resume
@@ -61,7 +63,7 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		Journal: *journal, Archive: *archive}
 	initial := input.PersonalFile != "" || input.BackendRoot != "" || input.Name != "" || input.Journal != "" || input.Archive != ""
 	if initial {
-		if !validVaultFileCreateManifest(*config, input, false) {
+		if !validVaultFileCreateManifestPhase(*config, input, false, false) {
 			return errVaultFileConfig
 		}
 	}
@@ -76,6 +78,9 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		}
 	} else {
 		if !initial {
+			return errVaultFileLocalReview
+		}
+		if teamfiles.CheckNew(input.Journal) != nil {
 			return errVaultFileLocalReview
 		}
 		var selector [16]byte
@@ -162,12 +167,37 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	if err != nil || projection.VaultID != manifest.VaultID {
 		return errVaultFileVerification
 	}
+	status := `{"status":"BACKUP_REQUIRED"}`
+	if _, err := os.Lstat(manifest.Archive); os.IsNotExist(err) {
+		companionPath, pathErr := vaultFileCreateCompanionPath(*config)
+		if pathErr != nil {
+			return pathErr
+		}
+		if _, journalErr := os.Lstat(manifest.Journal); !os.IsNotExist(journalErr) {
+			return errVaultFileLocalReview
+		}
+		if _, companionErr := os.Lstat(companionPath); !os.IsNotExist(companionErr) {
+			return errVaultFileLocalReview
+		}
+	} else if err != nil {
+		return errVaultFileLocalReview
+	} else {
+		kit, err := c.field("备份恢复码")
+		if err != nil {
+			return errVaultFileCancelled
+		}
+		defer clear(kit)
+		if err := completeVaultFileCreate(*config, manifest, session, password, key, kit); err != nil {
+			return err
+		}
+		status = `{"status":"LOCAL_BASELINE","remote_freshness":"UNVERIFIED"}`
+	}
 	session.Lock()
 	restore()
 	if resetErr != nil {
 		return errVaultFileLocalUnknown
 	}
-	if _, err := fmt.Fprintln(out, `{"status":"BACKUP_REQUIRED"}`); err != nil {
+	if _, err := fmt.Fprintln(out, status); err != nil {
 		return errVaultFileLocalUnknown
 	}
 	return nil
@@ -185,19 +215,24 @@ func readVaultFileCreateManifest(path string) (vaultFileCreateManifest, bool, er
 		return manifest, true, err
 	}
 	defer clear(raw)
-	if teamfiles.JSON(raw, &manifest) != nil || !validVaultFileCreateManifest(path, manifest, true) {
+	if teamfiles.JSON(raw, &manifest) != nil || !validVaultFileCreateManifestPhase(path, manifest, true, false) {
 		return vaultFileCreateManifest{}, true, errVaultFileLocalReview
 	}
 	return manifest, true, nil
 }
 
-func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest, requireID bool) bool {
+func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateManifest, requireID, journalMustBeNew bool) bool {
+	companionPath, err := vaultFileCreateCompanionPath(path)
+	if err != nil {
+		return false
+	}
 	if manifest.Version != 1 || manifest.Kind != vaultFileCreateKind ||
 		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
 		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
-		!teamfiles.Distinct(path, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
+		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) ||
+		!vaultFileCreateNormalizedSeparate(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
 	}
 	if requireID {
@@ -212,11 +247,48 @@ func validVaultFileCreateManifest(path string, manifest vaultFileCreateManifest,
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
 		return false
 	}
-	if separateVaultFileStatusState(manifest.BackendRoot, path, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
+	if separateVaultFileStatusState(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
 		return false
 	}
-	if teamfiles.CheckNew(manifest.Journal) != nil {
+	if journalMustBeNew && teamfiles.CheckNew(manifest.Journal) != nil {
 		return false
+	}
+	return true
+}
+
+// Missing leaves cannot be compared with os.SameFile. Reserve case-only and
+// canonically equivalent Unicode names on every filesystem, after resolving
+// each existing parent. This also reserves the backend namespace before its
+// first directory exists.
+func vaultFileCreateNormalizedSeparate(backendRoot string, paths ...string) bool {
+	canonical := make([]string, 0, len(paths))
+	for _, path := range paths {
+		resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path))
+		if err != nil {
+			return false
+		}
+		leaf := norm.NFC.String(filepath.Join(resolvedParent, filepath.Base(path)))
+		for _, prior := range canonical {
+			if strings.EqualFold(leaf, prior) {
+				return false
+			}
+		}
+		canonical = append(canonical, leaf)
+	}
+	resolvedRootParent, err := filepath.EvalSymlinks(filepath.Dir(backendRoot))
+	if err != nil {
+		return false
+	}
+	namespace := norm.NFC.String(filepath.Join(resolvedRootParent, filepath.Base(backendRoot), "vaultfile-backend"))
+	for _, leaf := range canonical {
+		for ancestor := leaf; ; ancestor = filepath.Dir(ancestor) {
+			if strings.EqualFold(ancestor, namespace) {
+				return false
+			}
+			if ancestor == filepath.Dir(ancestor) {
+				break
+			}
+		}
 	}
 	return true
 }
