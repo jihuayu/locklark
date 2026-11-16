@@ -28,6 +28,9 @@ func (a *App) onevraHeaderLeading(c *ui.Context) {
 		label := "本地金库"
 		if a.session != nil {
 			label = a.onevraVaultLabel()
+			if a.localVaultFiles.selected != "" {
+				label = a.localVaultFileLabel()
+			}
 		}
 		oneui.Text(c, label).FontSize(t.Rem(.875)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 	})
@@ -93,6 +96,10 @@ func (a *App) onevraVaultView(c *ui.Context) {
 		outer := oneui.Split(c, &a.onevra.sidebarWidth, func() {
 			a.onevraSidebarView(c)
 		}, func() {
+			if a.localVaultFiles.selected != "" {
+				a.onevraLocalVaultFileView(c)
+				return
+			}
 			inner := oneui.Split(c, &a.onevra.listWidth, func() {
 				a.onevraListView(c)
 			}, func() {
@@ -226,8 +233,8 @@ func (a *App) onevraSidebarView(c *ui.Context) {
 	archivedCount, trashedCount := a.onevraSidebarStateCounts()
 	ui.Column(c).Fill().MinWidth(0).Background(t.Background.Mix(t.Text, .035)).
 		Padding(t.Space(2.5)).Gap(t.Space(2)).Children(func() {
-		// Top current-vault switcher
-		switcherBtn := oneui.Button(c, "当前："+a.onevraVaultLabel(), oneui.ButtonOutline).FillWidth()
+		// The logical-group switcher is separate from independent files below.
+		switcherBtn := oneui.Button(c, "整理分组："+a.onevraVaultLabel(), oneui.ButtonOutline).FillWidth()
 		oneui.MenuButton(c, switcherBtn, func(m *oneui.Menu) {
 			if m.Item("全部保险库").Chosen() {
 				a.SelectVault("all")
@@ -246,6 +253,7 @@ func (a *App) onevraSidebarView(c *ui.Context) {
 
 		oneui.ScrollView(c, oneui.ScrollViewOptions{}).Grow(1).Fill().Children(func() {
 			oneui.Sidebar(c).Children(func() {
+				a.onevraLocalVaultFileSidebar(c)
 				oneui.SidebarSection(c, "浏览", func() {
 					a.onevraSidebarItem(c, "全部", lucide.List(), a.v2.nav == navAllItems && a.v2.vaultID == "all", len(a.v2.rows), func() { a.navigate(navAllItems) })
 					a.onevraSidebarItem(c, "收藏", lucide.Star(), a.v2.nav == navFavorites, a.onevraFavoriteCount(), func() { a.navigate(navFavorites) })
@@ -325,6 +333,7 @@ func (a *App) onevraSidebarItem(c *ui.Context, label string, icon *ui.SVG, selec
 	)
 	item.Key("onevra-nav:" + label)
 	if item.Clicked() {
+		a.closeLocalVaultFileView()
 		action()
 	}
 }
