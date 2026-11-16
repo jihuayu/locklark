@@ -25,6 +25,8 @@ import (
 )
 
 const vaultFileUsage = `USAGE
+  locklark vault-file create --config ABS_NEW_MANIFEST --personal-file ABS_PERSONAL --backend-root ABS_DIR --name NAME --journal ABS_JOURNAL --archive ABS_FUTURE_BACKUP
+  locklark vault-file create --config ABS_EXISTING_MANIFEST
   locklark vault-file track-existing --config ABS_CONFIG
   locklark vault-file status --config ABS_CONFIG
   locklark vault-file open-baseline --config ABS_CONFIG
@@ -32,6 +34,13 @@ const vaultFileUsage = `USAGE
   locklark vault-file edit-prepared --config ABS_CONFIG --input ABS_PRIVATE_EDIT
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
+
+Create currently prepares only a private, durable VaultID and local owner and
+recovery custody. BACKUP_REQUIRED means run locklark personal backup --file
+ABS_PERSONAL --out ABS_FUTURE_BACKUP, confirm its recovery kit on the terminal,
+and keep both archive and kit safe. Create does not yet seal or publish G.
+The same manifest path and VaultID are reused on retry. It is not an ordinary
+resume config until a later publication step supplies a verified checkpoint.
 
 Status reads only the existing configured local journal's contents and prints
 exactly one of CLEAN, DIRTY, PREPARED or REVIEW with remote_freshness UNVERIFIED. REVIEW
@@ -152,6 +161,9 @@ func decodeVaultFileHex(value string) ([]byte, bool) {
 }
 
 func runVaultFile(args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "create" {
+		return runVaultFileCreate(args[1:], out)
+	}
 	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") ||
 		len(args) == 2 && (args[0] == "resume-prepared" || args[0] == "import-prepared" || args[0] == "edit-prepared" || args[0] == "track-existing" || args[0] == "status" || args[0] == "open-baseline") && (args[1] == "--help" || args[1] == "-h") {
 		if _, err := io.WriteString(out, vaultFileUsage); err != nil {
