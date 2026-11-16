@@ -65,6 +65,9 @@ type payload struct {
 	// with the existing signed manifest digest.
 	Vaults      []vault.VaultMeta  `json:",omitempty"`
 	Attachments []backupAttachment `json:",omitempty"`
+	// Appended for v2 compatibility: older archives omit this member and
+	// retain their exact signed manifest bytes.
+	VaultFileOwners []vaultFileOwnerRecord `json:",omitempty"`
 }
 
 func collectBackupAttachments(items []vault.Item) []backupAttachment {
@@ -80,8 +83,13 @@ func collectBackupAttachments(items []vault.Item) []backupAttachment {
 // checkPayloadBounds rejects oversized counts before any item- or
 // attachment-proportional work runs.
 func checkPayloadBounds(p *payload) error {
-	if p == nil || len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults || len(p.Chains) > maxChains {
+	if p == nil || len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults || len(p.Chains) > maxChains || len(p.VaultFileOwners) > maxVaultFileOwnerRecords {
 		return invalid
+	}
+	if len(p.VaultFileOwners) > 0 {
+		if _, err := vaultFileOwnersDigest(p.VaultFileOwners); err != nil {
+			return invalid
+		}
 	}
 	attachments := 0
 	seenIDs := make(map[string]struct{}, len(p.Items))
@@ -328,6 +336,9 @@ func encodeArchive(p payload, pw string, key, accountID []byte, kit string, priv
 	if e := verifyChains(p.Chains); e != nil {
 		return nil, e
 	}
+	if e := validateBackupVaultFileOwners(&p); e != nil {
+		return nil, e
+	}
 	proof, err := payloadProof(p)
 	if err != nil {
 		return nil, err
@@ -419,9 +430,16 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	}
 	var body signedBackup
 	if json.Unmarshal(plain, &body) != nil {
+		clearVaultFileOwners(body.Body.VaultFileOwners)
 		return nil, invalid
 	}
 	p := &body.Body
+	accepted := false
+	defer func() {
+		if !accepted {
+			clearVaultFileOwners(p.VaultFileOwners)
+		}
+	}()
 
 	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) {
 		return nil, invalid
@@ -430,6 +448,9 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, e
 	}
 	if e = verifyChains(p.Chains); e != nil {
+		return nil, e
+	}
+	if e = validateBackupVaultFileOwners(p); e != nil {
 		return nil, e
 	}
 	if e = validateRecoveredVaults(p.Vaults); e != nil {
@@ -449,6 +470,7 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	if e != nil || last.Events[len(last.Events)-1].Link != g || !ed25519.Verify(last.Public, proof, body.Signature) {
 		return nil, invalid
 	}
+	accepted = true
 	return p, nil
 }
 
@@ -491,6 +513,9 @@ func loadChains(b *bolt.Bucket, i identity, anchor string) ([]Chain, error) {
 	return chains, nil
 }
 func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
+	if validateBackupVaultFileOwners(p) != nil || len(p.VaultFileOwners) > 0 && p.Epoch >= ^uint64(0)-1 {
+		return invalid
+	}
 	a, e := auditCipher(i)
 	if e != nil {
 		return e
@@ -524,6 +549,28 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 	ev, e := appendLinked(b, i, tip, s, "vault.restore", "", "succeeded", "", anchor)
 	if e != nil {
 		return e
+	}
+	if len(p.VaultFileOwners) > 0 {
+		if e = saveVaultFileOwners(b, i, p.VaultFileOwners); e != nil {
+			return e
+		}
+		// This second snapshot advancement prevents deleting only the
+		// custody event and record while retaining a valid earlier tip.
+		s, e = seal(b, i, p.Epoch+2, p.Items)
+		if errors.Is(e, ErrSnapshotCapacity) {
+			return ErrArchiveLimit
+		}
+		if e != nil {
+			return e
+		}
+		digest, err := vaultFileOwnersDigest(p.VaultFileOwners)
+		if err != nil {
+			return err
+		}
+		ev, e = appendLinked(b, i, auditTipAfter(ev, s, anchor), s, vaultFileOwnerRestoreAction, "", "succeeded", "", digest)
+		if e != nil {
+			return e
+		}
 	}
 	for _, it := range p.Items {
 		if !idOK(it.ID) {
@@ -623,6 +670,12 @@ func PrepareRestore(src, dest, pw string, oldKey []byte, kit string) (*Restorati
 	if e != nil {
 		return nil, e
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			clearVaultFileOwners(p.VaultFileOwners)
+		}
+	}()
 	if _, e = os.Lstat(dest); e == nil {
 		return nil, os.ErrExist
 	} else if !os.IsNotExist(e) {
@@ -640,6 +693,7 @@ func PrepareRestore(src, dest, pw string, oldKey []byte, kit string) (*Restorati
 	if removeErr != nil {
 		return nil, removeErr
 	}
+	keep = true
 	return &Restoration{dest, pw, bytes.Clone(oldKey), p}, nil
 }
 
@@ -652,6 +706,9 @@ func (r *Restoration) Publish(newKey []byte) error {
 
 func (r *Restoration) Close() {
 	clear(r.oldKey)
+	if r.p != nil {
+		clearVaultFileOwners(r.p.VaultFileOwners)
+	}
 	r.oldKey, r.p, r.pw = nil, nil, ""
 }
 func ArchivedAudit(path, pw string, key []byte) ([]Chain, error) {

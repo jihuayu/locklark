@@ -528,10 +528,10 @@ func authenticateStateItems(tx *bolt.Tx, pw string, key []byte, action string, u
 	if events == nil {
 		return nil, invalid
 	}
-	wantRows := action == "audit.list" || action == "backup.prepare" || passkeyTransferAction(action) || action == passkeyTransferItemAction
+	wantRows := action == "audit.list" || action == "backup.prepare" || action == vaultFileOwnerPrepareAction || action == vaultFileOwnerListAction || passkeyTransferAction(action) || action == passkeyTransferItemAction
 	// Transfer decisions derive one-use/revoke authority only from the complete
 	// authenticated current chain. Other actions keep the warm-prefix fast path.
-	forceCold := action == "audit.list" || action == "audit.archived" || action == "backup.prepare" || passkeyTransferAction(action) || action == passkeyTransferExportAction || action == passkeyTransferItemAction
+	forceCold := action == "audit.list" || action == "audit.archived" || action == "backup.prepare" || action == vaultFileOwnerPrepareAction || action == vaultFileOwnerListAction || passkeyTransferAction(action) || action == passkeyTransferExportAction || action == passkeyTransferItemAction
 	var rows []Event
 	var full [32]byte
 	var hashed uint64
@@ -1872,8 +1872,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if action == "backup.prepare" {
 			auditPriv := ed25519.NewKeyFromSeed(i.Audit)
 			defer clear(auditPriv)
+			owners, ownerErr := loadVaultFileOwners(b, i, rows)
+			if ownerErr != nil {
+				return ownerErr
+			}
+			defer clearVaultFileOwners(owners)
 			chains = append(chains, Chain{auditPriv.Public().(ed25519.PublicKey), append(rows, ev)})
-			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains, Vaults: vaults, Attachments: collectBackupAttachments(items)}
+			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains, Vaults: vaults, Attachments: collectBackupAttachments(items), VaultFileOwners: owners}
 			out.archive, e = encodeArchive(p, pw, key, slot.Account, option.backup, auditPriv)
 			return e
 		}
