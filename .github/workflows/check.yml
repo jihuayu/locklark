@@ -487,7 +487,7 @@ jobs:
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs scripts/test_browser_rotation_site.mjs
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -699,7 +699,7 @@ jobs:
         if: ${{ matrix.browser == 'chromium' }}
         timeout-minutes: 15
         run: |
-          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' env LOCKLARK_TEST_BROWSER_ROTATION=1 node scripts/browser_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py chromium
           # The route checkpoint is a separate mode that refuses the step-level
           # popup-vault override, so clear only that override for this run.

@@ -69,13 +69,31 @@ func consistentVaultCopy(source, destination string) (string, error) {
 }
 
 func containsCanary(raw []byte, f fixture, includeOrigin bool) bool {
-	values := []string{f.Password, f.Secret, f.Username, f.Value, f.SaveUsername, f.SaveValue, f.UpdateUsername, f.UpdateValue, f.RejectedUsername, f.RejectedValue, f.OTPSeed, f.OTPURI}
+	values := []string{f.Password, f.Secret, f.Username, f.Value, f.SaveUsername, f.SaveValue, f.UpdateUsername, f.UpdateValue, f.RotationValue, f.RejectedUsername, f.RejectedValue, f.OTPSeed, f.OTPURI}
 	if includeOrigin {
 		values = append(values, f.Origin)
 	}
 	for _, value := range values {
 		if value != "" && bytes.Contains(raw, []byte(value)) {
 			return true
+		}
+	}
+	if f.RotationValue != "" {
+		// Audit JSON may escape quotes, backslashes, and HTML characters.
+		// Match the interior too: a credential embedded in another string
+		// must be refused even when the complete quoted literal is absent.
+		encoded, err := json.Marshal(f.RotationValue)
+		if err == nil && len(encoded) >= 2 && bytes.Contains(raw, encoded[1:len(encoded)-1]) {
+			return true
+		}
+		var unescaped bytes.Buffer
+		encoder := json.NewEncoder(&unescaped)
+		encoder.SetEscapeHTML(false)
+		if encoder.Encode(f.RotationValue) == nil {
+			literal := bytes.TrimSuffix(unescaped.Bytes(), []byte("\n"))
+			if len(literal) >= 2 && bytes.Contains(raw, literal[1:len(literal)-1]) {
+				return true
+			}
 		}
 	}
 	return false

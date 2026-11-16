@@ -22,6 +22,8 @@ type fixture struct {
 	OTPSeed, OTPURI                                        string
 	SaveUsername, SaveValue, UpdateUsername, UpdateValue   string
 	RejectedUsername, RejectedValue                        string
+	// Optional run-private canary, registered after real browser generation.
+	RotationValue string `json:",omitempty"`
 	// Optional synthetic credit card, present only with -checkout-card. The
 	// omitempty tags keep the default fixture JSON byte-identical.
 	CardID, CardRevision, CardTitle, CardNumber       string `json:",omitempty"`
