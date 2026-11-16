@@ -73,7 +73,9 @@ func (a *App) localVaultFileUnlockTargetFor(ref localVaultFileRef, parent *perso
 		scope:      scope,
 		parent:     parent,
 		generation: a.generation,
-		label:      ref.name,
+		// Display metadata only: reuse the same whole-list snapshot the sidebar
+		// and title consume. It never participates in identity or authority.
+		label: a.localVaultFileDisplayLabelFor(ref),
 	}, true
 }
 

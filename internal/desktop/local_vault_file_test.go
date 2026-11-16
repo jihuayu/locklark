@@ -90,7 +90,7 @@ func TestDesktopIndependentFileDuplicateReviewRowsKeepSelectionSeparate(t *testi
 		c.SetTheme(theme.Onevra(c))
 		oneui.Sidebar(c).Children(func() { a.onevraLocalVaultFileSidebar(c) })
 	}, 480, 500)
-	if err := tester.Click("待核查文件"); err != nil || a.localVaultFiles.selected != first.path {
+	if err := tester.Click("待核查文件 #1"); err != nil || a.localVaultFiles.selected != first.path {
 		t.Fatal("LOCAL_NAV_FIRST_REVIEW_ROW_NOT_SELECTED")
 	}
 	tester.Key(0, ui.KeyTab)

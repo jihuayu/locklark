@@ -1,10 +1,8 @@
 package desktop
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +14,13 @@ import (
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
+)
+
+const (
+	localVaultFileStatusReview      = "本地文件库待核查"
+	localVaultFileStatusLocked      = "本地文件库尚未解锁"
+	localVaultFileStatusUnavailable = "本地文件库暂不可用；请稍后核查"
+	localVaultFileStatusReady       = "已验证本地初始版本 · 远端状态未核实"
 )
 
 // Local refs are navigation hints only. They never supply a policy checkpoint.
@@ -30,10 +35,13 @@ type localVaultFileState struct {
 	selected     string
 	items        []personal.VaultFileBaselineItem
 	status       string
-	loading      bool
-	sequence     uint64
 	listSequence uint64
-	cancel       context.CancelFunc
+	// displayLabelRefs and displayLabels are a private display-only snapshot.
+	// They are recomputed from the exact current refs whenever list metadata
+	// differs, including when tests assign refs directly. The snapshot is never
+	// an identity, route, grant or authority key.
+	displayLabelRefs []localVaultFileRef
+	displayLabels    []localVaultFileDisplayLabel
 
 	// Projection provenance for the local vault-file view. This is controller
 	// state only; the view layer renders the caption from it. viewSequence
@@ -143,65 +151,133 @@ func (a *App) closeLocalVaultFileView() {
 	// refresh delivery. The adopted child and its cache summary remain alive.
 	a.cancelLocalVaultFileRefreshView()
 	state := &a.localVaultFiles
-	state.sequence++
-	if state.cancel != nil {
-		state.cancel()
-		state.cancel = nil
-	}
-	state.selected, state.items, state.loading, state.status = "", nil, false, ""
+	state.selected, state.items, state.status = "", nil, ""
 }
 
+// localVaultFileNavigationScope resolves one navigation ref through the
+// existing full-scope helper and requires the captured journal hint and a
+// canonical path inside this workspace. It reads no manifest and touches no
+// wrapper.
+func (a *App) localVaultFileNavigationScope(ref localVaultFileRef) (localVaultFileSessionScope, bool) {
+	scope, ok := a.localVaultFileSessionScopeFor(ref)
+	if !ok || scope.configPath != ref.path || scope.vaultID == "" ||
+		scope.backendRoot == "" || scope.journalPath == "" ||
+		!filepath.IsAbs(ref.path) || filepath.Clean(ref.path) != ref.path {
+		return localVaultFileSessionScope{}, false
+	}
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
+	if backendRoot != scope.backendRoot || filepath.Dir(ref.path) != profileDir {
+		return localVaultFileSessionScope{}, false
+	}
+	return scope, true
+}
+
+// selectLocalVaultFile is pure navigation over the existing C1 scope/cache
+// boundary. It never calls the legacy baseline opener, the wrapper's Summary or
+// any factory/factor/unwrap path. Only the bounded cache projection of an
+// already adopted child is delivered; a missing child gives finite controller
+// feedback and waits for the future explicit unlock action.
 func (a *App) selectLocalVaultFile(ref localVaultFileRef) {
 	if a.session == nil || !a.session.Unlocked() {
 		return
 	}
 	a.closeLocalVaultFileView()
 	state := &a.localVaultFiles
-	if ref.vaultID == "" {
-		state.selected, state.status = ref.path, "本地文件库待核查"
+	state.selected = ref.path
+	switch a.syncLocalVaultFileSessions() {
+	case personal.VaultFileCacheBusy:
+		// Withhold delivery but preserve every adopted sibling wrapper and its
+		// cache. A later explicit navigation can try again.
+		state.status = localVaultFileStatusUnavailable
+		return
+	case personal.VaultFileCacheActive:
+		// Continue below.
+	default:
+		// Revoked already ran the established C1 clear through sync.
+		state.status = localVaultFileStatusReview
 		return
 	}
-	state.selected, state.loading = ref.path, true
-	state.status = "正在验证本地初始版本"
-	state.sequence++
-	sequence, generation, session := state.sequence, a.generation, a.session
-	_, backendRoot := localVaultFilePaths(a.settingsPath, session.VaultPath())
-	ctx, cancel := context.WithCancel(context.Background())
-	state.cancel = cancel
-	a.launch(func() {
-		result, err := vaultfileclient.OpenLocalGenesisBaseline(session, ref.path, backendRoot, ref.vaultID)
-		a.dispatch(func() {
-			defer cancel()
-			if ctx.Err() != nil || a.generation != generation || a.session != session ||
-				a.localVaultFiles.sequence != sequence || a.localVaultFiles.selected != ref.path {
-				return
-			}
-			state := &a.localVaultFiles
-			state.cancel, state.loading = nil, false
-			if err != nil || result.VaultID != ref.vaultID {
-				state.items = nil
-				if errors.Is(err, personal.ErrVaultFileFullFactorRequired) {
-					state.status = "需要完整解锁账户后打开此库"
-				} else {
-					state.status = "本地文件库待核查"
-				}
-			} else {
-				state.items = result.Items
-				state.status = "已验证本地初始版本 · 远端状态未核实"
-			}
-			if a.win != nil {
-				a.win.Invalidate()
-			}
-		})
-	})
+	scope, ok := a.localVaultFileNavigationScope(ref)
+	if !ok {
+		if a.syncLocalVaultFileSessions() == personal.VaultFileCacheBusy {
+			state.status = localVaultFileStatusUnavailable
+		} else {
+			state.status = localVaultFileStatusReview
+		}
+		return
+	}
+	summary, ok := a.readLocalVaultFileSession(scope)
+	if !ok {
+		switch a.syncLocalVaultFileSessions() {
+		case personal.VaultFileCacheBusy:
+			state.status = localVaultFileStatusUnavailable
+		case personal.VaultFileCacheActive:
+			state.status = localVaultFileStatusLocked
+		default:
+			state.status = localVaultFileStatusReview
+		}
+		return
+	}
+	if summary.VaultID != scope.vaultID {
+		clearLocalVaultFileSessionSummary(&summary)
+		state.status = localVaultFileStatusReview
+		return
+	}
+	state.items = summary.Items
+	state.status = localVaultFileStatusReady
+}
+
+// localVaultFileDisplayLabelSnapshot returns one whole-list snapshot shared by
+// the sidebar, the selected title and future unlock-dialog display metadata.
+// The exact input refs are compared on every access so direct test assignment
+// and any metadata or list change refresh the entire group.
+func (a *App) localVaultFileDisplayLabelSnapshot() []localVaultFileDisplayLabel {
+	state := &a.localVaultFiles
+	if state.displayLabels != nil && localVaultFileRefsEqual(state.displayLabelRefs, state.refs) {
+		return state.displayLabels
+	}
+	state.displayLabelRefs = append([]localVaultFileRef(nil), state.refs...)
+	state.displayLabels = localVaultFileDisplayLabels(state.displayLabelRefs)
+	return state.displayLabels
+}
+
+func localVaultFileRefsEqual(a, b []localVaultFileRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// localVaultFileDisplayLabelFor retrieves the shared snapshot label for one
+// exact ref. The ref stays the route; the label is display metadata only.
+func (a *App) localVaultFileDisplayLabelFor(ref localVaultFileRef) string {
+	for _, entry := range a.localVaultFileDisplayLabelSnapshot() {
+		if entry.ref == ref {
+			return entry.label
+		}
+	}
+	return ref.name
 }
 
 func (a *App) onevraLocalVaultFileSidebar(c *ui.Context) {
 	oneui.SidebarSection(c, "独立文件库", func() {
-		for _, ref := range a.localVaultFiles.refs {
-			ref := ref
-			item := oneui.SidebarItemWithSlots(c, ref.name, a.localVaultFiles.selected == ref.path,
-				func(c *ui.Context, size float32) { oneui.Icon(c, lucide.Vault()).Size(size, size) }, nil)
+		for _, entry := range a.localVaultFileDisplayLabelSnapshot() {
+			ref, label := entry.ref, entry.label
+			name, suffix := localVaultFileSidebarLabelParts(ref, label)
+			item := oneui.SidebarItemWithContent(c, label, a.localVaultFiles.selected == ref.path,
+				func(c *ui.Context, size float32) { oneui.Icon(c, lucide.Vault()).Size(size, size) },
+				func(c *ui.Context) ui.Element { return oneui.Text(c, name).SingleLine() },
+				func(c *ui.Context, size float32) {
+					if suffix == "" {
+						return
+					}
+					oneui.Text(c, suffix).FontSize(c.Theme().Rem(.72)).TextColor(c.Theme().TextMuted).SingleLine()
+				})
 			pathHash := sha256.Sum256([]byte(ref.path))
 			item.Key("local-vault-file:" + hex.EncodeToString(pathHash[:]))
 			if item.Clicked() {
@@ -217,10 +293,28 @@ func (a *App) onevraLocalVaultFileSidebar(c *ui.Context) {
 	})
 }
 
+// localVaultFileSidebarLabelParts splits the reviewed helper output for layout
+// only. The accessible button label remains the exact whole helper string; the
+// suffix occupies the existing trailing slot so it stays visible when a long
+// name truncates. No formatter, ID or fallback rule is reimplemented here.
+func localVaultFileSidebarLabelParts(ref localVaultFileRef, label string) (name, suffix string) {
+	displayName := localVaultFileDisplayName(ref.name)
+	prefix := displayName + " · "
+	if strings.HasPrefix(label, prefix) {
+		return displayName, label[len(prefix):]
+	}
+	return label, ""
+}
+
 func (a *App) localVaultFileLabel() string {
-	for _, ref := range a.localVaultFiles.refs {
-		if ref.path == a.localVaultFiles.selected {
-			return "独立文件库：" + ref.name
+	if a.localVaultFiles.selected == "" {
+		return "独立文件库"
+	}
+	for _, entry := range a.localVaultFileDisplayLabelSnapshot() {
+		if entry.ref.path == a.localVaultFiles.selected {
+			// The reviewed helper string is the complete accessible title. No
+			// legacy "独立文件库：" prefix is added for a known ref.
+			return entry.label
 		}
 	}
 	return "独立文件库"
@@ -230,18 +324,19 @@ func (a *App) onevraLocalVaultFileView(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Fill().Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
 		oneui.Text(c, a.localVaultFiles.status).Bold()
+		if caption := a.localVaultFileRefreshCaption(); caption != "" {
+			oneui.Text(c, caption).TextColor(t.TextMuted)
+		}
 		if oneui.Button(c, "关闭本地基线视图", oneui.ButtonOutline).Clicked() {
 			a.closeLocalVaultFileView()
 		}
-		if !a.localVaultFiles.loading {
-			if a.localVaultFiles.status == "本地文件库待核查" && !a.localCreate.open {
-				if oneui.Button(c, "核查或继续创建", oneui.ButtonOutline).Clicked() {
-					a.openLocalVaultFileCreate(a.localVaultFiles.selected)
-				}
+		if a.localVaultFiles.status == localVaultFileStatusReview && !a.localCreate.open {
+			if oneui.Button(c, "核查或继续创建", oneui.ButtonOutline).Clicked() {
+				a.openLocalVaultFileCreate(a.localVaultFiles.selected)
 			}
-			for _, item := range a.localVaultFiles.items {
-				oneui.Text(c, item.Title).SingleLine()
-			}
+		}
+		for _, item := range a.localVaultFiles.items {
+			oneui.Text(c, item.Title).SingleLine()
 		}
 	})
 }
