@@ -93,7 +93,10 @@ internal fun descendantRectInScroll(scroll: ScrollView, target: View): Rect? {
  * are intersected (with [root]'s screen rect, so a parent clip is honoured
  * before the map), then the result is clamped to the ScrollView's padding box
  * [paddingLeft, paddingTop, width - paddingRight, height - paddingBottom],
- * which is the stable window scrollTo can address. getLocationOnScreen is
+ * which is the stable window scrollTo can address. Either intersection
+ * returning false (no overlap) yields an empty rect: Rect.intersect leaves its
+ * receiver untouched on no overlap, so without the check the old rect would be
+ * returned as if visible. getLocationOnScreen is
  * used for both rectangles and no global/content rect is mixed in. A
  * ScrollView that is not shown or attached has no local window, unless
  * [detached] allows deterministic detached fixtures (geometry checks only; the
@@ -105,12 +108,18 @@ internal fun safeLocalRect(scroll: ScrollView, safe: Rect, root: View, detached:
     val location = IntArray(2).also { scroll.getLocationOnScreen(it) }
     val origin = IntArray(2).also { root.getLocationOnScreen(it) }
     val visible = Rect(safe)
-    visible.intersect(Rect(origin[0], origin[1], origin[0] + root.width, origin[1] + root.height))
-    if (visible.isEmpty) return Rect()
-    return Rect(visible).apply { offset(-location[0], -location[1]) }.apply {
-        intersect(Rect(scroll.paddingLeft, scroll.paddingTop,
-            scroll.width - scroll.paddingRight, scroll.height - scroll.paddingBottom))
+    // Rect.intersect keeps the receiver unchanged and returns false when the
+    // rectangles do not overlap, so the return value, not isEmpty, decides.
+    if (!visible.intersect(Rect(origin[0], origin[1], origin[0] + root.width, origin[1] + root.height))) {
+        return Rect()
     }
+    if (visible.isEmpty) return Rect()
+    val local = Rect(visible).apply { offset(-location[0], -location[1]) }
+    if (!local.intersect(Rect(scroll.paddingLeft, scroll.paddingTop,
+            scroll.width - scroll.paddingRight, scroll.height - scroll.paddingBottom))) {
+        return Rect()
+    }
+    return local
 }
 
 /**
