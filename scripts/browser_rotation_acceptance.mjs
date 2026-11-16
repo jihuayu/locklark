@@ -40,16 +40,22 @@ export async function acceptBrowserRotation(driver) {
   };
   const emptyLogin = () => page.evaluate(() =>
     document.querySelector("#username").value === "" && document.querySelector("#password").value === "");
-  const exactCandidate = async (id, revision) => {
+  const exactCandidate = async (id, revision, updating = false) => {
+    if (updating) step("update-r0:observe-r0");
     const row = observe().rows.find((row) => row.id === id);
     assert(row?.revision === revision, "Rotation exact target revision changed");
     const selected = '#candidates [data-item-id="' + id + '"][data-item-revision="' + revision + '"]';
+    if (updating) step("update-r0:open-popup");
     const popup = await openPopup();
+    if (updating) step("update-r0:refresh-ready");
     await wait(async () => (await popup.disabled("#refresh")) === false, "Rotation matching unavailable");
+    if (updating) step("update-r0:refresh-click");
     await popup.click("#refresh");
+    if (updating) step("update-r0:row-ready");
     await wait(async () => (await popup.disabled("#refresh")) === false &&
       (await popup.count(selected + ' [data-action="fill"]')) === 1,
     "Rotation exact candidate unavailable");
+    if (updating) step("update-r0:manual-setting");
     assert((await popup.evaluate('document.querySelector("#auto-login").checked')) === false,
       "Rotation requires the existing manual login setting");
     return { popup, selected };
@@ -160,21 +166,27 @@ export async function acceptBrowserRotation(driver) {
       newAuthentication.authorized && newAuthentication.status === 200,
     "Rotation website must reject the old credential and accept the generated credential");
 
-    step("update-r0");
+    step("update-r0:baseline-observe");
     const beforeUpdate = observe();
-    const { popup: updatePopup, selected } = await exactCandidate(itemID, r0);
+    const { popup: updatePopup, selected } = await exactCandidate(itemID, r0, true);
+    step("update-r0:update-click");
     await updatePopup.click(selected + ' [data-action="update"]');
+    step("update-r0:native-wait");
     input([{ wait_label: "批准更新登录" }]);
+    step("update-r0:preapproval-unchanged");
     const pending = observe();
     assert(pending.snapshot_digest === beforeUpdate.snapshot_digest &&
       pending.save_events.length === beforeUpdate.save_events.length,
     "Rotation update changed state before native approval");
+    step("update-r0:native-approve");
     input([{ click_label: "批准更新登录" }]);
     let updated;
+    step("update-r0:save-event");
     await wait(() => {
       updated = observe();
       return updated.save_events.length === beforeUpdate.save_events.length + 1;
     }, "Rotation native update receipt missing");
+    step("update-r0:revision-audit");
     const updateEvent = updated.save_events.at(-1), r1 = updated.rows.find((row) => row.id === itemID)?.revision;
     assert(updated.rows.length === beforeUpdate.rows.length && r1 && r1 !== r0 &&
       updateEvent.action === "item.browser.save.update" && updateEvent.result === "succeeded" &&
@@ -205,6 +217,8 @@ export async function acceptBrowserRotation(driver) {
       basicAccepted: counts.basicAccepted, basicRejected: counts.basicRejected };
     completed = true;
     step("cleanup");
+  // Keep the last fixed phase through cleanup. The exception may contain a
+  // generated credential, so neither it nor its message/stack is retained.
   } catch { failed = true; }
   finally {
     try {
