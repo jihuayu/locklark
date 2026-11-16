@@ -70,7 +70,7 @@ func desktopWindowsBroadDirectory(t *testing.T, path string) string {
 }
 
 func TestDesktopWindowsPrivateReserveAndTwoIndependentRefs(t *testing.T) {
-	root := t.TempDir()
+	root := desktopPrivateTestRoot(t)
 	settingsDir := filepath.Join(root, "settings")
 	if err := teamfiles.EnsurePrivateWorkspace(settingsDir); err != nil {
 		t.Fatal("LOCAL_NAV_WINDOWS_PRIVATE_ROOT_FAILED")
@@ -121,7 +121,7 @@ func TestDesktopWindowsPrivateReserveAndTwoIndependentRefs(t *testing.T) {
 }
 
 func TestDesktopWindowsRejectsBroadExistingSettingsWithoutRewrite(t *testing.T) {
-	root := t.TempDir()
+	root := desktopPrivateTestRoot(t)
 	settingsDir := filepath.Join(root, "settings")
 	desktopWindowsBroadDirectory(t, settingsDir)
 	before := desktopWindowsSDDL(t, settingsDir)
@@ -138,7 +138,7 @@ func TestDesktopWindowsRejectsBroadExistingSettingsWithoutRewrite(t *testing.T) 
 }
 
 func TestDesktopWindowsRejectsBroadExistingProfileWithoutRewrite(t *testing.T) {
-	root := t.TempDir()
+	root := desktopPrivateTestRoot(t)
 	settingsDir := filepath.Join(root, "settings")
 	if err := teamfiles.EnsurePrivateWorkspace(settingsDir); err != nil {
 		t.Fatal("LOCAL_NAV_WINDOWS_PRIVATE_ROOT_FAILED")
@@ -165,7 +165,7 @@ func TestDesktopWindowsRejectsBroadExistingProfileWithoutRewrite(t *testing.T) {
 }
 
 func TestDesktopWindowsRejectsBroadExistingPersonalWithoutChange(t *testing.T) {
-	root := t.TempDir()
+	root := desktopPrivateTestRoot(t)
 	settingsDir := filepath.Join(root, "settings")
 	if err := teamfiles.EnsurePrivateWorkspace(settingsDir); err != nil {
 		t.Fatal("LOCAL_NAV_WINDOWS_PRIVATE_ROOT_FAILED")

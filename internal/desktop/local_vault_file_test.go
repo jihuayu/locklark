@@ -14,7 +14,7 @@ import (
 )
 
 func TestDesktopIndependentFileNavigationUsesOnePersonalAndWorkspace(t *testing.T) {
-	root := t.TempDir()
+	root := desktopPrivateTestRoot(t)
 	settingsDir := filepath.Join(root, "settings")
 	if err := teamfiles.EnsurePrivateWorkspace(settingsDir); err != nil {
 		t.Fatal("LOCAL_NAV_PRIVATE_ROOT_FAILED")
