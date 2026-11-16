@@ -133,6 +133,7 @@ type App struct {
 	// session boundary; settings are non-secret and survive lock.
 	v2              v2State
 	localVaultFiles localVaultFileState
+	localCreate     localVaultFileCreateState
 	v2Mode          bool
 	onevra          onevraUI
 	settings        Settings
@@ -464,6 +465,7 @@ func (a *App) lockStart() {
 func (a *App) Lock() {
 	// Revoke all session/broker authority before any other lock work.
 	a.lockStart()
+	a.cancelLocalVaultFileCreate()
 	a.closeLocalVaultFileView()
 	a.localVaultFiles.refs = nil
 	a.stopSSHAgent()

@@ -165,6 +165,9 @@ func (a *App) onevraLocalVaultFileSidebar(c *ui.Context) {
 		if oneui.Button(c, "刷新独立文件库", oneui.ButtonGhost).Clicked() {
 			a.refreshLocalVaultFiles()
 		}
+		if oneui.Button(c, "新建独立文件库", oneui.ButtonGhost).Clicked() {
+			a.openLocalVaultFileCreate("")
+		}
 	})
 }
 
@@ -185,6 +188,11 @@ func (a *App) onevraLocalVaultFileView(c *ui.Context) {
 			a.closeLocalVaultFileView()
 		}
 		if !a.localVaultFiles.loading {
+			if a.localVaultFiles.status == "本地文件库待核查" && !a.localCreate.open {
+				if oneui.Button(c, "核查或继续创建", oneui.ButtonOutline).Clicked() {
+					a.openLocalVaultFileCreate(a.localVaultFiles.selected)
+				}
+			}
 			for _, item := range a.localVaultFiles.items {
 				oneui.Text(c, item.Title).SingleLine()
 			}
