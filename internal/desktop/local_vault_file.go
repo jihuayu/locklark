@@ -42,6 +42,15 @@ type localVaultFileState struct {
 	// production factory result has been handed off and before dispatch. The
 	// worker captures it before launch; production leaves it nil.
 	sessionCandidateForTest func(*localVaultFileSessionOperation)
+	// sessionCandidateOpenPauseForTest and sessionCandidateClosePauseForTest
+	// are parameterless private seams, nil in production. The open pause runs
+	// at generic worker entry after the cancel check and before the real
+	// factory; the close pause runs immediately before the real cleanup Close
+	// of a candidate that never became an adopted slot. Both are captured
+	// before launch so the worker never reads mutable App state, and neither
+	// receives a factor, key, identity, VUK, handle or capability.
+	sessionCandidateOpenPauseForTest  func()
+	sessionCandidateClosePauseForTest func()
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {

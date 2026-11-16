@@ -322,6 +322,7 @@ func (a *App) localCreateComplete() {
 	state.child = childOp
 	dispatch := a.dispatch
 	hook := a.localVaultFiles.sessionCandidateForTest
+	closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
 	a.launch(func() {
 		defer clear(password)
 		defer clear(secret)
@@ -358,6 +359,15 @@ func (a *App) localCreateComplete() {
 			}
 		}
 		if !verified {
+			// The producer is done with every factor and kit buffer. Clear
+			// before marking and before the UI dispatch so neither can retain
+			// material or block settlement.
+			clear(password)
+			clear(secret)
+			clear(kit)
+			if childOp != nil {
+				childOp.markProcessingFinished()
+			}
 			dispatch(func() {
 				defer cancel()
 				a.finishLocalVaultFileCreateFailure(childOp, generation, session, sequence, ctx, err)
@@ -377,16 +387,25 @@ func (a *App) localCreateComplete() {
 					clear(key)
 					if openErr == nil {
 						result := localVaultFileSessionResult{candidate: candidate, summary: summary, outcome: localVaultFileSessionOutcomeOpened}
-						opened = a.stageLocalVaultFileSessionResult(childOp, result, hook)
+						opened = a.stageLocalVaultFileSessionResult(childOp, result, hook, closePause)
 					} else if candidate != nil {
 						clearLocalVaultFileSessionSummary(&summary)
-						_ = candidate.Close()
+						closeLocalVaultFileSessionCandidate(childOp, candidate, closePause)
 					}
 				}
 			}
 			if !opened {
-				a.stageLocalVaultFileSessionResult(childOp, localVaultFileSessionResult{outcome: localVaultFileSessionOutcomeFailed}, hook)
+				a.stageLocalVaultFileSessionResult(childOp, localVaultFileSessionResult{outcome: localVaultFileSessionOutcomeFailed}, hook, closePause)
 			}
+		}
+		// No path above may run after this point with live factor or kit
+		// material. Staging, if it happened, already registered the exact
+		// candidate, so marking cannot open a premature no-candidate window.
+		clear(password)
+		clear(secret)
+		clear(kit)
+		if childOp != nil {
+			childOp.markProcessingFinished()
 		}
 		dispatch(func() {
 			defer cancel()

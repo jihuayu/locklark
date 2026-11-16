@@ -496,6 +496,7 @@ func TestDesktopCreateCompleteAdoptsExactOwnedChild(t *testing.T) {
 	if childOp.finiteOutcome() != localVaultFileSessionOutcomeOpened {
 		t.Fatal("DESKTOP_CREATE_COMPLETE_OPERATION_NOT_OPENED")
 	}
+	waitLocalVaultSessionSettlement(t, childOp)
 	if f.app.localCreate.open || f.app.localCreate.phase != "done" ||
 		f.app.localCreate.status != "已验证本地初始版本 · 远端状态未核实" ||
 		f.app.localCreate.child != nil || f.app.localCreate.password != "" ||
@@ -573,6 +574,7 @@ func TestDesktopCreateCompleteChildOpenFailureIsCreatedUnopened(t *testing.T) {
 	if _, err := candidate.Summary(); err == nil {
 		t.Fatal("DESKTOP_CREATE_CHILD_FAILURE_CANDIDATE_READABLE")
 	}
+	waitLocalVaultSessionSettlement(t, childOp)
 	launches, dispatches := len(q.launches), len(q.dispatches)
 	f.app.localCreateComplete()
 	if len(q.launches) != launches || len(q.dispatches) != dispatches {
@@ -620,6 +622,7 @@ func TestDesktopCreateCancelAfterStagedCandidateClosesOwnedCandidate(t *testing.
 	if _, err := candidate.Summary(); err == nil {
 		t.Fatal("DESKTOP_CREATE_CANCEL_CANDIDATE_READABLE")
 	}
+	waitLocalVaultSessionSettlement(t, childOp)
 	slot := f.app.localVaultFiles.sessionSlots[scope]
 	if slot == nil || slot.operation != nil || slot.session != nil {
 		t.Fatal("DESKTOP_CREATE_CANCEL_RETAINED_CHILD")
@@ -652,6 +655,7 @@ func TestDesktopCreateCompleteWrongKitStaysProtocolState(t *testing.T) {
 	if childOp.finiteOutcome() != localVaultFileSessionOutcomeCancelled {
 		t.Fatal("DESKTOP_CREATE_WRONG_KIT_OPERATION_NOT_CANCELLED")
 	}
+	waitLocalVaultSessionSettlement(t, childOp)
 	slot := f.app.localVaultFiles.sessionSlots[scope]
 	if slot == nil || slot.operation != nil || slot.session != nil {
 		t.Fatal("DESKTOP_CREATE_WRONG_KIT_RETAINED_CHILD")

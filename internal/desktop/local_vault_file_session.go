@@ -57,6 +57,80 @@ type localVaultFileSessionOperation struct {
 	handoffResult   localVaultFileSessionResult
 	handoffTerminal bool
 	outcome         localVaultFileSessionOutcome
+
+	// processingFinished is set exactly once by the producer after its last
+	// cryptographic/material use and, when the factory succeeded, after the
+	// exact candidate has been staged. candidateOutstanding stays true while a
+	// real candidate is owned by the handoff or the serial dispatch path and
+	// has not been legally adopted or actually Closed. settled is closed once
+	// both conditions hold; taking the handoff, cancelling the context, a
+	// finite outcome, a worker return or a queued Close request never closes it
+	// by itself.
+	processingFinished   bool
+	candidateOutstanding bool
+	settled              bool
+	settledCh            chan struct{}
+}
+
+// markProcessingFinished records the producer's terminal state and settles only
+// when no real candidate remains outstanding. A successfully created candidate
+// must already have been staged, so there is no premature no-candidate window.
+func (op *localVaultFileSessionOperation) markProcessingFinished() {
+	if op == nil {
+		return
+	}
+	op.handoffMu.Lock()
+	op.processingFinished = true
+	op.trySettleLocked()
+	op.handoffMu.Unlock()
+}
+
+// markCandidateResolved releases the one real candidate after it was legally
+// adopted by the slot or after its actual Close returned. It must be called
+// outside the lock that guards any Close or IO.
+func (op *localVaultFileSessionOperation) markCandidateResolved() {
+	if op == nil {
+		return
+	}
+	op.handoffMu.Lock()
+	op.candidateOutstanding = false
+	op.trySettleLocked()
+	op.handoffMu.Unlock()
+}
+
+func (op *localVaultFileSessionOperation) trySettleLocked() {
+	if op.settled || !op.processingFinished || op.candidateOutstanding {
+		return
+	}
+	op.settled = true
+	close(op.settledCh)
+}
+
+// settledSignal returns the one-shot settlement channel. It is immutable after
+// reservation, so callers may wait without holding handoffMu.
+func (op *localVaultFileSessionOperation) settledSignal() <-chan struct{} {
+	if op == nil {
+		return nil
+	}
+	return op.settledCh
+}
+
+func (op *localVaultFileSessionOperation) isSettled() bool {
+	if op == nil {
+		return false
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	return op.settled
+}
+
+func (op *localVaultFileSessionOperation) processingDone() bool {
+	if op == nil {
+		return false
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	return op.processingFinished
 }
 
 // stage transfers ownership of result to the operation. It refuses after
@@ -73,6 +147,9 @@ func (op *localVaultFileSessionOperation) stage(result localVaultFileSessionResu
 	}
 	op.handoffResult = result
 	op.handoffReady = true
+	if result.candidate != nil {
+		op.candidateOutstanding = true
+	}
 	return true
 }
 
@@ -259,6 +336,7 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		scope:      scope,
 		ctx:        ctx,
 		cancel:     cancel,
+		settledCh:  make(chan struct{}),
 	}
 	slot.operation = op
 	return op
@@ -275,11 +353,20 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 	ownedKey := append([]byte(nil), key...)
 	dispatch := a.dispatch
 	hook := a.localVaultFiles.sessionCandidateForTest
+	openPause := a.localVaultFiles.sessionCandidateOpenPauseForTest
+	closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
 	a.launch(func() {
 		defer clear(ownedPassword)
 		defer clear(ownedKey)
 		if op.ctx.Err() != nil {
+			// No factory ran, so no candidate can exist. The producer still
+			// reached its terminal state and a cancellation that already
+			// withdrew the operation may settle now.
+			op.markProcessingFinished()
 			return
+		}
+		if openPause != nil {
+			openPause()
 		}
 		candidate, summary, err := a.openLocalVaultFileSessionCandidate(op, ownedPassword, ownedKey)
 		outcome := localVaultFileSessionOutcomeOpened
@@ -287,20 +374,24 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 			outcome = localVaultFileSessionOutcomeFailed
 		}
 		result := localVaultFileSessionResult{candidate: candidate, summary: summary, outcome: outcome}
-		a.stageAndDispatchLocalVaultFileSessionResult(op, result, dispatch, hook)
+		// The worker's factor copies are dead once the real factory returns.
+		// Clear them before staging, marking or dispatch so a blocked UI path
+		// cannot delay erasure; the deferred clears remain as safety.
+		clear(ownedPassword)
+		clear(ownedKey)
+		a.stageAndDispatchLocalVaultFileSessionResult(op, result, dispatch, hook, closePause)
 	})
 }
 
 // stageLocalVaultFileSessionResult stages one result on the operation and calls
 // the optional hook. It never dispatches; the caller's single dispatch closure
 // owns the take/adopt and any UI transition. On refusal the operation already
-// became terminal, so this call still owns and closes the returned candidate.
-func (a *App) stageLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, hook func(*localVaultFileSessionOperation)) bool {
+// became terminal, so this call still owns and closes the returned candidate
+// before the producer is allowed to report processing finished.
+func (a *App) stageLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, hook func(*localVaultFileSessionOperation), closePause func()) bool {
 	if op == nil || !op.stage(result) {
 		clearLocalVaultFileSessionSummary(&result.summary)
-		if result.candidate != nil {
-			_ = result.candidate.Close()
-		}
+		closeLocalVaultFileSessionCandidate(op, result.candidate, closePause)
 		return false
 	}
 	if hook != nil {
@@ -310,15 +401,36 @@ func (a *App) stageLocalVaultFileSessionResult(op *localVaultFileSessionOperatio
 }
 
 // stageAndDispatchLocalVaultFileSessionResult is the generic worker's single
-// ownership handoff. Dispatcher and hook were captured before launch.
-func (a *App) stageAndDispatchLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, dispatch func(func()), hook func(*localVaultFileSessionOperation)) bool {
-	if !a.stageLocalVaultFileSessionResult(op, result, hook) {
+// ownership handoff. Dispatcher, hook and pause seams were captured before
+// launch. Processing is marked after a successful candidate was staged and
+// before the dispatcher is invoked, so a blocked or dropped dispatch can never
+// prevent cancellation settlement.
+func (a *App) stageAndDispatchLocalVaultFileSessionResult(op *localVaultFileSessionOperation, result localVaultFileSessionResult, dispatch func(func()), hook func(*localVaultFileSessionOperation), closePause func()) bool {
+	staged := a.stageLocalVaultFileSessionResult(op, result, hook, closePause)
+	op.markProcessingFinished()
+	if !staged {
 		return false
 	}
 	if dispatch != nil {
 		dispatch(func() { a.takeAndCompleteLocalVaultFileSessionResult(op) })
 	}
 	return true
+}
+
+// closeLocalVaultFileSessionCandidate is the one real cleanup Close for a
+// candidate that never became an adopted slot. The optional pause is a
+// parameterless private test seam invoked immediately before Close. Settlement
+// is released only after the real Close returns; no operation lock is held
+// across the seam or the Close.
+func closeLocalVaultFileSessionCandidate(op *localVaultFileSessionOperation, candidate *vaultfileclient.LocalGenesisSession, pause func()) {
+	if candidate == nil {
+		return
+	}
+	if pause != nil {
+		pause()
+	}
+	_ = candidate.Close()
+	op.markCandidateResolved()
 }
 
 // openLocalVaultFileSessionCandidate is the production factory. It calls the
@@ -369,12 +481,18 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 		}
 		slot.session = result.candidate
 		slot.summary = localVaultFileSessionSummaryClone(result.summary)
+		// The slot now owns the capability. The operation settles only after
+		// this legal transfer; a later slot close is the slot's responsibility.
+		op.markCandidateResolved()
 		a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeOpened)
 		return
 	}
 	clearLocalVaultFileSessionSummary(&result.summary)
 	if result.candidate != nil {
-		a.launch(func() { _ = result.candidate.Close() })
+		closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
+		a.launch(func() { closeLocalVaultFileSessionCandidate(op, result.candidate, closePause) })
+	} else {
+		op.markCandidateResolved()
 	}
 	outcome := result.outcome
 	if outcome != localVaultFileSessionOutcomeFailed {
@@ -421,7 +539,10 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 	}
 	clearLocalVaultFileSessionSummary(&result.summary)
 	if result.candidate != nil {
-		a.launch(func() { _ = result.candidate.Close() })
+		closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
+		a.launch(func() { closeLocalVaultFileSessionCandidate(op, result.candidate, closePause) })
+	} else {
+		op.markCandidateResolved()
 	}
 }
 
