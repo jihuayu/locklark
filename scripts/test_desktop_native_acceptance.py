@@ -1470,14 +1470,26 @@ class LocalVaultOracleTests(unittest.TestCase):
 class LocalVaultFlowBoundary:
     def __init__(self, kit):
         self.kit, self.events, self.reader_calls = kit, [], 0
+        self.fields = {}
+        self.prepare_enabled = False
+        self.prepare_waits = 0
+        self.prepare_clicks = []
 
     def phase(self, value):
         self.events.append(("phase", value))
 
     def wait(self, label):
+        if label == "准备创建":
+            self.prepare_waits += 1
+            if not self.prepare_enabled:
+                raise AcceptanceFailure()
         self.events.append(("wait", label))
 
     def click(self, label):
+        if label == "准备创建":
+            self.prepare_clicks.append(self.prepare_enabled)
+            if not self.prepare_enabled:
+                raise AcceptanceFailure()
         self.events.append(("click", label))
 
     def fill(self, label, value):
@@ -1487,6 +1499,10 @@ class LocalVaultFlowBoundary:
             marker = "wrong"
         else:
             marker = "other"
+        if label in ("主密码", "Secret Key"):
+            self.fields[label] = value
+            self.prepare_enabled = (bool(self.fields.get("主密码")) and
+                                    bool(self.fields.get("Secret Key")))
         self.events.append(("fill", label, marker))
 
 
@@ -1521,6 +1537,17 @@ class LocalVaultFlowTests(unittest.TestCase):
         self.assertEqual(subject.observe.call_count, 2)
         self.assertEqual(subject.controls.call_count, 2)
         subject.verify_local_vault.assert_called_once_with()
+        self.assertEqual(boundary.prepare_waits, 0)
+        self.assertEqual(boundary.prepare_clicks, [True])
+        self.assertEqual(events.count(("click", "准备创建")), 1)
+        self.assertLess(events.index(("click", "新建独立文件库")),
+                        events.index(("wait", "主密码")))
+        self.assertLess(events.index(("wait", "主密码")),
+                        events.index(("fill", "主密码", "other")))
+        self.assertLess(events.index(("wait", "Secret Key")),
+                        events.index(("fill", "Secret Key", "other")))
+        self.assertLess(events.index(("fill", "Secret Key", "other")),
+                        events.index(("click", "准备创建")))
         self.assertLess(events.index(("wait", "重新输入恢复码")), events.index(("reader",)))
         first_publish = [index for index, event in enumerate(events)
                          if event == ("click", "确认并发布备份")][0]

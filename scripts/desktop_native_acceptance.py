@@ -567,7 +567,11 @@ class Acceptance:
         before_ids = sorted(item["id"] for item in before["items"])
         self.wait("新建独立文件库")
         self.click("新建独立文件库")
-        self.wait("准备创建")
+        # The prepare button is correctly disabled until both factors have
+        # content. Wait on the real input controls, fill them, then let the
+        # original click perform the enabled check on the button itself.
+        self.wait("主密码")
+        self.wait("Secret Key")
         self.fill("主密码", self.fixture["Password"])
         self.fill("Secret Key", self.fixture["Secret"])
         self.click("准备创建")
