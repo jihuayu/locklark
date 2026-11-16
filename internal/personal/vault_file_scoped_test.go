@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -251,6 +252,23 @@ func openScopedChildPair(t *testing.T, fx *scopedChildFixture) (VaultFileChildTo
 		t.Fatal("children not registered")
 	}
 	return tokenA, tokenB, childA.handle, childB.handle
+}
+
+func openScopedChildForSession(t *testing.T, s *Session, v scopedChildVault, password, key []byte) VaultFileChildToken {
+	t.Helper()
+	token, items, err := s.OpenVaultFileChild(v.journal, v.checkpoint, password, key, VaultFileChildOptions{IncludeItemIDs: true})
+	if err != nil || len(items) != 1 || items[0].ID != v.itemID {
+		t.Fatal("SCOPED_CHILD_OWN_OPEN_OR_SUMMARY_FAILED")
+	}
+	return token
+}
+
+func assertScopedChildForSessionRead(t *testing.T, s *Session, token VaultFileChildToken, itemID string) {
+	t.Helper()
+	items, err := s.ReadVaultFileChild(token, VaultFileChildOptions{IncludeItemIDs: true})
+	if err != nil || len(items) != 1 || items[0].ID != itemID {
+		t.Fatal("SCOPED_CHILD_OWN_READ_FAILED")
+	}
 }
 
 func replaceScopedChildSlot(t *testing.T, path string, raw []byte) {
@@ -568,6 +586,109 @@ func TestVaultFileChildLifecycleAndTokenGeneration(t *testing.T) {
 	}
 	if _, err := fx.session.ReadVaultFileChild(tokenA3, VaultFileChildOptions{}); err != nil {
 		t.Fatal("superseded close removed the current A")
+	}
+}
+
+func TestVaultFileChildTokenOwnerIsolation(t *testing.T) {
+	fx := newScopedChildFixture(t)
+	first := fx.session
+
+	// A second real UnlockSession over the same local account and the same
+	// journal path. Both children use the same journal generation; only the
+	// concrete Session identity distinguishes them.
+	second, err := UnlockSession(first.path, fx.password, fx.key, time.Minute)
+	if err != nil {
+		t.Fatal("SCOPED_CHILD_SECOND_UNLOCK_FAILED")
+	}
+	t.Cleanup(second.Lock)
+
+	firstToken := openScopedChildForSession(t, first, fx.a, fx.password, fx.key)
+	secondToken := openScopedChildForSession(t, second, fx.a, fx.password, fx.key)
+	assertScopedChildForSessionRead(t, first, firstToken, fx.a.itemID)
+	assertScopedChildForSessionRead(t, second, secondToken, fx.a.itemID)
+
+	// A first-Session token is foreign to the second Session. Read must be a
+	// child error and Lock must be a no-op; neither may touch the second
+	// Session's own child.
+	if _, err := second.ReadVaultFileChild(firstToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_FOREIGN_READ_ACCEPTED")
+	}
+	assertScopedChildForSessionRead(t, second, secondToken, fx.a.itemID)
+	if err := second.LockVaultFileChild(firstToken); err != nil {
+		t.Fatal("SCOPED_CHILD_FOREIGN_LOCK_FAILED")
+	}
+	assertScopedChildForSessionRead(t, second, secondToken, fx.a.itemID)
+
+	// The reverse direction is symmetric.
+	if _, err := first.ReadVaultFileChild(secondToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_REVERSE_FOREIGN_READ_ACCEPTED")
+	}
+	if err := first.LockVaultFileChild(secondToken); err != nil {
+		t.Fatal("SCOPED_CHILD_REVERSE_FOREIGN_LOCK_FAILED")
+	}
+	assertScopedChildForSessionRead(t, first, firstToken, fx.a.itemID)
+	assertScopedChildForSessionRead(t, second, secondToken, fx.a.itemID)
+	if !first.Unlocked() || !second.Unlocked() {
+		t.Fatal("SCOPED_CHILD_FOREIGN_TOKEN_LOCKED_PARENT")
+	}
+
+	// A fresh Session for the same account file and journal path must reject
+	// every token issued by an earlier Session, including one whose child is
+	// still live in another Session.
+	first.Lock()
+	reopened, err := UnlockSession(first.path, fx.password, fx.key, time.Minute)
+	if err != nil {
+		t.Fatal("SCOPED_CHILD_REOPEN_FAILED")
+	}
+	t.Cleanup(reopened.Lock)
+	if _, err := reopened.ReadVaultFileChild(firstToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_OLD_PARENT_TOKEN_ACCEPTED")
+	}
+	if _, err := reopened.ReadVaultFileChild(secondToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_OTHER_PARENT_TOKEN_ACCEPTED")
+	}
+	if err := reopened.LockVaultFileChild(firstToken); err != nil {
+		t.Fatal("SCOPED_CHILD_OLD_PARENT_LOCK_FAILED")
+	}
+	if err := reopened.LockVaultFileChild(secondToken); err != nil {
+		t.Fatal("SCOPED_CHILD_OTHER_PARENT_LOCK_FAILED")
+	}
+	reopenedToken := openScopedChildForSession(t, reopened, fx.a, fx.password, fx.key)
+	assertScopedChildForSessionRead(t, reopened, reopenedToken, fx.a.itemID)
+	assertScopedChildForSessionRead(t, second, secondToken, fx.a.itemID)
+
+	// Zero Session and zero token are rejected without touching a registry.
+	var nilSession *Session
+	if _, err := nilSession.ReadVaultFileChild(secondToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_NIL_SESSION_READ_ACCEPTED")
+	}
+	if _, err := (&Session{}).ReadVaultFileChild(secondToken, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_ZERO_SESSION_READ_ACCEPTED")
+	}
+	if err := (&Session{}).LockVaultFileChild(secondToken); err != nil {
+		t.Fatal("SCOPED_CHILD_ZERO_SESSION_LOCK_FAILED")
+	}
+	if _, err := second.ReadVaultFileChild(VaultFileChildToken{}, VaultFileChildOptions{}); !errors.Is(err, ErrVaultFileScopedChild) {
+		t.Fatal("SCOPED_CHILD_ZERO_TOKEN_READ_ACCEPTED")
+	}
+}
+
+func TestVaultFileChildTokenOpaque(t *testing.T) {
+	fx := newScopedChildFixture(t)
+	token := openScopedChildForSession(t, fx.session, fx.a, fx.password, fx.key)
+
+	encoded, err := json.Marshal(token)
+	if err != nil || string(encoded) != "{}" {
+		t.Fatal("SCOPED_CHILD_TOKEN_JSON_NOT_OPAQUE")
+	}
+	for _, got := range []string{
+		fmt.Sprintf("%v", token),
+		fmt.Sprintf("%+v", token),
+		fmt.Sprintf("%#v", token),
+	} {
+		if got != "[vault-file child token]" {
+			t.Fatal("SCOPED_CHILD_TOKEN_FORMAT_NOT_OPAQUE")
+		}
 	}
 }
 

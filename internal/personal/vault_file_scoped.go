@@ -26,7 +26,8 @@ import (
 // or any private key outside this package.
 //
 // A child is one per journal path. The parent Session owns the registry, the
-// parent revocation flag and the token generation. The child owns only its
+// parent revocation flag, a per-Session owner marker and the token generation.
+// The child owns only its
 // ScopedUnlock handle, its deep-copied checkpoint and a journal baseline
 // (generation, remote revision, base/working byte hashes and pending state),
 // plus its own full-factor and idle deadlines. It retains no caller password,
@@ -67,10 +68,23 @@ type VaultFileChildOptions struct {
 	IncludeItemIDs bool
 }
 
+// vaultFileChildOwner is the per-Session identity marker carried opaquely by
+// every child token. It holds no account material, path or key. The blank byte
+// makes the type non-zero-sized, so two independent allocations cannot share
+// an address the way distinct zero-sized allocations may. It is allocated once
+// by newUnlockedSession before the Session is published and is never mutated.
+type vaultFileChildOwner struct {
+	_ byte
+}
+
 // VaultFileChildToken names one registered child generation. It is opaque and
 // comparable. Its fields are unexported so a caller cannot construct a token
-// for another path or generation.
+// for another path, generation or owning Session. owner binds the token to the
+// exact Session that registered it, so two Sessions that share one local
+// account, parent path, journal path and per-Session generation cannot accept
+// each other's tokens.
 type VaultFileChildToken struct {
+	owner      *vaultFileChildOwner
 	path       string
 	generation uint64
 }
@@ -182,6 +196,11 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	if err := s.active(true); err != nil {
 		s.mu.Unlock()
 		return VaultFileChildToken{}, nil, err
+	}
+	parentOwner := s.vaultFileOwner
+	if parentOwner == nil {
+		s.mu.Unlock()
+		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
 	parentMaterial := bytes.Clone(s.material)
 	parentSlot := s.slotDigest
@@ -303,6 +322,7 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		return VaultFileChildToken{}, nil, err
 	}
 	if s.path != parentPath || s.slotDigest != parentSlot ||
+		s.vaultFileOwner != parentOwner ||
 		subtle.ConstantTimeCompare(s.material, parentMaterial) != 1 {
 		s.lock()
 		s.mu.Unlock()
@@ -348,7 +368,7 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		}
 		return VaultFileChildToken{}, nil, ErrVaultFileScopedChild
 	}
-	token := VaultFileChildToken{path: journalPath, generation: generation}
+	token := VaultFileChildToken{owner: parentOwner, path: journalPath, generation: generation}
 	child := &vaultFileChild{
 		token:              token,
 		handle:             handle,
@@ -401,7 +421,11 @@ func (s *Session) OpenVaultFileChild(journalPath string, checkpoint *vaultfile.P
 // summary; child-specific lock, supersession, journal drift or suite expiry
 // invalidates only this child.
 func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFileChildOptions) ([]VaultFileBaselineItem, error) {
-	if s == nil || token.generation == 0 || token.path == "" {
+	// A foreign-owner token, a zero token or a zero Session is a child error.
+	// This is decided before any parent IO or authorization side effect so a
+	// different Session can never classify, read or drain this Session.
+	if s == nil || token.generation == 0 || token.path == "" ||
+		token.owner == nil || s.vaultFileOwner == nil || token.owner != s.vaultFileOwner {
 		return nil, ErrVaultFileScopedChild
 	}
 	if s.vaultFileRevoked.Load() {
@@ -538,7 +562,10 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 // (for example an old A after A was closed and reopened) is a no-op and cannot
 // remove the new generation.
 func (s *Session) LockVaultFileChild(token VaultFileChildToken) error {
-	if s == nil || token.generation == 0 || token.path == "" {
+	// A foreign-owner token is a no-op: it must not touch the victim child or
+	// any sibling even when path and per-Session generation happen to match.
+	if s == nil || token.generation == 0 || token.path == "" ||
+		token.owner == nil || s.vaultFileOwner == nil || token.owner != s.vaultFileOwner {
 		return nil
 	}
 	s.saveMu.Lock()
