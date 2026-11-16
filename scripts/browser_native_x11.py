@@ -100,6 +100,26 @@ RECOVERY_KEYS = frozenset({"title", "executable", "expected_pid",
 RECOVERY_MATERIAL = re.compile(r"^LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}$")
 RECOVERY_NODE_LIMIT = 4096
 
+# Dedicated private local-vault target request. The purpose key selects this
+# closed schema; it never widens the ordinary label allowlist or the fixed
+# read-only snapshot. known_labels are caller input matched by exact accessible
+# name only; the short ID prefix is display text, never a route or authority.
+LOCAL_VAULT_TARGET_TITLE = RECOVERY_TITLE
+LOCAL_VAULT_TARGET_KEYS = frozenset({
+    "title", "executable", "expected_pid", "local_vault_target",
+})
+LOCAL_VAULT_TARGET_FIELDS = frozenset({
+    "action", "known_labels", "target_index",
+})
+LOCAL_VAULT_TARGET_ACTIONS = frozenset({"select-sidebar", "wait-title"})
+LOCAL_VAULT_LABEL_SEPARATOR = " · "
+LOCAL_VAULT_LABEL_PREFIX = re.compile(r"^[0-9a-f]{8,32}$")
+LOCAL_VAULT_LABEL_MAX_BYTES = 546
+LOCAL_VAULT_BIDI_CONTROLS = frozenset({
+    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2066, 0x2067, 0x2068, 0x2069,
+})
+
 
 def control_label_allowed(label):
     return label in CONTROL_LABELS or (
@@ -126,6 +146,11 @@ FAILURE_REASONS = {
     "Native recovery material not ready": "recovery-material-timeout",
     "Native recovery material must be unique": "recovery-ambiguous",
     "Native recovery private pipe required": "recovery-pipe",
+    "Exact private local-vault target request required": "local-vault-request",
+    "Native local-vault target identity mismatch": "local-vault-identity",
+    "Native local-vault target not ready": "local-vault-target-timeout",
+    "Native local-vault target must be unique": "local-vault-target-ambiguous",
+    "Native local-vault target input failed": "local-vault-input",
     "Native acceptance X query failed": "x-query",
     "Previous native acceptance window did not close": "window-close-timeout",
     "Native acceptance window must be unique": "window-ambiguous",
@@ -723,6 +748,132 @@ def parse_recovery_request(request):
 
 
 def recovery_target_matches(expected, title, pid, expected_process):
+    """Exact X title/PID/executable binding before any AT-SPI read or input."""
+    return (type(expected) is dict and title == expected.get("title")
+            and type(pid) is int and pid == expected.get("expected_pid")
+            and expected_process is True)
+
+
+def local_vault_purpose_present(value):
+    """Bounded scan for the dedicated purpose key at any depth, even false."""
+    stack, visited = [value], 0
+    while stack:
+        current = stack.pop()
+        visited += 1
+        if visited > RECOVERY_NODE_LIMIT:
+            # An unbounded shape cannot be proven free of the purpose key.
+            return True
+        if type(current) is dict:
+            if "local_vault_target" in current:
+                return True
+            stack.extend(current.values())
+        elif type(current) is list:
+            stack.extend(current)
+    return False
+
+
+def local_vault_display_label(value):
+    """One exact reviewed normal display label, or None.
+
+    The reviewed Go helper emits ``escapedRealName + " · " + IDprefix`` for
+    normal rows: the name is ValidName's UTF-8/no-control/no-separator shape
+    with the fixed visible ``\\uXXXX`` escapes for bidi controls, and the
+    suffix is 8..32 lowercase hex characters. Duplicate-review forms and the
+    generic review fallback are not normal labels. This is a finite format
+    check only; the short prefix is never used as identity or authority.
+    """
+    if type(value) is not str:
+        return None
+    try:
+        if len(value.encode("utf-8")) > LOCAL_VAULT_LABEL_MAX_BYTES:
+            return None
+    except UnicodeEncodeError:
+        return None
+    body, separator, prefix = value.rpartition(LOCAL_VAULT_LABEL_SEPARATOR)
+    if not separator or not body or LOCAL_VAULT_LABEL_PREFIX.fullmatch(prefix) is None:
+        return None
+    name = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == "\\":
+            escape = body[index:index + 6]
+            if len(escape) != 6 or escape[1] != "u" or \
+                    re.fullmatch(r"[0-9A-F]{4}", escape[2:]) is None:
+                return None
+            codepoint = int(escape[2:], 16)
+            if codepoint not in LOCAL_VAULT_BIDI_CONTROLS:
+                return None
+            name.append(chr(codepoint))
+            index += 6
+            continue
+        codepoint = ord(char)
+        # ValidName rejects separators and C0/DEL controls; bidi controls are
+        # accepted only through the helper's visible escape form above.
+        if codepoint < 0x20 or codepoint == 0x7f or \
+                codepoint in LOCAL_VAULT_BIDI_CONTROLS or char in "/\\":
+            return None
+        name.append(char)
+        index += 1
+    name = "".join(name)
+    try:
+        name_bytes = len(name.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+    if not name or name_bytes > 255 or name in (".", ".."):
+        return None
+    if name[0] in ". " or name[-1] in ". ":
+        return None
+    return value
+
+
+def parse_local_vault_target_request(request):
+    """Strict purpose-bound schema for one private local-vault target action.
+
+    The presence of local_vault_target anywhere (including false, nested or a
+    malformed value) selects this parser and never falls back to ordinary
+    input. read_recovery keeps first priority; mixing the two dedicated
+    purposes is rejected rather than routed. The returned record contains only
+    the fixed window identity, the closed action, the exact caller-supplied
+    labels and the validated index.
+    """
+    if not local_vault_purpose_present(request):
+        return None
+    if recovery_key_present(request):
+        raise RuntimeError("Exact private local-vault target request required")
+    if type(request) is not dict or set(request) != LOCAL_VAULT_TARGET_KEYS:
+        raise RuntimeError("Exact private local-vault target request required")
+    if request.get("title") != LOCAL_VAULT_TARGET_TITLE:
+        raise RuntimeError("Exact private local-vault target request required")
+    executable = request.get("executable")
+    if ascii_path(executable) is None or os.path.normpath(executable) != executable or \
+            os.path.realpath(executable) != executable:
+        raise RuntimeError("Exact private local-vault target request required")
+    expected_pid = request.get("expected_pid")
+    if type(expected_pid) is not int or expected_pid <= 0:
+        raise RuntimeError("Exact private local-vault target request required")
+    target = request.get("local_vault_target")
+    if type(target) is not dict or set(target) != LOCAL_VAULT_TARGET_FIELDS:
+        raise RuntimeError("Exact private local-vault target request required")
+    action = target.get("action")
+    if type(action) is not str or action not in LOCAL_VAULT_TARGET_ACTIONS:
+        raise RuntimeError("Exact private local-vault target request required")
+    labels = target.get("known_labels")
+    if type(labels) is not list or not 1 <= len(labels) <= 2:
+        raise RuntimeError("Exact private local-vault target request required")
+    if any(local_vault_display_label(label) is None for label in labels):
+        raise RuntimeError("Exact private local-vault target request required")
+    if len(set(labels)) != len(labels):
+        raise RuntimeError("Exact private local-vault target request required")
+    target_index = target.get("target_index")
+    if type(target_index) is not int or not 0 <= target_index < len(labels):
+        raise RuntimeError("Exact private local-vault target request required")
+    return {"title": LOCAL_VAULT_TARGET_TITLE, "executable": executable,
+            "expected_pid": expected_pid, "action": action,
+            "known_labels": tuple(labels), "target_index": target_index}
+
+
+def local_vault_target_matches(expected, title, pid, expected_process):
     """Exact X title/PID/executable binding before any AT-SPI read or input."""
     return (type(expected) is dict and title == expected.get("title")
             and type(pid) is int and pid == expected.get("expected_pid")
@@ -1345,6 +1496,30 @@ def safe_click_record(value):
     return result
 
 
+def local_vault_select_output(target_index, record):
+    """Closed select success: action/index plus a pointer-only click ack.
+
+    The known label, target window/focus XIDs, PID, executable and the request
+    are never emitted. The ack only says the XTest calls returned success; it
+    is not evidence that the selected title changed.
+    """
+    source = dict(record) if isinstance(record, dict) else {}
+    source["label"] = "pointer"
+    click = safe_click_record(source)
+    click["label"] = "pointer"
+    click.pop("target", None)
+    for phase in ("before", "after"):
+        state = click.get(phase)
+        if isinstance(state, dict):
+            state.pop("focus", None)
+    return {"action": "select-sidebar", "target_index": target_index, "clicks": [click]}
+
+
+def local_vault_wait_output():
+    """Closed wait success: one fixed boolean, no label/text/geometry/ID."""
+    return {"action": "wait-title", "matched": True}
+
+
 def wait_window_viewable(read_map_state, deadline):
     """Observe one already selected XID within the original find deadline."""
     while time.monotonic() < deadline:
@@ -1587,6 +1762,91 @@ class NativeControls:
             raise RuntimeError("Native recovery material must be unique")
         return matches[0]
 
+    def local_vault_member(self, label, action):
+        """One exact known member with the dedicated action role/state/bounds.
+
+        The caller-supplied label is compared for exact equality only and is
+        never stored, printed or treated as an identity/route. A duplicate
+        exact name+role rejects, even when one node is hidden or disabled.
+        Returns the single valid bounds for the caller's one click, or None
+        while the member is not ready. This never reads ordinary snapshots.
+        """
+        windows = self.window_refs()
+        if not windows:
+            raise RuntimeError("Native accessibility window unavailable")
+        matches = []
+
+        def member(node, _depth):
+            if self.string(self.at.atspi_accessible_get_name, node) != label:
+                return True
+            role = self.string(self.at.atspi_accessible_get_role_name, node)
+            if action == "select-sidebar":
+                if role not in ("push button", "button"):
+                    return True
+            elif role != "label":
+                return True
+            matches.append(node)
+            return True
+
+        try:
+            self.walk(windows[0], member)
+        finally:
+            self.go.g_object_unref(windows[0])
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RuntimeError("Native local-vault target must be unique")
+        node = matches[0]
+        state = self.at.atspi_accessible_get_state_set(node)
+        if not state:
+            return None
+        try:
+            # Public AT-SPI state enum: ENABLED=8, SENSITIVE=24, SHOWING=25,
+            # VISIBLE=30. The read-only wait needs visibility only.
+            enabled = all(self.at.atspi_state_set_contains(state, n) for n in (8, 24))
+            showing = all(self.at.atspi_state_set_contains(state, n) for n in (25, 30))
+        finally:
+            self.go.g_object_unref(state)
+        if not showing or (action == "select-sidebar" and not enabled):
+            return None
+        component = self.at.atspi_accessible_get_component_iface(node)
+        if not component:
+            return None
+        try:
+            rect = self.checked(self.at.atspi_component_get_extents, component, 0)
+            if not rect:
+                return None
+            try:
+                bounds = {k: getattr(rect.contents, k) for k in ("x", "y", "width", "height")}
+            finally:
+                self.at.atspi_rect_free(rect)
+        finally:
+            self.go.g_object_unref(component)
+        if bounds["width"] <= 0 or bounds["height"] <= 0:
+            return None
+        return bounds
+
+    def local_vault_ready(self, label, action):
+        """Observe the dedicated member within the same 10s control budget."""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                control = self.local_vault_member(label, action)
+            except AccessibilityQueryUnavailable:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+                continue
+            if control is not None:
+                if time.monotonic() >= deadline:
+                    break
+                return control
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
+        raise RuntimeError("Native local-vault target not ready")
+
     def ready(self, label):
         if not control_label_allowed(label):
             raise RuntimeError("Native acceptance label is not allowlisted")
@@ -1618,12 +1878,18 @@ class NativeControls:
 
 def main():
     request = json.load(sys.stdin)
-    # This strict purpose-bound schema is selected before owner dispatch, X
-    # focus, XTest or any other request path. A false/malformed key never
-    # falls back to ordinary input.
-    if recovery_key_present(request):
+    # These strict purpose-bound schemas are selected before owner dispatch, X
+    # focus, XTest or any other request path. read_recovery keeps first
+    # priority. A false/nested/malformed key never falls back to ordinary
+    # input, and mixing the two dedicated purposes is rejected.
+    recovery_purpose = recovery_key_present(request)
+    local_purpose = local_vault_purpose_present(request)
+    if recovery_purpose:
         FAILURE_CONTEXT["action"] = "read-recovery"
+    elif local_purpose:
+        FAILURE_CONTEXT["action"] = "local-vault-request"
     recovery = parse_recovery_request(request)
+    local_target = parse_local_vault_target_request(request)
     x = C.CDLL("libX11.so.6")
     xt = C.CDLL("libXtst.so.6")
     pointer, window = C.c_void_p, C.c_ulong
@@ -1922,6 +2188,61 @@ def main():
                 return
         finally:
             errors.clear()
+
+    if local_target is not None:
+        # Dedicated purpose-bound branch: exact X identity and the caller's one
+        # exact known member, before any focus, raise or input. No ordinary
+        # snapshot or generic label allowlist is consulted.
+        def local_map_state():
+            attributes = attributes_of(target)
+            return None if attributes is None else attributes.map_state
+        wait_window_viewable(local_map_state, discovery_deadline)
+        x.XSync(display, 0)
+        check_x_target_errors(errors, target)
+        errors.clear()
+        if not normal_viewable(target) or not local_vault_target_matches(
+                local_target, window_title(target), window_pid(target),
+                expected_process(target)):
+            raise RuntimeError("Native local-vault target identity mismatch")
+        FAILURE_CONTEXT["action"] = (
+            "local-vault-select" if local_target["action"] == "select-sidebar"
+            else "local-vault-wait")
+        known_label = local_target["known_labels"][local_target["target_index"]]
+        controls = NativeControls(local_target["title"], local_target["expected_pid"])
+        if local_target["action"] == "wait-title":
+            controls.local_vault_ready(known_label, "wait-title")
+            print(json.dumps(local_vault_wait_output()), flush=True)
+            x.XCloseDisplay(display)
+            return
+        bounds = controls.local_vault_ready(known_label, "select-sidebar")
+
+        def local_pointer_state():
+            qroot, qchild = window(), window()
+            rx, ry, wx, wy = C.c_int(), C.c_int(), C.c_int(), C.c_int()
+            mask = C.c_uint()
+            available = x.XQueryPointer(display, root, C.byref(qroot), C.byref(qchild),
+                                        C.byref(rx), C.byref(ry), C.byref(wx),
+                                        C.byref(wy), C.byref(mask))
+            return {"x": rx.value, "y": ry.value, "button_mask": mask.value,
+                    "pointer_available": bool(available)}
+
+        click_x = bounds["x"] + bounds["width"] // 2
+        click_y = bounds["y"] + bounds["height"] // 2
+        before = local_pointer_state()
+        motion = xt.XTestFakeMotionEvent(display, -1, click_x, click_y, 0)
+        down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
+        up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
+        x.XFlush(display)
+        x.XSync(display, 0)
+        if not motion or not down or not up or errors:
+            raise RuntimeError("Native local-vault target input failed")
+        record = {"x": click_x, "y": click_y, "before": before,
+                  "x_test": {"motion": bool(motion), "down": bool(down), "up": bool(up)},
+                  "after": local_pointer_state()}
+        print(json.dumps(local_vault_select_output(
+            local_target["target_index"], record)), flush=True)
+        x.XCloseDisplay(display)
+        return
 
     def window_parent(candidate):
         """The real XQueryTree parent of one window; a refused query raises."""
