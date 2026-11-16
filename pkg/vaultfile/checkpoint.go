@@ -338,11 +338,7 @@ func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint
 			}
 			key = ed25519.PublicKey(findDevice(trustedPolicy, sp.SignerID).PolicySigningKey.PublicKey)
 		}
-		msg := make([]byte, 0, len(DomainPolicyDocumentSignature)+1+len(sp.Document))
-		msg = append(msg, DomainPolicyDocumentSignature...)
-		msg = append(msg, 0)
-		msg = append(msg, sp.Document...)
-		if !ed25519.Verify(key, msg, sp.Sig) {
+		if !verifyPolicyProofSignature(sp, key) {
 			return nil, Err(pathIndex(fieldSignedPolicyProofs, i), CodeSignatureVerifyFailed)
 		}
 		trusted = policyDigest(sp)
@@ -360,6 +356,16 @@ func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint
 	// when the pin is the current tip too (anchor == last, no continuation),
 	// whose proof was never re-copied by the loop.
 	return clonePolicySnapshot(&proofs[len(proofs)-1].Policy), nil
+}
+
+// verifyPolicyProofSignature uses the v1 policy-document signature preimage.
+// Callers must validate the proof and choose a trusted key before using it.
+func verifyPolicyProofSignature(sp *SignedPolicy, key ed25519.PublicKey) bool {
+	msg := make([]byte, 0, len(DomainPolicyDocumentSignature)+1+len(sp.Document))
+	msg = append(msg, DomainPolicyDocumentSignature...)
+	msg = append(msg, 0)
+	msg = append(msg, sp.Document...)
+	return ed25519.Verify(key, msg, sp.Sig)
 }
 
 // delegatedInviteReadersAuthorized reports whether prev, an already
