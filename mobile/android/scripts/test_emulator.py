@@ -49,6 +49,59 @@ def complete_pass(returncode, raw, expected_tests=4):
             (b"FAILURES!!!", b"INSTRUMENTATION_FAILED", b"Process crashed", b"INSTRUMENTATION_ABORTED")))
 
 
+# Android emits this fixed order. Geometry remains in private instrumentation
+# output; the public diagnosis contains only same-range scroll state.
+SCROLL_KEYS = (
+    "scroll_y", "scroll_span", "scroll_range", "scroll_top", "scroll_height",
+    "scroll_pad_top", "scroll_pad_bottom", "viewport_top", "viewport_bottom",
+    "safe_top", "safe_bottom", "target_top", "target_bottom", "screen_top",
+    "screen_bottom",
+)
+SCROLL_INTEGER = re.compile(rb"(?:0|-?[1-9][0-9]{0,5})\Z")
+
+
+def scroll_projection(raw):
+    def result(state, valid=False, clamped=False, has_range="unknown", at_start="unknown", at_end="unknown"):
+        return {"state": state, "valid": valid, "clamped": clamped,
+                "has_range": has_range, "at_start": at_start, "at_end": at_end}
+
+    if raw is None:
+        return result("unknown")
+    if raw == b"scroll=none":
+        return result("none", valid=True)
+    if raw == b"scroll=detached":
+        return result("detached", valid=True)
+    # Fifteen frozen values fit within this bound; untrusted private values do not.
+    if not raw or len(raw) > 512:
+        return result("invalid")
+    tokens = raw.split(b" ")
+    if len(tokens) != len(SCROLL_KEYS):
+        return result("invalid")
+    values = {}
+    clamped = False
+    for key, token in zip(SCROLL_KEYS, tokens):
+        prefix = key.encode("ascii") + b"="
+        if not token.startswith(prefix):
+            return result("invalid")
+        value = token[len(prefix):]
+        if value == b"clamped":
+            values[key] = None
+            clamped = True
+        elif SCROLL_INTEGER.fullmatch(value):
+            number = int(value)
+            if not -999_999 <= number <= 999_999:
+                return result("invalid")
+            values[key] = number
+        else:
+            return result("invalid")
+    offset, scroll_range = values["scroll_y"], values["scroll_range"]
+    fixed = lambda value: "true" if value else "false"
+    return result("measured", valid=True, clamped=clamped,
+                  has_range=fixed(scroll_range > 0) if scroll_range is not None else "unknown",
+                  at_start=fixed(offset <= 0) if offset is not None else "unknown",
+                  at_end=fixed(offset >= scroll_range) if offset is not None and scroll_range is not None else "unknown")
+
+
 def safe_diagnostic(raw):
     allowed_steps = {"platform-fs", "binding-create", "binding-unlock", "capsule-storage", "bound-operation", "create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
     steps = re.findall(rb"INSTRUMENTATION_STATUS: locklark_stage=([a-z-]+)", raw)
@@ -65,6 +118,7 @@ def safe_diagnostic(raw):
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
                                               "control", "control_phase", "ime", "ime_hide_requested", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
+    empty_context["scroll"] = scroll_projection(None)
     context = empty_context.copy()
     failures = []
     fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
@@ -77,7 +131,7 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
               (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "quick-unlock", "lock", "unlock", "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-observe", "ime-dismiss", "ime-hidden", "ime-wait-hidden", "scroll", "offscreen", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-observe", "ime-dismiss", "ime-hidden", "ime-wait-hidden", "scroll", "offscreen", "clipped", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
               (b"INSTRUMENTATION_STATUS: locklark_ime=", "ime", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=", "ime_hide_requested", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_window_focus=", "window_focus", {"true", "false"}),
@@ -88,6 +142,9 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_input_active=", "input_active", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
     for line in raw.splitlines():
+        scroll_prefix = b"INSTRUMENTATION_STATUS: locklark_scroll="
+        if line.startswith(scroll_prefix):
+            context["scroll"] = scroll_projection(line[len(scroll_prefix):])
         for prefix, key, allowed in fields:
             if line.startswith(prefix):
                 value = line[len(prefix):].decode("ascii", errors="replace")
@@ -104,6 +161,7 @@ def safe_diagnostic(raw):
             "core_error": failures[0]["core_error"] if failures else context["core_error"],
             "inputs_intact": failures[0]["inputs_intact"] if failures else context["inputs_intact"],
             "fs_owned": failures[0]["fs_owned"] if failures else context["fs_owned"],
+            "scroll": failures[0]["scroll"] if failures else context["scroll"],
             "fs_link": failures[0]["fs_link"] if failures else context["fs_link"],
             "fs_errno": failures[0]["fs_errno"] if failures else context["fs_errno"],
             "tests_run": int(counts[-1]) if counts else 0,
