@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -52,9 +53,15 @@ type localVaultFileState struct {
 
 	// Owned-session lifecycle state. It is reset on lock and never survives a
 	// parent or App generation boundary. The wrapper itself is opaque here.
-	sessionSlots      map[localVaultFileSessionScope]*localVaultFileSessionSlot
+	sessionSlots map[localVaultFileSessionScope]*localVaultFileSessionSlot
+	// sessionParent, sessionGeneration and sessionPath are bound together by
+	// syncLocalVaultFileSessions from one nonblocking VaultFileCacheSnapshot.
+	// sessionPath is only a routing hint for the exact parent and App
+	// generation; it is never auth, proof, a factor, grant or token, and it is
+	// empty for Busy/Revoked with no fallback to an older Active path.
 	sessionParent     *personal.Session
 	sessionGeneration uint64
+	sessionPath       string
 	// sessionCandidateForTest observes the staged operation after the
 	// production factory result has been handed off and before dispatch. The
 	// worker captures it before launch; production leaves it nil.
@@ -81,12 +88,58 @@ type localVaultFileState struct {
 	// staged. It is parameterless, nil in production and captured before
 	// launch; it never receives a factor, key, handle or capability.
 	refreshSummaryPauseForTest func()
+	// afterActiveSnapshotForTest, when non-nil, runs exactly once on the UI
+	// path after an Active VaultFileCacheSnapshot has captured its routing path
+	// and released the parent mutex, before the UI computes the next path. It
+	// is nil in production and exists only for deterministic Busy-after-Active
+	// regressions. The first caller claims it with an atomic compare-and-swap,
+	// so no caller blocks on another caller's pause.
+	afterActiveSnapshotForTest func()
+	afterActiveSnapshotClaimed atomic.Bool
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
 	base := filepath.Join(filepath.Dir(settingsPath), "vaultfile-workspace")
 	sum := sha256.Sum256([]byte(personalPath))
 	return filepath.Join(base, "profiles", hex.EncodeToString(sum[:])), filepath.Join(base, "backend")
+}
+
+// localVaultFileRoutingPath performs the one nonblocking snapshot read used by
+// this UI decision and returns the path only while Active. The returned value
+// is bound to the exact current parent and App generation and is a routing
+// hint only, never auth, proof, a factor, grant or token. Busy and Revoked
+// return an empty path with no fallback to an older hint.
+func (a *App) localVaultFileRoutingPath() (string, personal.VaultFileCacheState) {
+	cache := a.syncLocalVaultFileSessions()
+	state := &a.localVaultFiles
+	if cache != personal.VaultFileCacheActive || state.sessionPath == "" ||
+		state.sessionParent != a.session || state.sessionGeneration != a.generation {
+		return "", cache
+	}
+	path := state.sessionPath
+	a.runAfterActiveSnapshotForTest()
+	return path, cache
+}
+
+// localVaultFileBoundRoutingPath returns the path already bound by the most
+// recent sync for this exact parent and App generation. It never takes a new
+// snapshot or calls a blocking parent method; callers use it only immediately
+// after a successful snapshot helper.
+func (a *App) localVaultFileBoundRoutingPath() (string, bool) {
+	state := &a.localVaultFiles
+	if state.sessionPath == "" || state.sessionParent != a.session ||
+		state.sessionGeneration != a.generation {
+		return "", false
+	}
+	return state.sessionPath, true
+}
+
+func (a *App) runAfterActiveSnapshotForTest() {
+	pause := a.localVaultFiles.afterActiveSnapshotForTest
+	if pause == nil || !a.localVaultFiles.afterActiveSnapshotClaimed.CompareAndSwap(false, true) {
+		return
+	}
+	pause()
 }
 
 func listLocalVaultFileRefs(profileDir, backendRoot, personalPath string) ([]localVaultFileRef, error) {
@@ -123,12 +176,21 @@ func (a *App) refreshLocalVaultFiles() {
 	if a.session == nil {
 		return
 	}
+	personalPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" {
+		// Withhold this list refresh without clobbering the current finite
+		// status (including creation-complete presentation). No sibling or
+		// projection state is touched.
+		return
+	}
+	// Freeze the nonblocking routing path before the listing worker starts so
+	// the UI never calls the blocking Session.VaultPath method.
 	session, generation := a.session, a.generation
 	a.localVaultFiles.listSequence++
 	listSequence := a.localVaultFiles.listSequence
-	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, session.VaultPath())
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, personalPath)
 	a.launch(func() {
-		refs, err := listLocalVaultFileRefs(profileDir, backendRoot, session.VaultPath())
+		refs, err := listLocalVaultFileRefs(profileDir, backendRoot, personalPath)
 		a.dispatch(func() {
 			if a.session != session || a.generation != generation || a.localVaultFiles.listSequence != listSequence {
 				return
@@ -165,7 +227,11 @@ func (a *App) localVaultFileNavigationScope(ref localVaultFileRef) (localVaultFi
 		!filepath.IsAbs(ref.path) || filepath.Clean(ref.path) != ref.path {
 		return localVaultFileSessionScope{}, false
 	}
-	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
+	personalPath, ok := a.localVaultFileBoundRoutingPath()
+	if !ok {
+		return localVaultFileSessionScope{}, false
+	}
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, personalPath)
 	if backendRoot != scope.backendRoot || filepath.Dir(ref.path) != profileDir {
 		return localVaultFileSessionScope{}, false
 	}

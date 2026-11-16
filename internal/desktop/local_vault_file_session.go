@@ -51,6 +51,10 @@ type localVaultFileSessionOperation struct {
 	generation uint64
 	sequence   uint64
 	scope      localVaultFileSessionScope
+	// parentPath is the immutable nonblocking routing hint frozen at reserve
+	// from the same snapshot that authorized the begin. It is never auth,
+	// proof, a factor or a grant; workers still perform their real checks.
+	parentPath string
 	ctx        context.Context
 	cancel     context.CancelFunc
 	// waitFor is the immutable set of older operations with the same parent
@@ -401,11 +405,12 @@ type localVaultFileSessionSlot struct {
 // localVaultFileSessionScopeFor resolves the exact navigation ref and the
 // current workspace without reading a manifest or touching a wrapper.
 func (a *App) localVaultFileSessionScopeFor(ref localVaultFileRef) (localVaultFileSessionScope, bool) {
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive ||
+	personalPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" ||
 		ref.path == "" || ref.vaultID == "" {
 		return localVaultFileSessionScope{}, false
 	}
-	_, backendRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
+	_, backendRoot := localVaultFilePaths(a.settingsPath, personalPath)
 	if backendRoot == "" {
 		return localVaultFileSessionScope{}, false
 	}
@@ -424,10 +429,11 @@ func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 	parent := a.session
 	if parent == nil {
 		a.clearLocalVaultFileSessions()
+		state.sessionPath = ""
 		return personal.VaultFileCacheRevoked
 	}
 	a.purgeSettledLocalVaultFileSessionTails()
-	cache := parent.VaultFileCacheState()
+	cache, personalPath := parent.VaultFileCacheSnapshot()
 	if state.sessionParent != parent {
 		a.clearLocalVaultFileSessions()
 	} else if state.sessionGeneration != a.generation {
@@ -437,12 +443,20 @@ func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 		a.detachLocalVaultFileSessionsForBoundary()
 		state.sessionParent = parent
 		state.sessionGeneration = a.generation
+		state.sessionPath = ""
 		return cache
 	}
 	// A new parent may bind while Busy, but begin/adopt/read still require
-	// Active before any open, adoption or cache delivery.
+	// Active before any open, adoption or cache delivery. The routing path is
+	// bound only when this same snapshot is Active; Busy and Revoked keep it
+	// empty with no stale fallback.
 	state.sessionParent = parent
 	state.sessionGeneration = a.generation
+	if cache == personal.VaultFileCacheActive {
+		state.sessionPath = personalPath
+	} else {
+		state.sessionPath = ""
+	}
 	return cache
 }
 
@@ -521,12 +535,13 @@ func (a *App) beginLocalVaultFileSession(scope localVaultFileSessionScope, passw
 // password, Secret Key or recovery kit. It runs on the UI path so creation
 // completion can reserve before its worker launches.
 func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionScope) *localVaultFileSessionOperation {
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive ||
+	personalPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" ||
 		scope.configPath == "" || scope.vaultID == "" || scope.backendRoot == "" ||
 		scope.journalPath == "" {
 		return nil
 	}
-	_, currentRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
+	_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
 	if currentRoot != scope.backendRoot {
 		return nil
 	}
@@ -578,6 +593,7 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		generation: slot.appGeneration,
 		sequence:   slot.sequence,
 		scope:      scope,
+		parentPath: personalPath,
 		ctx:        ctx,
 		cancel:     cancel,
 		waitFor:    predecessors,
@@ -764,8 +780,13 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 		a.localVaultFiles.sessionSlots[op.scope] == op.slot &&
 		result.summary.VaultID == op.scope.vaultID
 	if valid {
-		_, currentRoot := localVaultFilePaths(a.settingsPath, op.parent.VaultPath())
-		valid = currentRoot == op.scope.backendRoot
+		personalPath, cache := a.localVaultFileRoutingPath()
+		valid = cache == personal.VaultFileCacheActive && personalPath != "" &&
+			personalPath == op.parentPath
+		if valid {
+			_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
+			valid = currentRoot == op.scope.backendRoot
+		}
 	}
 	if valid {
 		slot := op.slot
@@ -1020,20 +1041,24 @@ func (a *App) purgeSettledLocalVaultFileSessionTails() {
 // corresponding parent state. Caller-held copies already returned cannot be
 // recalled.
 func (a *App) readLocalVaultFileSession(scope localVaultFileSessionScope) (vaultfileclient.LocalGenesisBaseline, bool) {
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive {
+	personalPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" {
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
+	routingPath := personalPath
 	slot := a.localVaultFiles.sessionSlots[scope]
 	if slot == nil || slot.retiring || slot.session == nil || slot.parent != a.session ||
 		slot.appGeneration != a.generation {
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
-	_, currentRoot := localVaultFilePaths(a.settingsPath, a.session.VaultPath())
+	_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
 	if currentRoot != scope.backendRoot {
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
 	summary := localVaultFileSessionSummaryClone(slot.summary)
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive ||
+	personalPath, cache = a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" ||
+		personalPath != routingPath ||
 		a.localVaultFiles.sessionSlots[scope] != slot || slot.session == nil {
 		clearLocalVaultFileSessionSummary(&summary)
 		return vaultfileclient.LocalGenesisBaseline{}, false

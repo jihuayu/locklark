@@ -172,7 +172,8 @@ func (a *App) beginLocalVaultFileRefresh(scope localVaultFileSessionScope) *loca
 		a.localVaultFiles.selected != scope.configPath {
 		return nil
 	}
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive {
+	parentPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || parentPath == "" {
 		return nil
 	}
 	state := &a.localVaultFiles
@@ -185,7 +186,6 @@ func (a *App) beginLocalVaultFileRefresh(scope localVaultFileSessionScope) *loca
 		slot.appGeneration != a.generation {
 		return nil
 	}
-	parentPath := a.session.VaultPath()
 	_, currentRoot := localVaultFilePaths(a.settingsPath, parentPath)
 	if currentRoot != scope.backendRoot {
 		return nil

@@ -28,6 +28,10 @@ type localVaultFileUnlockTarget struct {
 	scope      localVaultFileSessionScope
 	parent     *personal.Session
 	generation uint64
+	// parentPath is the immutable nonblocking routing hint frozen with this
+	// target. It is never auth, proof, a factor or a grant; the child worker
+	// still performs its real checks.
+	parentPath string
 	label      string
 }
 
@@ -65,7 +69,11 @@ func (a *App) localVaultFileUnlockTargetFor(ref localVaultFileRef, parent *perso
 		scope.backendRoot == "" || scope.journalPath == "" {
 		return localVaultFileUnlockTarget{}, false
 	}
-	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, parent.VaultPath())
+	parentPath, ok := a.localVaultFileBoundRoutingPath()
+	if !ok {
+		return localVaultFileUnlockTarget{}, false
+	}
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, parentPath)
 	if backendRoot != scope.backendRoot || filepath.Dir(ref.path) != profileDir {
 		return localVaultFileUnlockTarget{}, false
 	}
@@ -73,6 +81,7 @@ func (a *App) localVaultFileUnlockTargetFor(ref localVaultFileRef, parent *perso
 		scope:      scope,
 		parent:     parent,
 		generation: a.generation,
+		parentPath: parentPath,
 		// Display metadata only: reuse the same whole-list snapshot the sidebar
 		// and title consume. It never participates in identity or authority.
 		label: a.localVaultFileDisplayLabelFor(ref),
@@ -130,12 +139,13 @@ func (a *App) submitLocalVaultFileUnlock() {
 	target := state.target
 	if target.parent == nil || a.session != target.parent ||
 		a.generation != target.generation || !target.parent.Unlocked() ||
+		target.parentPath == "" ||
 		target.scope.configPath == "" || target.scope.vaultID == "" ||
 		target.scope.backendRoot == "" || target.scope.journalPath == "" {
 		a.dismissLocalVaultFileUnlock(state, localVaultFileUnlockStatusStale)
 		return
 	}
-	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, target.parent.VaultPath())
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, target.parentPath)
 	if backendRoot != target.scope.backendRoot || filepath.Dir(target.scope.configPath) != profileDir {
 		a.dismissLocalVaultFileUnlock(state, localVaultFileUnlockStatusStale)
 		return
@@ -210,11 +220,12 @@ func (a *App) finishLocalVaultFileUnlock(sequence uint64, target localVaultFileU
 	}
 	state.busy = false
 	state.op = nil
-	if a.session != target.parent || a.generation != target.generation || !target.parent.Unlocked() {
+	if a.session != target.parent || a.generation != target.generation ||
+		target.parentPath == "" || !target.parent.Unlocked() {
 		a.dismissLocalVaultFileUnlock(state, localVaultFileUnlockStatusStale)
 		return
 	}
-	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, target.parent.VaultPath())
+	profileDir, backendRoot := localVaultFilePaths(a.settingsPath, target.parentPath)
 	if backendRoot != target.scope.backendRoot || filepath.Dir(target.scope.configPath) != profileDir {
 		a.dismissLocalVaultFileUnlock(state, localVaultFileUnlockStatusStale)
 		return
