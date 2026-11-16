@@ -92,9 +92,9 @@ func (a *App) localVaultFileLockMatchingSlots(parent *personal.Session, journalP
 	return slots
 }
 
-func (a *App) localVaultFileLockExisting(scope localVaultFileSessionScope) *localVaultFileLockOperation {
+func (a *App) localVaultFileLockExistingForJournal(parent *personal.Session, journalPath string) *localVaultFileLockOperation {
 	var completed *localVaultFileLockOperation
-	for _, slot := range a.localVaultFileLockMatchingSlots(a.session, scope.journalPath) {
+	for _, slot := range a.localVaultFileLockMatchingSlots(parent, journalPath) {
 		op := slot.lock
 		if op == nil {
 			continue
@@ -102,7 +102,7 @@ func (a *App) localVaultFileLockExisting(scope localVaultFileSessionScope) *loca
 		if !op.isDone() {
 			return op
 		}
-		if completed == nil && op.parent == a.session && op.generation == a.generation {
+		if completed == nil && op.parent == parent && op.generation == a.generation {
 			completed = op
 		}
 	}
@@ -135,27 +135,21 @@ func (a *App) clearCompletedLocalVaultFileLocks(scope localVaultFileSessionScope
 // It performs no wait. A completed marker is durable for the current anchor
 // until the next open boundary; an unfinished marker reports false.
 func (a *App) localVaultFileLockResult(scope localVaultFileSessionScope) (localVaultFileLockOutcome, bool) {
-	a.syncLocalVaultFileSessions()
-	if a.session == nil {
+	currentParent := a.session
+	if currentParent == nil {
 		return localVaultFileLockOutcomeUnknown, false
 	}
-	if slot := a.localVaultFiles.sessionSlots[scope]; slot != nil {
-		if slot.parent == a.session && slot.appGeneration == a.generation &&
-			slot.scope == scope && slot.lock != nil &&
-			slot.lock.parent == a.session && slot.lock.generation == a.generation &&
-			slot.lock.sequence != 0 && slot.lock.journalPath == scope.journalPath {
-			return slot.lock.finiteOutcome()
-		}
+	slot := a.localVaultFiles.sessionSlots[scope]
+	if slot == nil || slot.scope != scope || slot.parent != currentParent ||
+		slot.appGeneration != a.generation {
 		return localVaultFileLockOutcomeUnknown, false
 	}
-	for _, slot := range a.localVaultFileLockMatchingSlots(a.session, scope.journalPath) {
-		if slot.appGeneration == a.generation && slot.scope.backendRoot == scope.backendRoot &&
-			slot.lock != nil && slot.lock.parent == a.session &&
-			slot.lock.generation == a.generation && slot.lock.sequence != 0 {
-			return slot.lock.finiteOutcome()
-		}
+	op := slot.lock
+	if op == nil || op.parent != currentParent || op.generation != a.generation ||
+		op.sequence == 0 || op.journalPath != slot.scope.journalPath {
+		return localVaultFileLockOutcomeUnknown, false
 	}
-	return localVaultFileLockOutcomeUnknown, false
+	return op.finiteOutcome()
 }
 
 // beginLocalVaultFileLock freezes one explicit lock operation on the existing
@@ -165,48 +159,40 @@ func (a *App) localVaultFileLockResult(scope localVaultFileSessionScope) (localV
 // only local producer/tail snapshots. It performs no VaultPath, parent-mutex,
 // IO, dispatch or synchronous wait on the UI path.
 func (a *App) beginLocalVaultFileLock(scope localVaultFileSessionScope) *localVaultFileLockOperation {
-	if a.session == nil || !a.session.Unlocked() ||
-		scope.configPath == "" || scope.vaultID == "" ||
-		scope.backendRoot == "" || scope.journalPath == "" {
+	currentParent := a.session
+	if currentParent == nil {
 		return nil
 	}
-	a.syncLocalVaultFileSessions()
-	if a.session == nil || !a.session.Unlocked() {
-		return nil
-	}
+	// Ownership is the exact existing registry slot, and all subsequent work
+	// uses its stored scope/journal. The caller's full-scope value is only the
+	// map lookup key: it never supplies journal authority or creates an anchor.
 	state := &a.localVaultFiles
-	op := a.localVaultFileLockExisting(scope)
+	anchor := state.sessionSlots[scope]
+	if anchor == nil || anchor.scope != scope || anchor.parent != currentParent {
+		return nil
+	}
+	storedScope := anchor.scope
+	if storedScope.configPath == "" || storedScope.vaultID == "" ||
+		storedScope.backendRoot == "" || storedScope.journalPath == "" {
+		return nil
+	}
+	journalPath := storedScope.journalPath
+	op := a.localVaultFileLockExistingForJournal(currentParent, journalPath)
 	if op == nil {
 		state.lockSequence++
 		op = &localVaultFileLockOperation{
-			parent:      a.session,
+			parent:      currentParent,
 			generation:  a.generation,
 			sequence:    state.lockSequence,
-			scope:       scope,
-			journalPath: scope.journalPath,
+			scope:       storedScope,
+			journalPath: journalPath,
 			doneCh:      make(chan struct{}),
 		}
-	}
-
-	// The request scope is always the retained no-cache anchor. Existing
-	// matching aliases are marked with the same pointer before any cancellation
-	// or wrapper detach.
-	anchor := state.sessionSlots[scope]
-	if anchor == nil {
-		anchor = &localVaultFileSessionSlot{
-			scope: scope, parent: a.session, appGeneration: a.generation,
-			retiring: true,
-		}
-		if state.sessionSlots == nil {
-			state.sessionSlots = make(map[localVaultFileSessionScope]*localVaultFileSessionSlot)
-		}
-		state.sessionSlots[scope] = anchor
-		a.scheduleLocalVaultFileSessionTailPurge(anchor)
 	}
 	if op.anchor == nil {
 		op.anchor = anchor
 	}
-	slots := a.localVaultFileLockMatchingSlots(a.session, scope.journalPath)
+	slots := a.localVaultFileLockMatchingSlots(currentParent, journalPath)
 	anchorFound := false
 	for _, slot := range slots {
 		if slot == anchor {
@@ -228,7 +214,7 @@ func (a *App) beginLocalVaultFileLock(scope localVaultFileSessionScope) *localVa
 	// Collect exact producers before cancellation. Settlement already includes
 	// any pre-adoption candidate actual Close, so the worker never closes or
 	// counts those candidates again.
-	producers := a.collectLocalVaultFileSessionPredecessors(scope)
+	producers := a.collectLocalVaultFileSessionPredecessors(storedScope)
 	for _, producer := range producers {
 		a.cancelLocalVaultFileSessionOperationExact(producer)
 	}
@@ -246,11 +232,11 @@ func (a *App) beginLocalVaultFileLock(scope localVaultFileSessionScope) *localVa
 		}
 	}
 	if selected != "" {
-		if selected == scope.configPath {
+		if selected == storedScope.configPath {
 			a.localVaultFiles.items = nil
 		} else {
 			for _, ref := range a.localVaultFiles.refs {
-				if ref.path == selected && ref.journalPath == scope.journalPath {
+				if ref.path == selected && ref.journalPath == journalPath {
 					a.localVaultFiles.items = nil
 					break
 				}

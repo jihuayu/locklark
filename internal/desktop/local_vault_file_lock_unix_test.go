@@ -100,13 +100,25 @@ func TestDesktopLocalVaultAdoptedLockAliasBarrierAndReopen(t *testing.T) {
 	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
 	aliasScope := f.scope(aliasPath, aliasManifest)
 	f.openVault(t, q, aScope)
-	f.openVault(t, q, bScope)
 	aSlot := f.app.localVaultFiles.sessionSlots[aScope]
-	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
-	if aSlot == nil || aSlot.session == nil || bSlot == nil || bSlot.session == nil {
+	if aSlot == nil || aSlot.session == nil {
 		t.Fatal("LOCAL_LOCK_ADOPTED_SETUP_FAILED")
 	}
-	aWrapper, bWrapper := aSlot.session, bSlot.session
+	aWrapper := aSlot.session
+	// Register/adopt the real alias before beginning the lock so the exact
+	// stored-slot gate accepts it as a legitimate duplicate request.
+	f.openVault(t, q, aliasScope)
+	aliasSlot := f.app.localVaultFiles.sessionSlots[aliasScope]
+	if aliasSlot == nil || aliasSlot.session == nil {
+		t.Fatal("LOCAL_LOCK_ALIAS_SETUP_FAILED")
+	}
+	f.openVault(t, q, bScope)
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if bSlot == nil || bSlot.session == nil {
+		t.Fatal("LOCAL_LOCK_SIBLING_SETUP_FAILED")
+	}
+	bWrapper := bSlot.session
+	q.drainLaunches(t)
 
 	closeEntered := make(chan struct{})
 	closeRelease := make(chan struct{})
@@ -122,13 +134,20 @@ func TestDesktopLocalVaultAdoptedLockAliasBarrierAndReopen(t *testing.T) {
 	if lock == nil {
 		t.Fatal("LOCAL_LOCK_ADOPTED_BEGIN_FAILED")
 	}
-	aCloseWorker := startLocalVaultLaunchAsync(t, q)
+	firstCloseWorker := startLocalVaultLaunchAsync(t, q)
 	awaitLocalVaultSignal(t, closeEntered, "LOCAL_LOCK_ADOPTED_CLOSE_NOT_ENTERED")
-	lockWorker := startLocalVaultLaunchAsync(t, q)
+	var remainingWorkers []chan struct{}
+	for len(q.launches) != 0 {
+		remainingWorkers = append(remainingWorkers, startLocalVaultLaunchAsync(t, q))
+	}
+	if len(remainingWorkers) == 0 {
+		t.Fatal("LOCAL_LOCK_ADOPTED_WORKERS_MISSING")
+	}
 	if lock.isDone() {
 		t.Fatal("LOCAL_LOCK_ADOPTED_FINISHED_WHILE_CLOSE_PAUSED")
 	}
-	if aSlot.closeTail == nil || aSlot.session != nil {
+	if aSlot.closeTail == nil || aSlot.session != nil ||
+		aliasSlot.closeTail == nil || aliasSlot.session != nil {
 		t.Fatal("LOCAL_LOCK_ADOPTED_TAIL_NOT_INSTALLED")
 	}
 
@@ -136,8 +155,7 @@ func TestDesktopLocalVaultAdoptedLockAliasBarrierAndReopen(t *testing.T) {
 	if aliasLock != lock {
 		t.Fatal("LOCAL_LOCK_ALIAS_DID_NOT_REUSE_OPERATION")
 	}
-	if aliasSlot := f.app.localVaultFiles.sessionSlots[aliasScope]; aliasSlot == nil ||
-		aliasSlot.lock != lock {
+	if aliasSlot.lock != lock {
 		t.Fatal("LOCAL_LOCK_ALIAS_MARKER_NOT_INSTALLED")
 	}
 	if op := f.app.beginLocalVaultFileSession(aliasScope, []byte(f.password), f.key); op != nil {
@@ -164,8 +182,10 @@ func TestDesktopLocalVaultAdoptedLockAliasBarrierAndReopen(t *testing.T) {
 	}
 
 	close(closeRelease)
-	awaitLocalVaultSignal(t, aCloseWorker, "LOCAL_LOCK_ADOPTED_CLOSE_STUCK")
-	awaitLocalVaultSignal(t, lockWorker, "LOCAL_LOCK_ADOPTED_WORKER_STUCK")
+	awaitLocalVaultSignal(t, firstCloseWorker, "LOCAL_LOCK_ADOPTED_CLOSE_STUCK")
+	for _, worker := range remainingWorkers {
+		awaitLocalVaultSignal(t, worker, "LOCAL_LOCK_ADOPTED_WORKER_STUCK")
+	}
 	waitLocalVaultFileLockDone(t, lock)
 	if outcome, done := f.app.localVaultFileLockResult(aScope); !done ||
 		outcome != localVaultFileLockOutcomeSucceeded {
