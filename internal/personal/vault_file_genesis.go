@@ -113,7 +113,7 @@ func (s *Session) PrepareVaultFileGenesis(req VaultFileGenesisRequest, password,
 			return out, fmt.Errorf("%w: seal", ErrVaultFileGenesisRecovery)
 		}
 	}
-	checkpoint, err := verifyVaultFileGenesisIntent(req, intent, material.owner, rootPin)
+	checkpoint, err := verifyVaultFileGenesisIntent(req, intent, material.owner, material.localSigning, material.localAgeIdentity, material.localRecipient, rootPin)
 	if err != nil {
 		if intentExists {
 			return out, ErrVaultFileGenesisIntent
@@ -177,15 +177,17 @@ func (s *Session) PrepareVaultFileGenesis(req VaultFileGenesisRequest, password,
 }
 
 type vaultFileGenesisMaterial struct {
-	owner          vaultFileOwnerRecord
-	localSigning   []byte
-	localRecipient string
-	projection     VaultFileOwnershipPublic
+	owner            vaultFileOwnerRecord
+	localSigning     []byte
+	localAgeIdentity []byte
+	localRecipient   string
+	projection       VaultFileOwnershipPublic
 }
 
 func (m *vaultFileGenesisMaterial) clear() {
 	clearVaultFileOwners([]vaultFileOwnerRecord{m.owner})
 	clear(m.localSigning)
+	clear(m.localAgeIdentity)
 	*m = vaultFileGenesisMaterial{}
 }
 
@@ -233,6 +235,7 @@ func (s *Session) loadVaultFileGenesisMaterialLocked(vaultID string, archived va
 			}
 			material.owner = cloneVaultFileOwners(records[i : i+1])[0]
 			material.localSigning = bytes.Clone(auth.identity.Signing)
+			material.localAgeIdentity = []byte(auth.identity.Device)
 			material.localRecipient = device.Recipient().String()
 			material.projection, err = vaultFileOwnerPublic(records[i])
 			return err
@@ -302,17 +305,33 @@ func sameVaultFileGenesisOwner(a, b vaultFileOwnerRecord) bool {
 
 func sealVaultFileGenesis(name string, owner vaultFileOwnerRecord, localSigningSeed []byte, localRecipient string, rootPin *vaultfile.GenesisRootPin) (vaultfilejournal.GenesisIntent, error) {
 	var intent vaultfilejournal.GenesisIntent
-	recoveryAge, err := age.ParseX25519Identity(string(owner.RecoveryAgeIdentity))
+	policy, err := vaultFileGenesisExpectedPolicy(owner, localSigningSeed, localRecipient, rootPin)
 	if err != nil {
 		return intent, err
 	}
 	localSigner := ed25519.NewKeyFromSeed(localSigningSeed)
 	rootSigner := ed25519.NewKeyFromSeed(owner.OwnerRootSeed)
-	recoverySigner := ed25519.NewKeyFromSeed(owner.RecoverySigningSeed)
 	defer clear(localSigner)
 	defer clear(rootSigner)
+	return sealVaultFileGenesisPolicy(name, owner, policy, localSigner, rootSigner, rootPin)
+}
+
+const vaultFileGenesisAuthorDeviceID = "personal-owner-device"
+
+// This is the complete roster this producer can author. A root-valid file
+// with different local identity or additional roles is not its retry.
+func vaultFileGenesisExpectedPolicy(owner vaultFileOwnerRecord, localSigningSeed []byte, localRecipient string, rootPin *vaultfile.GenesisRootPin) (*vaultfile.Policy, error) {
+	if len(localSigningSeed) != ed25519.SeedSize || rootPin == nil {
+		return nil, ErrVaultFileGenesisRecovery
+	}
+	recoveryAge, err := age.ParseX25519Identity(string(owner.RecoveryAgeIdentity))
+	if err != nil {
+		return nil, err
+	}
+	localSigner := ed25519.NewKeyFromSeed(localSigningSeed)
+	recoverySigner := ed25519.NewKeyFromSeed(owner.RecoverySigningSeed)
+	defer clear(localSigner)
 	defer clear(recoverySigner)
-	const authorDeviceID = "personal-owner-device"
 	policy := &vaultfile.Policy{Format: vaultfile.Format, Version: vaultfile.Version,
 		VaultID: owner.VaultID, PolicySeq: 0,
 		OwnerRoot: vaultfile.OwnerRoot{KeyID: owner.OwnerRootKeyID, Alg: vaultfile.PolicySigAlgEd25519,
@@ -321,7 +340,7 @@ func sealVaultFileGenesis(name string, owner vaultFileOwnerRecord, localSigningS
 		Writers: []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}, {PrincipalID: "recovery", Label: "Recovery"}},
 		Owners:  []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}},
 		Devices: []vaultfile.Device{
-			{DeviceID: authorDeviceID, PrincipalID: "owner", Label: "Personal device",
+			{DeviceID: vaultFileGenesisAuthorDeviceID, PrincipalID: "owner", Label: "Personal device",
 				ContentSigningKey: vaultfile.PublicKey{Alg: vaultfile.SigAlgEd25519, PublicKey: bytes.Clone(localSigner.Public().(ed25519.PublicKey))},
 				AgeEncryptionKey:  localRecipient},
 			{DeviceID: owner.RecoveryDeviceID, PrincipalID: "recovery", Label: "Recovery device",
@@ -331,8 +350,13 @@ func sealVaultFileGenesis(name string, owner vaultFileOwnerRecord, localSigningS
 	}
 	sort.Slice(policy.Devices, func(i, j int) bool { return policy.Devices[i].DeviceID < policy.Devices[j].DeviceID })
 	if err := vaultfile.ValidatePolicy(policy); err != nil {
-		return intent, err
+		return nil, err
 	}
+	return policy, nil
+}
+
+func sealVaultFileGenesisPolicy(name string, owner vaultFileOwnerRecord, policy *vaultfile.Policy, localSigner, rootSigner ed25519.PrivateKey, rootPin *vaultfile.GenesisRootPin) (vaultfilejournal.GenesisIntent, error) {
+	var intent vaultfilejournal.GenesisIntent
 	document, err := vaultfile.EncodePolicyDocument(policy)
 	if err != nil {
 		return intent, err
@@ -349,7 +373,7 @@ func sealVaultFileGenesis(name string, owner vaultFileOwnerRecord, localSigningS
 		OwnerRootPublicKey: bytes.Clone(rootPin.OwnerRootPublicKey), PolicySeq: 0, PolicyDigest: policyDigest}
 	draft := &vaultfile.File{Format: vaultfile.Format, Version: vaultfile.Version,
 		Header: vaultfile.Header{VaultID: owner.VaultID, KeyEpoch: 1, ContentSeq: 0,
-			OpID: operationID, PolicySeq: 0, PolicyDigest: policyDigest, AuthorDeviceID: authorDeviceID},
+			OpID: operationID, PolicySeq: 0, PolicyDigest: policyDigest, AuthorDeviceID: vaultFileGenesisAuthorDeviceID},
 		SignedPolicyProofs: []vaultfile.SignedPolicy{proof}}
 	vuk := make([]byte, vaultfile.CEKSize)
 	defer clear(vuk)
@@ -366,7 +390,7 @@ func sealVaultFileGenesis(name string, owner vaultFileOwnerRecord, localSigningS
 	return intent, nil
 }
 
-func verifyVaultFileGenesisIntent(req VaultFileGenesisRequest, intent vaultfilejournal.GenesisIntent, owner vaultFileOwnerRecord, pin *vaultfile.GenesisRootPin) (*vaultfile.PolicyCheckpoint, error) {
+func verifyVaultFileGenesisIntent(req VaultFileGenesisRequest, intent vaultfilejournal.GenesisIntent, owner vaultFileOwnerRecord, localSigningSeed, localAgeIdentity []byte, localRecipient string, pin *vaultfile.GenesisRootPin) (*vaultfile.PolicyCheckpoint, error) {
 	if intent.Name != req.Name || intent.VaultID != req.VaultID || intent.OwnerRootKeyID != pin.OwnerRootKeyID ||
 		!bytes.Equal(intent.OwnerRootPublicKey, pin.OwnerRootPublicKey) || intent.PolicySeq != 0 {
 		return nil, ErrVaultFileGenesisIntent
@@ -376,8 +400,34 @@ func verifyVaultFileGenesisIntent(req VaultFileGenesisRequest, intent vaultfilej
 		return nil, ErrVaultFileGenesisIntent
 	}
 	f, err := vaultfile.ParseFile(intent.SealedBytes)
-	if err != nil || f.Header.OpID != intent.OperationID {
+	if err != nil || f.Header.OpID != intent.OperationID || f.Header.AuthorDeviceID != vaultFileGenesisAuthorDeviceID {
 		return nil, ErrVaultFileGenesisIntent
+	}
+	expected, err := vaultFileGenesisExpectedPolicy(owner, localSigningSeed, localRecipient, pin)
+	if err != nil {
+		return nil, ErrVaultFileGenesisIntent
+	}
+	document, err := vaultfile.EncodePolicyDocument(expected)
+	if err != nil || !bytes.Equal(f.SignedPolicyProofs[0].Document, document) ||
+		!bytes.Equal(checkpoint.PolicyDigest, vaultfile.PolicyDigest(expected)) ||
+		len(f.VUKDeviceSlots) != len(expected.Devices) {
+		return nil, ErrVaultFileGenesisIntent
+	}
+	for i := range expected.Devices {
+		if f.VUKDeviceSlots[i].DeviceID != expected.Devices[i].DeviceID ||
+			f.VUKDeviceSlots[i].Recipient != expected.Devices[i].AgeEncryptionKey {
+			return nil, ErrVaultFileGenesisIntent
+		}
+	}
+	localAge, err := age.ParseX25519Identity(string(localAgeIdentity))
+	if err != nil || localAge.Recipient().String() != localRecipient {
+		return nil, ErrVaultFileGenesisIntent
+	}
+	_, localMetadata, localItems, err := vault.OpenAuthenticatedItems(intent.SealedBytes, checkpoint, vaultFileGenesisAuthorDeviceID, localAge)
+	defer clear(localMetadata)
+	defer clearAuthenticatedItems(localItems)
+	if err != nil || len(localMetadata) != 0 || len(localItems) != 0 {
+		return nil, ErrVaultFileGenesisRecovery
 	}
 	recoverySigner := ed25519.NewKeyFromSeed(owner.RecoverySigningSeed)
 	defer clear(recoverySigner)

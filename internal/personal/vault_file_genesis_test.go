@@ -156,14 +156,108 @@ func TestVaultFileGenesisProducerPublishedRecoveryAndExactRetry(t *testing.T) {
 		t.Fatal("GENESIS_RESTORED_UNLOCK_FAILED")
 	}
 	defer restoredSession.Lock()
+	restoredOwner := testVaultFileOwnerRecord(t, restoredSession, restored, f.owner.VaultID)
+	defer clearVaultFileOwners([]vaultFileOwnerRecord{restoredOwner})
+	restoredRecovery, err := age.ParseX25519Identity(string(restoredOwner.RecoveryAgeIdentity))
+	if err != nil {
+		t.Fatal("GENESIS_RESTORED_RECOVERY_IDENTITY_INVALID")
+	}
+	_, restoredMetadata, restoredItems, err := vault.OpenAuthenticatedItems(intent.SealedBytes, checkpoint, restoredOwner.RecoveryDeviceID, restoredRecovery)
+	defer clear(restoredMetadata)
+	defer clearAuthenticatedItems(restoredItems)
+	if err != nil || len(restoredMetadata) != 0 || len(restoredItems) != 0 {
+		t.Fatal("GENESIS_RESTORED_CUSTODY_CANNOT_OPEN_ORIGINAL_G")
+	}
 	recovered, err := restoredSession.PrepareVaultFileGenesis(f.request(), f.password, f.key, f.kit)
-	if err != nil || !reflect.DeepEqual(recovered, first) {
-		t.Fatal("GENESIS_RESTORED_CUSTODY_RETRY_FAILED")
+	if !errors.Is(err, ErrVaultFileGenesisIntent) || recovered != (VaultFileGenesisPublic{}) {
+		t.Fatal("GENESIS_RESTORED_NEW_IDENTITY_ACCEPTED_OLD_AUTHOR")
 	}
 	final := loadProducedGenesis(t, f.journal)
 	defer clear(final.SealedBytes)
 	if !sameVaultFileGenesisIntent(intent, final) {
 		t.Fatal("GENESIS_RESTORED_RETRY_CHANGED_INTENT")
+	}
+}
+
+func TestVaultFileGenesisRetryRejectsRootSignedForeignLocalRoster(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("genesis intent persistence is unsupported on this platform")
+	}
+	f := newGenesisProducerFixture(t)
+	record := testVaultFileOwnerRecord(t, f.session, f.personal, f.owner.VaultID)
+	defer clearVaultFileOwners([]vaultFileOwnerRecord{record})
+	material, err := f.session.loadVaultFileGenesisMaterial(f.owner.VaultID, record)
+	if err != nil {
+		t.Fatal("GENESIS_CURRENT_IDENTITY_FAILED")
+	}
+	defer material.clear()
+	rootPublic, err := hex.DecodeString(f.owner.OwnerRootPublicKey)
+	if err != nil {
+		t.Fatal("GENESIS_ROOT_PUBLIC_INVALID")
+	}
+	pin := &vaultfile.GenesisRootPin{VaultID: f.owner.VaultID,
+		OwnerRootKeyID: f.owner.OwnerRootKeyID, OwnerRootPublicKey: ed25519.PublicKey(rootPublic)}
+	recoveryAge, err := age.ParseX25519Identity(string(record.RecoveryAgeIdentity))
+	if err != nil {
+		t.Fatal("GENESIS_RECOVERY_IDENTITY_INVALID")
+	}
+	for _, tc := range []struct {
+		name string
+		seal func(string) (vaultfilejournal.GenesisIntent, error)
+	}{
+		{name: "wrong-local-author", seal: func(name string) (vaultfilejournal.GenesisIntent, error) {
+			wrongSeed := bytes.Repeat([]byte{0x58}, ed25519.SeedSize)
+			defer clear(wrongSeed)
+			return sealVaultFileGenesis(name, record, wrongSeed, material.localRecipient, pin)
+		}},
+		{name: "extra-reader-role", seal: func(name string) (vaultfilejournal.GenesisIntent, error) {
+			policy, err := vaultFileGenesisExpectedPolicy(record, material.localSigning, material.localRecipient, pin)
+			if err != nil {
+				return vaultfilejournal.GenesisIntent{}, err
+			}
+			policy.Readers = []vaultfile.Member{{PrincipalID: "owner", Label: "Owner"}}
+			localSigner := ed25519.NewKeyFromSeed(material.localSigning)
+			rootSigner := ed25519.NewKeyFromSeed(record.OwnerRootSeed)
+			defer clear(localSigner)
+			defer clear(rootSigner)
+			return sealVaultFileGenesisPolicy(name, record, policy, localSigner, rootSigner, pin)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			private := filepath.Join(filepath.Dir(f.personal), tc.name)
+			if err := os.Mkdir(private, 0700); err != nil {
+				t.Fatal("GENESIS_PRIVATE_PARENT_FAILED")
+			}
+			req := f.request()
+			req.IntentPath = filepath.Join(private, "genesis.journal")
+			intent, err := tc.seal(req.Name)
+			if err != nil {
+				t.Fatalf("GENESIS_ROOT_SIGNED_FIXTURE_FAILED: %v", err)
+			}
+			defer clear(intent.SealedBytes)
+			checkpoint, err := vaultfile.VerifyGenesis(intent.SealedBytes, pin)
+			if err != nil || !bytes.Equal(checkpoint.PolicyDigest, intent.PolicyDigest) {
+				t.Fatal("GENESIS_FIXTURE_CRYPTO_INVALID")
+			}
+			_, metadata, items, err := vault.OpenAuthenticatedItems(intent.SealedBytes, checkpoint, record.RecoveryDeviceID, recoveryAge)
+			defer clear(metadata)
+			defer clearAuthenticatedItems(items)
+			if err != nil || len(metadata) != 0 || len(items) != 0 {
+				t.Fatal("GENESIS_FIXTURE_RECOVERY_OPEN_FAILED")
+			}
+			if err := vaultfilejournal.CreateNewGenesisIntent(req.IntentPath, intent); err != nil {
+				t.Fatal("GENESIS_FOREIGN_INTENT_CREATE_FAILED")
+			}
+			got, err := f.session.PrepareVaultFileGenesis(req, f.password, f.key, f.kit)
+			if !errors.Is(err, ErrVaultFileGenesisIntent) || got != (VaultFileGenesisPublic{}) {
+				t.Fatal("GENESIS_FOREIGN_LOCAL_ROSTER_ACCEPTED")
+			}
+			stored := loadProducedGenesis(t, req.IntentPath)
+			defer clear(stored.SealedBytes)
+			if !sameVaultFileGenesisIntent(intent, stored) {
+				t.Fatal("GENESIS_FOREIGN_INTENT_CHANGED")
+			}
+		})
 	}
 }
 
