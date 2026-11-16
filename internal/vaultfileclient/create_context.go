@@ -33,6 +33,9 @@ type CreationContext struct {
 	stateMu            sync.Mutex
 	terminal           bool
 	activeCancel       context.CancelFunc
+	// Nil in production. Tests can cancel after an actual durable intent and
+	// companion, without receiving factors, G or a backend capability.
+	afterIntentForTest func()
 }
 
 // OpenCreation reserves an initial selector before any custody work, or reads

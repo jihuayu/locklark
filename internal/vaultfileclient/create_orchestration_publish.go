@@ -63,6 +63,9 @@ func (c *CreationContext) completeCreate(ctx context.Context, password, key, kit
 	if err != nil {
 		return mapCreateGenesisError(err)
 	}
+	if c.afterIntentForTest != nil {
+		c.afterIntentForTest()
+	}
 	// The durable companion is re-read, then the live Session independently
 	// rechecks archive custody, G, local author and recovery reader before the
 	// first possible backend Create.
