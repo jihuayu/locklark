@@ -30,7 +30,8 @@ class SafetyTests(unittest.TestCase):
                     def __init__(self, _):
                         self.diagnosis = acceptance.safe_host_diagnosis({"operation": "keyboard-check", "target": "new-master",
                             "step": "enter-master", "command": "ime", "command_exit": "nonzero", "exit_code": 1,
-                            "stderr_class": "service-missing", "failure_origin": "service", "reason": "command-failed"})
+                            "stderr_class": "service-missing", "stdout_failure_class": "service-missing",
+                            "failure_origin": "service", "reason": "command-failed"})
 
                     def setup(self):
                         raise acceptance.AcceptanceFailure()
@@ -42,7 +43,8 @@ class SafetyTests(unittest.TestCase):
                         self.diagnosis["control"] = "create-form"
 
                     def close(self):
-                        self.diagnosis.update({"command": "ui-cleanup", "command_exit": "nonzero", "exit_code": 7})
+                        self.diagnosis.update({"command": "ui-cleanup", "command_exit": "nonzero", "exit_code": 7,
+                                               "stdout_failure_class": "unknown"})
                         if cleanup_raises:
                             raise OSError("PrivateCleanupMessageMustNotBePrinted")
 
@@ -60,6 +62,7 @@ class SafetyTests(unittest.TestCase):
                 self.assertEqual((diagnosis["command"], diagnosis["command_exit"], diagnosis["exit_code"]), ("ime", "nonzero", 1))
                 self.assertEqual(diagnosis["control"], "create-form")
                 self.assertEqual(diagnosis["stderr_class"], "service-missing")
+                self.assertEqual(diagnosis["stdout_failure_class"], "service-missing")
                 self.assertEqual(diagnosis["failure_origin"], "service")
                 self.assertEqual(saved["result.json"]["cleanup_ok"], not cleanup_raises)
                 self.assertTrue(saved["result.json"]["scan_ok"])
@@ -78,10 +81,52 @@ class SafetyTests(unittest.TestCase):
                         controller.shell("dumpsys", "input_method")
                     safe = acceptance.safe_host_diagnosis(controller.diagnosis)
                     self.assertEqual(safe.get("stderr_class"), expected)
+                    self.assertEqual(safe["stdout_failure_class"], "empty")
                     if raw:
                         self.assertNotIn(raw.decode(), json.dumps(safe))
                 finally:
                     controller.close()
+
+    def test_failed_ime_stdout_class_is_bounded_and_cannot_weaken_gate(self):
+        marker = b"Can't find service: input_method\n"
+        canary = b"PrivateStdoutCanaryForDiagnostics"
+        cases = ((marker, "service-missing", "service"), (marker + canary, "unknown", "service"),
+                 (b"", "empty", "remote-other"), (b"\xff\x00", "unknown", "remote-other"),
+                 (b"x" * 4097, "oversized", "remote-other"))
+        for raw, expected, origin in cases:
+            with self.subTest(expected=expected, size=len(raw)), tempfile.TemporaryDirectory() as root:
+                controller = acceptance.AndroidAcceptance(types.SimpleNamespace(adb="/unused", serial="emulator-5556", artifacts=root))
+                controller.record(canary.decode())
+                try:
+                    failed = subprocess.CompletedProcess([], 7, raw, b"")
+                    with mock.patch.object(acceptance.subprocess, "run", return_value=failed), self.assertRaises(acceptance.AcceptanceFailure):
+                        controller.dismiss_keyboard()
+                    public = acceptance.safe_host_diagnosis(controller.diagnosis)
+                    self.assertEqual((public["operation"], public["command"], public["command_exit"], public["exit_code"]),
+                                     ("keyboard-check", "ime", "nonzero", 7))
+                    self.assertEqual((public["stdout_failure_class"], public["failure_origin"]), (expected, origin))
+                    self.assertEqual(public["stderr_class"], "empty")
+                    self.assertNotIn(canary.decode(), json.dumps(public))
+                    if canary in raw:
+                        with self.assertRaises(acceptance.AcceptanceFailure):
+                            controller.scan()
+                finally:
+                    controller.close()
+        with tempfile.TemporaryDirectory() as root:
+            controller = acceptance.AndroidAcceptance(types.SimpleNamespace(adb="/unused", serial="emulator-5556", artifacts=root))
+            try:
+                failed = subprocess.CompletedProcess([], 7, marker, b"")
+                with mock.patch.object(acceptance.subprocess, "run", return_value=failed), self.assertRaises(acceptance.AcceptanceFailure):
+                    controller.dismiss_keyboard()
+                self.assertEqual(acceptance.safe_host_diagnosis(controller.diagnosis)["stdout_failure_class"], "service-missing")
+                succeeded = subprocess.CompletedProcess([], 0, marker, b"")
+                with mock.patch.object(acceptance.subprocess, "run", return_value=succeeded):
+                    controller.dismiss_keyboard()
+                public = acceptance.safe_host_diagnosis(controller.diagnosis)
+                self.assertEqual((public["stdout_failure_class"], public["failure_origin"], public["command_exit"]),
+                                 ("unknown", "remote-other", "ok"))
+            finally:
+                controller.close()
 
     def test_manual_password_mode_is_enabled_before_keyboard_input(self):
         controller = mock.Mock(spec=acceptance.AndroidAcceptance)
@@ -513,11 +558,13 @@ class BackgroundTransitionTests(unittest.TestCase):
     def test_public_diagnosis_is_only_fixed_control_and_lifecycle_enums(self):
         secret = "PrivateDiagnosticFixture"
         value = acceptance.safe_host_diagnosis({"activity": secret, "foreground": "launcher", "control": secret,
-                                                "wait": "background-stopped", "ime": secret, "extra": secret})
+                                                "wait": "background-stopped", "ime": secret,
+                                                "stdout_failure_class": secret, "extra": secret})
         self.assertEqual({key: value[key] for key in ("activity", "foreground", "control", "wait", "identity", "ime")},
                          {"activity": "unknown", "foreground": "launcher", "control": "unknown",
                           "wait": "background-stopped", "identity": "unknown", "ime": "unknown"})
         self.assertNotIn(secret, str(value))
+        self.assertEqual(value["stdout_failure_class"], "unknown")
         nodes = self.locked_nodes()
         self.assertEqual(acceptance.ui_control_state(nodes), "unlock-ready")
         nodes[0]["enabled"] = "false"
@@ -637,11 +684,12 @@ class ActionableControlTests(unittest.TestCase):
         controller.started, controller.args = True, types.SimpleNamespace(timeout=180)
         controller.diagnosis = acceptance.safe_host_diagnosis({"operation": "type-text", "target": "new-master", "command": "text",
                                                              "command_exit": "nonzero", "exit_code": 1, "stderr_class": "permission",
-                                                             "failure_origin": "permission"})
+                                                             "stdout_failure_class": "service-missing", "failure_origin": "permission"})
         controller.observe_activity_state = mock.Mock(side_effect=acceptance.AcceptanceFailure)
         controller.snapshot = mock.Mock(side_effect=lambda _: controller.diagnosis.update({"control": "create-form", "create_form": True}))
         def query_keyboard(*_, **__):
-            controller.diagnosis.update({"command": "ime", "command_exit": "ok", "exit_code": 0, "stderr_class": "empty"})
+            controller.diagnosis.update({"command": "ime", "command_exit": "ok", "exit_code": 0, "stderr_class": "empty",
+                                         "stdout_failure_class": "unknown"})
             return subprocess.CompletedProcess([], 0, b"mInputShown=true\n", b"")
         controller.shell = mock.Mock(side_effect=query_keyboard)
         controller.capture_failure_diagnosis()
@@ -652,6 +700,7 @@ class ActionableControlTests(unittest.TestCase):
         self.assertEqual(controller.diagnosis["command"], "text")
         self.assertEqual(controller.diagnosis["exit_code"], 1)
         self.assertEqual(controller.diagnosis["stderr_class"], "permission")
+        self.assertEqual(controller.diagnosis["stdout_failure_class"], "service-missing")
         self.assertEqual(controller.diagnosis["failure_origin"], "permission")
 
     def test_python_contract_exception_is_classified_without_error_arguments(self):
