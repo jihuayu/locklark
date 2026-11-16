@@ -325,6 +325,52 @@ func TestLocalVaultFileReadObserverMissingObject(t *testing.T) {
 	assertNotAllTrue(t, report)
 }
 
+func TestLocalVaultFileReadObserverUnknownProfileEntry(t *testing.T) {
+	p := newPublishedLocalFixture(t)
+	extra := filepath.Join(p.profileDir, "extra.txt")
+	if err := os.WriteFile(extra, []byte(p.fixture.Secret), 0600); err != nil {
+		t.Fatal("OBSERVER_UNKNOWN_PROFILE_SETUP_FAILED")
+	}
+	if err := os.Chmod(extra, 0600); err != nil {
+		t.Fatal("OBSERVER_UNKNOWN_PROFILE_MODE_FAILED")
+	}
+	before := snapshotPersistent(t, p.root)
+	report, err := verifyLocalWorkspace(p.fixture, p.workspace)
+	if err == nil {
+		t.Fatal("OBSERVER_UNKNOWN_PROFILE_ENTRY_ACCEPTED")
+	}
+	if allProjectionTrue(report) {
+		t.Fatal("OBSERVER_UNKNOWN_PROFILE_ALL_TRUE")
+	}
+	after := snapshotPersistent(t, p.root)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("OBSERVER_UNKNOWN_PROFILE_MUTATED_PERSISTENT_FILES")
+	}
+}
+
+func TestLocalVaultFileReadObserverBackendTmpEntry(t *testing.T) {
+	p := newPublishedLocalFixture(t)
+	extra := filepath.Join(p.backendRoot, "vaultfile-backend", "v1", "tmp", "x")
+	if err := os.WriteFile(extra, []byte(p.fixture.Secret), 0644); err != nil {
+		t.Fatal("OBSERVER_BACKEND_TMP_SETUP_FAILED")
+	}
+	if err := os.Chmod(extra, 0644); err != nil {
+		t.Fatal("OBSERVER_BACKEND_TMP_MODE_FAILED")
+	}
+	before := snapshotPersistent(t, p.root)
+	report, err := verifyLocalWorkspace(p.fixture, p.workspace)
+	if err == nil {
+		t.Fatal("OBSERVER_BACKEND_TMP_ENTRY_ACCEPTED")
+	}
+	if allProjectionTrue(report) {
+		t.Fatal("OBSERVER_BACKEND_TMP_ALL_TRUE")
+	}
+	after := snapshotPersistent(t, p.root)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("OBSERVER_BACKEND_TMP_MUTATED_PERSISTENT_FILES")
+	}
+}
+
 func TestLocalVaultFileReadObserverForeignBinding(t *testing.T) {
 	p := newPublishedLocalFixture(t)
 	foreign := filepath.Join(p.root, "foreign.ll")

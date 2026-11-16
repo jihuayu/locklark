@@ -394,6 +394,29 @@ func readBackendObject(backendRoot, name string) (localBackendRecord, bool, erro
 	return record, true, nil
 }
 
+// backendTmpState accepts a completed create only when the versioned tmp
+// directory is present and empty. Any temporary entry is an unknown object,
+// so the observer refuses instead of treating it as an implicitly safe file.
+func backendTmpState(backendRoot string) (present, empty bool, err error) {
+	namespace := filepath.Join(backendRoot, "vaultfile-backend")
+	version := filepath.Join(namespace, "v1")
+	tmp := filepath.Join(version, "tmp")
+	for _, dir := range []string{backendRoot, namespace, version, tmp} {
+		exists, err := realDirectory(dir)
+		if err != nil {
+			return false, false, err
+		}
+		if !exists {
+			return false, false, nil
+		}
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		return true, false, err
+	}
+	return true, len(entries) == 0, nil
+}
+
 func localPrivateModes(f fixture, workspace, profiles, profileDir, backendRoot, config, companion, journal, archive, objectPath string, objectFound bool, entries []os.DirEntry) bool {
 	ok := true
 	requireDir := func(path string) {
@@ -523,6 +546,18 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 		return report, nil
 	}
 
+	base := strings.TrimSuffix(filepath.Base(config), ".json")
+	known := map[string]bool{
+		base + ".json":          true,
+		base + ".json.baseline": true,
+		base + ".journal":       true,
+		base + ".llb":           true,
+	}
+	for _, entry := range entries {
+		if !known[entry.Name()] {
+			return report, errors.New("unknown local profile entry")
+		}
+	}
 	companionPath, err := vaultfileclient.CompanionPath(config)
 	if err != nil {
 		return report, errors.New("invalid local companion path")
@@ -537,7 +572,6 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 	}
 	report.ManifestBackend = manifest.BackendRoot == backendRoot
 
-	base := strings.TrimSuffix(filepath.Base(config), ".json")
 	expectedJournal := filepath.Join(profileDir, base+".journal")
 	expectedArchive := filepath.Join(profileDir, base+".llb")
 	bound := manifest.Name == base+".llv" && manifest.Journal == expectedJournal && manifest.Archive == expectedArchive
@@ -567,6 +601,13 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 		report.ArchivePresent = true
 	}
 
+	tmpPresent, tmpEmpty, tmpErr := backendTmpState(backendRoot)
+	if tmpErr != nil {
+		return report, tmpErr
+	}
+	if tmpPresent && !tmpEmpty {
+		return report, errors.New("backend temporary directory is not empty")
+	}
 	record, recordFound, recordErr := readBackendObject(backendRoot, manifest.Name)
 	if recordErr != nil {
 		return report, recordErr
