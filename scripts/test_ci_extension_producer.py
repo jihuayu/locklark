@@ -150,6 +150,7 @@ class VaultFileProductCIContract(unittest.TestCase):
         "TestVaultFileStatusProductMinimum",
         "TestVaultFileStatusProductAbsentBackendMinimum",
         "TestVaultFileDevicePublicProductMinimum",
+        "TestVaultFileOpenBaselineProductMinimum",
     )
     SELECTOR = "^(" + "|".join(EARLY_PARENTS) + ")$"
     MINIMUM = f"go test -count=1 -run '{SELECTOR}' ./cmd/locklark"
@@ -217,6 +218,7 @@ class VaultFileProductCIContract(unittest.TestCase):
             "TestVaultFileStatusProductAmbiguousBackendRefusal",
             "TestVaultFileStatusProductUnsafeBackendRefusal",
             "TestVaultFileDevicePublicProductFactorRefusal",
+            "TestVaultFileOpenBaselineProductRefusals",
         } <= parents - excluded)
         for name in parents:
             with self.subTest(parent=name):
