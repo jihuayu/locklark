@@ -136,6 +136,16 @@ func assertLocalVaultSessionCompleted(t *testing.T, op *localVaultFileSessionOpe
 	}
 }
 
+func localVaultSessionSlotsNonReadable(a *App) bool {
+	for _, slot := range a.localVaultFiles.sessionSlots {
+		if slot == nil || !slot.retiring || slot.session != nil || slot.operation != nil ||
+			slot.summary.VaultID != "" || len(slot.summary.Items) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func holdDesktopParentDBBusy(t *testing.T, f *localVaultSessionFixture) func() {
 	t.Helper()
 	holder, err := bolt.Open(f.parent.VaultPath(), 0600, &bolt.Options{Timeout: time.Second})
@@ -292,8 +302,8 @@ func TestDesktopLocalVaultSessionPerVaultCloseIsolation(t *testing.T) {
 		t.Fatal("LOCAL_SESSION_WRAPPERS_NOT_DISTINCT")
 	}
 	f.app.closeLocalVaultFileSession(aScope)
-	if f.app.localVaultFiles.sessionSlots[aScope] != nil {
-		t.Fatal("LOCAL_SESSION_CLOSE_RETAINED_SLOT")
+	if slot := f.app.localVaultFiles.sessionSlots[aScope]; slot == nil || !slot.retiring || slot.session != nil {
+		t.Fatal("LOCAL_SESSION_CLOSE_RETAINED_READABLE_SLOT")
 	}
 	q.drain(t)
 	if _, err := aSession.Summary(); err == nil {
@@ -554,10 +564,8 @@ func TestDesktopLocalVaultSessionParentLockStopsCachedMetadata(t *testing.T) {
 	if _, ok := f.app.readLocalVaultFileSession(aScope); ok {
 		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CACHE_DELIVERED")
 	}
-	if len(f.app.localVaultFiles.sessionSlots) != 0 ||
-		f.app.localVaultFiles.sessionParent != nil ||
-		f.app.localVaultFiles.sessionGeneration != 0 {
-		t.Fatal("LOCAL_SESSION_PARENT_LOCK_REGISTRY_RETAINED")
+	if !localVaultSessionSlotsNonReadable(f.app) {
+		t.Fatal("LOCAL_SESSION_PARENT_LOCK_RETAINED_READABLE_SLOT")
 	}
 	if pending.finiteOutcome() != localVaultFileSessionOutcomeCancelled ||
 		pending.slot.operation != nil || pending.slot.session != nil {
@@ -569,7 +577,7 @@ func TestDesktopLocalVaultSessionParentLockStopsCachedMetadata(t *testing.T) {
 	if _, ok := f.app.readLocalVaultFileSession(bScope); ok {
 		t.Fatal("LOCAL_SESSION_PARENT_LOCK_SIBLING_CACHE_DELIVERED")
 	}
-	if f.app.localVaultFiles.sessionParent != nil {
+	if f.app.localVaultFiles.sessionParent != f.parent {
 		t.Fatal("LOCAL_SESSION_PARENT_LOCK_REBOUND")
 	}
 	if _, err := aSession.Summary(); err == nil {
@@ -580,8 +588,7 @@ func TestDesktopLocalVaultSessionParentLockStopsCachedMetadata(t *testing.T) {
 	}
 	q.drain(t)
 	if _, ok := f.app.readLocalVaultFileSession(aScope); ok ||
-		len(f.app.localVaultFiles.sessionSlots) != 0 ||
-		f.app.localVaultFiles.sessionParent != nil {
+		!localVaultSessionSlotsNonReadable(f.app) {
 		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CACHE_REVIVED")
 	}
 }
@@ -672,8 +679,10 @@ func TestDesktopLocalVaultSessionHeldDispatchCancelClosesPendingCandidate(t *tes
 	if !f.parent.Unlocked() {
 		t.Fatal("LOCAL_SESSION_HELD_DISPATCH_PARENT_LOCKED")
 	}
-	if len(f.app.localVaultFiles.sessionSlots) != 1 ||
-		f.app.localVaultFiles.sessionSlots[bScope] != bSlot || bSlot.session != bSession {
+	if slot := f.app.localVaultFiles.sessionSlots[aScope]; slot == nil || !slot.retiring || slot.session != nil {
+		t.Fatal("LOCAL_SESSION_HELD_DISPATCH_CLOSED_SLOT_READABLE")
+	}
+	if f.app.localVaultFiles.sessionSlots[bScope] != bSlot || bSlot.session != bSession {
 		t.Fatal("LOCAL_SESSION_HELD_DISPATCH_REGISTRY_CHANGED")
 	}
 	if len(q.dispatches) != 1 {

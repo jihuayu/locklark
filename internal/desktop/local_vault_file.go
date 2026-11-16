@@ -53,6 +53,14 @@ type localVaultFileState struct {
 	// receives a factor, key, identity, VUK, handle or capability.
 	sessionCandidateOpenPauseForTest  func()
 	sessionCandidateClosePauseForTest func()
+	// sessionPredecessorWaitForTest runs when a producer is about to wait for
+	// its captured predecessors. sessionPostBarrierCancelPauseForTest runs in
+	// the cancelled-after-barrier path just before the producer marks
+	// processing finished. Both are parameterless, nil in production and
+	// captured before launch; neither receives a factor, key, handle or
+	// capability.
+	sessionPredecessorWaitForTest        func()
+	sessionPostBarrierCancelPauseForTest func()
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {

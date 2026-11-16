@@ -282,7 +282,8 @@ func (a *App) localCreatePublishBackup() {
 		backup.Close()
 		a.dispatch(func() {
 			defer cancel()
-			if ctx.Err() != nil || a.generation != generation || a.session != session ||
+			if ctx.Err() != nil ||
+				a.generation != generation || a.session != session ||
 				!a.localCreate.open || a.localCreate.sequence != sequence {
 				return
 			}
@@ -320,16 +321,60 @@ func (a *App) localCreateComplete() {
 	// second factor-open launch can race this creation attempt.
 	childOp := a.reserveLocalVaultFileSessionOperation(scope)
 	state.child = childOp
+	if childOp == nil {
+		// No ordered operation means no protocol constructor, Prepare,
+		// Complete, Verify or unwrap may start. Keep the dialog in its manual
+		// retry state and release the transient context/material.
+		clear(password)
+		clear(secret)
+		clear(kit)
+		cancel()
+		state.cancel, state.busy, state.child = nil, false, nil
+		state.status = "创建未完成；请核查本地状态"
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+		return
+	}
 	dispatch := a.dispatch
 	hook := a.localVaultFiles.sessionCandidateForTest
 	closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
+	predecessorWait := a.localVaultFiles.sessionPredecessorWaitForTest
+	postBarrierCancelPause := a.localVaultFiles.sessionPostBarrierCancelPauseForTest
 	a.launch(func() {
 		defer clear(password)
 		defer clear(secret)
 		defer clear(kit)
 		var err error
 		verified := false
-		if ctx.Err() == nil {
+		if len(childOp.waitFor) != 0 {
+			if predecessorWait != nil {
+				predecessorWait()
+			}
+			waitLocalVaultFileSessionPredecessors(childOp, ctx, func() {
+				clear(password)
+				clear(secret)
+				clear(kit)
+			})
+		}
+		canceled := func() bool {
+			return ctx.Err() != nil || childOp.ctx.Err() != nil
+		}
+		if canceled() {
+			clear(password)
+			clear(secret)
+			clear(kit)
+			if len(childOp.waitFor) != 0 && postBarrierCancelPause != nil {
+				postBarrierCancelPause()
+			}
+			childOp.markProcessingFinished()
+			dispatch(func() {
+				defer cancel()
+				a.finishLocalVaultFileCreateFailure(childOp, generation, session, sequence, ctx, vaultfileclient.ErrCreateCancelled)
+			})
+			return
+		}
+		if !canceled() {
 			var expected vaultfileclient.Manifest
 			expected, err = boundLocalVaultFileManifest(scope.configPath, session.VaultPath(), scope.backendRoot)
 			if err == nil && expected.Journal != scope.journalPath {
@@ -343,7 +388,7 @@ func (a *App) localCreateComplete() {
 				var creation *vaultfileclient.CreationContext
 				creation, err = vaultfileclient.OpenCreationForVault(scope.configPath, &expected, scope.vaultID, password, secret)
 				if creation != nil {
-					if ctx.Err() == nil {
+					if !canceled() {
 						var backupRequired bool
 						backupRequired, err = creation.Prepare(ctx)
 						if err == nil && backupRequired {
@@ -384,7 +429,7 @@ func (a *App) localCreateComplete() {
 		// Creation is verified. Child-open is a separate finite outcome: a
 		// failure here is "created but not opened", never a Complete retry.
 		opened := false
-		if ctx.Err() == nil && childOp != nil {
+		if !canceled() && childOp != nil {
 			manifest, exists, readErr := vaultfileclient.ReadManifest(scope.configPath)
 			if readErr == nil && exists && manifest.VaultID == scope.vaultID &&
 				manifest.PersonalFile == session.VaultPath() && manifest.BackendRoot == scope.backendRoot {
@@ -416,7 +461,8 @@ func (a *App) localCreateComplete() {
 		}
 		dispatch(func() {
 			defer cancel()
-			if ctx.Err() != nil || a.generation != generation || a.session != session ||
+			if ctx.Err() != nil || childOp.ctx.Err() != nil ||
+				a.generation != generation || a.session != session ||
 				!a.localCreate.open || a.localCreate.sequence != sequence {
 				if childOp != nil {
 					a.cancelLocalVaultFileSessionOperationExact(childOp)

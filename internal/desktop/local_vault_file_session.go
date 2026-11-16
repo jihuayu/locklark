@@ -53,6 +53,11 @@ type localVaultFileSessionOperation struct {
 	scope      localVaultFileSessionScope
 	ctx        context.Context
 	cancel     context.CancelFunc
+	// waitFor is the immutable set of older operations with the same parent
+	// instance and exact journalPath that must settle before this producer may
+	// enter its real factory or protocol. It is captured by reserve before any
+	// predecessor is cancelled or replaced.
+	waitFor []*localVaultFileSessionOperation
 
 	// handoffMu guards the one result slot plus its ready/terminal transition.
 	// It is never held across dispatch, launch, validation, Close or IO.
@@ -175,23 +180,35 @@ func (op *localVaultFileSessionOperation) take() (localVaultFileSessionResult, b
 	return result, true
 }
 
-// takeCancelled makes the operation terminal and returns any undelivered
-// result to the caller for exact cleanup.
-func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSessionResult, bool) {
+// takeCancelled makes an unsettled operation terminal and returns any
+// undelivered result to the caller for exact cleanup. It returns active=false
+// for an already settled operation so a late cancellation can never overwrite
+// a settled outcome.
+func (op *localVaultFileSessionOperation) takeCancelled() (localVaultFileSessionResult, bool, bool) {
 	if op == nil {
-		return localVaultFileSessionResult{}, false
+		return localVaultFileSessionResult{}, false, false
 	}
 	op.handoffMu.Lock()
 	defer op.handoffMu.Unlock()
+	if op.settled {
+		// A settled opening already transferred its candidate to the slot; a
+		// later cancellation must not rewrite that finite outcome. A settled
+		// no-candidate failure still records the cancel outcome expected by the
+		// existing creation failure path.
+		if op.outcome != localVaultFileSessionOutcomeOpened {
+			op.outcome = localVaultFileSessionOutcomeCancelled
+		}
+		return localVaultFileSessionResult{}, false, false
+	}
 	op.handoffTerminal = true
 	op.outcome = localVaultFileSessionOutcomeCancelled
 	if !op.handoffReady {
-		return localVaultFileSessionResult{}, false
+		return localVaultFileSessionResult{}, false, true
 	}
 	result := op.handoffResult
 	op.handoffResult = localVaultFileSessionResult{}
 	op.handoffReady = false
-	return result, true
+	return result, true, true
 }
 
 func (op *localVaultFileSessionOperation) finish(outcome localVaultFileSessionOutcome) {
@@ -213,6 +230,83 @@ func (op *localVaultFileSessionOperation) finiteOutcome() localVaultFileSessionO
 	return op.outcome
 }
 
+// collectLocalVaultFileSessionPredecessors gathers every unsettled operation
+// already owned by a slot with the same parent instance and exact journalPath.
+// The full UI identity remains separate; this is only the scheduling key.
+// Retiring tails are included, and exact operation pointers are deduplicated.
+// It must run before the caller cancels or replaces any of them.
+func (a *App) collectLocalVaultFileSessionPredecessors(scope localVaultFileSessionScope) []*localVaultFileSessionOperation {
+	state := &a.localVaultFiles
+	seen := make(map[*localVaultFileSessionOperation]struct{})
+	var out []*localVaultFileSessionOperation
+	add := func(op *localVaultFileSessionOperation) {
+		if op == nil || op.isSettled() {
+			return
+		}
+		if _, ok := seen[op]; ok {
+			return
+		}
+		seen[op] = struct{}{}
+		out = append(out, op)
+	}
+	addWithWait := func(op *localVaultFileSessionOperation) {
+		add(op)
+		if op == nil {
+			return
+		}
+		for _, pred := range op.waitFor {
+			add(pred)
+		}
+	}
+	for _, slot := range state.sessionSlots {
+		if slot == nil || slot.parent != a.session || slot.scope.journalPath != scope.journalPath {
+			continue
+		}
+		addWithWait(slot.operation)
+		for _, op := range slot.tail {
+			addWithWait(op)
+		}
+	}
+	return out
+}
+
+// waitLocalVaultFileSessionPredecessors blocks the producer until every
+// captured predecessor settles. If the producer's own context is cancelled
+// while waiting, onCancel runs promptly (to clear worker-owned material) but
+// the wait still completes. Settlement is not signalled here; callers mark
+// processing finished only after this returns.
+func waitLocalVaultFileSessionPredecessors(op *localVaultFileSessionOperation, ctx context.Context, onCancel func()) {
+	if op == nil || len(op.waitFor) == 0 {
+		return
+	}
+	cleared := false
+	clearOnCancel := func() {
+		if cleared {
+			return
+		}
+		cleared = true
+		if onCancel != nil {
+			onCancel()
+		}
+	}
+	if ctx.Err() != nil {
+		clearOnCancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, pred := range op.waitFor {
+			<-pred.settledSignal()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		clearOnCancel()
+		<-done
+	}
+}
+
 type localVaultFileSessionSlot struct {
 	scope         localVaultFileSessionScope
 	parent        *personal.Session
@@ -221,6 +315,14 @@ type localVaultFileSessionSlot struct {
 	operation     *localVaultFileSessionOperation
 	session       *vaultfileclient.LocalGenesisSession
 	summary       vaultfileclient.LocalGenesisBaseline
+	// retiring marks a slot retained as an ordering tail after its cache,
+	// wrapper and current operation were detached. It is never cache-readable
+	// and is purged only after all tail operations settle.
+	retiring bool
+	tail     []*localVaultFileSessionOperation
+	// purgeReady is closed by the tail-readiness goroutine. The map is purged
+	// only on the UI path.
+	purgeReady chan struct{}
 }
 
 // localVaultFileSessionScopeFor resolves the exact navigation ref and the
@@ -238,11 +340,12 @@ func (a *App) localVaultFileSessionScopeFor(ref localVaultFileRef) (localVaultFi
 }
 
 // syncLocalVaultFileSessions is the lazy generation/parent boundary. A parent
-// pointer or App generation change clears the prior slots as before. The same
-// current parent in Busy preserves slots, summaries and pending operations; it
-// withholds delivery and authorization until Active. Revoked clears and is
-// never rebound as a valid sessionParent. App.Lock also calls
-// clearLocalVaultFileSessions explicitly at its own established boundary.
+// pointer change drops the old parent's slots and tails; the old workers still
+// close their own candidates. A same-parent App generation change detaches the
+// current cache/operation/wrapper state but preserves retiring ordering tails.
+// A read-only Revoked cache state is treated the same way: it detaches current
+// cache state but is not proof that the parent was actually locked. App.Lock is
+// the established all-tail drop boundary.
 func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 	state := &a.localVaultFiles
 	parent := a.session
@@ -250,12 +353,17 @@ func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 		a.clearLocalVaultFileSessions()
 		return personal.VaultFileCacheRevoked
 	}
+	a.purgeSettledLocalVaultFileSessionTails()
 	cache := parent.VaultFileCacheState()
-	if state.sessionParent != parent || state.sessionGeneration != a.generation {
+	if state.sessionParent != parent {
 		a.clearLocalVaultFileSessions()
+	} else if state.sessionGeneration != a.generation {
+		a.detachLocalVaultFileSessionsForBoundary()
 	}
 	if cache == personal.VaultFileCacheRevoked {
-		a.clearLocalVaultFileSessions()
+		a.detachLocalVaultFileSessionsForBoundary()
+		state.sessionParent = parent
+		state.sessionGeneration = a.generation
 		return cache
 	}
 	// A new parent may bind while Busy, but begin/adopt/read still require
@@ -265,14 +373,44 @@ func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 	return cache
 }
 
-// clearLocalVaultFileSessions cancels every pending operation, detaches every
-// adopted wrapper, clears every retained summary, and starts each real Close
-// through the existing launch path. It takes no parent lock and never touches
-// a sibling wrapper or a single-vault navigation decision.
+// detachLocalVaultFileSessionsForBoundary cancels and detaches every current
+// slot while retaining retiring ordering tails. It never waits.
+func (a *App) detachLocalVaultFileSessionsForBoundary() {
+	state := &a.localVaultFiles
+	for _, slot := range state.sessionSlots {
+		if slot == nil || slot.retiring {
+			continue
+		}
+		a.retireLocalVaultFileSessionSlot(slot)
+	}
+}
+
+// clearLocalVaultFileSessions is the established all-tail drop boundary used by
+// App.Lock and actual parent replacement. It cancels every pending operation,
+// detaches every adopted wrapper, clears every retained summary, and starts each
+// real Close through the existing launch path. Retiring metadata is dropped;
+// old workers still settle and close their own candidates. It takes no parent
+// lock and never touches a sibling wrapper or a single-vault navigation
+// decision.
 func (a *App) clearLocalVaultFileSessions() {
 	state := &a.localVaultFiles
 	for _, slot := range state.sessionSlots {
-		a.retireLocalVaultFileSessionSlot(slot)
+		if slot == nil {
+			continue
+		}
+		if slot.operation != nil {
+			a.cancelLocalVaultFileSessionOperationExact(slot.operation)
+		}
+		session := slot.session
+		slot.operation = nil
+		slot.session = nil
+		clearLocalVaultFileSessionSummary(&slot.summary)
+		slot.retiring = true
+		slot.tail = nil
+		slot.parent = nil
+		if session != nil {
+			a.launch(func() { _ = session.Close() })
+		}
 	}
 	state.sessionSlots = nil
 	state.sessionParent = nil
@@ -312,10 +450,25 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		return nil
 	}
 	state := &a.localVaultFiles
+	// Capture every unsettled same-parent/same-journal predecessor before any
+	// cancellation or replacement. Full scope equality is deliberately not the
+	// ordering key: read-aliased config paths can share one journal.
+	predecessors := a.collectLocalVaultFileSessionPredecessors(scope)
 	slot := state.sessionSlots[scope]
+	if slot != nil && slot.retiring {
+		// The retiring entry keeps its tail for collection; the new current
+		// slot is a distinct pointer so its async purge cannot delete it.
+		slot = nil
+	}
 	if slot != nil && (slot.parent != a.session || slot.appGeneration != a.generation) {
 		a.retireLocalVaultFileSessionSlot(slot)
 		slot = nil
+	}
+	// Conflicting pending predecessors are cancelled exactly. A held old
+	// dispatch is bypassed by reclaiming its pending handoff here rather than
+	// making the successor depend on that dispatch.
+	for _, pred := range predecessors {
+		a.cancelLocalVaultFileSessionOperationExact(pred)
 	}
 	if slot == nil {
 		slot = &localVaultFileSessionSlot{scope: scope, parent: a.session, appGeneration: a.generation}
@@ -324,12 +477,12 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		}
 		state.sessionSlots[scope] = slot
 	} else {
-		a.cancelLocalVaultFileSessionOperation(slot)
 		if old := slot.session; old != nil {
 			slot.session = nil
 			clearLocalVaultFileSessionSummary(&slot.summary)
 			a.launch(func() { _ = old.Close() })
 		}
+		slot.tail = nil
 	}
 	slot.sequence++
 	ctx, cancel := context.WithCancel(context.Background())
@@ -341,6 +494,7 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 		scope:      scope,
 		ctx:        ctx,
 		cancel:     cancel,
+		waitFor:    predecessors,
 		settledCh:  make(chan struct{}),
 	}
 	slot.operation = op
@@ -360,15 +514,29 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 	hook := a.localVaultFiles.sessionCandidateForTest
 	openPause := a.localVaultFiles.sessionCandidateOpenPauseForTest
 	closePause := a.localVaultFiles.sessionCandidateClosePauseForTest
+	predecessorWait := a.localVaultFiles.sessionPredecessorWaitForTest
+	postBarrierCancelPause := a.localVaultFiles.sessionPostBarrierCancelPauseForTest
 	a.launch(func() {
 		defer clear(ownedPassword)
 		defer clear(ownedKey)
+		if len(op.waitFor) != 0 {
+			if predecessorWait != nil {
+				predecessorWait()
+			}
+			waitLocalVaultFileSessionPredecessors(op, op.ctx, func() {
+				clear(ownedPassword)
+				clear(ownedKey)
+			})
+		}
 		if op.ctx.Err() != nil {
-			// No factory ran, so no candidate can exist. Clear both
-			// worker-owned factor copies before the settlement mark; the
-			// deferred clears remain as safety.
+			// No factory ran, so no candidate can exist. The barrier is already
+			// resolved; clear both worker-owned factor copies and only then
+			// report processing finished.
 			clear(ownedPassword)
 			clear(ownedKey)
+			if len(op.waitFor) != 0 && postBarrierCancelPause != nil {
+				postBarrierCancelPause()
+			}
 			op.markProcessingFinished()
 			return
 		}
@@ -513,6 +681,11 @@ func (a *App) completeLocalVaultFileSessionResult(op *localVaultFileSessionOpera
 func (a *App) finishLocalVaultFileSessionOperation(op *localVaultFileSessionOperation, outcome localVaultFileSessionOutcome) {
 	op.finish(outcome)
 	if op.slot != nil && op.slot.operation == op {
+		if !op.isSettled() {
+			// A failure whose candidate cleanup is still running remains a
+			// discoverable predecessor through the existing slot tail.
+			op.slot.tail = appendLocalVaultFileSessionOperation(op.slot.tail, op)
+		}
 		if op.cancel != nil {
 			op.cancel()
 			op.cancel = nil
@@ -539,8 +712,20 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 	if op == nil {
 		return
 	}
-	result, pending := op.takeCancelled()
-	a.finishLocalVaultFileSessionOperation(op, localVaultFileSessionOutcomeCancelled)
+	result, pending, active := op.takeCancelled()
+	if active && op.slot != nil {
+		// Keep an unsettled cancelled operation discoverable through the
+		// existing slot tail even when this is a narrow cancel rather than a
+		// close/retire. A later producer with the same parent and journal must
+		// still join it; settled tails are skipped by collection.
+		op.slot.tail = appendLocalVaultFileSessionOperation(op.slot.tail, op)
+	}
+	// Always release an exact stale slot binding. A settled opened outcome is
+	// never changed by takeCancelled.
+	a.endLocalVaultFileSessionOperation(op)
+	if !active {
+		return
+	}
 	if !pending {
 		return
 	}
@@ -550,6 +735,23 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 		a.launch(func() { closeLocalVaultFileSessionCandidate(op, result.candidate, closePause) })
 	} else {
 		op.markCandidateResolved()
+	}
+}
+
+// endLocalVaultFileSessionOperation releases the exact current slot binding for
+// an operation that already recorded its outcome. It never changes the finite
+// outcome, so a late cancellation cannot overwrite an operation that settled
+// concurrently.
+func (a *App) endLocalVaultFileSessionOperation(op *localVaultFileSessionOperation) {
+	if op == nil {
+		return
+	}
+	if op.slot != nil && op.slot.operation == op {
+		if op.cancel != nil {
+			op.cancel()
+			op.cancel = nil
+		}
+		op.slot.operation = nil
 	}
 }
 
@@ -568,20 +770,103 @@ func (a *App) closeLocalVaultFileSession(scope localVaultFileSessionScope) {
 }
 
 func (a *App) retireLocalVaultFileSessionSlot(slot *localVaultFileSessionSlot) {
-	if slot == nil {
+	if slot == nil || slot.retiring {
 		return
 	}
 	state := &a.localVaultFiles
-	if state.sessionSlots[slot.scope] == slot {
-		delete(state.sessionSlots, slot.scope)
+	if op := slot.operation; op != nil {
+		slot.tail = appendLocalVaultFileSessionOperation(slot.tail, op)
+		a.cancelLocalVaultFileSessionOperationExact(op)
+		slot.operation = nil
 	}
-	a.cancelLocalVaultFileSessionOperation(slot)
 	session := slot.session
 	slot.session = nil
 	clearLocalVaultFileSessionSummary(&slot.summary)
-	slot.parent = nil
+	// Keep parent, scope and appGeneration so a same-parent/new-slot reopen can
+	// inherit this ordering tail. The entry is never cache-readable.
+	slot.retiring = true
 	if session != nil {
 		a.launch(func() { _ = session.Close() })
+	}
+	if state.sessionSlots[slot.scope] != slot {
+		return
+	}
+	a.scheduleLocalVaultFileSessionTailPurge(slot)
+}
+
+func appendLocalVaultFileSessionOperation(list []*localVaultFileSessionOperation, op *localVaultFileSessionOperation) []*localVaultFileSessionOperation {
+	if op == nil {
+		return list
+	}
+	for _, existing := range list {
+		if existing == op {
+			return list
+		}
+	}
+	return append(list, op)
+}
+
+// scheduleLocalVaultFileSessionTailPurge marks a retiring entry ready only
+// after every tail operation settles. The readiness goroutine never touches the
+// App map; the next UI sync purges only an exact current map entry whose tail is
+// still the same and fully settled. This keeps a no-cache tombstone available
+// for inheritance across close/reopen and App generation changes without a
+// second registry or an off-UI map mutation.
+func (a *App) scheduleLocalVaultFileSessionTailPurge(slot *localVaultFileSessionSlot) {
+	if slot == nil {
+		return
+	}
+	if slot.purgeReady == nil {
+		slot.purgeReady = make(chan struct{})
+	}
+	tail := append([]*localVaultFileSessionOperation(nil), slot.tail...)
+	allSettled := true
+	for _, op := range tail {
+		if !op.isSettled() {
+			allSettled = false
+			break
+		}
+	}
+	if allSettled {
+		close(slot.purgeReady)
+		return
+	}
+	ready := slot.purgeReady
+	go func() {
+		for _, op := range tail {
+			<-op.settledSignal()
+		}
+		close(ready)
+	}()
+}
+
+// purgeSettledLocalVaultFileSessionTails runs on the UI path. It deletes only
+// the exact retiring slot pointer currently in the map with a ready, fully
+// settled tail. A later slot that inherited the scope is never deleted.
+func (a *App) purgeSettledLocalVaultFileSessionTails() {
+	state := &a.localVaultFiles
+	for scope, slot := range state.sessionSlots {
+		if slot == nil || !slot.retiring || slot.purgeReady == nil {
+			continue
+		}
+		select {
+		case <-slot.purgeReady:
+		default:
+			continue
+		}
+		if state.sessionSlots[scope] != slot {
+			continue
+		}
+		allSettled := true
+		for _, op := range slot.tail {
+			if !op.isSettled() {
+				allSettled = false
+				break
+			}
+		}
+		if allSettled {
+			delete(state.sessionSlots, scope)
+		}
 	}
 }
 
@@ -598,7 +883,7 @@ func (a *App) readLocalVaultFileSession(scope localVaultFileSessionScope) (vault
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
 	slot := a.localVaultFiles.sessionSlots[scope]
-	if slot == nil || slot.session == nil || slot.parent != a.session ||
+	if slot == nil || slot.retiring || slot.session == nil || slot.parent != a.session ||
 		slot.appGeneration != a.generation {
 		return vaultfileclient.LocalGenesisBaseline{}, false
 	}
