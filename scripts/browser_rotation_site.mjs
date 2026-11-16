@@ -116,7 +116,7 @@ export function createBrowserRotationSite({ key, cert, onSnapshot = () => {} }) 
     const nonce = randomBytes(16).toString("base64");
     response.setHeader("Content-Type", "text/html; charset=utf-8");
     response.setHeader("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
-    response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>${title}</title><body><h1>${title}</h1>${body}${script ? `<script nonce="${nonce}">${script}</script>` : ""}</body></html>`);
+    response.end(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Locklark acceptance · ${title}</title><body><h1>${title}</h1>${body}${script ? `<script nonce="${nonce}">${script}</script>` : ""}</body></html>`);
   };
   const form = (kind) => {
     const changing = kind === "change-password", registering = kind === "register";

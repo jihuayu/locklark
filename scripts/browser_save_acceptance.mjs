@@ -6,10 +6,16 @@ import { execFileSync } from "node:child_process";
 import { join, sep } from "node:path";
 import {
   accessSync,
+  closeSync,
   constants as fsConstants,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
+  writeSync,
 } from "node:fs";
 
 const CANARY_KEYS = [
@@ -21,6 +27,7 @@ const CANARY_KEYS = [
   "SaveValue",
   "UpdateUsername",
   "UpdateValue",
+  "RotationValue",
   "RejectedUsername",
   "RejectedValue",
   "OTPSeed",
@@ -45,6 +52,55 @@ export function fixtureCanaries(fixture) {
   );
 }
 
+// Call immediately after reading the generated page value, before any further
+// asynchronous operation. Register it in memory first so even an input-file
+// refusal is covered by live controller/artifact cleanup. Only the run's
+// existing private fixture input is updated; this never opens the live vault.
+export function registerRotationValue(fixture, state, value) {
+  if (typeof value !== "string" || !value.isWellFormed() ||
+      Buffer.byteLength(value) < 4 || Buffer.byteLength(value) > 256 || /[\0\r\n]/.test(value))
+    throw Error("Private rotation value registration refused");
+  if (fixture.RotationValue && fixture.RotationValue !== value)
+    throw Error("Private rotation value already registered");
+  fixture.RotationValue = value;
+  let fd;
+  let raw, encoded;
+  try {
+    if (typeof fsConstants.O_NOFOLLOW !== "number") throw Error();
+    const vault = join(state, "vault");
+    for (const directory of [state, vault]) {
+      const info = lstatSync(directory);
+      if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid() ||
+          (info.mode & 0o777) !== 0o700) throw Error();
+    }
+    fd = openSync(join(vault, "fixture.json"), fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.uid !== process.getuid() || info.nlink !== 1 ||
+        (info.mode & 0o777) !== 0o600 || info.size > 64 * 1024) throw Error();
+    raw = readFileSync(fd);
+    const stored = JSON.parse(raw.toString("utf8"));
+    if (stored.Path !== join(vault, "synthetic.ll") || stored.Path !== fixture.Path ||
+        (stored.RotationValue && stored.RotationValue !== value)) throw Error();
+    stored.RotationValue = value;
+    encoded = Buffer.from(JSON.stringify(stored));
+    if (encoded.length > 64 * 1024) throw Error();
+    let written = 0;
+    while (written < encoded.length) {
+      const count = writeSync(fd, encoded, written, encoded.length - written, written);
+      if (count <= 0) throw Error();
+      written += count;
+    }
+    ftruncateSync(fd, encoded.length);
+    fsyncSync(fd);
+  } catch {
+    throw Error("Private rotation fixture input refused");
+  } finally {
+    raw?.fill(0);
+    encoded?.fill(0);
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 function classifyFixtureCanaries(fixture) {
   const exact = [];
   const shortNumeric = [];
@@ -61,6 +117,15 @@ function classifyFixtureCanaries(fixture) {
     }
   }
   return { exact, shortNumeric };
+}
+
+function canaryRepresentations(value) {
+  const escaped = value.split("").map((character) => character.charCodeAt(0) > 127
+    ? "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0") : character).join("");
+  const upperEscaped = escaped.replace(/\\u[0-9a-f]{4}/g,
+    (value) => value.slice(0, 2) + value.slice(2).toUpperCase());
+  return [...new Set([value, JSON.stringify(value).slice(1, -1), escaped, upperEscaped,
+    JSON.stringify(escaped).slice(1, -1), JSON.stringify(upperEscaped).slice(1, -1), encodeURIComponent(value)])];
 }
 
 function isWordCharacter(character) {
@@ -109,16 +174,22 @@ function containsShortNumericBytes(bytes, value) {
 
 export function browserScreenshotsAllowed(stage) {
   return typeof stage === "string" && !stage.startsWith("checkout") && !stage.startsWith("otp") &&
+    !stage.startsWith("rotation") &&
     !stage.startsWith("passkey-management") &&
     !(stage.startsWith("passkey-conditional") || stage.startsWith("passkey-signal"));
 }
 
-export function captureControllerOutput() {
+export function captureControllerOutput({ getFixture = () => null } = {}) {
   const lines = [];
   for (const method of ["log", "error"]) {
     const original = console[method].bind(console);
     console[method] = (...values) => {
-      lines.push(format(...values));
+      const line = format(...values);
+      const fixture = getFixture();
+      // Refuse before forwarding, including values registered after this
+      // wrapper was installed. Final scans still cover earlier fixed output.
+      if (fixture) assertPrivateText(line, fixture);
+      lines.push(line);
       original(...values);
     };
   }
@@ -157,7 +228,8 @@ function classifyArtifactPath(state, directory, name) {
 export function assertPrivateText(text, fixture) {
   const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
   assert(
-    !exact.some((value) => text.includes(value)),
+    !exact.some((value) => text.includes(value)) &&
+      !(fixture.RotationValue && canaryRepresentations(fixture.RotationValue).some((value) => text.includes(value))),
     "Synthetic factor or field leaked in output",
   );
   for (const { value } of shortNumeric) {
@@ -177,31 +249,7 @@ export function assertPrivateText(text, fixture) {
 
 export function assertPrivateArtifacts(state, fixture) {
   const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
-  const patterns = exact.flatMap((value) => {
-    const escaped = value
-      .split("")
-      .map((character) =>
-        character.charCodeAt(0) > 127
-          ? "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0")
-          : character,
-      )
-      .join("");
-    const upperEscaped = escaped.replace(
-      /\\u[0-9a-f]{4}/g,
-      (value) => value.slice(0, 2) + value.slice(2).toUpperCase(),
-    );
-    return [
-      ...new Set([
-        value,
-        JSON.stringify(value).slice(1, -1),
-        escaped,
-        upperEscaped,
-        JSON.stringify(escaped).slice(1, -1),
-        JSON.stringify(upperEscaped).slice(1, -1),
-        encodeURIComponent(value),
-      ]),
-    ].map((value) => Buffer.from(value));
-  });
+  const patterns = exact.flatMap((value) => canaryRepresentations(value).map((value) => Buffer.from(value)));
   const fixturePath = join(state, "vault", "fixture.json");
   let scanned = 0;
   const walk = (directory) => {

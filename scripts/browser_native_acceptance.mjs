@@ -127,7 +127,8 @@ function expectedRouteClickClose(error, event, expected) {
   );
 }
 
-const scanController = captureControllerOutput();
+let observedFixture = null;
+const scanController = captureControllerOutput({ getFixture: () => observedFixture });
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
 const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
@@ -498,8 +499,7 @@ function observeRouteLifecycle(target) {
 }
 // The controlled source page's title; source-tab keys use exactly this prefix.
 const browserWindowTitle = "Locklark acceptance";
-let privacyValues = [];
-let observedFixture = null;
+let privacyValues = () => fixtureCanaries(observedFixture || {});
 function popupStatusKind(value) {
   const text = String(value || "");
   if (text.includes("已保存")) return "saved";
@@ -1679,7 +1679,6 @@ try {
   );
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
   observedFixture = fixture;
-  privacyValues = fixtureCanaries(fixture);
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
   const registerArgs = [
@@ -3654,7 +3653,7 @@ try {
     try {
       if (lastPopup && browserScreenshotsAllowed(stage)) {
         const text = String((await lastPopup.text("body")) || "");
-        if (!privacyValues.some((value) => text.includes(value)))
+        if (!privacyValues().some((value) => text.includes(value)))
           await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
       }
     } catch {}

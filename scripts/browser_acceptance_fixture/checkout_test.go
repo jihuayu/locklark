@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,52 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestRotationCanaryRefusesRawEscapedAndEmbeddedJSON(t *testing.T) {
+	value := "Synthetic-rotation-\"<>&\\credential"
+	f := fixture{RotationValue: value}
+	standard, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal("synthetic JSON encoding failed")
+	}
+	embedded, err := json.Marshal(map[string]string{"note": "prefix-" + value + "-suffix"})
+	if err != nil {
+		t.Fatal("synthetic embedded JSON encoding failed")
+	}
+	if bytes.Contains(embedded, standard) {
+		t.Fatal("embedded case must omit the complete standalone JSON literal")
+	}
+	var htmlLiteral, htmlEmbedded bytes.Buffer
+	for _, entry := range []struct {
+		destination *bytes.Buffer
+		value       any
+	}{{&htmlLiteral, value}, {&htmlEmbedded, map[string]string{"note": "prefix-" + value + "-suffix"}}} {
+		encoder := json.NewEncoder(entry.destination)
+		encoder.SetEscapeHTML(false)
+		if encoder.Encode(entry.value) != nil {
+			t.Fatal("synthetic unescaped HTML JSON encoding failed")
+		}
+	}
+	for _, entry := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"raw", []byte(value)},
+		{"standard JSON", standard},
+		{"standard embedded JSON", embedded},
+		{"unescaped HTML JSON", htmlLiteral.Bytes()},
+		{"unescaped HTML embedded JSON", htmlEmbedded.Bytes()},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			if !containsCanary(entry.raw, f, false) {
+				t.Fatal("rotation credential representation was not refused")
+			}
+		})
+	}
+	if containsCanary([]byte(`{"note":"fixed safe receipt"}`), f, false) {
+		t.Fatal("safe fixed metadata was refused")
+	}
+}
 
 // countingReader records how many bytes were pulled per Read so the test can
 // observe the exact entropy slices without inspecting generated values.

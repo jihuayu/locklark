@@ -3,12 +3,14 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createBrowserRotationSite } from "./browser_rotation_site.mjs";
+import { assertPrivateArtifacts, browserScreenshotsAllowed, captureControllerOutput,
+  fixtureCanaries, registerRotationValue } from "./browser_save_acceptance.mjs";
 
 function ownedTLS(directory) {
   const file = (name) => join(directory, name);
@@ -115,6 +117,8 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
 
     const changePage = await call("/change-password", { cookie: authenticatedSession });
     assert.equal(changePage.status, 200);
+    assert(changePage.body.includes("<title>Locklark acceptance · Change password</title>"),
+      "Website title must retain the existing X11 source-window prefix");
     assert(changePage.body.includes('action="/change-password"') &&
       changePage.body.includes('id="new-password"') && changePage.body.includes('id="confirm-password"') &&
       changePage.body.includes('fetch(form.action'), "Session-authenticated real POST change form required");
@@ -152,4 +156,58 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     rmSync(directory, { recursive: true, force: true });
     assert(!existsSync(directory), "Private fixture TLS files must be removed");
   }
+});
+
+test("rotation canary reaches live output and artifact guards before forwarding", () => {
+  const state = mkdtempSync(join(tmpdir(), "locklark-rotation-privacy-"));
+  const originalLog = console.log, originalError = console.error;
+  try {
+    chmodSync(state, 0o700);
+    const vault = join(state, "vault");
+    mkdirSync(vault, { mode: 0o700 });
+    const fixture = { Path: join(vault, "synthetic.ll") };
+    const fixturePath = join(vault, "fixture.json");
+    writeFileSync(fixturePath, JSON.stringify(fixture), { mode: 0o600 });
+    const forwarded = [];
+    console.log = (...values) => forwarded.push(values);
+    console.error = (...values) => forwarded.push(values);
+    const scan = captureControllerOutput({ getFixture: () => fixture });
+    const value = 'Private-generated +"🔐-' + randomBytes(20).toString("hex");
+    registerRotationValue(fixture, state, value);
+    assert(fixtureCanaries(fixture).includes(value), "Generated value must enter the live canary set");
+    assert(JSON.parse(readFileSync(fixturePath, "utf8")).RotationValue === value &&
+      (statSync(fixturePath).mode & 0o777) === 0o600,
+      "Observer canary must remain in the existing private fixture input");
+    assert.throws(() => console.log(value), { message: "Synthetic factor or field leaked in output" });
+    assert.throws(() => console.error(value), { message: "Synthetic factor or field leaked in output" });
+    assert.throws(() => console.log(encodeURIComponent(value)), { message: "Synthetic factor or field leaked in output" });
+    assert.throws(() => console.error(JSON.stringify(value)), { message: "Synthetic factor or field leaked in output" });
+    assert(forwarded.length === 0, "Generated value must never be forwarded to controller output");
+    console.log("Fixed rotation receipt");
+    scan(fixture);
+    const diagnostic = join(state, "rotation.log");
+    writeFileSync(diagnostic, "Fixed rotation receipt", { mode: 0o600 });
+    assertPrivateArtifacts(state, fixture);
+    writeFileSync(diagnostic, encodeURIComponent(value), { mode: 0o600 });
+    assert.throws(() => assertPrivateArtifacts(state, fixture),
+      { message: "Synthetic factor or field value persisted in diagnostics" });
+    assert(!browserScreenshotsAllowed("rotation:generator") && browserScreenshotsAllowed("save:positive"),
+      "Rotation must forbid screenshots without changing ordinary save coverage");
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+    rmSync(state, { recursive: true, force: true });
+  }
+});
+
+test("refused private fixture input still registers the generated value for cleanup", () => {
+  const state = mkdtempSync(join(tmpdir(), "locklark-rotation-refusal-"));
+  try {
+    chmodSync(state, 0o700);
+    const fixture = { Path: join(state, "vault", "synthetic.ll") };
+    const value = "Private-generated-" + randomBytes(20).toString("hex");
+    assert.throws(() => registerRotationValue(fixture, state, value),
+      { message: "Private rotation fixture input refused" });
+    assert(fixtureCanaries(fixture).includes(value), "Input refusal must not lose the in-memory canary");
+  } finally { rmSync(state, { recursive: true, force: true }); }
 });
