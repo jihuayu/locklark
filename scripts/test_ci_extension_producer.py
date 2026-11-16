@@ -457,14 +457,14 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
     READY = "Install native GUI acceptance tools"
     PEER = "Install independent notes KDBX reader"
     GATE = "Test reconciled E2E gates and component contracts"
+    A = "Test native Onevra independent local vault creation"
+    DAILY = "Test native desktop daily tools and clipboard ownership"
+    QUICK = "Test native desktop global quick search"
     CHROMIUM = "Test browser extension DOM"
     FIREFOX = "Test Firefox browser extension DOM"
     UPLOAD = "Preserve synthetic popup UI screenshots"
     READY_STEPS = (
-        "Test native desktop daily tools and clipboard ownership",
-        "Test native Onevra independent local vault creation",
-        "Test native desktop global quick search",
-        PEER, CHROMIUM, FIREFOX,
+        A, DAILY, QUICK, PEER, CHROMIUM, FIREFOX,
     )
     PEER_STEPS = (
         "Test native imported multiline login notes and failure privacy",
@@ -487,17 +487,29 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
         for name, identifier in ids.items():
             self.assertEqual(step_fields("web-core", name).get("id"), identifier)
         self.assertNotIn("if", step_fields("web-core", self.READY))
-        self.assertNotIn("if", step_fields("web-core", self.GATE))
+        self.assertEqual(step_fields("web-core", self.GATE).get("if"),
+                         "${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}")
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^\s*go build\b")
         self.assertIn('--skip-build --bin-dir "$RUNNER_TEMP/locklark-bin"', step_text("web-core", self.GATE))
         order = [
             "Download Linux primary binaries", "Make Linux binaries executable",
             "Smoke test downloaded CLI before acceptance", "Test browser extension",
-            self.READY, self.GATE,
+            self.READY, self.A, self.GATE,
         ]
         positions = [source.index(f"      - name: {name}\n") for name in order]
         self.assertEqual(positions, sorted(positions))
+        self.assertLess(source.index(f"      - name: {self.GATE}\n"),
+                        source.index(f"      - name: {self.DAILY}\n"))
+        a_fields = step_fields("web-core", self.A)
+        a_text = step_text("web-core", self.A)
+        self.assertEqual(a_fields.get("timeout-minutes"), "10")
+        self.assertEqual(a_fields.get("run"), step_fields("web-core", self.DAILY).get("run"))
+        for shared in ("LOCKLARK_GO: go",
+                       "LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop",
+                       "LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture",
+                       "LOCKLARK_TEST_SCENARIO: local-vault-file-create"):
+            self.assertIn(shared, a_text)
         self.assertFalse(web_core_step_enabled(self.READY, previous_failure=True))
         self.assertFalse(web_core_step_enabled(self.READY, cancelled=True))
 
@@ -508,6 +520,23 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
                     self.assertTrue(web_core_step_enabled(
                         name, previous_failure=previous_failure, outcomes=self.ready_outcomes(),
                     ))
+
+    def test_a_failure_still_runs_reconciled_e2e_and_keeps_job_red(self):
+        # A is now before the original E2E gate. Its failure must not be turned
+        # into an implicit-success skip of that gate, while the gate still
+        # requires the same native_gui_ready prerequisite.
+        self.assertTrue(web_core_step_enabled(
+            self.GATE, previous_failure=True, outcomes=self.ready_outcomes()))
+        self.assertFalse(web_core_step_enabled(
+            self.GATE, cancelled=True, outcomes=self.ready_outcomes()))
+        for status in ("failure", "skipped", "cancelled", ""):
+            outcomes = {**self.ready_outcomes(), "native_gui_ready": status}
+            self.assertFalse(web_core_step_enabled(
+                self.GATE, previous_failure=True, outcomes=outcomes))
+        # An A failure cannot be swallowed: the step has no continue-on-error.
+        source = block("web-core")
+        self.assertNotIn("continue-on-error:", source)
+        self.assertNotIn("always()", step_fields("web-core", self.A).get("if", ""))
 
     def test_unready_or_cancelled_blocks_every_independent_step(self):
         for status in ("failure", "skipped", "cancelled", ""):
