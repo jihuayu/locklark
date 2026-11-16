@@ -220,12 +220,16 @@ func readVaultFileCreateManifest(path string) (vaultFileCreateManifest, bool, er
 }
 
 func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateManifest, requireID, journalMustBeNew bool) bool {
+	companionPath, err := vaultFileCreateCompanionPath(path)
+	if err != nil {
+		return false
+	}
 	if manifest.Version != 1 || manifest.Kind != vaultFileCreateKind ||
 		!teamfiles.ValidPath(path) || !teamfiles.ValidPath(manifest.PersonalFile) ||
 		!teamfiles.ValidPath(manifest.BackendRoot) || !teamfiles.ValidPath(manifest.Journal) ||
 		!teamfiles.ValidPath(manifest.Archive) || !vaultfilebackend.ValidName(manifest.Name) ||
 		!privateVaultFileCreateParent(filepath.Dir(path)) || !privateVaultFileCreateParent(filepath.Dir(manifest.Journal)) ||
-		!teamfiles.Distinct(path, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
+		!teamfiles.Distinct(path, companionPath, manifest.PersonalFile, manifest.BackendRoot, manifest.Journal, manifest.Archive) {
 		return false
 	}
 	if requireID {
@@ -240,7 +244,7 @@ func validVaultFileCreateManifestPhase(path string, manifest vaultFileCreateMani
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
 		return false
 	}
-	if separateVaultFileStatusState(manifest.BackendRoot, path, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
+	if separateVaultFileStatusState(manifest.BackendRoot, path, companionPath, manifest.PersonalFile, manifest.Journal, manifest.Archive) != nil {
 		return false
 	}
 	if journalMustBeNew && teamfiles.CheckNew(manifest.Journal) != nil {
