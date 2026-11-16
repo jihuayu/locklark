@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,47 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 )
+
+const fixtureCompleteFailurePrefix = "OBSERVER_FIXTURE_COMPLETE_FAILED"
+
+type fixtureFailureClass string
+
+const (
+	fixtureFailureVerifyRejected fixtureFailureClass = "VERIFY_REJECTED"
+	fixtureFailureLocalReview    fixtureFailureClass = "LOCAL_REVIEW"
+	fixtureFailureUnknownReview  fixtureFailureClass = "UNKNOWN_REVIEW"
+	fixtureFailureCancelled      fixtureFailureClass = "CANCELLED"
+	fixtureFailureUnsupported    fixtureFailureClass = "UNSUPPORTED"
+	fixtureFailureBackend        fixtureFailureClass = "BACKEND"
+	fixtureFailureOther          fixtureFailureClass = "OTHER"
+)
+
+// classifyFixtureSetupFailure is test-only and reports only a fixed enum. The
+// production Complete path already folds lower-level causes through
+// mapCreateGenesisError, so this classification cannot recover the original
+// cause. It deliberately never inspects or formats the error text.
+func classifyFixtureSetupFailure(err error) fixtureFailureClass {
+	switch {
+	case errors.Is(err, vaultfileclient.ErrCreateVerification):
+		return fixtureFailureVerifyRejected
+	case errors.Is(err, vaultfileclient.ErrLocalReview):
+		return fixtureFailureLocalReview
+	case errors.Is(err, vaultfileclient.ErrCreateUnknown):
+		return fixtureFailureUnknownReview
+	case errors.Is(err, vaultfileclient.ErrCreateCancelled):
+		return fixtureFailureCancelled
+	case errors.Is(err, vaultfileclient.ErrCreateUnsupported):
+		return fixtureFailureUnsupported
+	case errors.Is(err, vaultfileclient.ErrBackend):
+		return fixtureFailureBackend
+	default:
+		return fixtureFailureOther
+	}
+}
+
+func fixtureCompleteFailureMessage(err error) string {
+	return fixtureCompleteFailurePrefix + ": " + string(classifyFixtureSetupFailure(err))
+}
 
 type publishedLocalFixture struct {
 	fixture      fixture
@@ -136,7 +178,7 @@ func createPublishedVault(t *testing.T, f fixture, root, workspace, backendRoot 
 		t.Fatal("OBSERVER_FIXTURE_RESUME_PREPARE_FAILED")
 	}
 	if err := creation.Complete(context.Background(), password, secret, p.kit); err != nil {
-		t.Fatal("OBSERVER_FIXTURE_COMPLETE_FAILED")
+		t.Fatal(fixtureCompleteFailureMessage(err))
 	}
 	if err := creation.Verify(context.Background(), password, secret, p.kit); err != nil {
 		t.Fatal("OBSERVER_FIXTURE_VERIFY_FAILED")
@@ -866,6 +908,30 @@ func TestRunFlagParseErrorsUseFixedFailure(t *testing.T) {
 		}
 		if string(raw) != failureMessage+"\n" {
 			t.Fatal("OBSERVER_FLAG_FAILURE_LINE_INVALID")
+		}
+	}
+}
+
+func TestFixtureCompleteFailureClassificationIsPrivate(t *testing.T) {
+	const canary = "private-fixture-setup-canary"
+	cases := []struct {
+		name string
+		err  error
+		want fixtureFailureClass
+	}{
+		{"known", fmt.Errorf("%s: %w", canary, vaultfileclient.ErrCreateVerification), fixtureFailureVerifyRejected},
+		{"unknown", fmt.Errorf("%s: %w", canary, errors.New(canary)), fixtureFailureOther},
+	}
+	for _, tc := range cases {
+		line := fixtureCompleteFailureMessage(tc.err)
+		if line != fixtureCompleteFailurePrefix+": "+string(tc.want) {
+			t.Fatalf("OBSERVER_SETUP_CLASSIFICATION_INVALID_%s", tc.name)
+		}
+		if strings.Contains(line, canary) {
+			t.Fatalf("OBSERVER_SETUP_CLASSIFICATION_LEAKED_TEXT_%s", tc.name)
+		}
+		if len(line) > 128 {
+			t.Fatalf("OBSERVER_SETUP_CLASSIFICATION_NOT_BOUNDED_%s", tc.name)
 		}
 	}
 }
