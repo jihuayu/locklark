@@ -88,9 +88,9 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     const observations = [];
     site = createBrowserRotationSite({ ...tls, onSnapshot: (value) => observations.push(value) });
     const urls = await site.listen();
-    const username = "synthetic-rotation-user";
-    const oldPassword = "Owned-R0-" + randomBytes(20).toString("hex");
-    const newPassword = "Owned-R1-" + randomBytes(20).toString("hex");
+    const username = String.fromCodePoint(0x6d4b, 0x8bd5, 0x7528, 0x6237) + "@account._+-9";
+    const oldPassword = "Owned-R0-" + randomBytes(20).toString("hex") + String.fromCodePoint(0x1f510);
+    const newPassword = "Owned-R1-" + randomBytes(20).toString("hex") + String.fromCodePoint(0x1f510);
     const call = async (path, options) => {
       const response = await httpsRequest(urls.origin + path, tls.ca, options);
       assert(response.authorized, "Owned CA and hostname must authorize every real TLS request");
@@ -107,6 +107,14 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
       assert.equal(refused.status, 403);
       assert(site.snapshot().registrations === 0 && refused.headers["set-cookie"] === undefined,
         "Opaque or cross-origin registration must not create an account or replace the session");
+    }
+    for (const invalidUsername of ["", "user:name", "user\nname", "user\n",
+      String.fromCodePoint(0x6d4b).repeat(43), String.fromCharCode(0xd800)]) {
+      const refused = await call("/register", { method: "POST", cookie: registrationSession,
+        fields: { csrf: csrf(registerPage), username: invalidUsername, password: oldPassword, confirm: oldPassword } });
+      assert.equal(refused.status, 400);
+      assert(site.snapshot().registrations === 0 && refused.headers["set-cookie"] === undefined,
+        "Invalid or oversized UTF-8 username must not create an account or replace the session");
     }
     const registered = await call("/register", { method: "POST", cookie: registrationSession,
       fields: { csrf: csrf(registerPage), username, password: oldPassword, confirm: oldPassword } });
@@ -153,11 +161,11 @@ test("owned HTTPS account rotates through real forms and the same Basic verifier
     assert.equal((await call("/credential", { authorization: basic(newPassword) })).status, 200);
 
     const receipt = site.snapshot();
-    assert.deepEqual(receipt, { tlsConnections: 13, requests: 13, registrations: 1, loginAccepted: 1,
+    assert.deepEqual(receipt, { tlsConnections: 19, requests: 19, registrations: 1, loginAccepted: 1,
       loginRejected: 0, passwordChanges: 1, changeRejected: 1, basicAccepted: 3, basicRejected: 1,
-      requestRefused: 2, observerFailures: 0, countersCapped: false, accountRegistered: true, closed: false });
-    assert(observations.length === 36 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
-    console.log("PASS: owned HTTPS website only; verified TLS=13 requests=13 register=1 login=1 change=1 origin refused=2 wrong-account refused=1 Basic accepted=3 rejected=1");
+      requestRefused: 8, observerFailures: 0, countersCapped: false, accountRegistered: true, closed: false });
+    assert(observations.length === 54 && observations.every(Object.isFrozen), "Read-only finite counter snapshots required");
+    console.log("PASS: owned HTTPS website only; verified TLS=19 requests=19 register=1 login=1 change=1 origin refused=2 invalid-username refused=6 wrong-account refused=1 Basic accepted=3 rejected=1");
   } finally {
     if (site) {
       await site.close();
