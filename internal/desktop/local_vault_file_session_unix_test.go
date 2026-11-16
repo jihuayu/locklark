@@ -12,6 +12,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
+	bolt "go.etcd.io/bbolt"
 )
 
 type localVaultSessionFixture struct {
@@ -495,5 +496,102 @@ func TestDesktopLocalVaultSessionParentLockStopsCachedMetadata(t *testing.T) {
 		len(f.app.localVaultFiles.sessionSlots) != 0 ||
 		f.app.localVaultFiles.sessionParent != nil {
 		t.Fatal("LOCAL_SESSION_PARENT_LOCK_CACHE_REVIVED")
+	}
+}
+
+func TestDesktopLocalVaultSessionBusyPreservesCacheAndSibling(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	f.openVault(t, q, bScope)
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if bSlot == nil || bSlot.session == nil || bSlot.summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_SESSION_BUSY_SETUP_FAILED")
+	}
+	bSession := bSlot.session
+	parent, generation := f.app.session, f.app.generation
+
+	holder, err := bolt.Open(f.parent.VaultPath(), 0600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		t.Fatal("LOCAL_SESSION_BUSY_DB_HOLDER_FAILED")
+	}
+	blocker, err := holder.Begin(true)
+	if err != nil {
+		_ = holder.Close()
+		t.Fatal("LOCAL_SESSION_BUSY_WRITE_TRANSACTION_FAILED")
+	}
+	release := func() {
+		if blocker != nil {
+			_ = blocker.Rollback()
+			blocker = nil
+		}
+		if holder != nil {
+			_ = holder.Close()
+			holder = nil
+		}
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.parent.List("active")
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.parent.VaultFileCacheState() != personal.VaultFileCacheBusy {
+		if time.Now().After(deadline) {
+			t.Fatal("LOCAL_SESSION_BUSY_TIMEOUT")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		_ = err
+		t.Fatal("LOCAL_SESSION_BUSY_OPERATION_NOT_BLOCKED")
+	default:
+	}
+	if f.app.session != parent || f.app.generation != generation ||
+		f.app.localVaultFiles.sessionParent != parent {
+		t.Fatal("LOCAL_SESSION_BUSY_PARENT_BOUNDARY_CHANGED")
+	}
+
+	if _, ok := f.app.readLocalVaultFileSession(bScope); ok {
+		t.Fatal("LOCAL_SESSION_BUSY_CACHE_DELIVERED")
+	}
+	if _, ok := f.app.readLocalVaultFileSession(aScope); ok {
+		t.Fatal("LOCAL_SESSION_BUSY_SIBLING_CACHE_DELIVERED")
+	}
+	if len(f.app.localVaultFiles.sessionSlots) != 2 ||
+		f.app.localVaultFiles.sessionSlots[bScope] != bSlot ||
+		bSlot.session != bSession || bSlot.summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_SESSION_BUSY_RETREATED_REGISTRY")
+	}
+	if op := f.app.beginLocalVaultFileSession(aScope, []byte(f.password), f.key); op != nil {
+		t.Fatal("LOCAL_SESSION_BUSY_BEGIN_AUTHORIZED")
+	}
+	if len(f.app.localVaultFiles.sessionSlots) != 2 ||
+		f.app.localVaultFiles.sessionSlots[bScope] != bSlot || bSlot.session != bSession {
+		t.Fatal("LOCAL_SESSION_BUSY_BEGIN_RETREATED_REGISTRY")
+	}
+
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal("LOCAL_SESSION_BUSY_PARENT_OPERATION_FAILED")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("LOCAL_SESSION_BUSY_PARENT_OPERATION_STUCK")
+	}
+	if read, ok := f.app.readLocalVaultFileSession(bScope); !ok || read.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_SESSION_BUSY_CACHE_NOT_RESTORED")
+	}
+	summary, err := bSession.Summary()
+	if err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_SESSION_BUSY_SIBLING_LOST")
 	}
 }
