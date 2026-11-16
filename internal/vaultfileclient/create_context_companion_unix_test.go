@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/teamfiles"
@@ -136,5 +137,40 @@ func TestVaultFileCreateCompanionLiveIntentAndExclusiveRetry(t *testing.T) {
 	objects, err := os.ReadDir(filepath.Join(manifest.BackendRoot, "vaultfile-backend", "v1", "data"))
 	if err != nil || len(objects) != 0 {
 		t.Fatal("CREATE_CLAIMED_MISSING_WROTE_OBJECT")
+	}
+}
+
+func TestCreationFinishRejectsExpiredResult(t *testing.T) {
+	root := t.TempDir()
+	private := filepath.Join(root, "private")
+	journalDir := filepath.Join(root, "journal")
+	if os.Mkdir(private, 0700) != nil || os.Mkdir(journalDir, 0700) != nil {
+		t.Fatal("CREATE_EXPIRY_PRIVATE_PARENT_FAILED")
+	}
+	password := []byte("create-expiry-factor")
+	key := bytes.Repeat([]byte{0x37}, 16)
+	personalPath := filepath.Join(root, "personal.ll")
+	if personal.Create(personalPath, string(password), key) != nil {
+		t.Fatal("CREATE_EXPIRY_PERSONAL_CREATE_FAILED")
+	}
+	config := filepath.Join(private, "create.json")
+	proposal := Manifest{Version: 1, Kind: CreateKind, PersonalFile: personalPath,
+		BackendRoot: filepath.Join(root, "backend"), Name: "owned-g",
+		Journal: filepath.Join(journalDir, "genesis.journal"), Archive: filepath.Join(root, "published.llb")}
+	creation, err := OpenCreation(config, &proposal, password, []byte(personal.FormatSecret(key)))
+	if err != nil {
+		t.Fatal("CREATE_EXPIRY_OPEN_FAILED")
+	}
+	defer creation.Close()
+	op, err := creation.begin(context.Background())
+	if err != nil {
+		t.Fatal("CREATE_EXPIRY_BEGIN_FAILED")
+	}
+	creation.fullFactorDeadline = time.Now().Add(-time.Second)
+	if err := op.finish(nil, true, false); !errors.Is(err, ErrCreateUnknown) {
+		t.Fatal("CREATE_EXPIRY_LATE_SUCCESS")
+	}
+	if _, err := creation.Prepare(context.Background()); !errors.Is(err, ErrCreateCancelled) {
+		t.Fatal("CREATE_EXPIRY_CONTEXT_REUSED")
 	}
 }

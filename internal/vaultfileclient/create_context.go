@@ -177,6 +177,18 @@ func (c *CreationContext) begin(ctx context.Context) (*creationOperation, error)
 func (op *creationOperation) finish(err error, mayWrite, terminalOnSuccess bool) error {
 	op.stop()
 	c := op.owner
+	// The Session methods gate their own effects, but path I/O after their
+	// return can outlive the full-factor or idle deadline. Do not release a
+	// successful result from this outer operation after that deadline.
+	if err == nil {
+		if freshErr := c.fresh(); freshErr != nil {
+			if mayWrite {
+				err = ErrCreateUnknown
+			} else {
+				err = freshErr
+			}
+		}
+	}
 	c.stateMu.Lock()
 	cancelled := c.terminal || op.ctx.Err() != nil
 	if cancelled {
