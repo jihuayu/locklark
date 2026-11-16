@@ -12,9 +12,11 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// VaultFileBaselineItem is the entire read-only disclosure from a local
-// baseline. No item ID, secret field, attachment or KDBX handle leaves Session.
+// VaultFileBaselineItem is the read-only disclosure from a local baseline.
+// ID is present only in the explicit item-reference mode; it is a selector,
+// never proof of a grant or authority. Secrets and KDBX handles never leave Session.
 type VaultFileBaselineItem struct {
+	ID       string             `json:"id,omitempty"`
 	Title    string             `json:"title"`
 	Category vault.ItemCategory `json:"category"`
 }
@@ -27,6 +29,17 @@ var ErrVaultFileBaselineVerification = errors.New("vault-file baseline verificat
 // written, reconciled or compared with a remote backend. The caller supplies
 // the independent checkpoint and checks the journal's physical scope.
 func (s *Session) OpenVaultFileBaseline(journalPath string, checkpoint *vaultfile.PolicyCheckpoint) ([]VaultFileBaselineItem, error) {
+	return s.openVaultFileBaseline(journalPath, checkpoint, false)
+}
+
+// OpenVaultFileBaselineWithItemIDs applies the same full-factor, policy,
+// device, journal and freshness checks, then includes existing item data IDs
+// in the bounded summary. IDs only locate items for an explicit later edit.
+func (s *Session) OpenVaultFileBaselineWithItemIDs(journalPath string, checkpoint *vaultfile.PolicyCheckpoint) ([]VaultFileBaselineItem, error) {
+	return s.openVaultFileBaseline(journalPath, checkpoint, true)
+}
+
+func (s *Session) openVaultFileBaseline(journalPath string, checkpoint *vaultfile.PolicyCheckpoint, includeItemIDs bool) ([]VaultFileBaselineItem, error) {
 	if s == nil {
 		return nil, ErrSessionLocked
 	}
@@ -104,7 +117,11 @@ func (s *Session) OpenVaultFileBaseline(journalPath string, checkpoint *vaultfil
 		defer clearAuthenticatedItems(items)
 		out = make([]VaultFileBaselineItem, 0, len(items))
 		for _, item := range items {
-			out = append(out, VaultFileBaselineItem{Title: item.Title, Category: item.EffectiveCategory()})
+			summary := VaultFileBaselineItem{Title: item.Title, Category: item.EffectiveCategory()}
+			if includeItemIDs {
+				summary.ID = item.ID
+			}
+			out = append(out, summary)
 		}
 		candidate = auth.nextCache
 		return nil

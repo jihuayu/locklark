@@ -28,6 +28,7 @@ const vaultFileUsage = `USAGE
   locklark vault-file track-existing --config ABS_CONFIG
   locklark vault-file status --config ABS_CONFIG
   locklark vault-file open-baseline --config ABS_CONFIG
+  locklark vault-file open-baseline --include-item-ids --config ABS_CONFIG
   locklark vault-file import-prepared --config ABS_CONFIG --input ABS_SEALED_FILE
   locklark vault-file resume-prepared --config ABS_CONFIG
 
@@ -44,6 +45,9 @@ baseline with the same fully unlocked local personal device and the supplied
 checkpoint. It prints bounded title/category summaries, LOCAL_BASELINE and
 remote_freshness UNVERIFIED. It does not read backend data or establish a
 current grant, remote freshness or complete content history.
+The explicit --include-item-ids mode adds only existing item IDs to those
+summaries for later selection. An item ID is not authority; the default output
+never includes IDs.
 
 Import one already signed sealed content successor into an existing clean
 baseline journal, or resume its prepared operation. Darwin and Linux only.
@@ -159,6 +163,10 @@ func runVaultFile(args []string, out io.Writer) error {
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "independent operator configuration")
 	var inputPath string
+	var includeItemIDs bool
+	if args[0] == "open-baseline" {
+		flags.BoolVar(&includeItemIDs, "include-item-ids", false, "include item selectors in the verified local baseline summary")
+	}
 	if importing {
 		flags.StringVar(&inputPath, "input", "", "existing signed sealed content successor")
 	}
@@ -200,7 +208,7 @@ func runVaultFile(args []string, out io.Writer) error {
 		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
 			return err
 		}
-		return openBaselineVaultFile(out, cfg, pin)
+		return openBaselineVaultFile(out, cfg, pin, includeItemIDs)
 	}
 	if args[0] == "status" {
 		if err := separateVaultFileStatusState(cfg.BackendRoot, paths...); err != nil {
