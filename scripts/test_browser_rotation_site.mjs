@@ -321,6 +321,55 @@ test("static rotation integration encloses actual generator input and read in th
     source.includes("updateEvent.item_id === itemID") && source.includes("updateEvent.base_revision === r0") &&
     source.includes("await fillAndLogin(itemID, r1)"),
     "Browser POST, independent website authentication, exact native update and actual refill login must remain required");
+  const candidateStart = source.indexOf("const exactCandidate = async (");
+  const candidateEnd = source.indexOf("  const fillAndLogin =", candidateStart);
+  const candidate = source.slice(candidateStart, candidateEnd);
+  const updateStart = source.indexOf('step("update-r0:baseline-observe")');
+  const updateEnd = source.indexOf('step("refill-login-r1")', updateStart);
+  const update = source.slice(updateStart, updateEnd);
+  const stages = (block) => [...block.matchAll(/step\("update-r0:([a-z0-9-]+)"\)/g)].map((match) => match[1]);
+  assert.deepEqual(stages(candidate), ["observe-r0", "open-popup", "refresh-ready", "refresh-click", "row-ready", "manual-setting"],
+    "Exact-candidate diagnostics must use only the fixed update stages");
+  assert.deepEqual(stages(update), ["baseline-observe", "update-click", "native-wait", "preapproval-unchanged", "native-approve", "save-event", "revision-audit"],
+    "Native-update diagnostics must use only the fixed update stages");
+  const ordered = (block, tokens) => {
+    let previous = -1;
+    for (const token of tokens) {
+      const position = block.indexOf(token, previous + 1);
+      assert(position > previous, "Fixed update stages must precede their actual operation in order");
+      previous = position;
+    }
+  };
+  ordered(candidate, [
+    'if (updating) step("update-r0:observe-r0")', "const row = observe()",
+    'if (updating) step("update-r0:open-popup")', "const popup = await openPopup()",
+    'if (updating) step("update-r0:refresh-ready")', 'await wait(async () => (await popup.disabled("#refresh")) === false',
+    'if (updating) step("update-r0:refresh-click")', 'await popup.click("#refresh")',
+    'if (updating) step("update-r0:row-ready")', 'await wait(async () => (await popup.disabled("#refresh")) === false &&',
+    'if (updating) step("update-r0:manual-setting")', 'assert((await popup.evaluate',
+  ]);
+  ordered(update, [
+    'step("update-r0:baseline-observe")', "const beforeUpdate = observe()", "await exactCandidate(itemID, r0, true)",
+    'step("update-r0:update-click")', "await updatePopup.click(",
+    'step("update-r0:native-wait")', 'input([{ wait_label: "批准更新登录" }])',
+    'step("update-r0:preapproval-unchanged")', "const pending = observe()", 'pending.save_events.length === beforeUpdate.save_events.length',
+    'step("update-r0:native-approve")', 'input([{ click_label: "批准更新登录" }])',
+    'step("update-r0:save-event")', "await wait(() => {", 'updated.save_events.length === beforeUpdate.save_events.length + 1',
+    'step("update-r0:revision-audit")', "const updateEvent =", 'updateEvent.base_revision === r0',
+  ]);
+  assert(source.includes("const exactCandidate = async (id, revision, updating = false) =>") &&
+    (source.match(/exactCandidate\(itemID, r0, true\)/g) || []).length === 1 &&
+    (source.match(/step\("update-r0:/g) || []).length === 13 &&
+    !source.includes('step("update-r0")'),
+    "Only the exact native update may opt into the fixed diagnostic stages");
+  const failureStart = source.indexOf("\n  } catch { failed = true; }\n  finally {");
+  assert(failureStart >= 0, "Rotation failure must enter cleanup without retaining the exception");
+  const failure = source.slice(failureStart + 1);
+  assert(failure.startsWith("  } catch { failed = true; }\n  finally {") &&
+    !/\b(?:step|phase)\s*\(/.test(failure) &&
+    !/\b(?:console|error|message|stack|cause)\b/.test(failure) &&
+    failure.includes('throw Error("Browser rotation acceptance failed")'),
+    "Failure and cleanup must preserve the last fixed stage without exposing an exception payload");
 });
 
 test("static rotation hook runs once and keeps the remaining invocation free of screenshots", () => {
