@@ -1,4 +1,4 @@
-package main
+package vaultfileclient
 
 import (
 	"bytes"
@@ -16,116 +16,139 @@ import (
 	"github.com/jihuayu/locklark/pkg/vaultfilepublish"
 )
 
-func completeVaultFileCreate(configPath string, manifest vaultFileCreateManifest, session *personal.Session, password, key, kit []byte) error {
-	companion, companionExists, err := readVaultFileCreateCompanion(configPath, manifest)
+func (c *CreationContext) completeCreate(ctx context.Context, password, key, kit []byte) error {
+	manifest := c.manifest
+	companion, companionExists, err := ReadCompanion(c.configPath, manifest)
 	if err != nil {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	journalExists := false
 	if _, err := os.Lstat(manifest.Journal); err == nil {
 		journalExists = true
 	} else if !os.IsNotExist(err) {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	if journalExists {
 		pending, err := vaultfilejournal.OpenExistingIntent(manifest.Journal)
 		if err == nil {
 			if pending.Close() != nil {
-				return errVaultFileUnknown
+				return ErrCreateUnknown
 			}
 		} else {
 			if errors.Is(err, vaultfilejournal.ErrLocked) {
-				return errVaultFileUnknown
+				return ErrCreateUnknown
 			}
 			acked, openErr := vaultfilejournal.OpenExisting(manifest.Journal)
 			if openErr != nil {
 				if errors.Is(openErr, vaultfilejournal.ErrLocked) {
-					return errVaultFileUnknown
+					return ErrCreateUnknown
 				}
-				return errVaultFileLocalReview
+				return ErrLocalReview
 			}
 			if acked.Close() != nil {
-				return errVaultFileUnknown
+				return ErrCreateUnknown
 			}
 			if !companionExists {
-				return errVaultFileLocalReview
+				return ErrLocalReview
 			}
-			return verifyVaultFileCreateAcked(manifest, companion, session, password, key, kit)
+			return c.verifyCreateAcked(companion, password, key, kit)
 		}
 	} else if companionExists {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 
 	// The producer creates or verifies one exact intent. It does not open a
 	// backend. An already claimed intent remains read-resolve-only below.
-	companion, err = ensureVaultFileCreateCompanion(configPath, manifest, session, password, key, kit)
+	companion, err = c.ensureCreateCompanion(password, key, kit)
 	if err != nil {
-		return mapVaultFileCreateGenesisError(err)
+		return mapCreateGenesisError(err)
+	}
+	if c.afterIntentForTest != nil {
+		c.afterIntentForTest()
 	}
 	// The durable companion is re-read, then the live Session independently
 	// rechecks archive custody, G, local author and recovery reader before the
 	// first possible backend Create.
-	companion, companionExists, err = readVaultFileCreateCompanion(configPath, manifest)
+	companion, companionExists, err = ReadCompanion(c.configPath, manifest)
 	if err != nil || !companionExists {
-		return errVaultFileLocalUnknown
+		return ErrLocalUnknown
 	}
 	req := personal.VaultFileGenesisRequest{VaultID: manifest.VaultID, Name: manifest.Name,
 		IntentPath: manifest.Journal, ArchivePath: manifest.Archive}
-	public, err := session.PrepareVaultFileGenesis(req, password, key, kit)
+	public, err := c.session.PrepareVaultFileGenesis(req, password, key, kit)
 	if err != nil {
-		return mapVaultFileCreateGenesisError(err)
+		return mapCreateGenesisError(err)
 	}
-	if validateVaultFileCreateCompanionPublic(companion, manifest, public) != nil {
-		return errVaultFileLocalReview
+	if validateCreateCompanionPublic(companion, manifest, public) != nil {
+		return ErrLocalReview
 	}
 	journal, err := vaultfilejournal.OpenExistingIntent(manifest.Journal)
 	if err != nil {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	intent, err := journal.Load()
-	if err != nil || !pendingVaultFileCreateIntentMatches(intent, companion, manifest) {
+	if err != nil || !pendingCreateIntentMatches(intent, companion, manifest) {
 		clear(intent.SealedBytes)
 		journal.Close()
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	clear(intent.SealedBytes)
-	rootBytes, ok := decodeVaultFileHex(public.Ownership.OwnerRootPublicKey)
+	rootBytes, ok := DecodeHex(public.Ownership.OwnerRootPublicKey)
 	if !ok {
 		journal.Close()
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	pin := &vaultfile.GenesisRootPin{VaultID: manifest.VaultID,
 		OwnerRootKeyID: public.Ownership.OwnerRootKeyID, OwnerRootPublicKey: ed25519.PublicKey(rootBytes)}
+	if _, err := c.checkManifest(); err != nil {
+		journal.Close()
+		return err
+	}
+	if err := c.fresh(); err != nil {
+		journal.Close()
+		return err
+	}
+	if ctx.Err() != nil {
+		journal.Close()
+		return ErrCreateUnknown
+	}
 	backend, err := vaultfilebackend.OpenDir(manifest.BackendRoot)
 	if err != nil {
 		journal.Close()
-		return errVaultFileBackend
+		return ErrBackend
 	}
-	ctx := context.Background()
+	if err := c.fresh(); err != nil || ctx.Err() != nil {
+		backend.Close()
+		journal.Close()
+		if ctx.Err() != nil {
+			return ErrCreateUnknown
+		}
+		return err
+	}
 	publishErr := vaultfilepublish.PublishGenesisDir(ctx, backend, journal, pin)
 	journalCloseErr := journal.Close()
 	backendCloseErr := backend.Close()
 	if publishErr != nil {
 		if errors.Is(publishErr, vaultfilepublish.ErrGenesisReview) || errors.Is(publishErr, vaultfilepublish.ErrVerification) {
-			return errVaultFileLocalReview
+			return ErrLocalReview
 		}
-		return errVaultFileUnknown
+		return ErrCreateUnknown
 	}
 	if journalCloseErr != nil || backendCloseErr != nil {
-		return errVaultFileUnknown
+		return ErrCreateUnknown
 	}
-	if err := verifyVaultFileCreateAcked(manifest, companion, session, password, key, kit); err != nil {
-		if errors.Is(err, errVaultFileLocalReview) {
+	if err := c.verifyCreateAcked(companion, password, key, kit); err != nil {
+		if errors.Is(err, ErrLocalReview) {
 			return err
 		}
 		// The remote Create and local Ack may already have committed. A
 		// failed post-Ack Session check cannot revoke those effects.
-		return errVaultFileUnknown
+		return ErrCreateUnknown
 	}
 	return nil
 }
 
-func pendingVaultFileCreateIntentMatches(intent vaultfilejournal.GenesisIntent, companion vaultFileCreateCompanion, manifest vaultFileCreateManifest) bool {
+func pendingCreateIntentMatches(intent vaultfilejournal.GenesisIntent, companion Companion, manifest Manifest) bool {
 	hash := sha256.Sum256(intent.SealedBytes)
 	cp := companion.Resume.Checkpoint
 	return cp != nil && cp.PolicySeq != nil && *cp.PolicySeq == 0 &&
@@ -137,50 +160,61 @@ func pendingVaultFileCreateIntentMatches(intent vaultfilejournal.GenesisIntent, 
 		hex.EncodeToString(intent.PolicyDigest) == cp.PolicyDigest
 }
 
-func verifyVaultFileCreateAcked(manifest vaultFileCreateManifest, companion vaultFileCreateCompanion, session *personal.Session, password, key, kit []byte) error {
+func (c *CreationContext) verifyCreateAcked(companion Companion, password, key, kit []byte) error {
+	manifest := c.manifest
+	if _, err := c.checkManifest(); err != nil {
+		return err
+	}
 	gHash, err := hex.DecodeString(companion.GenesisSHA256)
 	if err != nil || len(gHash) != sha256.Size {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	req := personal.VaultFileGenesisRequest{VaultID: manifest.VaultID, Name: manifest.Name,
 		IntentPath: manifest.Journal, ArchivePath: manifest.Archive}
-	public, err := session.VerifyAckedVaultFileGenesis(req, gHash, password, key, kit)
+	public, err := c.session.VerifyAckedVaultFileGenesis(req, gHash, password, key, kit)
 	if err != nil {
-		return mapVaultFileCreateGenesisError(err)
+		return mapCreateGenesisError(err)
 	}
-	if validateVaultFileCreateCompanionPublic(companion, manifest, public) != nil {
-		return errVaultFileLocalReview
+	if validateCreateCompanionPublic(companion, manifest, public) != nil {
+		return ErrLocalReview
 	}
 	// The Session already bound the exact G hash and sole State; this small
 	// read binds the companion's public operation ID to that same G.
 	j, err := vaultfilejournal.OpenExisting(manifest.Journal)
 	if err != nil {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	state, loadErr := j.LoadGenesisBaseline()
 	closeErr := j.Close()
 	if loadErr != nil || closeErr != nil {
-		return errVaultFileLocalReview
+		return ErrLocalReview
 	}
 	defer clear(state.BaseBytes)
 	defer clear(state.WorkingBytes)
 	hash := sha256.Sum256(state.BaseBytes)
 	file, err := vaultfile.ParseFile(state.BaseBytes)
 	if err != nil || !bytes.Equal(hash[:], gHash) || file.Header.OpID != companion.OperationID {
-		return errVaultFileLocalReview
+		return ErrLocalReview
+	}
+	if _, err := c.checkManifest(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func mapVaultFileCreateGenesisError(err error) error {
+func mapCreateGenesisError(err error) error {
 	switch {
 	case errors.Is(err, personal.ErrVaultFileGenesisUnknown), errors.Is(err, vaultfilejournal.ErrCreateUnknown):
-		return errVaultFileUnknown
+		return ErrCreateUnknown
 	case errors.Is(err, personal.ErrVaultFileGenesisIntent):
-		return errVaultFileLocalReview
+		return ErrLocalReview
+	case errors.Is(err, ErrLocalReview):
+		return ErrLocalReview
+	case errors.Is(err, ErrLocalUnknown):
+		return ErrCreateUnknown
 	case errors.Is(err, vaultfilejournal.ErrUnsupported):
-		return errVaultFileUnsupported
+		return ErrCreateUnsupported
 	default:
-		return errVaultFileVerification
+		return ErrCreateVerification
 	}
 }

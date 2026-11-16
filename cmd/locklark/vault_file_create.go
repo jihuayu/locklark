@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -9,9 +10,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
-	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	"golang.org/x/term"
@@ -47,28 +46,12 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 		PersonalFile: *personalFile, BackendRoot: *backendRoot, Name: *name,
 		Journal: *journal, Archive: *archive}
 	initial := input.PersonalFile != "" || input.BackendRoot != "" || input.Name != "" || input.Journal != "" || input.Archive != ""
+	var proposal *vaultFileCreateManifest
 	if initial {
-		if !validVaultFileCreateManifestPhase(*config, input, false, false) {
-			return errVaultFileConfig
-		}
+		proposal = &input
 	}
-	manifest, exists, err := readVaultFileCreateManifest(*config)
-	if err != nil {
-		return errVaultFileLocalReview
-	}
-	if exists {
-		if initial && (manifest.PersonalFile != input.PersonalFile || manifest.BackendRoot != input.BackendRoot ||
-			manifest.Name != input.Name || manifest.Journal != input.Journal || manifest.Archive != input.Archive) {
-			return errVaultFileLocalReview
-		}
-	} else {
-		if !initial {
-			return errVaultFileLocalReview
-		}
-		manifest, err = vaultfileclient.ReserveManifest(*config, input)
-		if err != nil {
-			return err
-		}
+	if _, err := vaultfileclient.EnsureCreateManifest(*config, proposal); err != nil {
+		return mapVaultFileCreateContextError(err)
 	}
 	// No backend is opened and no sealed file or key leaves this phase.
 	controlInput, controlOutput, err := openRunCLIConsole()
@@ -87,6 +70,8 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	var once sync.Once
 	var resetErr error
 	restore := func() { once.Do(func() { resetErr = term.Restore(fd, state) }) }
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -101,6 +86,7 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	go func() {
 		select {
 		case <-signals:
+			cancelRun()
 			restore()
 			os.Exit(130)
 		case <-done:
@@ -116,47 +102,29 @@ func runVaultFileCreate(args []string, out io.Writer) (retErr error) {
 	if err != nil {
 		return errVaultFileCancelled
 	}
-	key, err := personal.ParseSecret(string(secretInput))
-	clear(secretInput)
+	defer clear(secretInput)
+	creation, err := vaultfileclient.OpenCreation(*config, proposal, password, secretInput)
 	if err != nil {
-		return errVaultFileVerification
+		return mapVaultFileCreateContextError(err)
 	}
-	defer clear(key)
-	session, err := personal.UnlockSession(manifest.PersonalFile, password, key, time.Minute)
+	defer creation.Close()
+	backupRequired, err := creation.Prepare(runCtx)
 	if err != nil {
-		return errVaultFileVerification
-	}
-	defer session.Lock()
-	projection, err := session.PrepareVaultFileOwnership(manifest.VaultID)
-	if err != nil || projection.VaultID != manifest.VaultID {
-		return errVaultFileVerification
+		return mapVaultFileCreateContextError(err)
 	}
 	status := `{"status":"BACKUP_REQUIRED"}`
-	if _, err := os.Lstat(manifest.Archive); os.IsNotExist(err) {
-		companionPath, pathErr := vaultFileCreateCompanionPath(*config)
-		if pathErr != nil {
-			return pathErr
-		}
-		if _, journalErr := os.Lstat(manifest.Journal); !os.IsNotExist(journalErr) {
-			return errVaultFileLocalReview
-		}
-		if _, companionErr := os.Lstat(companionPath); !os.IsNotExist(companionErr) {
-			return errVaultFileLocalReview
-		}
-	} else if err != nil {
-		return errVaultFileLocalReview
-	} else {
+	if !backupRequired {
 		kit, err := c.field("备份恢复码")
 		if err != nil {
 			return errVaultFileCancelled
 		}
 		defer clear(kit)
-		if err := completeVaultFileCreate(*config, manifest, session, password, key, kit); err != nil {
-			return err
+		if err := creation.Complete(runCtx, password, secretInput, kit); err != nil {
+			return mapVaultFileCreateContextError(err)
 		}
 		status = `{"status":"LOCAL_BASELINE","remote_freshness":"UNVERIFIED"}`
 	}
-	session.Lock()
+	creation.Close()
 	restore()
 	if resetErr != nil {
 		return errVaultFileLocalUnknown
