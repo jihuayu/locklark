@@ -131,15 +131,16 @@ type App struct {
 
 	// M2.4 desktop v2 state. It is reset on lock and never survives a
 	// session boundary; settings are non-secret and survive lock.
-	v2              v2State
-	localVaultFiles localVaultFileState
-	localCreate     localVaultFileCreateState
-	v2Mode          bool
-	onevra          onevraUI
-	settings        Settings
-	settingsPath    string
-	settingsLoaded  bool
-	lastActivity    time.Time
+	v2               v2State
+	localVaultFiles  localVaultFileState
+	localCreate      localVaultFileCreateState
+	localVaultUnlock localVaultFileUnlockState
+	v2Mode           bool
+	onevra           onevraUI
+	settings         Settings
+	settingsPath     string
+	settingsLoaded   bool
+	lastActivity     time.Time
 	// clipboardClearSeconds mirrors security.clipboard.clearAfterSeconds for
 	// broker connection goroutines. Only settings mutations and UI start write
 	// it; the IPC factory and lease getter read it without touching a.settings.
@@ -466,6 +467,7 @@ func (a *App) Lock() {
 	// Revoke all session/broker authority before any other lock work.
 	a.lockStart()
 	a.cancelLocalVaultFileCreate()
+	a.cancelLocalVaultFileUnlock()
 	a.closeLocalVaultFileView()
 	// Child wrappers are detached and closed at the same established App.Lock
 	// boundary, before the parent RequestLock/Lock work below. Each close is

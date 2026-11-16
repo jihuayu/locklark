@@ -67,6 +67,15 @@ type localVaultFileSessionOperation struct {
 	handoffTerminal bool
 	outcome         localVaultFileSessionOutcome
 
+	// onComplete is an immutable-once UI observer installed before the worker
+	// launches. It is invoked at most once, after this operation has a real
+	// finite outcome and its exact slot binding has ended. Settlement alone,
+	// a held dispatch or a queued cleanup Close never invokes it. The observer
+	// is taken out under handoffMu and called outside the mutex so a reentrant
+	// callback cannot observe a half-cleared observer.
+	onComplete     func(localVaultFileSessionOutcome)
+	completionSent bool
+
 	// processingFinished is set exactly once by the producer after its last
 	// cryptographic/material use and, when the factory succeeded, after the
 	// exact candidate has been staged. candidateOutstanding stays true while a
@@ -228,6 +237,44 @@ func (op *localVaultFileSessionOperation) finiteOutcome() localVaultFileSessionO
 	op.handoffMu.Lock()
 	defer op.handoffMu.Unlock()
 	return op.outcome
+}
+
+// setCompletionObserver installs the one UI completion observer before the
+// worker launches. Callers that do not need an observer leave it nil.
+func (op *localVaultFileSessionOperation) setCompletionObserver(fn func(localVaultFileSessionOutcome)) {
+	if op == nil {
+		return
+	}
+	op.handoffMu.Lock()
+	op.onComplete = fn
+	op.handoffMu.Unlock()
+}
+
+// takeCompletionObserver returns a finite outcome and its one-shot observer.
+// A missing or not-yet-finite outcome does not consume the observer. The
+// caller must invoke the returned function outside handoffMu.
+func (op *localVaultFileSessionOperation) takeCompletionObserver() (localVaultFileSessionOutcome, func(localVaultFileSessionOutcome)) {
+	if op == nil {
+		return localVaultFileSessionOutcomeNone, nil
+	}
+	op.handoffMu.Lock()
+	defer op.handoffMu.Unlock()
+	if op.completionSent || op.outcome == localVaultFileSessionOutcomeNone {
+		return op.outcome, nil
+	}
+	op.completionSent = true
+	fn := op.onComplete
+	op.onComplete = nil
+	return op.outcome, fn
+}
+
+// notifyLocalVaultFileSessionCompletion observes the finite outcome only after
+// the operation's exact slot binding has ended. It never polls settlement.
+func (a *App) notifyLocalVaultFileSessionCompletion(op *localVaultFileSessionOperation) {
+	outcome, fn := op.takeCompletionObserver()
+	if fn != nil {
+		fn(outcome)
+	}
 }
 
 // collectLocalVaultFileSessionPredecessors gathers every unsettled operation
@@ -517,14 +564,29 @@ func (a *App) reserveLocalVaultFileSessionOperation(scope localVaultFileSessionS
 }
 
 // launchLocalVaultFileSessionOperation starts the generic candidate-open worker
-// for an already reserved operation. The dispatcher and test hook are captured
-// on the UI path, so the worker never reads mutable App state.
+// for an already reserved operation with an already parsed key. The dispatcher
+// and test hook are captured on the UI path, so the worker never reads mutable
+// App state.
 func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOperation, password, key []byte) {
+	a.launchLocalVaultFileSessionOperationWithFactors(op, password, key, nil)
+}
+
+// launchLocalVaultFileSessionUnlockOperation starts the same candidate-open
+// worker for the explicit local-vault unlock dialog. The Secret Key arrives as
+// short-lived text; it is parsed inside this one worker, after predecessor
+// ordering and cancellation checks, so no decoded key or factor is stored in
+// the operation, slot or dialog state.
+func (a *App) launchLocalVaultFileSessionUnlockOperation(op *localVaultFileSessionOperation, password, secret []byte) {
+	a.launchLocalVaultFileSessionOperationWithFactors(op, password, nil, secret)
+}
+
+func (a *App) launchLocalVaultFileSessionOperationWithFactors(op *localVaultFileSessionOperation, password, key, secret []byte) {
 	if op == nil {
 		return
 	}
 	ownedPassword := append([]byte(nil), password...)
 	ownedKey := append([]byte(nil), key...)
+	ownedSecret := append([]byte(nil), secret...)
 	dispatch := a.dispatch
 	hook := a.localVaultFiles.sessionCandidateForTest
 	openPause := a.localVaultFiles.sessionCandidateOpenPauseForTest
@@ -534,21 +596,23 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 	a.launch(func() {
 		defer clear(ownedPassword)
 		defer clear(ownedKey)
+		defer clear(ownedSecret)
+		clearFactors := func() {
+			clear(ownedPassword)
+			clear(ownedKey)
+			clear(ownedSecret)
+		}
 		if len(op.waitFor) != 0 {
 			if predecessorWait != nil {
 				predecessorWait()
 			}
-			waitLocalVaultFileSessionPredecessors(op, op.ctx, func() {
-				clear(ownedPassword)
-				clear(ownedKey)
-			})
+			waitLocalVaultFileSessionPredecessors(op, op.ctx, clearFactors)
 		}
 		if op.ctx.Err() != nil {
 			// No factory ran, so no candidate can exist. The barrier is already
-			// resolved; clear both worker-owned factor copies and only then
+			// resolved; clear every worker-owned factor copy and only then
 			// report processing finished.
-			clear(ownedPassword)
-			clear(ownedKey)
+			clearFactors()
 			if len(op.waitFor) != 0 && postBarrierCancelPause != nil {
 				postBarrierCancelPause()
 			}
@@ -558,17 +622,32 @@ func (a *App) launchLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 		if openPause != nil {
 			openPause()
 		}
+		if ownedSecret != nil {
+			parsed, err := personal.ParseSecret(string(ownedSecret))
+			clear(ownedSecret)
+			if err != nil {
+				// A malformed Secret Key is a fixed no-candidate failure. It
+				// never reaches the factory and no key is retained.
+				clearFactors()
+				a.stageAndDispatchLocalVaultFileSessionResult(op,
+					localVaultFileSessionResult{outcome: localVaultFileSessionOutcomeFailed},
+					dispatch, hook, closePause)
+				return
+			}
+			clear(ownedKey)
+			ownedKey = parsed
+		}
 		candidate, summary, err := a.openLocalVaultFileSessionCandidate(op, ownedPassword, ownedKey)
 		outcome := localVaultFileSessionOutcomeOpened
 		if err != nil {
 			outcome = localVaultFileSessionOutcomeFailed
 		}
 		result := localVaultFileSessionResult{candidate: candidate, summary: summary, outcome: outcome}
-		// The worker's factor copies are dead once the real factory returns.
-		// Clear them before staging, marking or dispatch so a blocked UI path
-		// cannot delay erasure; the deferred clears remain as safety.
-		clear(ownedPassword)
-		clear(ownedKey)
+		// Every worker-owned factor copy, including a parsed key, is dead once
+		// the real factory returns. Clear before staging, marking or dispatch
+		// so a blocked UI path cannot delay erasure; the deferred clears remain
+		// as safety.
+		clearFactors()
 		a.stageAndDispatchLocalVaultFileSessionResult(op, result, dispatch, hook, closePause)
 	})
 }
@@ -707,6 +786,10 @@ func (a *App) finishLocalVaultFileSessionOperation(op *localVaultFileSessionOper
 		}
 		op.slot.operation = nil
 	}
+	// The finite outcome is now recorded and the exact slot binding has ended.
+	// This is the only point that may report UI completion; it is never tied
+	// to an earlier settlement or to a queued cleanup Close.
+	a.notifyLocalVaultFileSessionCompletion(op)
 }
 
 // cancelLocalVaultFileSessionOperation cancels only this slot's pending
@@ -738,6 +821,10 @@ func (a *App) cancelLocalVaultFileSessionOperationExact(op *localVaultFileSessio
 	// Always release an exact stale slot binding. A settled opened outcome is
 	// never changed by takeCancelled.
 	a.endLocalVaultFileSessionOperation(op)
+	// Cancellation is a real finite outcome once takeCancelled recorded it and
+	// the exact binding ended. The pending candidate cleanup below is product
+	// work and is not awaited by the UI observer.
+	a.notifyLocalVaultFileSessionCompletion(op)
 	if !active {
 		return
 	}
