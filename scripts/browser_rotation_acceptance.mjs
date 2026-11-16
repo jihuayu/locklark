@@ -60,12 +60,139 @@ async function readRotationReadiness(popup, itemID, revision) {
   }
 }
 
+const STAGING_OUTCOMES = Object.freeze(["pending", "native-accepted", "local-only", "missing", "multiple", "invalid"]);
+const HISTORY_IDS_PROJECTOR = `function (state) {
+  const history = state && Array.isArray(state.generatedHistory) ? state.generatedHistory : null;
+  if (!history) return { available: false, ids: [] };
+  const ids = [];
+  for (const entry of history) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    if (typeof entry.id !== "string" || !/^[a-f0-9]{32}$/.test(entry.id)) continue;
+    if (ids.includes(entry.id)) continue;
+    ids.push(entry.id);
+    if (ids.length >= 100) break;
+  }
+  return { available: true, ids };
+}`;
+
+// This is the exact projection used inside the live popup. It runs on the
+// existing get-state message, compares the private generated value only in the
+// popup realm and returns a fixed enum plus small counts. The target id is used
+// solely by the private controller to freeze the fresh entry.
+export function projectGeneratedStagingOutcome(state, target) {
+  const empty = { available: false, historyCount: 0, freshCount: 0, targetCount: 0,
+    outcome: "missing", targetId: "" };
+  const history = state && Array.isArray(state.generatedHistory) ? state.generatedHistory : null;
+  if (!history) return empty;
+  const beforeIDs = target && Array.isArray(target.beforeIds) ? target.beforeIds : [];
+  const before = new Set(beforeIDs.filter((id) => typeof id === "string" && /^[a-f0-9]{32}$/.test(id)));
+  const origin = target && typeof target.origin === "string" ? target.origin : "";
+  const password = target && typeof target.password === "string" ? target.password : "";
+  const frozenId = target && typeof target.frozenId === "string" ? target.frozenId : "";
+  const entries = history.filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) &&
+    typeof entry.id === "string" && /^[a-f0-9]{32}$/.test(entry.id));
+  const fresh = entries.filter((entry) => !before.has(entry.id));
+  const matched = frozenId
+    ? entries.filter((entry) => entry.id === frozenId)
+    : fresh.filter((entry) => entry.origin === origin && entry.password === password);
+  const targetEntry = matched.length === 1 ? matched[0] : null;
+  let outcome = "missing";
+  if (fresh.length === 0) outcome = "missing";
+  else if (fresh.length !== 1) outcome = "multiple";
+  else if (matched.length !== 1) outcome = matched.length > 1 ? "multiple" : "missing";
+  else if (targetEntry !== fresh[0] || targetEntry.origin !== origin ||
+    typeof targetEntry.password !== "string" || targetEntry.password !== password) outcome = "missing";
+  else if (!["pending", "native-accepted", "local-only"].includes(targetEntry.stagingOutcome)) outcome = "invalid";
+  else outcome = targetEntry.stagingOutcome;
+  return {
+    available: true,
+    historyCount: Math.min(entries.length, 100),
+    freshCount: Math.min(fresh.length, 100),
+    targetCount: Math.min(matched.length, 100),
+    outcome,
+    targetId: outcome === "pending" || outcome === "native-accepted" || outcome === "local-only"
+      ? targetEntry.id
+      : "",
+  };
+}
+
+function validateStagingProjection(value) {
+  const keys = ["available", "freshCount", "historyCount", "outcome", "targetCount", "targetId"].sort().join(",");
+  assert(value && Object.keys(value).sort().join(",") === keys,
+    "Rotation generated staging projection refused");
+  assert(typeof value.available === "boolean" &&
+    Number.isSafeInteger(value.historyCount) && value.historyCount >= 0 && value.historyCount <= 100 &&
+    Number.isSafeInteger(value.freshCount) && value.freshCount >= 0 && value.freshCount <= 100 &&
+    Number.isSafeInteger(value.targetCount) && value.targetCount >= 0 && value.targetCount <= 100 &&
+    STAGING_OUTCOMES.includes(value.outcome) &&
+    (value.targetId === "" || /^[a-f0-9]{32}$/.test(value.targetId)),
+    "Rotation generated staging projection refused");
+  return value;
+}
+
 export async function acceptBrowserRotation(driver) {
   const { page, fixture, phase, input, observe, openPopup, reconnect, eventually: wait,
     closePopups, captureRotationValue, key, cert, returnURL } = driver;
   const step = (name) => phase("rotation:" + name);
   let site, urls, completed = false, cleaned = false, failed = false, receipt;
-  let updateReadiness;
+  let updateReadiness, rotationStateProbe = 0;
+  const stateLiteral = (value) => JSON.stringify(value)
+    .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  const startPopupStateRead = async (popup, projectSource, target) => {
+    const slot = "__locklark_rotation_state_" + (++rotationStateProbe);
+    const token = "state-" + rotationStateProbe;
+    await popup.evaluate(`(() => {
+      const slot = ${stateLiteral(slot)}, token = ${stateLiteral(token)};
+      globalThis[slot] = { token: token, value: null };
+      chrome.runtime.sendMessage({ type: "state" }).then(
+        (state) => {
+          if (!globalThis[slot] || globalThis[slot].token !== token) return;
+          try {
+            globalThis[slot] = { token: token, value: (${projectSource})(state, ${stateLiteral(target)}) };
+          } catch {
+            globalThis[slot] = { token: token, value: null };
+          }
+        },
+        () => {
+          if (!globalThis[slot] || globalThis[slot].token !== token) return;
+          globalThis[slot] = { token: token, value: null };
+        },
+      );
+      return true;
+    })()`);
+    return async () => {
+      const value = await popup.evaluate(`globalThis[${stateLiteral(slot)}]`);
+      if (!value || typeof value !== "object" || value.token !== token || value.value === null) return null;
+      await popup.evaluate(`delete globalThis[${stateLiteral(slot)}]`).catch(() => {});
+      return value.value;
+    };
+  };
+  const readGeneratedHistoryIDs = async (popup) => {
+    const read = await startPopupStateRead(popup, HISTORY_IDS_PROJECTOR, null);
+    let ids;
+    await wait(async () => {
+      const value = await read();
+      if (value === null) return false;
+      assert(value && value.available === true && Array.isArray(value.ids) &&
+        value.ids.length <= 100 && value.ids.every((id) => /^[a-f0-9]{32}$/.test(id)),
+      "Rotation generated history baseline refused");
+      ids = value.ids;
+      return true;
+    }, "Rotation generated history baseline unavailable");
+    return ids;
+  };
+  const readGeneratedStaging = async (popup, target) => {
+    const read = await startPopupStateRead(popup,
+      projectGeneratedStagingOutcome.toString(), target);
+    let projection;
+    await wait(async () => {
+      const value = await read();
+      if (value === null) return false;
+      projection = validateStagingProjection(value);
+      return true;
+    }, "Rotation generated staging state unavailable");
+    return projection;
+  };
   const enter = async (selector, value) => {
     await page.locator(selector).click();
     await page.keyboard.press("Control+A");
@@ -168,6 +295,7 @@ export async function acceptBrowserRotation(driver) {
       "Rotation R0 must authenticate before the password change");
 
     step("generator");
+    let beforeGeneratedHistory;
     const generated = await captureRotationValue(async () => {
       const generator = await openPopup();
       await generator.click("#generator-section > summary");
@@ -175,6 +303,9 @@ export async function acceptBrowserRotation(driver) {
       await wait(async () => (await generator.text("#gen-preview"))?.length >= 4 &&
         (await generator.disabled("#gen-regenerate")) === false,
       "Rotation product generator did not finish");
+      // Baseline is read only after the real preview settled and before the
+      // single gen-fill that is allowed to create this journey's fresh entry.
+      beforeGeneratedHistory = await readGeneratedHistoryIDs(generator);
       await generator.click("#gen-fill");
       await wait(() => page.evaluate(() => {
         const password = document.querySelector("#new-password").value;
@@ -186,6 +317,23 @@ export async function acceptBrowserRotation(driver) {
       return page.locator("#new-password").inputValue();
     });
     assert(generated !== fixture.Value, "Rotation generator must produce a different credential");
+
+    step("stage-save:bind-history");
+    const bindingPopup = await openPopup();
+    const binding = await readGeneratedStaging(bindingPopup, {
+      beforeIds: beforeGeneratedHistory,
+      origin: urls.origin,
+      password: generated,
+      frozenId: "",
+    });
+    assert(binding.available === true && binding.freshCount === 1 &&
+      binding.targetCount === 1 && binding.targetId,
+    "Rotation generated history entry binding failed");
+    assert(binding.outcome !== "local-only", "Rotation generated staging was rejected");
+    assert(binding.outcome === "pending" || binding.outcome === "native-accepted",
+      "Rotation generated history entry was not a fresh stage");
+    const generatedHistoryId = binding.targetId;
+    await closePopups();
 
     step("change-post");
     const [changed] = await Promise.all([
@@ -236,6 +384,26 @@ export async function acceptBrowserRotation(driver) {
       "Rotation staging changed candidate rows or the target revision");
     assert(afterStaging.rows.find((row) => row.id === itemID)?.revision === r0,
       "Rotation staging must not advance the original target revision");
+
+    step("stage-save:outcome");
+    const outcomePopup = await openPopup();
+    let stagingOutcome;
+    await wait(async () => {
+      stagingOutcome = await readGeneratedStaging(outcomePopup, {
+        beforeIds: beforeGeneratedHistory,
+        origin: urls.origin,
+        password: generated,
+        frozenId: generatedHistoryId,
+      });
+      if (!stagingOutcome.available) throw Error("Rotation generated staging state unavailable");
+      if (stagingOutcome.outcome === "pending") return false;
+      if (stagingOutcome.outcome === "native-accepted") return true;
+      throw Error("Rotation generated staging outcome refused");
+    }, "Rotation generated staging outcome not native-accepted");
+    assert(stagingOutcome.freshCount === 1 && stagingOutcome.targetCount === 1 &&
+      stagingOutcome.targetId === generatedHistoryId,
+    "Rotation generated staging outcome changed the frozen target");
+    await closePopups();
 
     step("update-r0:baseline-observe");
     const beforeUpdate = observe();
@@ -291,7 +459,7 @@ export async function acceptBrowserRotation(driver) {
       counts.passwordChanges === 1 && counts.basicAccepted === 2 && counts.basicRejected === 1,
     "Rotation website evidence must describe one continuous account journey");
     receipt = { registered: true, savedR0: true, loginR0: true, generatedAndFilled: true,
-      stagedWithoutCommit: true, changedByPOST: true, oldRejected: true, newAccepted: true, sameItem: true, baseR0: true,
+      stagedWithoutCommit: true, stagedNativeAccepted: true, changedByPOST: true, oldRejected: true, newAccepted: true, sameItem: true, baseR0: true,
       revisionAdvanced: true, refillLoginR1: true, laterScreenshotsDisabled: true,
       tlsConnections: counts.tlsConnections, requests: counts.requests, registrations: counts.registrations,
       loginAccepted: counts.loginAccepted, passwordChanges: counts.passwordChanges,
