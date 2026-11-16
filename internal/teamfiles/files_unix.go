@@ -61,7 +61,34 @@ func trustedFile(path string, private bool) error {
 	return chain(resolved, true, private)
 }
 func createLocalFile(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return nil, err
+	}
+	owned, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, ErrFile
+	}
+	// The process umask may strip the owner's read bit from the newly
+	// created inode. Correct only this O_EXCL-owned descriptor before any
+	// bytes are published, then verify the exact mode on that descriptor.
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		if current, statErr := os.Lstat(path); statErr == nil && os.SameFile(owned, current) {
+			os.Remove(path)
+		}
+		return nil, ErrFile
+	}
+	current, err := f.Stat()
+	if err != nil || !os.SameFile(owned, current) || !current.Mode().IsRegular() || current.Mode().Perm() != 0600 {
+		f.Close()
+		if atPath, statErr := os.Lstat(path); statErr == nil && os.SameFile(owned, atPath) {
+			os.Remove(path)
+		}
+		return nil, ErrFile
+	}
+	return f, nil
 }
 func openLocalFile(path string, private bool) (*os.File, error) {
 	before, err := os.Lstat(path)
