@@ -28,11 +28,38 @@ function authenticateWebsite(targetURL, ca, username, password) {
   });
 }
 
+async function readRotationReadiness(popup, itemID, revision) {
+  try {
+    const observation = await popup.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#candidates [data-item-id][data-item-revision]')];
+      const sameID = rows.filter(row => row.dataset.itemId === ${JSON.stringify(itemID)});
+      const exact = sameID.filter(row => row.dataset.itemRevision === ${JSON.stringify(revision)});
+      const cap = count => Math.min(count, 100);
+      const controls = action => cap(exact.reduce((count, row) =>
+        count + row.querySelectorAll('[data-action="' + action + '"]').length, 0));
+      return { probeAvailable: true, refreshDisabled: document.querySelector('#refresh')?.disabled !== false,
+        rowCount: cap(rows.length), sameIDCount: cap(sameID.length), exactRevisionCount: cap(exact.length),
+        fillCount: controls('fill'), updateCount: controls('update'), failure: 'none' };
+    })()`);
+    const counts = ["rowCount", "sameIDCount", "exactRevisionCount", "fillCount", "updateCount"];
+    const keys = ["probeAvailable", "refreshDisabled", ...counts, "failure"].sort().join(",");
+    assert(observation && Object.keys(observation).sort().join(",") === keys &&
+      observation.probeAvailable === true && typeof observation.refreshDisabled === "boolean" &&
+      observation.failure === "none" && counts.every(name => Number.isSafeInteger(observation[name]) &&
+        observation[name] >= 0 && observation[name] <= 100), "Rotation readiness projection refused");
+    return Object.freeze(observation);
+  } catch {
+    return Object.freeze({ probeAvailable: false, refreshDisabled: true, rowCount: 0,
+      sameIDCount: 0, exactRevisionCount: 0, fillCount: 0, updateCount: 0, failure: "probe-failed" });
+  }
+}
+
 export async function acceptBrowserRotation(driver) {
   const { page, fixture, phase, input, observe, openPopup, reconnect, eventually: wait,
     closePopups, captureRotationValue, key, cert, returnURL } = driver;
   const step = (name) => phase("rotation:" + name);
   let site, urls, completed = false, cleaned = false, failed = false, receipt;
+  let updateReadiness;
   const enter = async (selector, value) => {
     await page.locator(selector).click();
     await page.keyboard.press("Control+A");
@@ -52,9 +79,15 @@ export async function acceptBrowserRotation(driver) {
     if (updating) step("update-r0:refresh-click");
     await popup.click("#refresh");
     if (updating) step("update-r0:row-ready");
-    await wait(async () => (await popup.disabled("#refresh")) === false &&
-      (await popup.count(selected + ' [data-action="fill"]')) === 1,
-    "Rotation exact candidate unavailable");
+    try {
+      await wait(async () => (await popup.disabled("#refresh")) === false &&
+        (await popup.count(selected + ' [data-action="fill"]')) === 1,
+      "Rotation exact candidate unavailable");
+    } catch {
+      // Observe once after the unchanged wait fails, before cleanup closes it.
+      if (updating) updateReadiness = await readRotationReadiness(popup, id, revision);
+      throw Error("Rotation exact candidate unavailable");
+    }
     if (updating) step("update-r0:manual-setting");
     assert((await popup.evaluate('document.querySelector("#auto-login").checked')) === false,
       "Rotation requires the existing manual login setting");
@@ -233,6 +266,9 @@ export async function acceptBrowserRotation(driver) {
       }
     } catch { failed = true; }
   }
-  if (failed || !completed || !cleaned) throw Error("Browser rotation acceptance failed");
+  if (failed || !completed || !cleaned) {
+    if (updateReadiness) console.error("Native browser rotation row readiness: " + JSON.stringify(updateReadiness));
+    throw Error("Browser rotation acceptance failed");
+  }
   return Object.freeze({ ...receipt, popupClosed: true, websiteClosed: true });
 }

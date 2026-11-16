@@ -300,6 +300,49 @@ test("generation failure discards unknown output and reports only a fixed error"
   } finally { console.log = originalLog; console.error = originalError; }
 });
 
+test("rotation row readiness projects bounded metadata without retaining identifiers or errors", async () => {
+  const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("async function readRotationReadiness(");
+  const end = source.indexOf("\nexport async function acceptBrowserRotation", start);
+  assert(start >= 0 && end > start, "The actual rotation readiness projection is required");
+  const read = vm.runInNewContext("(" + source.slice(start, end).trim() + ")", { assert });
+  const id = 'private-id-"<>&', revision = 'private-revision-\\"<>&', payload = "private-error-payload";
+  const row = (itemID, itemRevision, fills = 1, updates = 1) => ({
+    dataset: { itemId: itemID, itemRevision },
+    querySelectorAll: (selector) => Array(selector === '[data-action="fill"]' ? fills : updates).fill({}),
+  });
+  const probe = async (rows, disabled = false) => {
+    const result = await read({ evaluate: (expression) => vm.runInNewContext(expression, {
+      document: { querySelector: () => ({ disabled }), querySelectorAll: () => rows },
+    }) }, id, revision);
+    const serialized = JSON.stringify(result);
+    assert(![id, revision, payload].some((value) => serialized.includes(value)), "Readiness output must contain no identifier or error payload");
+    assert(Object.isFrozen(result), "The last observation must be frozen before cleanup");
+    return JSON.parse(serialized);
+  };
+  const ready = await probe([row(id, revision)]);
+  assert.deepEqual(ready, { probeAvailable: true, refreshDisabled: false, rowCount: 1,
+    sameIDCount: 1, exactRevisionCount: 1, fillCount: 1, updateCount: 1, failure: "none" });
+  assert.equal((await probe([row(id, revision)], true)).refreshDisabled, true);
+  assert.equal((await probe([])).rowCount, 0);
+  assert.equal((await probe([row(id, "different-revision")])).exactRevisionCount, 0);
+  assert.equal((await probe([row("different-id", revision)])).sameIDCount, 0);
+  const capped = await probe(Array.from({ length: 101 }, () => row(id, revision, 2, 2)));
+  for (const key of ["rowCount", "sameIDCount", "exactRevisionCount", "fillCount", "updateCount"])
+    assert.equal(capped[key], 100);
+  const unavailable = { probeAvailable: false, refreshDisabled: true, rowCount: 0,
+    sameIDCount: 0, exactRevisionCount: 0, fillCount: 0, updateCount: 0, failure: "probe-failed" };
+  for (const popup of [
+    { evaluate: () => { throw Error(payload); } },
+    { evaluate: (expression) => vm.runInNewContext(expression, { document: { querySelectorAll: () => { throw Error(payload); } } }) },
+    { evaluate: () => ({ ...ready, payload }) },
+  ]) {
+    const result = await read(popup, id, revision);
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), unavailable);
+    assert(Object.isFrozen(result), "Failed probes must retain only a frozen fixed result");
+  }
+});
+
 test("static rotation integration encloses actual generator input and read in the output barrier", () => {
   const source = readFileSync(new URL("./browser_rotation_acceptance.mjs", import.meta.url), "utf8");
   const start = source.indexOf("const generated = await captureRotationValue(async () => {");
@@ -348,6 +391,12 @@ test("static rotation integration encloses actual generator input and read in th
     'if (updating) step("update-r0:row-ready")', 'await wait(async () => (await popup.disabled("#refresh")) === false &&',
     'if (updating) step("update-r0:manual-setting")', 'assert((await popup.evaluate',
   ]);
+  assert(candidate.includes('try {\n      await wait(async () => (await popup.disabled("#refresh")) === false &&\n' +
+    '        (await popup.count(selected + \' [data-action="fill"]\')) === 1,\n' +
+    '      "Rotation exact candidate unavailable");\n    } catch {') &&
+    candidate.includes('if (updating) updateReadiness = await readRotationReadiness(popup, id, revision);') &&
+    (source.match(/await readRotationReadiness\(/g) || []).length === 1,
+    "Only a failed unchanged readiness wait may perform one extra finite probe");
   ordered(update, [
     'step("update-r0:baseline-observe")', "const beforeUpdate = observe()", "await exactCandidate(itemID, r0, true)",
     'step("update-r0:update-click")', "await updatePopup.click(",
@@ -365,9 +414,12 @@ test("static rotation integration encloses actual generator input and read in th
   const failureStart = source.indexOf("\n  } catch { failed = true; }\n  finally {");
   assert(failureStart >= 0, "Rotation failure must enter cleanup without retaining the exception");
   const failure = source.slice(failureStart + 1);
+  const finiteOutput = 'if (updateReadiness) console.error("Native browser rotation row readiness: " + JSON.stringify(updateReadiness));';
+  assert((failure.match(/Native browser rotation row readiness:/g) || []).length === 1 &&
+    failure.includes(finiteOutput), "Cleanup may emit only the frozen readiness projection");
   assert(failure.startsWith("  } catch { failed = true; }\n  finally {") &&
     !/\b(?:step|phase)\s*\(/.test(failure) &&
-    !/\b(?:console|error|message|stack|cause)\b/.test(failure) &&
+    !/\b(?:console|error|message|stack|cause)\b/.test(failure.replace(finiteOutput, "")) &&
     failure.includes('throw Error("Browser rotation acceptance failed")'),
     "Failure and cleanup must preserve the last fixed stage without exposing an exception payload");
 });
