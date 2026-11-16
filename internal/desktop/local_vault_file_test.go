@@ -6,8 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/theme"
 )
 
 func TestDesktopIndependentFileNavigationUsesOnePersonalAndWorkspace(t *testing.T) {
@@ -42,6 +45,9 @@ func TestDesktopIndependentFileNavigationUsesOnePersonalAndWorkspace(t *testing.
 	a := New()
 	a.settingsPath = settingsPath
 	a.path, a.session = personalPath, s
+	if !a.session.Unlocked() {
+		t.Fatal("LOCAL_NAV_REVIEW_SESSION_NOT_UNLOCKED")
+	}
 	a.launch = func(fn func()) { fn() }
 	a.refreshLocalVaultFiles()
 	if len(a.localVaultFiles.refs) != 2 || a.localVaultFiles.refs[0].vaultID == "" ||
@@ -54,5 +60,35 @@ func TestDesktopIndependentFileNavigationUsesOnePersonalAndWorkspace(t *testing.
 	a.Lock()
 	if a.localVaultFiles.selected != "" || len(a.localVaultFiles.refs) != 0 {
 		t.Fatal("LOCAL_NAV_ACCOUNT_LOCK_RETAINED_REFS")
+	}
+}
+
+func TestDesktopIndependentFileDuplicateReviewRowsKeepSelectionSeparate(t *testing.T) {
+	a := newOnevraTestApp()
+	personalPath := filepath.Join(t.TempDir(), "personal.ll")
+	key := []byte("1234567890abcdef")
+	if personal.Create(personalPath, "review-factor", key) != nil {
+		t.Fatal("LOCAL_NAV_REVIEW_PROFILE_CREATE_FAILED")
+	}
+	s, err := personal.UnlockSession(personalPath, []byte("review-factor"), key, time.Minute)
+	if err != nil {
+		t.Fatal("LOCAL_NAV_REVIEW_PROFILE_UNLOCK_FAILED")
+	}
+	defer s.Lock()
+	a.path, a.session = personalPath, s
+	first := localVaultFileRef{path: filepath.Join(t.TempDir(), "first.json"), name: "待核查文件"}
+	second := localVaultFileRef{path: filepath.Join(t.TempDir(), "second.json"), name: "待核查文件"}
+	a.localVaultFiles.refs = []localVaultFileRef{first, second}
+	tester := ui.NewTester(func(c *ui.Context) {
+		c.SetTheme(theme.Onevra(c))
+		oneui.Sidebar(c).Children(func() { a.onevraLocalVaultFileSidebar(c) })
+	}, 480, 500)
+	if err := tester.Click("待核查文件"); err != nil || a.localVaultFiles.selected != first.path {
+		t.Fatal("LOCAL_NAV_FIRST_REVIEW_ROW_NOT_SELECTED")
+	}
+	tester.Key(0, ui.KeyTab)
+	tester.Key(0, ui.KeyEnter)
+	if a.localVaultFiles.selected != second.path {
+		t.Fatal("LOCAL_NAV_SECOND_REVIEW_ROW_FOCUS_COLLIDED")
 	}
 }

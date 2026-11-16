@@ -23,14 +23,14 @@ type localVaultFileRef struct {
 }
 
 type localVaultFileState struct {
-	refs     []localVaultFileRef
-	selected string
-	items    []personal.VaultFileBaselineItem
-	status   string
-	loading  bool
-	sequence uint64
+	refs         []localVaultFileRef
+	selected     string
+	items        []personal.VaultFileBaselineItem
+	status       string
+	loading      bool
+	sequence     uint64
 	listSequence uint64
-	cancel   context.CancelFunc
+	cancel       context.CancelFunc
 }
 
 func localVaultFilePaths(settingsPath, personalPath string) (profileDir, backendRoot string) {
@@ -156,6 +156,8 @@ func (a *App) onevraLocalVaultFileSidebar(c *ui.Context) {
 			ref := ref
 			item := oneui.SidebarItemWithSlots(c, ref.name, a.localVaultFiles.selected == ref.path,
 				func(c *ui.Context, size float32) { oneui.Icon(c, lucide.Vault()).Size(size, size) }, nil)
+			pathHash := sha256.Sum256([]byte(ref.path))
+			item.Key("local-vault-file:" + hex.EncodeToString(pathHash[:]))
 			if item.Clicked() {
 				a.selectLocalVaultFile(ref)
 			}
