@@ -464,15 +464,31 @@ var tempCounter atomic.Uint64
 // publication mechanism; it is not a general directory-flush or power-loss
 // guarantee.
 func openDatabase(path, parent string, missingHint bool) (*Journal, error) {
+	created := false
 	if missingHint {
 		// Publish only when the name is genuinely absent; when another opener
 		// won the publication race, publishNewDatabase reports that and its
 		// uniquely named temporary file was removed, nothing else.
-		if _, err := publishNewDatabase(path, parent); err != nil {
+		var err error
+		created, err = publishNewDatabase(path, parent)
+		if err != nil {
 			return nil, err
 		}
 	}
-	return openExistingDatabase(path)
+	j, err := openExistingDatabase(path)
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		if err := j.db.Update(func(tx *bolt.Tx) error {
+			_, err := tx.CreateBucket([]byte(bucketName))
+			return err
+		}); err != nil {
+			_ = j.Close()
+			return nil, err
+		}
+	}
+	return j, nil
 }
 
 // openExistingDatabase opens an existing database with bbolt through the one
@@ -489,6 +505,10 @@ func openExistingDatabase(path string) (*Journal, error) {
 	if missing {
 		return nil, fmt.Errorf("%w: database file %s does not exist", ErrInvalid, path)
 	}
+	if stat, err := file.Stat(); err != nil || stat.Size() == 0 {
+		_ = file.Close()
+		return nil, ErrInvalid
+	}
 	handedOff := false
 	defer func() {
 		if !handedOff {
@@ -496,8 +516,9 @@ func openExistingDatabase(path string) (*Journal, error) {
 		}
 	}()
 	db, err := bolt.Open(path, 0o600, &bolt.Options{
-		NoSync:  false,
-		Timeout: lockTimeout,
+		NoSync:         false,
+		NoFreelistSync: true,
+		Timeout:        lockTimeout,
 		OpenFile: func(name string, flag int, perm os.FileMode) (*os.File, error) {
 			// bbolt opens the located database once, read-write. The
 			// validated handle already names that file, so any other name is

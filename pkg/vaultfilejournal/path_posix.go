@@ -9,6 +9,7 @@ import (
 	"os"
 
 	bolt "go.etcd.io/bbolt"
+	"golang.org/x/sys/unix"
 )
 
 // checkPrivateDir requires dir to be a real (non-symlinked) directory with no
@@ -37,48 +38,101 @@ func checkExistingDBFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("%w: database file: %v", ErrInvalid, err)
 	}
+	if !fi.Mode().IsRegular() || fi.Size() == 0 {
+		return fmt.Errorf("%w: existing database is not a nonempty regular file", ErrInvalid)
+	}
 	if mode := fi.Mode().Perm(); mode&0o077 != 0 {
 		return fmt.Errorf("%w: database file %s has mode %04o, want no group or other access", ErrInvalid, path, mode)
 	}
 	return nil
 }
 
-// openDatabase opens the bbolt database after the path checks. A new file is
-// checkpointed by syncing its parent directory; an existing file never gains
-// group or other access, so it is rejected rather than repaired.
+// openDatabase lets only the descriptor this call created with O_EXCL enter
+// bbolt at zero length. An existing zero-length file can be a failed genesis
+// intent creation, so it is never handed to bbolt for initialization.
 func openDatabase(path, parent string, missingHint bool) (*Journal, error) {
 	if !missingHint {
 		if err := checkExistingDBFile(path); err != nil {
 			return nil, err
 		}
 	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{NoSync: false, Timeout: lockTimeout})
+	var opened *os.File
+	db, err := bolt.Open(path, 0o600, &bolt.Options{NoSync: false, NoFreelistSync: !missingHint, Timeout: lockTimeout,
+		OpenFile: func(name string, flags int, _ os.FileMode) (*os.File, error) {
+			if opened != nil || name != path || flags&os.O_TRUNC != 0 || flags&(os.O_WRONLY|os.O_RDWR) != os.O_RDWR {
+				return nil, ErrInvalid
+			}
+			openFlags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
+			if missingHint {
+				openFlags |= unix.O_CREAT | unix.O_EXCL
+			}
+			fd, err := unix.Open(path, openFlags, 0600)
+			if err != nil {
+				return nil, fmt.Errorf("%w: database descriptor: %v", ErrInvalid, err)
+			}
+			file := os.NewFile(uintptr(fd), "vaultfile-journal")
+			if file == nil {
+				_ = unix.Close(fd)
+				return nil, ErrInvalid
+			}
+			info, err := file.Stat()
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 ||
+				(!missingHint && info.Size() == 0) {
+				_ = file.Close()
+				return nil, ErrInvalid
+			}
+			if missingHint && unix.Fchmod(fd, 0600) != nil {
+				_ = file.Close()
+				return nil, ErrInvalid
+			}
+			opened = file
+			return file, nil
+		},
+	})
 	if err != nil {
 		if errors.Is(err, bolt.ErrTimeout) {
 			return nil, fmt.Errorf("%w: %w", ErrLocked, err)
 		}
 		return nil, fmt.Errorf("vault file journal: open: %w", err)
 	}
-	// bolt creates only the main file; checkpoint it so the 0600 inode is
-	// durable rather than depending on a later rename. If the file already
-	// existed, skip the extra sync.
-	if missingHint {
-		if err := syncDir(parent); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("vault file journal: sync directory: %w", err)
-		}
-	}
-	if err := verifyDBFile(path); err != nil {
+	refuse := func(err error) (*Journal, error) {
 		_ = db.Close()
 		return nil, err
+	}
+	if opened == nil {
+		return refuse(ErrInvalid)
+	}
+	held, err := opened.Stat()
+	named, nameErr := os.Lstat(path)
+	if err != nil || nameErr != nil || !named.Mode().IsRegular() || !os.SameFile(held, named) {
+		return refuse(ErrInvalid)
+	}
+	if missingHint {
+		// A real Journal.Open/Close has an empty journal namespace. Bare bbolt
+		// initialization has none and cannot later take over a reserved inode.
+		if err := db.Update(func(tx *bolt.Tx) error {
+			_, err := tx.CreateBucket([]byte(bucketName))
+			return err
+		}); err != nil {
+			return refuse(err)
+		}
+	}
+	// Checkpoint a newly created inode; existing files are never repaired.
+	if missingHint {
+		if err := syncDir(parent); err != nil {
+			return refuse(fmt.Errorf("vault file journal: sync directory: %w", err))
+		}
+	}
+	named, nameErr = os.Lstat(path)
+	if nameErr != nil || !named.Mode().IsRegular() || !os.SameFile(held, named) {
+		return refuse(ErrInvalid)
 	}
 	// Re-check the permission bits now that the file is open, so the
 	// no-group-or-other promise covers the read boundary too. A file widened
 	// in between is rejected as is, never chmodded.
 	if !missingHint {
 		if err := checkExistingDBFile(path); err != nil {
-			_ = db.Close()
-			return nil, err
+			return refuse(err)
 		}
 	}
 	return &Journal{db: db}, nil

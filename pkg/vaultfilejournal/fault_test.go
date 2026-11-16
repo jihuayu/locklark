@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -183,10 +184,10 @@ func TestOpenLocked(t *testing.T) {
 // TestOpenStaleMissingHintDoesNotRemoveOwnedJournal models the race where
 // Open's existence check observes a missing path (missing=true) and another
 // opener then creates, locks and writes it before this call reaches bbolt. The
-// stale hint is passed directly to the same internal helper to keep the
-// regression deterministic and free of global state: it must fail promptly
-// with ErrLocked, must not remove the competing database, and the owning
-// handle must keep working.
+// stale hint is passed directly to the same internal helper: O_EXCL must
+// reject the collision instead of opening and possibly initializing someone
+// else's inode. It must not remove the competing database, and its owner keeps
+// working.
 func TestOpenStaleMissingHintDoesNotRemoveOwnedJournal(t *testing.T) {
 	dir := privateDir(t)
 	path := filepath.Join(dir, "journal.db")
@@ -200,11 +201,19 @@ func TestOpenStaleMissingHintDoesNotRemoveOwnedJournal(t *testing.T) {
 		_ = j.Close()
 		t.Fatalf("stale-hint open unexpectedly succeeded")
 	}
-	if !errors.Is(err, ErrLocked) || !errors.Is(err, bolt.ErrTimeout) {
-		t.Fatalf("stale-hint open = %v, want ErrLocked", err)
-	}
-	if elapsed := time.Since(start); elapsed > lockTimeout+3*time.Second {
-		t.Fatalf("stale-hint open took %v, want prompt ErrLocked", elapsed)
+	if runtime.GOOS == "windows" {
+		// Genesis intent creation is unsupported there; keep the existing
+		// validated-handle lock behavior of the Windows opener.
+		if !errors.Is(err, ErrLocked) || !errors.Is(err, bolt.ErrTimeout) {
+			t.Fatalf("stale-hint open = %v, want Windows ErrLocked", err)
+		}
+	} else {
+		if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrLocked) {
+			t.Fatalf("stale-hint open = %v, want O_EXCL collision", err)
+		}
+		if elapsed := time.Since(start); elapsed >= lockTimeout {
+			t.Fatalf("stale-hint open took %v, want prompt O_EXCL refusal", elapsed)
+		}
 	}
 	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
 		t.Fatalf("stale-hint open removed the owned database: %v, %v", info, err)
