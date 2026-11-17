@@ -29,6 +29,14 @@ type authItemsFixture struct {
 
 func newAuthItemsFixture(t *testing.T) *authItemsFixture {
 	t.Helper()
+	return newAuthItemsFixtureVault(t, "vault-auth-items")
+}
+
+// newAuthItemsFixtureVault builds the same real genesis fixture under the
+// caller's vault ID, so tests that need two independent vaults can keep every
+// item title and every key-generation step identical.
+func newAuthItemsFixtureVault(t *testing.T, vaultID string) *authItemsFixture {
+	t.Helper()
 	genKey := func() (ed25519.PublicKey, ed25519.PrivateKey) {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -50,7 +58,7 @@ func newAuthItemsFixture(t *testing.T) *authItemsFixture {
 	policy := &vaultfile.Policy{
 		Format:           vaultfile.Format,
 		Version:          vaultfile.Version,
-		VaultID:          "vault-auth-items",
+		VaultID:          vaultID,
 		PolicySeq:        0,
 		PrevPolicyDigest: nil,
 		OwnerRoot: vaultfile.OwnerRoot{

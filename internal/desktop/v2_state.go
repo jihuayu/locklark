@@ -599,6 +599,7 @@ func (a *App) selectVault(id string) {
 }
 
 func (a *App) SelectVault(id string) {
+	a.closeLocalVaultFileView()
 	a.EnableV2()
 	a.v2.settingsOpen = false
 	a.selectVault(id)

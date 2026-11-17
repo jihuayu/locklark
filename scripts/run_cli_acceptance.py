@@ -27,7 +27,8 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STAGES = {"prerequisites", "certificates", "create", "login", "gh-success", "gh-error", "gh-stdin", "gh-pipes", "no-ctty",
-          "deny", "stale", "wrong-factors", "forbidden-gh", "stdio-exit", "timeout", "signal", "privacy", "cleanup", "complete"}
+          "deny", "stale", "wrong-factors", "forbidden-gh", "stdio-exit", "timeout", "signal",
+          "revision-rotate", "revision-stale", "revision-current", "revision-audit", "privacy", "cleanup", "complete"}
 
 
 FAILURE_CODES = frozenset({
@@ -77,12 +78,15 @@ FAILURE_CODES = frozenset({
     "signal-result-or-output-mismatch",
     "privacy-oracle-request-invalid",
     "privacy-environment-or-global-config-changed",
+    "revision-rotation-mismatch", "revision-stale-refusal-mismatch",
+    "revision-current-request-mismatch", "revision-audit-mismatch", "revision-oracle-state-mismatch",
 })
 UNEXPECTED_FAILURE_CODES = frozenset({"timeout", "json", "io", "unexpected"})
 REQUEST_SUBSTAGES = frozenset({
     "init", "add-login", "list", "run-cli", "success", "http-error", "stdin",
     "pipe-stdin", "pipe-stderr", "no-ctty", "deny", "stale", "wrong-factors",
     "forbidden-gh", "stdio", "timeout", "interrupt", "terminate",
+    "revision-audit-before", "revision-edit", "revision-list", "revision-stale", "revision-current", "revision-audit-after",
 })
 FAILURE_METADATA_KEYS = frozenset({
     "request_substage", "expected_exit_code", "actual_exit_code", "stdin_pipe",
@@ -150,17 +154,45 @@ def scan(raw, values):
             require(pattern not in raw, "privacy-canary-disclosed")
 
 
+def revision_audit_flags(before, after, item_id, old_revision, new_revision):
+    """Correlate the private signed events; return only fixed success flags."""
+    require(len(after) >= len(before) and after[:len(before)] == before, "revision-audit-mismatch")
+    reads = {"desktop.unlock", "audit.list", "item.list"}
+    observed = [(event.get("action"), event.get("result"), event.get("item_id"), event.get("base_revision"))
+                for event in after[len(before):] if event.get("action") not in reads]
+    require(observed == [
+        ("item.edit.password", "succeeded", item_id, old_revision),
+        # The producer signs the authenticated current revision to preserve
+        # audit-chain continuity, including a rejected stale-selector request.
+        # The live request boundary separately proves that selector was R0.
+        ("item.run.password", "conflict", item_id, new_revision),
+        ("item.run.password", "intent", item_id, new_revision),
+    ], "revision-audit-mismatch")
+    return {"same_item_edit": True, "old_revision_conflict": True, "new_revision_intent": True}
+
+
 class TLSOracle(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
     def __init__(self, root, token, certificate, key):
         self.root, self.token, self.requests, self.failures = root, token, [], []
+        self.token_generation = "initial"
         self.mutex = threading.Lock()
         self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.tls.minimum_version = ssl.TLSVersion.TLSv1_3
         self.tls.load_cert_chain(certificate, key)
         super().__init__(("127.0.0.1", 0), OracleConnection)
+
+    def expect_rotated_token(self, token):
+        with self.mutex:
+            require(self.token_generation == "initial" and bool(token) and token != self.token,
+                    "revision-oracle-state-mismatch")
+            self.token, self.token_generation = token, "rotated"
+
+    def authorization(self, header):
+        with self.mutex:
+            return header in ("token " + self.token, "Bearer " + self.token), self.token_generation
 
     def record(self, value):
         with self.mutex:
@@ -227,9 +259,10 @@ class OracleConnection(socketserver.BaseRequestHandler):
             method, path, version = lines[0].split(" ")
             headers = {line.split(":", 1)[0].lower(): line.split(":", 1)[1].strip() for line in lines[1:] if ":" in line}
             body = self.body(secure, headers)
-            authorized = headers.get("authorization") in ("token " + self.server.token, "Bearer " + self.server.token)
+            authorized, generation = self.server.authorization(headers.get("authorization"))
             self.server.record({"method": method, "path": path, "headers": headers, "body": bytes(body).decode(),
-                                "selected_token_matches": authorized, "tls13": secure.version() == "TLSv1.3"})
+                                "selected_token_matches": authorized, "credential_generation": generation,
+                                "tls13": secure.version() == "TLSv1.3"})
             require(authorized and version == "HTTP/1.1", "oracle-request-auth-or-version-mismatch")
             if path == "/user" and method == "GET":
                 status, response = "200 OK", {"login": "locklark-owned-fixture", "id": 8675309}
@@ -434,6 +467,45 @@ class Acceptance:
         require(not list(self.temps.iterdir()), "request-temporary-directory-not-clean")
         return stdout, terminal, record, len(self.server.requests) - before
 
+    def real_revision_chain(self):
+        # This is a local record revision change and fresh one-shot RUN approval;
+        # it makes no browser-rotation or reusable-lease claim.
+        factors = [("主密码", self.master), ("Secret Key", self.key)]
+        self.stage = "revision-rotate"
+        before, _, _ = self.invoke("audit", factors, substage="revision-audit-before")
+        old = dict(self.item)
+        rotated = self.secret("ghp_")  # Keep both credential canaries in every later scan.
+        edited, _, _ = self.invoke("edit-login", factors + [("新登录密码", rotated)],
+            options=("--id", old["id"], "--revision", old["revision"], "--field", "password"), substage="revision-edit")
+        edited = json.loads(edited)
+        require(edited.get("id") == old["id"] and isinstance(edited.get("revision"), str)
+                and re.fullmatch(r"[a-f0-9]{64}", edited["revision"]) is not None
+                and edited["revision"] != old["revision"], "revision-rotation-mismatch")
+        rows, _, _ = self.invoke("list", factors, substage="revision-list")
+        current = [row for row in json.loads(rows) if row.get("id") == old["id"]]
+        require(len(current) == 1 and current[0].get("revision") == edited["revision"], "revision-rotation-mismatch")
+        self.item, self.token = current[0], rotated
+        self.server.expect_rotated_token(rotated)
+        self.stage = "revision-stale"
+        out, terminal, record, count = self.request("revision-stale", ["api", "/user"], revision=old["revision"], expected=1)
+        require(not out and not record.exists() and count == 0
+                and b"login changed; list again and review before retrying" in terminal
+                and self.failure_metadata.get("prompts_observed") == 3, "revision-stale-refusal-mismatch")
+        self.mark("real_old_revision_conflict_starts_zero_children_and_zero_tls")
+        self.stage = "revision-current"
+        out, _, record, count = self.request("revision-current", ["api", "/user", "--jq", ".login"])
+        require(out == b"locklark-owned-fixture\n" and record.exists() and count == 1
+                and self.failure_metadata.get("prompts_observed") == 3
+                and self.server.requests[-1].get("credential_generation") == "rotated",
+                "revision-current-request-mismatch")
+        self.stage = "revision-audit"
+        after, _, _ = self.invoke("audit", factors, substage="revision-audit-after")
+        flags = revision_audit_flags(json.loads(before), json.loads(after), old["id"], old["revision"], self.item["revision"])
+        self.write(self.root / "revision-result.json", {**flags, "old_child_absent": True, "old_tls_absent": True,
+                   "fresh_full_run_authorization": True, "new_child_value_verified": True, "new_tls_value_verified": True})
+        self.mark("real_new_revision_requires_full_factors_and_run_then_uses_only_new_value")
+        self.mark("real_revision_edit_conflict_and_intent_audit_correlated")
+
     def run(self):
         require(pathlib.Path(self.cli).is_file() and pathlib.Path(self.gh).is_file(), "prerequisites-executable-missing")
         self.build_fixture()
@@ -499,6 +571,7 @@ class Acceptance:
             out, error, record, count = self.request(label, [], mode="slow", expected=1, parent_signal=signum)
             require(not out and record.exists() and b"local process result unavailable" in error and count == 0, "signal-result-or-output-mismatch")
         self.mark("interrupt_and_terminate_after_start_report_unknown_and_cleanup")
+        self.real_revision_chain()
         self.stage = "privacy"
         require(not self.server.failures and all(r["selected_token_matches"] and r["tls13"] for r in self.server.requests), "privacy-oracle-request-invalid")
         require(hashlib.sha256(self.global_config.read_bytes()).digest() == self.global_digest and dict(os.environ) == self.parent_environment, "privacy-environment-or-global-config-changed")

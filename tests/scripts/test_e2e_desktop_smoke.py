@@ -705,7 +705,7 @@ class DesktopSmokeFixture(unittest.TestCase):
             if scraper.is_alive():  # cannot be true after a dead read; kept explicit
                 self.fail("a stdout collector raced the reports read")
 
-    def observe_owned_teardown(self) -> dict:
+    def observe_owned_teardown(self, *, capture_launch: bool = False) -> dict:
         """Record the helper's own teardown; never wait, kill or assert here.
 
         ``real`` is captured before the patch, so the wrapper always delegates
@@ -715,13 +715,34 @@ class DesktopSmokeFixture(unittest.TestCase):
         then reads ``Popen.returncode``. It delegates the only reaping call, so
         neither fact is offered as proof that the helper reaped: that proof is
         the pid and group checks, and the status read here only says what the
-        helper's own call left behind.
+        helper's own call left behind. The opt-in launch capture also keeps
+        the exact owned Popen and teardown group private for lifecycle checks;
+        it does not wait for or claim target readiness.
         """
 
         real = support.terminate_process_group
         observed: dict = {"poll_before": [], "returncode": []}
+        if capture_launch:
+            # Parent-side ownership observations only, never target readiness.
+            # The existing Popen observer still captures/drains stdout, and
+            # every spawn/teardown below delegates to its real implementation.
+            observed.update(launches=[], teardowns=[])
+            real_popen = support.subprocess.Popen
+
+            def observe_launch(command, **kwargs):
+                owned = self._is_desktop_spawn(command, kwargs)
+                process = real_popen(command, **kwargs)
+                if owned:
+                    observed["launches"].append(process)
+                return process
+
+            launch_patcher = mock.patch.object(support.subprocess, "Popen", observe_launch)
+            launch_patcher.start()
+            self.addCleanup(launch_patcher.stop)
 
         def observe(process, *, grace, owned_group):
+            if capture_launch:
+                observed["teardowns"].append((process, owned_group))
             observed["poll_before"].append(process.poll() is None)
             result = real(process, grace=grace, owned_group=owned_group)
             observed["returncode"].append(process.returncode)
@@ -1068,11 +1089,22 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
     SECONDS = 0.5
 
     def test_passing_smoke_leaves_no_owned_process_behind(self):
+        teardown = self.observe_owned_teardown(capture_launch=True)
         self.assertTrue(self.launch())
-        recorded = self.record_of_last_launch()
-        self.assertFalse(_alive(recorded["pid"]), "teardown abandoned the owned group")
-        pids = self.executed.read_text(encoding="utf-8").split()
-        self.assertEqual(len(pids), 1)
+        # The lifecycle contract owns the actual Popen returned synchronously,
+        # even if teardown precedes the child's first fixture progress report.
+        # ARGV/environment tests separately retain the real execution records.
+        self.assertEqual(len(teardown["launches"]), 1, "expected exactly one owned launch")
+        self.assertEqual(len(teardown["teardowns"]), 1, "expected exactly one teardown")
+        process = teardown["launches"][0]
+        teardown_process, group = teardown["teardowns"][0]
+        self.assertTrue(teardown_process is process, "teardown did not own the launched process")
+        self.assertTrue(group == process.pid, "teardown did not own the launched group")
+        self.assertEqual(teardown["poll_before"], [True], "the owned process exited before teardown")
+        self.assertIsNotNone(process.returncode, "the owned process was not reaped")
+        self.assertIsNotNone(process.poll(), "the owned process is still running")
+        self.assertFalse(_alive(process.pid), "teardown abandoned the owned process")
+        self.assertFalse(harness._group_has_members(group), "teardown abandoned the owned group")
         if Path("/proc").is_dir():
             needle = str(self.records[0]).encode()
             leftovers = []

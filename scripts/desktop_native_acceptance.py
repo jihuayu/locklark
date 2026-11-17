@@ -12,6 +12,7 @@ import os
 import pathlib
 import re
 import select
+import stat
 import struct
 import subprocess
 import sys
@@ -34,6 +35,45 @@ OTP_DIAGNOSTIC_PREFIX = "Desktop OTP failure diagnostic: "
 OTP_DIAGNOSTIC_DELTA_LIMIT = 64
 OTP_DIAGNOSTIC_LIMIT = 1024
 UNAVAILABLE = "unavailable"
+# Product encoding: newRecovery emits "LLR2-" + base32(32 bytes); the complete
+# checkpoint form is 110 characters with "-" at index 57. Base32 letters, the
+# digits 2-7 and "-" are unchanged by JSON string escaping and URL
+# percent-encoding, so this canonical byte pattern also covers those forms.
+RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
+RECOVERY_KIT_TEXT = re.compile(r"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
+LOCAL_SCENARIO = "local-vault-file-create"
+WRONG_RECOVERY_CONFIRMATION = "not-the-issued-recovery-code"
+LOCAL_SETTINGS_DEFAULTS = {
+    "security.autolock.minutes": 5,
+    "security.clipboard.clearAfterSeconds": 30,
+    "security.autolock.onSleep": True,
+    "security.autolock.onDeviceLock": True,
+    "security.autolock.onWindowClose": True,
+    "security.revealPasswords": False,
+    "privacy.checkHibp": False,
+    "appearance.theme": "system",
+    "appearance.interfaceDensity": "comfortable",
+    "app.keepInTray": True,
+    "app.defaultVaultForSaving": "",
+}
+LOCAL_PROJECTION_FIELDS = (
+    "manifest_personal", "manifest_backend", "companion_present",
+    "manifest_digest", "journal_present", "archive_present",
+    "private_modes", "backend_hash_matches", "factors_absent",
+)
+LOCAL_PROFILE_ENTRY_LIMIT = 128
+LOCAL_PROFILE_FILE_LIMIT = 64 << 10
+LOCAL_VAULT_ID = re.compile(r"^[0-9a-f]{32}$")
+LOCAL_VAULT_LABEL_SEPARATOR = " · "
+LOCAL_VAULT_BIDI_CONTROLS = frozenset({
+    0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2066, 0x2067, 0x2068, 0x2069,
+})
+# Actual select emitter's static pointer label. The request's dynamic vault
+# label is never the emitted click label and never enters this response.
+LOCAL_VAULT_TARGET_CLICK_LABEL = "pointer"
+PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
+CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
 
 class AcceptanceFailure(Exception):
@@ -43,6 +83,365 @@ class AcceptanceFailure(Exception):
 def require(condition):
     if not condition:
         raise AcceptanceFailure()
+
+
+def local_vault_valid_name(value):
+    """Exact reviewed backend ValidName shape for private display derivation."""
+    if type(value) is not str:
+        return False
+    try:
+        raw = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    if not 1 <= len(raw) <= 255 or b"\x00" in raw:
+        return False
+    if value in (".", "..") or value[0] in ". " or value[-1] in ". ":
+        return False
+    for char in value:
+        codepoint = ord(char)
+        if char in "/\\" or codepoint < 0x20 or codepoint == 0x7f:
+            return False
+    return True
+
+
+def local_vault_display_name(value):
+    """Reviewed helper display copy: visible bidi escapes plus backslash escape."""
+    out = []
+    for char in value:
+        codepoint = ord(char)
+        if codepoint in LOCAL_VAULT_BIDI_CONTROLS:
+            out.append("\\u%04X" % codepoint)
+        elif char == "\\":
+            out.append("\\\\")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def local_vault_display_labels(manifests):
+    """Whole-list reviewed normal labels; duplicates/invalid shapes refuse."""
+    if type(manifests) not in (list, tuple) or not manifests:
+        raise AcceptanceFailure()
+    ids, names = [], []
+    seen_ids = set()
+    for manifest in manifests:
+        if type(manifest) is not dict:
+            raise AcceptanceFailure()
+        vault_id, name = manifest.get("vault_id"), manifest.get("name")
+        if type(vault_id) is not str or LOCAL_VAULT_ID.fullmatch(vault_id) is None:
+            raise AcceptanceFailure()
+        if not local_vault_valid_name(name):
+            raise AcceptanceFailure()
+        if vault_id in seen_ids:
+            raise AcceptanceFailure()
+        seen_ids.add(vault_id)
+        ids.append(vault_id)
+        names.append(name)
+    labels = []
+    for vault_id, name in zip(ids, names):
+        prefix_len = 8
+        for other in ids:
+            if other == vault_id:
+                continue
+            common = 0
+            for left, right in zip(vault_id, other):
+                if left != right:
+                    break
+                common += 1
+            prefix_len = max(prefix_len, min(common + 1, 32))
+        labels.append(local_vault_display_name(name) + LOCAL_VAULT_LABEL_SEPARATOR + vault_id[:prefix_len])
+    if len(set(labels)) != len(labels):
+        raise AcceptanceFailure()
+    return labels
+
+
+def local_vault_wrong_secret(secret):
+    """One different canonical LL1 secret for a real wrong-factor attempt."""
+    if type(secret) is not str or not secret.startswith("LL1-"):
+        raise AcceptanceFailure()
+    body = list(secret[4:])
+    for index, char in enumerate(body):
+        if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567":
+            body[index] = "A" if char != "A" else "B"
+            candidate = "LL1-" + "".join(body)
+            if candidate != secret:
+                return candidate
+            break
+    raise AcceptanceFailure()
+
+
+def local_vault_profile_dir(settings_path, personal_path):
+    """Exact product profile root for this private settings/personal pair."""
+    base = pathlib.Path(settings_path).parent / "vaultfile-workspace"
+    digest = hashlib.sha256(str(personal_path).encode("utf-8")).hexdigest()
+    return base / "profiles" / digest
+
+
+def _local_vault_manifest_json(raw):
+    def reject_constant(value):
+        raise AcceptanceFailure()
+    def reject_duplicates(pairs):
+        record = {}
+        for key, value in pairs:
+            if key in record:
+                raise AcceptanceFailure()
+            record[key] = value
+        return record
+    try:
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
+                           object_pairs_hook=reject_duplicates)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise AcceptanceFailure() from None
+    return value
+
+
+def _validate_local_vault_manifest(record):
+    required = {"version", "kind", "vault_id", "personal_file", "backend_root",
+                "name", "journal", "archive"}
+    if type(record) is not dict or set(record) != required:
+        raise AcceptanceFailure()
+    if type(record.get("version")) is not int or record["version"] != 1 or \
+            record.get("kind") != "vault_file_create":
+        raise AcceptanceFailure()
+    if type(record.get("vault_id")) is not str or LOCAL_VAULT_ID.fullmatch(record["vault_id"]) is None:
+        raise AcceptanceFailure()
+    if not local_vault_valid_name(record.get("name")):
+        raise AcceptanceFailure()
+    for field in ("personal_file", "backend_root", "journal", "archive"):
+        value = record.get(field)
+        if type(value) is not str or not os.path.isabs(value) or os.path.normpath(value) != value:
+            raise AcceptanceFailure()
+    return record
+
+
+def _parse_local_vault_manifest(raw):
+    return _validate_local_vault_manifest(_local_vault_manifest_json(raw))
+
+
+def _local_vault_manifest_spans(raw):
+    """Return only the top-level name/vault_id value byte spans of a valid manifest."""
+    try:
+        text = raw.decode("utf-8")
+        decoder = json.JSONDecoder()
+        index, length = 0, len(text)
+
+        def whitespace(value):
+            while value < length and text[value] in " \t\r\n":
+                value += 1
+            return value
+
+        index = whitespace(index)
+        if index >= length or text[index] != "{":
+            raise AcceptanceFailure()
+        index += 1
+        seen, spans = set(), []
+        while True:
+            index = whitespace(index)
+            if index < length and text[index] == "}":
+                index += 1
+                break
+            key, index = decoder.raw_decode(text, index)
+            if type(key) is not str or key in seen:
+                raise AcceptanceFailure()
+            seen.add(key)
+            index = whitespace(index)
+            if index >= length or text[index] != ":":
+                raise AcceptanceFailure()
+            start = whitespace(index + 1)
+            value, index = decoder.raw_decode(text, start)
+            if key in ("name", "vault_id"):
+                if type(value) is not str:
+                    raise AcceptanceFailure()
+                spans.append((start + 1, index - 1))
+            index = whitespace(index)
+            if index < length and text[index] == ",":
+                index += 1
+                continue
+            if index < length and text[index] == "}":
+                index += 1
+                break
+            raise AcceptanceFailure()
+        if whitespace(index) != length or len(spans) != 2:
+            raise AcceptanceFailure()
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise AcceptanceFailure() from None
+    return sorted((len(text[:start].encode("utf-8")),
+                   len(text[:end].encode("utf-8"))) for start, end in spans)
+
+
+def _stable_local_vault_manifest(path, expected):
+    """No-follow bounded reread; fail closed unless it is the captured snapshot."""
+    path = pathlib.Path(path)
+    expected_identity = (expected["device"], expected["inode"])
+    try:
+        before = os.lstat(path)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or \
+            (before.st_dev, before.st_ino) != expected_identity:
+        raise AcceptanceFailure()
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != expected["size"] or \
+                (opened.st_dev, opened.st_ino) != expected_identity:
+            raise AcceptanceFailure()
+        with os.fdopen(descriptor, "rb", closefd=True) as source:
+            descriptor = -1
+            raw = source.read(LOCAL_PROFILE_FILE_LIMIT + 1)
+    except OSError:
+        raise AcceptanceFailure() from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if len(raw) > LOCAL_PROFILE_FILE_LIMIT or len(raw) != expected["size"] or \
+            hashlib.sha256(raw).digest() != expected["digest"]:
+        raise AcceptanceFailure()
+    record = _parse_local_vault_manifest(raw)
+    if record["name"] != expected["name"] or record["vault_id"] != expected["vault_id"]:
+        raise AcceptanceFailure()
+    try:
+        after = os.lstat(path)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode) or \
+            after.st_size != expected["size"] or \
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+        raise AcceptanceFailure()
+    return raw
+
+
+def _local_manifest_guard(manifest):
+    try:
+        return {"name": manifest["name"], "vault_id": manifest["vault_id"],
+                "device": manifest["device"], "inode": manifest["inode"],
+                "size": manifest["size"], "digest": manifest["digest"]}
+    except (KeyError, TypeError):
+        raise AcceptanceFailure() from None
+
+
+def read_local_vault_manifests(profile_dir):
+    """Bounded read of this run's private profile manifests only."""
+    profile_dir = pathlib.Path(profile_dir)
+    try:
+        info = os.lstat(profile_dir)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise AcceptanceFailure()
+    try:
+        entries = list(os.scandir(profile_dir))
+    except OSError:
+        raise AcceptanceFailure() from None
+    if len(entries) > LOCAL_PROFILE_ENTRY_LIMIT:
+        raise AcceptanceFailure()
+    manifests = []
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+            raise AcceptanceFailure()
+        try:
+            entry_info = entry.stat(follow_symlinks=False)
+        except OSError:
+            raise AcceptanceFailure() from None
+        if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_size > LOCAL_PROFILE_FILE_LIMIT:
+            raise AcceptanceFailure()
+        descriptor = -1
+        try:
+            descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            opened_info = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_info.st_mode) or \
+                    opened_info.st_size > LOCAL_PROFILE_FILE_LIMIT or \
+                    (opened_info.st_dev, opened_info.st_ino) != (entry_info.st_dev, entry_info.st_ino):
+                raise AcceptanceFailure()
+            with os.fdopen(descriptor, "rb", closefd=True) as source:
+                descriptor = -1
+                raw = source.read(LOCAL_PROFILE_FILE_LIMIT + 1)
+        except OSError:
+            raise AcceptanceFailure() from None
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if len(raw) > LOCAL_PROFILE_FILE_LIMIT:
+            raise AcceptanceFailure()
+        record = _parse_local_vault_manifest(raw)
+        manifests.append({"path": entry.path, "name": record["name"],
+                          "vault_id": record["vault_id"],
+                          "device": opened_info.st_dev, "inode": opened_info.st_ino,
+                          "size": len(raw), "digest": hashlib.sha256(raw).digest()})
+    manifests.sort(key=lambda item: item["path"])
+    return manifests
+
+
+def _local_vault_pointer_state(value):
+    if type(value) is not dict or set(value) != {"x", "y", "button_mask", "pointer_available"}:
+        return False
+    if any(type(value.get(key)) is not int for key in ("x", "y", "button_mask")):
+        return False
+    return type(value.get("pointer_available")) is bool
+
+
+def _local_vault_select_click(value):
+    if type(value) is not dict or set(value) != {"label", "x", "y", "before", "after", "x_test"}:
+        return False
+    if value.get("label") != LOCAL_VAULT_TARGET_CLICK_LABEL:
+        return False
+    if type(value.get("x")) is not int or type(value.get("y")) is not int:
+        return False
+    if not _local_vault_pointer_state(value.get("before")) or \
+            not _local_vault_pointer_state(value.get("after")):
+        return False
+    x_test = value.get("x_test")
+    if type(x_test) is not dict or set(x_test) != {"motion", "down", "up"}:
+        return False
+    for key in ("motion", "down", "up"):
+        if type(x_test.get(key)) is not bool or x_test[key] is not True:
+            return False
+    return True
+
+
+def parse_local_vault_target_response(action, target_index, result):
+    """Strict finite response for one dedicated local-vault target action."""
+    if type(result) is not dict:
+        raise AcceptanceFailure()
+    if action == "select-sidebar":
+        if set(result) != {"action", "target_index", "clicks"} or \
+                result.get("action") != "select-sidebar" or \
+                type(result.get("target_index")) is not int or \
+                result["target_index"] != target_index:
+            raise AcceptanceFailure()
+        clicks = result.get("clicks")
+        if type(clicks) is not list or len(clicks) != 1 or \
+                not _local_vault_select_click(clicks[0]):
+            raise AcceptanceFailure()
+        return result
+    if action == "wait-title":
+        if set(result) != {"action", "matched"} or result.get("action") != "wait-title" or \
+                type(result.get("matched")) is not bool or result["matched"] is not True:
+            raise AcceptanceFailure()
+        return result
+    raise AcceptanceFailure()
+
+
+def parse_local_vault_pair_projection(result):
+    """Strict exactly-two-manifest, nine-true-boolean pair observer result."""
+    expected = {"manifest_count", *LOCAL_PROJECTION_FIELDS}
+    if type(result) is not dict or set(result) != expected:
+        raise AcceptanceFailure()
+    if type(result.get("manifest_count")) is not int or result["manifest_count"] != 2:
+        raise AcceptanceFailure()
+    for field in LOCAL_PROJECTION_FIELDS:
+        if type(result.get(field)) is not bool or result[field] is not True:
+            raise AcceptanceFailure()
+    return result
 
 
 def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
@@ -74,13 +473,18 @@ class Acceptance:
         self.diagnostics.mkdir(mode=0o700)
         self.host = pathlib.Path(os.environ["LOCKLARK_DESKTOP_HOST"]).resolve(strict=True)
         require(bool(os.environ.get("DISPLAY")))
-        self.env = {**os.environ, "GOTOOLCHAIN": "go1.27.3"}
+        self.scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
+        self.env = self.scenario_env(self.scenario, os.environ)
         self.go = os.environ.get("LOCKLARK_GO", "go")
         fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
         self.fixture_prebuilt = bool(fixture)
         self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
         self.fixture_path = self.state / "vault" / "fixture.json"
         self.values, self.codes = set(), set()
+        # Exact validated local-vault manifests are private product state, not
+        # ordinary diagnostics. Permit only each file's own name/ID while still
+        # scanning it for every other registered value and every recovery kit.
+        self.local_manifest_private_values = {}
         self.started = time.time()
         self.app, self.probe = None, None
         self.reason = "acceptance"
@@ -102,8 +506,43 @@ class Acceptance:
         # fixed record of the first failed copy.
         self.otp_copy = None
         self.otp_diagnostic = None
+        # The recovery-kit barrier is armed before setup and close, so the
+        # upcoming local-vault-file-create scenario is covered even when its
+        # fixture reader never registers the dynamically issued kit.
+        self.privacy_failure = None
         self.log = (self.state / "native.log").open("xb")
         os.chmod(self.state / "native.log", 0o600)
+
+    @staticmethod
+    def scenario_env(scenario, environ):
+        """Only the local-vault scenario releases classic for its child app."""
+        env = {**environ, "GOTOOLCHAIN": "go1.27.3"}
+        if scenario == LOCAL_SCENARIO:
+            env.pop("LOCKLARK_DESKTOP_LAYOUT", None)
+        return env
+
+    @staticmethod
+    def local_settings_document(vault_path):
+        """Real dotted non-secret defaults plus the one local vault path."""
+        return {**LOCAL_SETTINGS_DEFAULTS, "app.vaultPath": str(vault_path)}
+
+    def app_command(self):
+        if (getattr(self, "scenario", None) == LOCAL_SCENARIO
+                and getattr(self, "settings_path", None) is not None):
+            return [str(self.host), "--settings", str(self.settings_path)]
+        return [str(self.host)]
+
+    def write_private_settings(self):
+        self.settings_dir = self.state / "settings"
+        self.settings_dir.mkdir(mode=0o700)
+        os.chmod(self.settings_dir, 0o700)
+        self.settings_path = self.settings_dir / "settings.json"
+        raw = json.dumps(self.local_settings_document(self.fixture["Path"]),
+                         ensure_ascii=False).encode("utf-8")
+        with os.fdopen(os.open(self.settings_path,
+                               os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(raw)
 
     def phase(self, value):
         self.stage = value
@@ -446,6 +885,304 @@ class Acceptance:
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]}, {"click_label":"解锁"},
                     {"wait_label":"新建登录"}])
 
+    def unlock_onevra(self):
+        self.phase("unlock-onevra")
+        self.input([{"click_label":"使用应急资料…"},
+                    {"click_label":"主密码"}, {"text":self.fixture["Password"]},
+                    {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]},
+                    {"click_label":"解锁"},
+                    {"wait_label":"新建登录"}])
+
+    def read_recovery(self):
+        """Read one kit from the private pipe and register it immediately."""
+        request = {"title": TITLE, "executable": str(self.host),
+                   "expected_pid": self.app.pid, "preserve_focus": True,
+                   "read_recovery": True}
+        self.native_action = "read-recovery"
+        self.native_failed_index = None
+        self.native_x_error_codes = []
+        started = time.monotonic()
+        try:
+            result = json.loads(self.command(
+                [sys.executable, str(ROOT / "scripts/browser_native_x11.py")],
+                json.dumps(request).encode(), timeout=15))
+        except json.JSONDecodeError:
+            self.reason = "native-response-json"
+            raise AcceptanceFailure() from None
+        finally:
+            self.native_elapsed_ms = round((time.monotonic() - started) * 1000)
+        kit = result.get("recovery") if isinstance(result, dict) else None
+        # Establish that the pipe value is a kit, then register it before the
+        # only remaining shape check or any failing UI step. A non-kit string
+        # is never stored as a known value.
+        require(isinstance(result, dict) and type(kit) is str and
+                RECOVERY_KIT_TEXT.fullmatch(kit) is not None)
+        self.values.add(kit)
+        require(set(result) == {"recovery"})
+        return kit
+
+    def verify_local_vault(self):
+        """Bounded read-only local projection; no unlock, publish or session."""
+        workspace = self.settings_dir / "vaultfile-workspace"
+        result = json.loads(self.command(
+            [str(self.fixture_binary), "-fixture", str(self.fixture_path),
+             "-verify-local", str(workspace)]))
+        require(isinstance(result, dict) and
+                set(result) == {"manifest_count", *LOCAL_PROJECTION_FIELDS})
+        require(type(result.get("manifest_count")) is int and
+                result["manifest_count"] == 1)
+        for field in LOCAL_PROJECTION_FIELDS:
+            require(type(result.get(field)) is bool and result[field] is True)
+        return result
+
+    def local_vault_profile_dir(self):
+        return local_vault_profile_dir(self.settings_path, self.fixture["Path"])
+
+    def read_local_vault_manifests(self):
+        try:
+            return read_local_vault_manifests(self.local_vault_profile_dir())
+        except AcceptanceFailure:
+            self.reason = "local-pair-profile"
+            raise
+
+    def local_vault_labels(self, manifests):
+        try:
+            return local_vault_display_labels(manifests)
+        except AcceptanceFailure:
+            self.reason = "local-pair-profile"
+            raise
+
+    def record_local_vault_a(self):
+        manifests = self.read_local_vault_manifests()
+        require(len(manifests) == 1)
+        labels = self.local_vault_labels(manifests)
+        self.local_a_manifest = manifests[0]
+        self.local_a_label = labels[0]
+        self.local_manifest_private_values = {
+            pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
+            for manifest in manifests
+        }
+        for manifest, label in zip(manifests, labels):
+            self.values.update((manifest["vault_id"], manifest["name"], label))
+
+    def record_local_vault_b(self):
+        manifests = self.read_local_vault_manifests()
+        require(len(manifests) == 2)
+        a_path = self.local_a_manifest.get("path")
+        a_frozen_id = self.local_a_manifest.get("vault_id")
+        a_index = next((index for index, manifest in enumerate(manifests)
+                        if manifest.get("path") == a_path), None)
+        require(a_index is not None)
+        # A's original path and frozen ID are both immutable. An unchanged path
+        # with a changed ID is a closed refusal, never a silent new A.
+        require(manifests[a_index]["vault_id"] == a_frozen_id)
+        b_index = 1 - a_index
+        require(manifests[b_index]["path"] != a_path)
+        require(manifests[b_index]["vault_id"] != a_frozen_id)
+        labels = self.local_vault_labels(manifests)
+        require(len(set(labels)) == 2)
+        self.local_manifests = manifests
+        # local_labels is explicitly [actual A, actual B]; indices are in the
+        # same coordinate frame regardless of manifest filename sort order.
+        self.local_a_index, self.local_b_index = 0, 1
+        self.local_a_label, self.local_b_label = labels[a_index], labels[b_index]
+        self.local_labels = [self.local_a_label, self.local_b_label]
+        self.local_a_manifest, self.local_b_manifest = manifests[a_index], manifests[b_index]
+        self.local_manifest_private_values = {
+            pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
+            for manifest in manifests
+        }
+        for manifest, label in zip(manifests, labels):
+            self.values.update((manifest["vault_id"], manifest["name"], label))
+
+    def local_vault_target(self, action, labels, index):
+        require(action in ("select-sidebar", "wait-title"))
+        require(type(labels) in (list, tuple) and 1 <= len(labels) <= 2)
+        require(type(index) is int and 0 <= index < len(labels))
+        request = {"title": TITLE, "executable": str(self.host),
+                   "expected_pid": self.app.pid,
+                   "local_vault_target": {"action": action,
+                                          "known_labels": list(labels),
+                                          "target_index": index}}
+        self.native_action = ("local-vault-select" if action == "select-sidebar"
+                              else "local-vault-wait")
+        self.native_failed_index = None
+        self.native_x_error_codes = []
+        started = time.monotonic()
+        try:
+            result = json.loads(self.command(
+                [sys.executable, str(ROOT / "scripts/browser_native_x11.py")],
+                json.dumps(request).encode(), timeout=15))
+        except json.JSONDecodeError:
+            self.reason = "native-response-json"
+            raise AcceptanceFailure() from None
+        finally:
+            self.native_elapsed_ms = round((time.monotonic() - started) * 1000)
+        try:
+            parsed = parse_local_vault_target_response(action, index, result)
+        except AcceptanceFailure:
+            self.reason = "native-response-schema"
+            raise
+        if action == "select-sidebar":
+            self.last_native_click = safe_click_record(parsed["clicks"][0])
+        return parsed
+
+    def select_local_vault(self, labels, index, phase):
+        self.phase(phase)
+        self.local_vault_target("select-sidebar", labels, index)
+        # Click ACK is not selection proof. This is the separate exact-title
+        # boolean proof after the target click.
+        self.local_vault_target("wait-title", labels, index)
+
+    def refresh_local_vault(self, labels, index, phase):
+        self.select_local_vault(labels, index, phase)
+        self.wait("显示上次验证结果")
+        self.click("刷新本地文件库")
+        self.wait("本次刷新已验证")
+
+    def create_local_vault_b(self):
+        """Second real Onevra create through the same UI and fresh recovery."""
+        self.phase("local-pair-create-b-open")
+        self.wait("新建独立文件库")
+        self.click("新建独立文件库")
+        self.wait("主密码")
+        self.wait("Secret Key")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("准备创建")
+        self.wait("重新输入恢复码")
+        kit_b = self.read_recovery()
+        require(kit_b != self.local_kit_a)
+        self.phase("local-pair-create-b-publish")
+        self.fill("重新输入恢复码", kit_b)
+        self.click("确认并发布备份")
+        self.wait("备份恢复码")
+        self.phase("local-pair-create-b-complete")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.fill("备份恢复码", kit_b)
+        self.click("完成创建")
+        self.wait("关闭本地基线视图")
+        self.wait("已验证本地初始版本 · 远端状态未核实")
+        require(self.controls()["关闭本地基线视图"]["present"] is True)
+        self.record_local_vault_b()
+
+    def local_vault_pair_flow(self):
+        labels = self.local_labels
+        a_index, b_index = self.local_a_index, self.local_b_index
+        self.refresh_local_vault(labels, a_index, "local-pair-refresh-a")
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b")
+
+        self.select_local_vault(labels, a_index, "local-pair-select-a-lock")
+        self.wait("显示上次验证结果")
+        self.click("锁定本地文件库")
+        self.wait("本地文件库已锁定")
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b-after-lock")
+
+        self.select_local_vault(labels, a_index, "local-pair-select-a-unlock")
+        self.wait("解锁本地文件库")
+        self.click("解锁本地文件库")
+        self.wait("解锁独立文件库")
+        wrong_password = self.fixture["Password"] + "-wrong"
+        wrong_secret = local_vault_wrong_secret(self.fixture["Secret"])
+        require(wrong_password != self.fixture["Password"] and wrong_secret != self.fixture["Secret"])
+        self.values.update((wrong_password, wrong_secret))
+        self.fill("主密码", wrong_password)
+        self.fill("Secret Key", wrong_secret)
+        self.click("完整验证并解锁")
+        self.wait("完整验证失败；请重新输入")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("完整验证并解锁")
+        self.eventually(lambda: self.controls().get("解锁独立文件库", {}).get("present") is False)
+        self.local_vault_target("wait-title", labels, a_index)
+        self.wait("显示上次验证结果")
+        self.click("刷新本地文件库")
+        self.wait("本次刷新已验证")
+
+        self.refresh_local_vault(labels, b_index, "local-pair-refresh-b-after-unlock")
+        self.phase("local-pair-close-view")
+        self.click("关闭本地基线视图")
+        self.select_local_vault(labels, a_index, "local-pair-navigate-back-a")
+        self.wait("显示上次验证结果")
+
+    def verify_local_vault_pair(self):
+        workspace = self.settings_dir / "vaultfile-workspace"
+        try:
+            result = json.loads(self.command(
+                [str(self.fixture_binary), "-fixture", str(self.fixture_path),
+                 "-verify-local-pair", str(workspace)]))
+        except json.JSONDecodeError:
+            self.reason = "local-pair-observer-json"
+            raise AcceptanceFailure() from None
+        try:
+            return parse_local_vault_pair_projection(result)
+        except AcceptanceFailure:
+            self.reason = "local-pair-observer"
+            raise
+
+    def final_local_vault_pair_validation(self, before_ids):
+        self.phase("local-pair-observer")
+        self.verify_local_vault_pair()
+        after = self.observe()
+        require(after.get("audit_safe") is True)
+        after_ids = sorted(item["id"] for item in after["items"])
+        require(after_ids == before_ids)
+        self.phase("local-pair-account-lock")
+        self.click("立即锁定")
+        self.wait("使用应急资料…")
+        controls = self.controls()
+        require(controls.get("使用应急资料…", {}).get("present") is True)
+        for label in ("刷新本地文件库", "锁定本地文件库",
+                      "解锁本地文件库", "关闭本地基线视图"):
+            require(controls.get(label, {}).get("present") is False)
+
+    def local_vault_file_create(self):
+        """One real Onevra A closure; no product method or fixture create."""
+        self.phase("local-create-open")
+        before = self.observe()
+        before_ids = sorted(item["id"] for item in before["items"])
+        self.wait("新建独立文件库")
+        self.click("新建独立文件库")
+        # The prepare button is correctly disabled until both factors have
+        # content. Wait on the real input controls, fill them, then let the
+        # original click perform the enabled check on the button itself.
+        self.wait("主密码")
+        self.wait("Secret Key")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.click("准备创建")
+        self.wait("重新输入恢复码")
+        kit = self.read_recovery()
+        self.phase("local-create-wrong-confirm")
+        self.fill("重新输入恢复码", WRONG_RECOVERY_CONFIRMATION)
+        self.click("确认并发布备份")
+        self.wait("恢复码未逐字匹配")
+        require(self.controls()["备份恢复码"]["present"] is False)
+        self.phase("local-create-publish")
+        self.fill("重新输入恢复码", kit)
+        self.click("确认并发布备份")
+        self.wait("备份恢复码")
+        self.phase("local-create-complete")
+        self.fill("主密码", self.fixture["Password"])
+        self.fill("Secret Key", self.fixture["Secret"])
+        self.fill("备份恢复码", kit)
+        self.click("完成创建")
+        self.wait("关闭本地基线视图")
+        self.wait("已验证本地初始版本 · 远端状态未核实")
+        require(self.controls()["关闭本地基线视图"]["present"] is True)
+        self.local_kit_a = kit
+        self.record_local_vault_a()
+        self.phase("local-create-baseline")
+        after = self.observe()
+        require(before["audit_safe"] is True and after["audit_safe"] is True)
+        after_ids = sorted(item["id"] for item in after["items"])
+        require(len(before_ids) == len(after_ids) and before_ids == after_ids)
+        self.verify_local_vault()
+        self.create_local_vault_b()
+        self.local_vault_pair_flow()
+        self.final_local_vault_pair_validation(before_ids)
+
     def build_fixture(self):
         if self.fixture_prebuilt:
             require(self.fixture_binary.is_file() and os.access(self.fixture_binary, os.X_OK))
@@ -457,13 +1194,18 @@ class Acceptance:
         self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
         self.fixture = json.loads(self.fixture_path.read_bytes())
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "OTPSeed", "OTPConfig", "ProviderValue", "ProviderCanary"))
-        self.app = subprocess.Popen([str(self.host)], env=self.env, stdout=self.log, stderr=self.log)
+        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
+            self.write_private_settings()
+        self.app = subprocess.Popen(self.app_command(), env=self.env, stdout=self.log, stderr=self.log)
         self.probe = subprocess.Popen([sys.executable, str(ROOT / "scripts/desktop_native_probe.py")],
                                       env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=self.log, text=True, bufsize=1)
         require(bool(select.select([self.probe.stdout], [], [], 15)[0]))
         require(json.loads(self.probe.stdout.readline()).get("ready") is True)
-        self.unlock()
+        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
+            self.unlock_onevra()
+        else:
+            self.unlock()
         self.probe_request({"op":"own-clipboard", "marker":MARKER})
 
     def create(self, generated):
@@ -750,23 +1492,55 @@ class Acceptance:
         require(self.displays_empty())
 
     def scan(self):
+        self.privacy_failure = None
         if hasattr(self, "fixture"):
             for window in range(int(self.started) // 20, int(time.time()) // 20 + 1):
                 self.otp(window * 20)
         patterns = set()
         for value in self.values:
             patterns.update((value.encode(), json.dumps(value, ensure_ascii=True)[1:-1].encode(), urllib.parse.quote(value, safe="").encode()))
+        manifest_private_values = getattr(self, "local_manifest_private_values", {})
         count = 0
         for path in self.state.rglob("*"):
-            if not path.is_file() or path == self.fixture_path or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
+            if path == self.fixture_path:
                 continue
-            data = path.read_bytes()
-            require(not any(value and value in data for value in patterns))
+            allowed = ()
+            expected = manifest_private_values.get(path)
+            if expected is not None:
+                data = _stable_local_vault_manifest(path, expected)
+                allowed = _local_vault_manifest_spans(data)
+            else:
+                if not path.is_file() or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
+                    continue
+                data = path.read_bytes()
+            # Syntax-level barrier for a dynamically issued recovery kit that
+            # was never registered in self.values (for example when the
+            # fixture reader fails). A match is kept in memory only.
+            if RECOVERY_KIT_PATTERN.search(data) is not None:
+                self.privacy_failure = "recovery-kit"
+                raise AcceptanceFailure()
+            # Only a complete match occupying one exact current manifest
+            # name/vault_id value span is exempt; all other occurrences scan.
+            for pattern in patterns:
+                if not pattern:
+                    continue
+                start = data.find(pattern)
+                while start >= 0:
+                    if (start, start + len(pattern)) not in allowed:
+                        self.privacy_failure = "known-value"
+                        raise AcceptanceFailure()
+                    start = data.find(pattern, start + 1)
             # Codes are short: match a complete independent token, so an
             # unrelated hexadecimal ID substring cannot produce a false hit.
             for code in self.codes:
-                require(re.search(rb"(?<![A-Za-z0-9])" + code.encode() + rb"(?![A-Za-z0-9])", data) is None)
+                if re.search(rb"(?<![A-Za-z0-9])" + code.encode() + rb"(?![A-Za-z0-9])", data) is not None:
+                    self.privacy_failure = "otp-code"
+                    raise AcceptanceFailure()
             count += 1
+        # A vanished prevalidated manifest is not a pass. Revalidate every
+        # captured path after the walk so replacement during scan also fails.
+        for path, expected in manifest_private_values.items():
+            _stable_local_vault_manifest(path, expected)
         return count
 
     def close(self):
@@ -783,21 +1557,32 @@ class Acceptance:
 
     def run(self):
         success = False
+        close_failure = None
+        scenario = getattr(self, "scenario", None) or os.environ.get("LOCKLARK_TEST_SCENARIO")
         try:
             self.setup()
-            if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
+            failure_stage = os.environ.get("LOCKLARK_TEST_FAILURE_STAGE")
+            if failure_stage and scenario == LOCAL_SCENARIO:
+                # This scenario has no old probe-input body. An explicit fault
+                # request must fail closed, never be silently ignored into a
+                # PASS; the normal cleanup/finish barrier still runs.
+                self.reason = "local-vault-fault-stage"
+                self.phase("local-vault-fault-stage")
+                raise AcceptanceFailure()
+            if failure_stage == "probe-input":
                 # Add a genuinely newly generated password to the fault's
                 # private payload and final scan, alongside unlock/OTP factors.
                 self.create(True)
                 self.phase("private-probe-failure")
                 result = self.probe_request({"op":"unsupported", "private":list(self.values)})
                 require(result.get("ok") is True)
-            elif os.environ.get("LOCKLARK_TEST_FAILURE_STAGE"):
+            elif failure_stage:
                 raise AcceptanceFailure()
-            scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
             if scenario:
-                require(scenario in ("foreign-owner","provider"))
-                if scenario == "provider":
+                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO))
+                if scenario == LOCAL_SCENARIO:
+                    self.local_vault_file_create()
+                elif scenario == "provider":
                     self.provider_acceptance()
                 else:
                     self.foreign_lock_case()
@@ -836,13 +1621,17 @@ class Acceptance:
                 failure["controls"] = self.controls()
             except Exception:
                 failure["controls_unavailable"] = True
-            try:
-                failure["displays"] = {}
-                for name, otp in (("field", False), ("otp", True)):
-                    observed = self.display(otp=otp)
-                    failure["displays"][name] = {key:observed[key] for key in ("present", "empty")}
-            except Exception:
-                failure["displays_unavailable"] = True
+            if scenario != LOCAL_SCENARIO:
+                # The local-vault scenario never reuses the broad display probe
+                # after a kit may have appeared. Its failure projection stays
+                # on the fixed control allowlist above.
+                try:
+                    failure["displays"] = {}
+                    for name, otp in (("field", False), ("otp", True)):
+                        observed = self.display(otp=otp)
+                        failure["displays"][name] = {key:observed[key] for key in ("present", "empty")}
+                except Exception:
+                    failure["displays_unavailable"] = True
             self.reason, self.native_action = failure["reason"], failure["native_action"]
             # An artifact write must never change the failure line or exit code.
             try:
@@ -852,45 +1641,149 @@ class Acceptance:
         finally:
             # Include a value created immediately before an unrelated failure
             # in the final log scan, without changing the live source vault.
-            if hasattr(self, "fixture"):
+            try:
+                if hasattr(self, "fixture"):
+                    try:
+                        self.observe()
+                    except Exception:
+                        pass
+            finally:
+                scenario_failure = not success
                 try:
-                    self.observe()
+                    self.close()
+                except Exception:
+                    # A close failure is its own fixed cleanup outcome, never
+                    # a success and never an exception-detail projection. The
+                    # barrier still runs in finish below.
+                    close_failure = "close"
+                    success = False
+                finally:
+                    result = self.finish(success, close_failure, scenario_failure)
+        return result
+
+    @staticmethod
+    def write_transcript(path, lines, exclusive):
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+        with os.fdopen(os.open(path, flags, 0o600), "w") as output:
+            output.write("\n".join(lines) + "\n")
+
+    @staticmethod
+    def replace_transcript(path, lines):
+        """Atomically replace a transcript with a fully written private temp."""
+        fd, temp_path = tempfile.mkstemp(dir=str(path.parent),
+                                         prefix=".controller-", suffix=".tmp")
+        try:
+            try:
+                output = os.fdopen(fd, "w")
+            except Exception:
+                os.close(fd)
+                raise
+            with output:
+                output.write("\n".join(lines) + "\n")
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                # Only the file created by this call is removed. The original
+                # transcript is left untouched until the atomic replace.
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    def finish(self, success, cleanup_failure=None, scenario_failure=None):
+        """Write the transcript, run the barrier, then project fixed lines."""
+        try:
+            if getattr(self, "foreign_observations", None):
+                # Best-effort extra detail: a write failure must never replace
+                # the primary outcome or stop the fixed lines below.
+                path = self.diagnostics/"clipboard-ownership.json"
+                try:
+                    with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
+                        json.dump(self.foreign_observations,output,indent=2)
                 except Exception:
                     pass
-            self.close()
-        if self.foreign_observations:
-            # Best-effort extra detail: a write failure must never replace
-            # the primary outcome or stop the fixed lines below.
-            path = self.diagnostics/"clipboard-ownership.json"
+            failure_line = ("Desktop native acceptance failed at " + self.stage + " [" +
+                            self.reason + "] action=" + self.native_action)
+            otp_line = getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"
+            cleanup_line = CLEANUP_FAILURE_PREFIX + cleanup_failure if cleanup_failure else None
+            # When a close failure forces success=False, the earlier scenario
+            # outcome is still known separately, so only a real scenario
+            # failure contributes its fixed line.
+            scenario_failed = (not success) if scenario_failure is None else scenario_failure
+            privacy = "passed"
+            # The provisional transcript carries every controller phase and
+            # the fixed outcome before the success label is known. It is what
+            # the barrier scans, so a text PASS is never written first.
+            provisional = ["Desktop native private state: " + str(self.state),
+                           "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
+                           "Desktop native private artifact and controller scan: pending"]
+            if scenario_failed:
+                provisional.append(failure_line)
+            if cleanup_line:
+                provisional.append(cleanup_line)
+            provisional.append(otp_line)
+            controller = self.state / "controller.log"
             try:
-                with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
-                    json.dump(self.foreign_observations,output,indent=2)
+                self.write_transcript(controller, self.output_lines + provisional, exclusive=True)
+            except Exception:
+                privacy = "controller-write"
+            # The recovery-kit syntax scan is part of scan(), so it runs here
+            # on success, scenario failure, close failure and transcript-write
+            # failure alike.
+            try:
+                self.scan()
+            except Exception:
+                privacy = getattr(self, "privacy_failure", None) or "scan-error"
+            if privacy == "passed":
+                scenario = getattr(self, "scenario", None) or os.environ.get("LOCKLARK_TEST_SCENARIO")
+                success_label = {
+                    "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
+                    "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
+                    LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A/B create, wrong-kit refusal, fresh recovery, pair observer, lock/refresh/unlock and cached navigation",
+                }.get(scenario,"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
+                # Only now, after the scan passed, may the fixed success line
+                # enter the transcript. A rewrite failure also yields no PASS.
+                final = ["Desktop native private state: " + str(self.state),
+                         "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
+                         "Desktop native private artifact and controller scan: passed"]
+                if success:
+                    final.append(success_label)
+                elif scenario_failed:
+                    final.append(failure_line)
+                if cleanup_line:
+                    final.append(cleanup_line)
+                final.append(otp_line)
+                try:
+                    self.replace_transcript(controller, self.output_lines + final)
+                except Exception:
+                    privacy = "controller-write"
+            lines = ["Desktop native private state: " + str(self.state),
+                     "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max)]
+            if privacy == "passed":
+                lines.append("Desktop native private artifact and controller scan: passed")
+                if success:
+                    lines.append(success_label)
+                elif scenario_failed:
+                    lines.append(failure_line)
+            else:
+                lines.append("Desktop native privacy scan failed")
+                lines.append(PRIVACY_FAILURE_PREFIX + privacy)
+                if scenario_failed:
+                    lines.append(failure_line)
+            if cleanup_line:
+                lines.append(cleanup_line)
+            lines.append(otp_line)
+            self.emit_lines(lines)
+            return 0 if success and privacy == "passed" and cleanup_line is None else 1
+        except Exception:
+            # Fixed fallback only; never include a kit, matched value or path.
+            try:
+                self.emit_lines(["Desktop native privacy scan failed",
+                                 PRIVACY_FAILURE_PREFIX + "finalize"])
             except Exception:
                 pass
-        success_label = {
-            "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
-            "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
-        }.get(os.environ.get("LOCKLARK_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
-        final_lines = ["Desktop native private state: " + str(self.state),
-                       "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
-                       "Desktop native private artifact and controller scan: passed",
-                       success_label
-                       if success else "Desktop native acceptance failed at " + self.stage + " [" + self.reason + "] action=" + self.native_action,
-                       getattr(self, "otp_diagnostic", None) or "Desktop OTP failure diagnostic: none"]
-        # Include every controller phase and the final summary in the same
-        # scan as native/probe logs and diagnostics. Raw values remain only in
-        # memory; the file contains the already public, fixed transcript.
-        controller = self.state / "controller.log"
-        try:
-            with os.fdopen(os.open(controller, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as output:
-                output.write("\n".join(self.output_lines + final_lines) + "\n")
-            self.scan()
-        except Exception:
-            self.emit_lines(final_lines)
-            print("Desktop native privacy scan failed", flush=True)
             return 1
-        self.emit_lines(final_lines)
-        return 0 if success else 1
 
     @staticmethod
     def emit_lines(lines):

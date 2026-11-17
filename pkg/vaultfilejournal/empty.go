@@ -75,11 +75,7 @@ var ErrJournalNotEmpty = fmt.Errorf("%w: journal is not empty", ErrStateExists)
 // none to observe; a committed state is always visible in full and never
 // partially.
 func (j *Journal) InitializeEmptyState(s State) error {
-	if s.Generation != 0 ||
-		len(s.BaseBytes) == 0 ||
-		len(s.RemoteRevision) == 0 ||
-		!bytes.Equal(s.BaseBytes, s.WorkingBytes) ||
-		!validStateGeneration(s) {
+	if !validInitialState(s) {
 		return fmt.Errorf("%w: initial state must be generation 0 with matching non-empty base and working bytes and a revision", ErrInvalid)
 	}
 	// Copy before taking the lock and starting the transaction so the encoded
@@ -122,6 +118,11 @@ func (j *Journal) InitializeEmptyState(s State) error {
 		return wrapEmptyErr("initialize empty state", err)
 	}
 	return nil
+}
+
+func validInitialState(s State) bool {
+	return s.Generation == 0 && len(s.BaseBytes) != 0 && len(s.RemoteRevision) != 0 &&
+		bytes.Equal(s.BaseBytes, s.WorkingBytes) && validStateGeneration(s)
 }
 
 // checkOnlyJournalBucket rejects any top-level bucket this package does not

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unicode/utf8"
 )
 
@@ -44,6 +45,7 @@ VAULT & LIFECYCLE
   audit                 --file PATH
   archived-audit        --file PATH
   health                --file PATH [--hibp true]
+  vault-file-device-public --file ABS_PERSONAL
 
 ITEMS & LOGINS
   add-login             --file PATH
@@ -224,6 +226,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		return err
 	}
 	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if args[0] == "vault-file-device-public" {
+			_, err := io.WriteString(out, "usage: locklark personal vault-file-device-public --file ABS_PERSONAL\n\nAfter a full-factor unlock, print the local age recipient and content-signing public key for independent vault-file enrollment. This does not grant access or verify a policy.\n")
+			return err
+		}
 		if help, ok := personalActionHelp[args[0]]; ok {
 			_, err := io.WriteString(out, help)
 			return err
@@ -347,6 +353,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) == 1 {
 			opts["--state"] = "active"
 		} else if len(opts) != 2 || !personal.ValidStateFilter(opts["--state"]) {
+			return personalUsage
+		}
+	case "vault-file-device-public":
+		if len(opts) != 1 || !filepath.IsAbs(path) {
 			return personalUsage
 		}
 	case "export-kdbx":
@@ -910,6 +920,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			response, err = personal.MatchLogins(path, string(pw), key, opts["--origin"], opts["--frame-origin"])
 		case "list":
 			response, err = personal.ListState(path, string(pw), key, opts["--state"])
+		case "vault-file-device-public":
+			var session *personal.Session
+			session, err = personal.UnlockSession(path, pw, key, time.Minute)
+			if err == nil {
+				response, err = session.VaultFileDevicePublic()
+				session.Lock()
+			}
 		case "audit":
 			response, err = personal.Audit(path, string(pw), key)
 		}

@@ -132,45 +132,48 @@ func TestDecodeRecordMalformed(t *testing.T) {
 func TestDecodeBoundsBeforeAllocation(t *testing.T) {
 	good := encodeRecord(baseProposal())
 
-	// Calibrate: a valid record allocates a copy of its bytes, proving the
-	// counter observes allocations made inside its lifetime. Inputs are
-	// separately allocated so small results are not stack-allocated.
-	var cal countingAllocator
-	cal.stop = startAllocTracking(&cal)
+	// Calibrate: a valid record allocates its result copy, proving this
+	// allocation-count property observes allocations inside the call.
 	in := bytes.Clone(good)
-	p, err := decodeRecord(in)
-	got := cal.stop()
-	if err != nil || got < int64(len(p.Bytes)) || cal.bytes.Load() < int64(len(p.Bytes)) {
-		t.Fatalf("valid decode allocated %d bytes, want at least the %d-byte copy (%v)", got, len(p.Bytes), err)
+	var validErr error
+	validAllocs := testing.AllocsPerRun(10, func() {
+		_, validErr = decodeRecord(in)
+	})
+	if validErr != nil || validAllocs < 1 {
+		t.Fatalf("valid decode allocated %v allocations, want at least the result copy (%v)", validAllocs, validErr)
 	}
+	baseline := testing.AllocsPerRun(100, func() {})
 
 	hostile := []struct {
-		name string
-		raw  []byte
+		name              string
+		raw               []byte
+		allocationBounded bool
 	}{
 		// Declared lengths exceed the caps and a claimed 4 GiB body.
 		{"max-uint32-bytes", func() []byte {
 			r := bytes.Clone(good[:recordOverhead])
 			setLengths(r, 64, MaxExpectedRevisionBytes, math.MaxUint32)
 			return reseal(r)
-		}()},
+		}(), true},
 		// Declared revision length exceeds MaxRevisionSize.
 		{"max-revision-length", func() []byte {
 			r := bytes.Clone(good[:recordOverhead])
 			setLengths(r, 64, math.MaxUint16, 1)
 			return reseal(r)
-		}()},
+		}(), true},
 		// Every length in bounds but the record is shorter than declared.
 		{"declared-past-end", func() []byte {
 			raw := append(bytes.Clone(good[:recordOverhead]), make([]byte, MaxOperationIDBytes+MaxExpectedRevisionBytes+MaxProposalBytes+recordDigest)...)
 			setLengths(raw, MaxOperationIDBytes, MaxExpectedRevisionBytes, MaxProposalBytes)
 			return reseal(raw)
-		}()},
+		}(), true},
 		// A record one byte over the absolute maximum.
-		{"oversize-record", make([]byte, maxRecordLen+1)},
+		{"oversize-record", make([]byte, maxRecordLen+1), true},
 		// Valid lengths whose body is followed by extra bytes: the digest no
 		// longer matches the full record.
-		{"extra-body-bad-digest", reseal(append(bytes.Clone(good), make([]byte, 1024)...))},
+		// This case reaches digest verification, whose fixed hash state is not
+		// derived from a claimed length; only the semantic rejection is checked.
+		{"extra-body-bad-digest", reseal(append(bytes.Clone(good), make([]byte, 1024)...)), false},
 	}
 	for _, h := range hostile {
 		for _, grow := range []int{0, 4096} {
@@ -178,16 +181,19 @@ func TestDecodeBoundsBeforeAllocation(t *testing.T) {
 			if grow > 0 {
 				raw = append(raw, make([]byte, grow)...)
 			}
-			var a countingAllocator
-			a.stop = startAllocTracking(&a)
-			p, err := decodeRecord(raw)
-			got := a.stop()
-			if !errors.Is(err, ErrCorrupt) || p.Bytes != nil {
-				t.Fatalf("%s: decodeRecord = %v, want ErrCorrupt and no result", h.name, err)
+			var decoded Proposal
+			var decodeErr error
+			allocs := testing.AllocsPerRun(100, func() {
+				decoded, decodeErr = decodeRecord(raw)
+			})
+			if !errors.Is(decodeErr, ErrCorrupt) || decoded.Bytes != nil {
+				t.Fatalf("%s: decodeRecord = %v, want ErrCorrupt and no result", h.name, decodeErr)
 			}
-			// Only the ReadMemStats bookkeeping itself may allocate here.
-			if got > 1024 {
-				t.Fatalf("%s (len %d, +%d): corrupt record allocated %d bytes before rejection", h.name, len(h.raw), grow, got)
+			// The boundary property is no allocation beyond the no-op tracking
+			// baseline for records rejected by the header/length checks; a
+			// length-derived allocation would add at least one.
+			if h.allocationBounded && allocs > baseline {
+				t.Fatalf("%s: corrupt record allocated %v allocations before rejection, baseline %v", h.name, allocs, baseline)
 			}
 		}
 	}

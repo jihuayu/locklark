@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/browserhost"
@@ -42,74 +43,107 @@ func cliLifetimeRequest(t *testing.T, a *App) browserhost.BrokerCLIRequest {
 // caller deadline ends the approval, removes only that pending, and ignores a
 // late click from the retired render.
 func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
-	a := dailyAppFixture(t)
-	a.notifyBrowserBrokerUnlocked()
-	session, epoch := a.brokerSession, a.brokerEpoch
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	req := cliLifetimeRequest(t, a)
-	type result struct {
-		approved bool
-		err      error
-	}
-	done := make(chan result, 1)
-	go func() {
-		approved, err := a.requestCLIRunApproval(ctx, browserhost.Peer{}, req.VaultPath, req.Scope, req.Targets, session, epoch)
-		done <- result{approved: approved, err: err}
-	}()
+	// Keep fixture/session timestamps and the real context timer in one clock
+	// domain. Authenticated fixture I/O finishes before the caller budget starts;
+	// host scheduling cannot consume the transient pending's observation window.
+	synctest.Test(t, func(t *testing.T) {
+		a := dailyAppFixture(t)
+		a.notifyBrowserBrokerUnlocked()
+		session, epoch := a.brokerSession, a.brokerEpoch
+		req := cliLifetimeRequest(t, a)
+		const callerLifetime = 300 * time.Millisecond
+		if callerLifetime >= browserhost.CLIRunApprovalMaxLifetime {
+			t.Fatal("caller deadline must precede the approval lifetime cap")
+		}
+		begin := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), callerLifetime)
+		defer cancel()
+		type result struct {
+			approved bool
+			err      error
+		}
+		done := make(chan result, 1)
+		go func() {
+			approved, err := a.requestCLIRunApproval(ctx, browserhost.Peer{}, req.VaultPath, req.Scope, req.Targets, session, epoch)
+			done <- result{approved: approved, err: err}
+		}()
 
-	var pending *cliRunPending
-	waitUntil := time.Now().Add(2 * time.Second)
-	for {
+		// Wait for the request goroutine to block on its actual decision/context
+		// channels without advancing virtual time or racing a polling interval.
+		synctest.Wait()
 		a.brokerMu.Lock()
-		pending = a.cliPending
+		pending := a.cliPending
 		a.brokerMu.Unlock()
-		if pending != nil {
-			break
+		if pending == nil || ctx.Err() != nil || !time.Now().Equal(begin) {
+			t.Fatal("approval was not published before the caller deadline")
 		}
-		if time.Now().After(waitUntil) {
-			t.Fatal("approval was not published")
+		// Headless unit rendered-state fixture only: no GUI window is opened.
+		// Bind the real pending's ID so timeout must retire its rendered owner.
+		a.brokerMu.Lock()
+		a.approvalWinPending = pending.id
+		a.brokerMu.Unlock()
+		time.Sleep(callerLifetime - time.Millisecond)
+		synctest.Wait()
+		a.brokerMu.Lock()
+		current := a.cliPending == pending
+		renderedCurrent := a.approvalWinPending == pending.id
+		a.brokerMu.Unlock()
+		if !current || !renderedCurrent || ctx.Err() != nil {
+			t.Fatal("approval or rendered binding retired before the caller deadline")
 		}
-		time.Sleep(time.Millisecond)
-	}
-	begin := time.Now()
-	select {
-	case out := <-done:
-		if out.approved || !errors.Is(out.err, errCLIRunRefused) {
-			t.Fatalf("early deadline approval = %v, %v", out.approved, out.err)
+		select {
+		case <-done:
+			t.Fatal("approval returned before the caller deadline")
+		default:
 		}
-		if elapsed := time.Since(begin); elapsed >= 3*time.Second {
-			t.Fatalf("short caller deadline took %s", elapsed)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("approval did not honor the short caller deadline")
-	}
-	a.brokerMu.Lock()
-	stillPending := a.cliPending != nil
-	rendered := a.approvalWinPending
-	a.brokerMu.Unlock()
-	if stillPending || rendered != "" {
-		t.Fatalf("timeout left pending=%v rendered=%q", stillPending, rendered)
-	}
-	if a.approveCLIRunID(pending.id, true) {
-		t.Fatal("late approval accepted the retired pending id")
-	}
-	if _, ok := cliPendingDecision(pending); ok {
-		t.Fatal("late approval signalled a retired pending")
-	}
 
-	// Old timeout cleanup must not decide or hide a replacement render.
-	replacement := cliPendingBindingFixture(t, a, "pending-replacement")
-	setCLIPending(a, replacement, replacement.id)
-	if a.approveCLIRunID(pending.id, true) || a.hideApprovalWindowFor(pending.id) {
-		t.Fatal("retired callback touched the replacement pending")
-	}
-	if replacement.decided {
-		t.Fatal("retired callback decided the replacement pending")
-	}
-	if _, ok := cliPendingDecision(replacement); ok {
-		t.Fatal("retired callback signalled the replacement pending")
-	}
+		time.Sleep(time.Millisecond)
+		synctest.Wait()
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) || time.Since(begin) != callerLifetime {
+			t.Fatal("the original short caller deadline did not expire")
+		}
+		select {
+		case out := <-done:
+			if out.approved || !errors.Is(out.err, errCLIRunRefused) {
+				t.Fatal("early deadline did not refuse the approval")
+			}
+		default:
+			t.Fatal("approval did not honor the short caller deadline")
+		}
+		a.brokerMu.Lock()
+		stillPending := a.cliPending != nil
+		rendered := a.approvalWinPending
+		a.brokerMu.Unlock()
+		if stillPending || rendered != "" {
+			t.Fatal("timeout left a pending or rendered approval")
+		}
+		if a.approveCLIRunID(pending.id, true) {
+			t.Fatal("late approval accepted the retired pending id")
+		}
+		if _, ok := cliPendingDecision(pending); ok {
+			t.Fatal("late approval signalled a retired pending")
+		}
+
+		// Old timeout cleanup must not decide or hide a replacement render.
+		replacement := cliPendingBindingFixture(t, a, "pending-replacement")
+		setCLIPending(a, replacement, replacement.id)
+		if a.approveCLIRunID(pending.id, true) || a.hideApprovalWindowFor(pending.id) {
+			t.Fatal("retired callback touched the replacement pending")
+		}
+		a.brokerMu.Lock()
+		replacementCurrent := a.cliPending == replacement
+		replacementRendered := a.approvalWinPending == replacement.id
+		a.brokerMu.Unlock()
+		if !replacementCurrent || !replacementRendered {
+			t.Fatal("retired callback changed the replacement pending or rendered binding")
+		}
+		if replacement.decided {
+			t.Fatal("retired callback decided the replacement pending")
+		}
+		if _, ok := cliPendingDecision(replacement); ok {
+			t.Fatal("retired callback signalled the replacement pending")
+		}
+	})
 }
 
 // TestHandleCLIRunLateApprovalRefused proves a callback that returns "approved"

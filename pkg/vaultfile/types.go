@@ -86,8 +86,12 @@ type SignedPolicy struct {
 // Policy is the vault authorization document.
 //
 // The owner root is independent of any device: it is the security root of the
-// vault. Devices hold role-bound policy signing keys and content signing keys;
-// readers do not hold content signing keys.
+// vault. Every listed device, including a reader's device, carries content-
+// signing public-key metadata. Its presence or a valid signature does not
+// authorize content writes to this vault: the device's principal must be a
+// writer, admin or owner in the authenticated policy. A transition also
+// requires that role in the authenticated old-file policy. A reader may hold
+// the corresponding private key for personal snapshots or other vaults.
 //
 // A policy carries no digest of itself. Its one and only digest is computed
 // outside this document (PolicyDigest), over the canonical encoding of the

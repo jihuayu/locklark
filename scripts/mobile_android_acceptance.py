@@ -43,6 +43,9 @@ OPERATIONS = {"unknown", "wait", "locate", "tap", "type-text", "keyboard-check",
 COMMANDS = {"unknown", "properties", "display", "install", "app-reset", "private-dir", "launch", "force-stop", "ui-dump",
             "ui-read", "ui-cleanup", "tap", "text", "scroll", "key", "ime", "lifecycle", "db-copy"}
 STDERR_CLASSES = {"unknown", "empty", "offline", "service-missing", "permission", "timeout", "spawn-error", "other"}
+STDOUT_FAILURE_CLASSES = {"unknown", "empty", "oversized", "service-missing"}
+STDOUT_TAIL_ERROR_CLASSES = {"unknown", "service-missing", "permission", "transport"}
+STDOUT_LENGTH_BUCKETS = {"unknown", "empty", "up-to-4096", "up-to-8192", "over-8192"}
 FAILURE_ORIGINS = {"transport", "service", "permission", "remote-other", "timeout", "spawn"}
 FAILURE_OUTPUT_LIMIT = 8192
 TARGETS = {"unknown", "row", "field-picker", "generate-key", "new-master", "repeat-master", "backup-ack", "create-vault",
@@ -230,7 +233,9 @@ def safe_host_diagnosis(value):
                "control": CONTROL_STATES, "wait": WAIT_STATES, "identity": IDENTITY_STATES,
                "ime": {"unknown", "shown", "hidden"}, "operation": OPERATIONS, "target": TARGETS, "step": CREATE_STEPS,
                "command": COMMANDS, "command_exit": {"unknown", "pending", "ok", "nonzero", "timeout", "error"},
-               "stderr_class": STDERR_CLASSES, "failure_origin": FAILURE_ORIGINS,
+               "stderr_class": STDERR_CLASSES, "stdout_failure_class": STDOUT_FAILURE_CLASSES,
+               "stdout_tail_error_class": STDOUT_TAIL_ERROR_CLASSES, "stdout_length_bucket": STDOUT_LENGTH_BUCKETS,
+               "failure_origin": FAILURE_ORIGINS,
                "bounds": {"unknown", "missing", "ready", "disabled", "hidden", "invalid-bounds", "offscreen"},
                "exception": EXCEPTIONS, "helper": HELPERS,
                "reason": {"unknown", "assertion", "python-contract", "xml", "deadline", "wait-expired", "control-not-actionable", "command-failed"}}
@@ -284,6 +289,47 @@ def adb_stderr_class(raw):
     if b"permission denied" in lowered or b"permission denial" in lowered or b"securityexception" in lowered or b"device unauthorized" in lowered:
         return "permission"
     return "other"
+
+
+def adb_stdout_failure_class(raw, command):
+    """Classify only an exact, bounded failed-command marker; never return output."""
+    if not isinstance(raw, bytes):
+        return "unknown"
+    if not raw:
+        return "empty"
+    if len(raw) > 4096:
+        return "oversized"
+    if command == "ime" and raw in (b"Can't find service: input_method", b"Can't find service: input_method\n",
+                                    b"Can't find service: input_method\r\n"):
+        return "service-missing"
+    return "unknown"
+
+
+def adb_stdout_length_bucket(raw):
+    """Describe whether the existing failure-origin prefix covers all stdout."""
+    if not isinstance(raw, bytes):
+        return "unknown"
+    if not raw:
+        return "empty"
+    if len(raw) <= 4096:
+        return "up-to-4096"
+    return "up-to-8192" if len(raw) <= FAILURE_OUTPUT_LIMIT else "over-8192"
+
+
+def adb_stdout_tail_error_class(raw):
+    """Inspect at most the final 4096 bytes for one exact terminal error line."""
+    if not isinstance(raw, bytes) or not raw:
+        return "unknown"
+    tail = raw[-4096:]
+    trimmed = tail.rstrip(b"\r\n")
+    # If the slice began inside a line, that line cannot be treated as exact.
+    if len(raw) > 4096 and b"\n" not in trimmed:
+        return "unknown"
+    final_line = trimmed.rsplit(b"\n", 1)[-1].lower()
+    known = {b"can't find service: input_method": "service-missing",
+             b"permission denied": "permission",
+             b"error: device offline": "transport", b"error: closed": "transport"}
+    return known.get(final_line, "unknown")
 
 
 def adb_failure_origin(stdout, stderr):
@@ -444,8 +490,11 @@ class AndroidAcceptance:
         # Never record argv: input text includes synthetic complete factors.
         self.counter += 1
         result = None
-        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None,
-                               "stderr_class": "unknown", "failure_origin": "remote-other"})
+        category = command_category(arguments)
+        self.diagnosis.update({"command": category, "command_exit": "pending", "exit_code": None,
+                               "stderr_class": "unknown", "stdout_failure_class": "unknown",
+                               "stdout_tail_error_class": "unknown", "stdout_length_bucket": "unknown",
+                               "failure_origin": "remote-other"})
         try:
             result = subprocess.run(self.adb + list(map(str, arguments)),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
@@ -461,6 +510,10 @@ class AndroidAcceptance:
                                    "stderr_class": adb_stderr_class(stderr)})
             if result.returncode != 0:
                 self.diagnosis["failure_origin"] = adb_failure_origin(stdout, stderr)
+                self.diagnosis["stdout_failure_class"] = adb_stdout_failure_class(stdout, category)
+                if required and category == "ime":
+                    self.diagnosis["stdout_tail_error_class"] = adb_stdout_tail_error_class(stdout)
+                    self.diagnosis["stdout_length_bucket"] = adb_stdout_length_bucket(stdout)
         if oracle:
             path = self.root / oracle
             path.write_bytes(stdout)
@@ -768,7 +821,8 @@ class AndroidAcceptance:
         if not self.started:
             return
         preserved = {key: self.diagnosis[key] for key in ("operation", "target", "step", "command", "command_exit", "exit_code",
-                     "stderr_class", "failure_origin", "bounds", "exception", "helper", "source_line", "reason")}
+                     "stderr_class", "stdout_failure_class", "stdout_tail_error_class", "stdout_length_bucket",
+                     "failure_origin", "bounds", "exception", "helper", "source_line", "reason")}
         deadline = time.monotonic() + min(10, self.args.timeout)
         try:
             try:

@@ -2851,6 +2851,8 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_shared_clipboard_acceptance.mjs",
     "scripts/browser_edge_install.mjs",
     "scripts/browser_extension_prebuilt.mjs",
+    "scripts/browser_rotation_acceptance.mjs",
+    "scripts/browser_rotation_site.mjs",
     # The strict Node helper executes this Python runtime closure.
     "scripts/browserrelease/__init__.py",
     "scripts/browserrelease/prebuilt.py",

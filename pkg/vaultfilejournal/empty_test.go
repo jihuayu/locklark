@@ -62,7 +62,8 @@ func sameSnapshot(a, b map[string]map[string][]byte) bool {
 			return false
 		}
 		for k, v := range entries {
-			if !bytes.Equal(other[k], v) {
+			otherValue, ok := other[k]
+			if !ok || !bytes.Equal(otherValue, v) {
 				return false
 			}
 		}
@@ -299,6 +300,11 @@ func TestInitializeEmptyStateRejectsExistingState(t *testing.T) {
 
 func TestInitializeEmptyStateRejectsMalformedInput(t *testing.T) {
 	j := openAt(t, privateDir(t))
+	initial := rawJournalSnapshot(t, j)
+	entries, hasJournalBucket := initial[bucketName]
+	if len(initial) != 1 || !hasJournalBucket || len(entries) != 0 {
+		t.Fatal("fresh journal must contain only an empty journal bucket")
+	}
 	valid := emptyBootstrapState(4)
 	for _, tc := range []struct {
 		name   string
@@ -321,10 +327,13 @@ func TestInitializeEmptyStateRejectsMalformedInput(t *testing.T) {
 			if err := j.InitializeEmptyState(s); !errors.Is(err, ErrInvalid) {
 				t.Fatalf("InitializeEmptyState = %v, want ErrInvalid", err)
 			}
+			if !sameSnapshot(initial, rawJournalSnapshot(t, j)) {
+				t.Fatal("a malformed call changed the fresh journal")
+			}
 		})
 	}
-	if before := rawJournalSnapshot(t, j); len(before) != 0 {
-		t.Fatalf("rejected inputs created records: %v", before)
+	if !sameSnapshot(initial, rawJournalSnapshot(t, j)) {
+		t.Fatal("malformed inputs changed the fresh journal")
 	}
 	// A malformed call is rejected even after a valid bootstrap, before the
 	// transaction, so the stored state is untouched.

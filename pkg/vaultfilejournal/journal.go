@@ -184,7 +184,26 @@ func Open(path string) (*Journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openDatabase(path, parent, missing)
+	j, err := openDatabase(path, parent, missing)
+	if err != nil {
+		return nil, err
+	}
+	if err := j.db.View(func(tx *bolt.Tx) error {
+		if genesisIntentPresent(tx) {
+			return ErrPendingGenesisIntent
+		}
+		if tx.Bucket([]byte(bucketName)) == nil {
+			return ErrInvalid
+		}
+		return nil
+	}); err != nil {
+		_ = j.Close()
+		return nil, err
+	}
+	// Existing-only validation has completed without an open-time freelist
+	// repair. Explicit later mutations retain the ordinary durable policy.
+	j.db.NoFreelistSync = false
+	return j, nil
 }
 
 // Close closes the journal. Later calls to Load and Save return ErrClosed.

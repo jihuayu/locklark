@@ -2690,18 +2690,39 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (removed) removed.password = "";
     }
     scheduleGeneratedPrune();
-    return entry.id;
+    return entry;
+  }
+  // A generated staging outcome is valid only while this exact entry is still
+  // live in the same generation: no reinsertion and no TTL extension.
+  function settleGeneratedStagingOutcome(entry, generation, outcome) {
+    pruneGenerated();
+    if (!entry || generation !== epoch || entry.expiresAt <= Date.now()) return false;
+    const index = generatedHistory.indexOf(entry);
+    if (index < 0 || generatedHistory[index] !== entry ||
+      generatedHistory[index].id !== entry.id) return false;
+    if (outcome !== "native-accepted" && outcome !== "local-only") return false;
+    entry.stagingOutcome = outcome;
+    return true;
   }
   function generatedHistoryView() {
     pruneGenerated();
-    return generatedHistory.map((entry) => ({
-      id: entry.id,
-      origin: entry.origin,
-      username: entry.username,
-      password: entry.password,
-      profile: entry.profile,
-      createdAt: entry.createdAt,
-    }));
+    return generatedHistory.map((entry) => {
+      const stagingOutcome =
+        entry.stagingOutcome === "pending" ||
+        entry.stagingOutcome === "native-accepted" ||
+        entry.stagingOutcome === "local-only"
+          ? entry.stagingOutcome
+          : "";
+      return {
+        id: entry.id,
+        origin: entry.origin,
+        username: entry.username,
+        password: entry.password,
+        profile: entry.profile,
+        createdAt: entry.createdAt,
+        ...(stagingOutcome ? { stagingOutcome } : {}),
+      };
+    });
   }
   function addNeverOrigin(origin) {
     if (neverSaveOrigins.includes(origin)) return;
@@ -2715,12 +2736,12 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   async function stageSave(values, c) {
     pruneStaged();
-    if (!validCredentialText(values?.password)) return { mode: "never" };
+    if (!validCredentialText(values?.password)) return { mode: "never", native: false };
     const username =
       typeof values.username === "string" ? values.username.slice(0, 16384) : "";
-    if (!validCredentialText(username, true)) return { mode: "never" };
+    if (!validCredentialText(username, true)) return { mode: "never", native: false };
     if (!offerSaveLogins || neverSaveOrigins.includes(c.origin))
-      return { mode: "never" };
+      return { mode: "never", native: false };
     const last = lastFilledCredentials.get(c.tabId);
     if (
       last &&
@@ -2732,7 +2753,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       last.password === values.password &&
       values.isPasswordChange !== true
     )
-      return { mode: "unchanged" };
+      return { mode: "unchanged", native: false };
     // Only one pending save is kept per tab and origin. A new submission replaces
     // the previous proposal instead of leaking the older password for five minutes.
     for (const [stageId, record] of stagedSaves)
@@ -2816,27 +2837,38 @@ if (typeof importScripts === "function") importScripts("core.js");
           revision: record.existingRevision,
         });
         const staged = response.staged_save;
-        if (staged) {
-          record.stageId = staged.stage_id;
-          record.origin = staged.origin;
-          record.username = staged.username;
-          record.title = staged.title;
-          record.mode = staged.mode;
-          record.existingItemId = staged.existing_item_id || "";
-          record.existingRevision = staged.existing_revision || "";
-          if (Number.isSafeInteger(staged.expires_at))
-            record.expiresAt = Math.min(record.expiresAt, staged.expires_at);
-          record.native = true;
+        if (staged && typeof staged === "object" && !Array.isArray(staged)) {
+          if (["new", "update", "never", "unchanged"].includes(staged.mode))
+            record.mode = staged.mode;
+          if (
+            (staged.mode === "new" || staged.mode === "update") &&
+            /^[a-f0-9]{32}$/.test(staged.stage_id || "") &&
+            staged.origin === c.origin &&
+            typeof staged.username === "string" &&
+            typeof staged.title === "string"
+          ) {
+            record.stageId = staged.stage_id;
+            record.origin = staged.origin;
+            record.username = staged.username;
+            record.title = staged.title;
+            record.existingItemId =
+              typeof staged.existing_item_id === "string" ? staged.existing_item_id : "";
+            record.existingRevision =
+              typeof staged.existing_revision === "string" ? staged.existing_revision : "";
+            if (Number.isSafeInteger(staged.expires_at))
+              record.expiresAt = Math.min(record.expiresAt, staged.expires_at);
+            record.native = true;
+          }
         }
       } catch {
         record.native = false;
       }
     }
     if (record.mode === "unchanged" || record.mode === "never")
-      return { mode: record.mode };
+      return { mode: record.mode, native: record.native === true };
     stagedSaves.set(record.stageId, record);
     armStagedTimer(record);
-    return { mode: record.mode, stageId: record.stageId };
+    return { mode: record.mode, stageId: record.stageId, native: record.native === true };
   }
   async function commitStagedSave(stageId, options, c) {
     pruneStaged();
@@ -3025,11 +3057,14 @@ if (typeof importScripts === "function") importScripts("core.js");
         historyId: "",
       };
     } else generated = await generateResult(params);
-    const historyId = recordGenerated(
+    if (generation !== epoch) throw Error("refused");
+    const historyEntry = recordGenerated(
       c.origin,
       typeof params.username === "string" ? params.username : "",
       generated,
     );
+    historyEntry.stagingOutcome = "pending";
+    const historyId = historyEntry.id;
     let fill = null;
     try {
       const results = await api.scripting.executeScript({
@@ -3046,14 +3081,25 @@ if (typeof importScripts === "function") importScripts("core.js");
       )
         fill = results[0].result;
     } catch {}
-    const staged = await stageSave(
-      {
-        username: fill?.username || params.username || "",
-        password: generated.password,
-        isNewPassword: true,
-        isPasswordChange: fill?.isPasswordChange === true,
-      },
-      c,
+    let staged;
+    try {
+      staged = await stageSave(
+        {
+          username: fill?.username || params.username || "",
+          password: generated.password,
+          isNewPassword: true,
+          isPasswordChange: fill?.isPasswordChange === true,
+        },
+        c,
+      );
+    } catch (error) {
+      settleGeneratedStagingOutcome(historyEntry, generation, "local-only");
+      throw error;
+    }
+    settleGeneratedStagingOutcome(
+      historyEntry,
+      generation,
+      staged?.native === true ? "native-accepted" : "local-only",
     );
     return {
       password: generated.password,
@@ -5995,13 +6041,13 @@ if (typeof importScripts === "function") importScripts("core.js");
         },
         c,
       );
-      return {
-        ...staged,
-        pendingSave:
-          staged.mode === "new" || staged.mode === "update"
-            ? serializeStaged(stagedForTab(c.tabId, c.origin))
-            : null,
-      };
+      const reply = { mode: staged.mode };
+      if (staged.stageId !== undefined) reply.stageId = staged.stageId;
+      reply.pendingSave =
+        staged.mode === "new" || staged.mode === "update"
+          ? serializeStaged(stagedForTab(c.tabId, c.origin))
+          : null;
+      return reply;
     }
     if (message.type === "inline-commit-staged-save") {
       if (typeof message.stageId !== "string" || !/^[a-f0-9]{32}$/.test(message.stageId))
@@ -6028,14 +6074,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     if (message.type === "inline-generate") {
       const generated = await generateResult(message);
-      const historyId =
+      const historyEntry =
         message.recordHistory === true
           ? recordGenerated(
               c.origin,
               typeof message.username === "string" ? message.username : "",
               generated,
             )
-          : generated.historyId || "";
+          : null;
+      const historyId = historyEntry?.id || generated.historyId || "";
       return {
         password: generated.password,
         profile: generated.profile,
@@ -7202,11 +7249,12 @@ if (typeof importScripts === "function") importScripts("core.js");
           let historyId = generated.historyId || "";
           if (message.recordHistory === true) {
             const info = await activeTabInfo();
-            historyId = recordGenerated(
+            const historyEntry = recordGenerated(
               info?.origin || "",
               typeof message.username === "string" ? message.username : "",
               generated,
             );
+            historyId = historyEntry.id;
           }
           return {
             password: generated.password,
@@ -7550,11 +7598,13 @@ if (typeof importScripts === "function") importScripts("core.js");
         pendingSave,
       });
     };
-    run().then(respondState, () => {
+    run().then(respondState, (error) => {
       if (requestEpoch === epoch)
         status = unconfirmedSave
           ? SAVE_UNKNOWN
-          : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
+          : message.type === "match" && error?.knownRefusal === true
+            ? "原生宿主拒绝读取候选"
+            : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
       return respondState();
     });
     return true;

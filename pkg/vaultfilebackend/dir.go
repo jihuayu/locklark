@@ -203,6 +203,19 @@ func sameIdentity(want, got os.FileInfo) bool {
 // performs, including the wait for the process-wide lock-file semaphore, is
 // bounded by DefaultLockTimeout and reports ErrConflict when it runs out.
 func OpenDir(root string) (*Dir, error) {
+	return openDir(root, false)
+}
+
+// OpenExistingDir opens an already established local-directory backend. The
+// root, namespace directories and lock file must all exist and pass OpenDir's
+// validation. Opening never creates them or resolves a stale lock ticket or
+// temporary file. Later explicit backend operations retain their normal crash
+// recovery and CAS behavior. No committed object is created by opening a Dir.
+func OpenExistingDir(root string) (*Dir, error) {
+	return openDir(root, true)
+}
+
+func openDir(root string, existingOnly bool) (*Dir, error) {
 	if !dirSupported {
 		return nil, fmt.Errorf("%w: the local directory backend is implemented for darwin and linux only", ErrUnsupported)
 	}
@@ -213,7 +226,7 @@ func OpenDir(root string) (*Dir, error) {
 	if err != nil {
 		return nil, deniedMsg(err, "root")
 	}
-	real, err := prepareRoot(abs)
+	real, err := prepareRootMode(abs, existingOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +258,13 @@ func OpenDir(root string) (*Dir, error) {
 		{tmpDir, "data directory", &ids.tmp},
 		{dataDir, "data directory", &ids.data},
 	} {
-		if err := makePrivateDir(c.path, c.label); err != nil {
+		var err error
+		if existingOnly {
+			err = checkPrivateDir(c.path, c.label)
+		} else {
+			err = makePrivateDir(c.path, c.label)
+		}
+		if err != nil {
 			return nil, err
 		}
 		// Capture the identity of the exact directory just validated, so
@@ -272,7 +291,12 @@ func OpenDir(root string) (*Dir, error) {
 	if err := pl.acquire(context.Background(), deadline); err != nil {
 		return nil, lockWaitError(err)
 	}
-	f, err := openLockFile(lock)
+	var f *os.File
+	if existingOnly {
+		f, err = openExistingLockFile(lock)
+	} else {
+		f, err = openLockFile(lock)
+	}
 	if err != nil {
 		pl.release()
 		return nil, err
@@ -336,7 +360,11 @@ func checkPrivateDir(d, label string) error {
 // /var -> /private/var on macOS). The resolved path is a fixed absolute path
 // that later lexical checks rely on.
 func prepareRoot(abs string) (string, error) {
-	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+	return prepareRootMode(abs, false)
+}
+
+func prepareRootMode(abs string, existingOnly bool) (string, error) {
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) && !existingOnly {
 		if err := os.MkdirAll(abs, 0700); err != nil {
 			return "", deniedMsg(err, "create root")
 		}

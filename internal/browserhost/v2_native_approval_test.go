@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
 )
@@ -143,6 +144,90 @@ func TestV2StagedSavePayloadSurvivesApproval(t *testing.T) {
 	last := out.responses(t)
 	if last[len(last)-1].Type != "save-staged" || last[len(last)-1].Staged == nil {
 		t.Fatalf("staged save after approval: %#v", last[len(last)-1])
+	}
+}
+
+func TestNonQuickGeneratedStageBlocksMatchUntilExplicitRelease(t *testing.T) {
+	for _, release := range []string{"reject", "approve"} {
+		t.Run(release, func(t *testing.T) {
+			c, out, s, capability := nonQuickFixture(t)
+			defer c.Close()
+			items, revisions, err := s.ReadAuthenticatedItems(true)
+			if err != nil || len(items) != 1 {
+				t.Fatal("authenticated R0 fixture unavailable")
+			}
+			item := items[0]
+			site, err := origin.Website(item.URL)
+			if err != nil {
+				t.Fatal("R0 website origin unavailable")
+			}
+			r0 := revisions[item.ID]
+			match := Request{V: 1, ID: reqID(700), Type: "match", Capability: capability, Origin: site, TabID: 1, DocumentID: "rotation-login"}
+			if c.Handle(match) != nil || lastNativeResponse(t, out).Type != "candidates" {
+				t.Fatal("R0 native match failed")
+			}
+			fill := match
+			fill.ID, fill.Type, fill.ItemID, fill.Revision = reqID(701), "fill", item.ID, r0
+			if c.Handle(fill) != nil || c.Snapshot().Pending == nil || c.ApproveFill(fill.ID) != nil {
+				t.Fatal("R0 native fill review failed")
+			}
+			filled := lastNativeResponse(t, out)
+			defer filled.Clear()
+			if filled.Type != "fill" || filled.Username == "" || filled.Password == "" || c.Snapshot().Pending != nil {
+				t.Fatal("R0 native fill did not release its pending review")
+			}
+			generated := generateViaHost(t, c, out, capability, reqID(702), `{"mode":"random","length":24,"digits":true,"symbols":true}`)
+			defer generated.Clear()
+			if generated.GeneratedPassword == "" || generated.GeneratedPassword == filled.Password || c.Snapshot().V2 != nil {
+				t.Fatal("native generation did not complete independently of a review")
+			}
+			stage := mustReadRequest(t, map[string]any{
+				"v": 1, "id": reqID(703), "type": "stage-save", "capability": capability,
+				"origin": site, "tab_id": 1, "window_id": 1, "document_id": "rotation-change",
+				"username": item.Username, "password": generated.GeneratedPassword,
+				"mode": "update", "title": item.Title, "item_id": item.ID, "revision": r0,
+			})
+			defer stage.Clear()
+			if c.Handle(stage) != nil {
+				t.Fatal("extension staged-save request failed")
+			}
+			if view := c.Snapshot(); view.QuickFill || view.V2 == nil || view.V2.Type != "stage-save" {
+				t.Fatal("normal pairing must retain the exact staged-save review")
+			}
+			match.ID, match.DocumentID = reqID(704), "rotation-change"
+			if c.Handle(match) != nil {
+				t.Fatal("pending-review match transport failed")
+			}
+			refused := lastNativeResponse(t, out)
+			if refused.Type != "error" || refused.Error != "refused" || c.Snapshot().V2 == nil || !s.Unlocked() {
+				t.Fatal("unhandled staged-save review must refuse match while remaining unlocked")
+			}
+			if release == "reject" {
+				err = c.RejectV2(stage.ID)
+			} else {
+				err = c.ApproveV2(stage.ID)
+			}
+			if err != nil || c.Snapshot().V2 != nil || !s.Unlocked() {
+				t.Fatal("explicit staged-save decision did not release the review")
+			}
+			decision := lastNativeResponse(t, out)
+			if release == "reject" && (decision.Type != "error" || decision.Error != "refused") ||
+				release == "approve" && (decision.Type != "save-staged" || decision.Staged == nil) {
+				t.Fatal("staged-save decision returned an unexpected finite outcome")
+			}
+			match.ID = reqID(705)
+			if c.Handle(match) != nil {
+				t.Fatal("same-capability rematch transport failed")
+			}
+			matched := lastNativeResponse(t, out)
+			if matched.Type != "candidates" || len(matched.Candidates) != 1 || matched.Candidates[0].ID != item.ID || matched.Candidates[0].Revision != r0 {
+				t.Fatal("same capability must recover the exact R0 candidate after a decision")
+			}
+			rows, err := s.List("active")
+			if err != nil || len(rows) != 1 || rows[0].ID != item.ID || rows[0].Revision != r0 || !s.Unlocked() {
+				t.Fatal("staging and either decision must preserve R0 without persisting R1")
+			}
+		})
 	}
 }
 

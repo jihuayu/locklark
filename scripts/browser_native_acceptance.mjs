@@ -20,6 +20,7 @@ import {
 } from "./browser_save_acceptance.mjs";
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
+import { acceptBrowserRotation } from "./browser_rotation_acceptance.mjs";
 import { nativeUnlockActions } from "./browser_unlock_sequence.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
@@ -49,6 +50,9 @@ import {
 } from "./browser_edge_install.mjs";
 
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+const rotationFlag = process.env.LOCKLARK_TEST_BROWSER_ROTATION;
+assert(rotationFlag === undefined || rotationFlag === "1", "Rotation mode requires an explicit opt-in");
+const rotationRequested = rotationFlag === "1";
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
 // prefix and one fixed phase, printed only at its real launch boundary.
 const CHECKOUT_STARTUP_PREFIX = "Native checkout startup: ";
@@ -101,6 +105,7 @@ function routeModeCompatible() {
     off("LOCKLARK_TEST_POPUP_VAULT") &&
     off("LOCKLARK_TEST_CHECKOUT_FRAMES") &&
     off("LOCKLARK_TEST_BROWSER_PARITY") &&
+    off("LOCKLARK_TEST_BROWSER_ROTATION") &&
     off("LOCKLARK_TEST_FAILURE_STAGE") &&
     off("LOCKLARK_TEST_EDGE_INSTALL_ONLY") &&
     off("LOCKLARK_TEST_EDGE_PAIR_DISCONNECT") &&
@@ -127,7 +132,8 @@ function expectedRouteClickClose(error, event, expected) {
   );
 }
 
-const scanController = captureControllerOutput();
+let observedFixture = null;
+const scanController = captureControllerOutput({ getFixture: () => observedFixture });
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
 const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
@@ -229,6 +235,17 @@ if (edgePairDisconnect) {
       "Edge pair/disconnect cannot be combined with another acceptance mode",
     );
 }
+if (rotationRequested) {
+  assert(process.platform === "linux" && browserName === "chromium" && !routeDetailRead &&
+    !checkoutFrames && !edgeManagerInstall && !process.env.LOCKLARK_TEST_SHARED_CLIPBOARD &&
+    !process.env.LOCKLARK_TEST_BROWSER_PARITY && !process.env.LOCKLARK_TEST_FAILURE_STAGE,
+  "Rotation mode requires the normal Linux Chromium journey");
+  assert([undefined, "", "1"].includes(process.env.LOCKLARK_TEST_POPUP_VAULT),
+    "Rotation popup-vault mode requires the exact opt-in");
+  assert(process.env.LOCKLARK_BROWSER_REQUIRE_PREBUILT === "1" &&
+    process.env.LOCKLARK_BROWSER_FIXTURE && isAbsolute(process.env.LOCKLARK_BROWSER_FIXTURE) && register,
+  "Rotation mode requires same-run prebuilt inputs");
+}
 // After every route/Edge compatibility assertion above: a checkout invocation
 // in any of those modes is refused there, so this is the first point at which
 // a checkout run is known to be a normal one. The launch-boundary markers keep
@@ -316,6 +333,12 @@ let stage = "fixture",
   routeTargetAfterPopupClose = null,
   routeObservationHistory = [],
   nativeInput = null;
+// Once a generated password has existed, text inspection alone cannot prove
+// later password-input pixels safe. This invocation never resumes screenshots.
+let rotationScreenshotsBlocked = false;
+let popupVaultReadyProof = false;
+let normalReadyProof = false;
+const screenshotsAllowed = () => !rotationScreenshotsBlocked && browserScreenshotsAllowed(stage);
 startupMarkup(1);
 // Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
 // appended only when one of the four fields actually changes, so a failure
@@ -498,8 +521,7 @@ function observeRouteLifecycle(target) {
 }
 // The controlled source page's title; source-tab keys use exactly this prefix.
 const browserWindowTitle = "Locklark acceptance";
-let privacyValues = [];
-let observedFixture = null;
+let privacyValues = () => fixtureCanaries(observedFixture || {});
 function popupStatusKind(value) {
   const text = String(value || "");
   if (text.includes("已保存")) return "saved";
@@ -1679,7 +1701,6 @@ try {
   );
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
   observedFixture = fixture;
-  privacyValues = fixtureCanaries(fixture);
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
   const registerArgs = [
@@ -3189,6 +3210,7 @@ try {
     }
     phase("post-repair:route-refused");
     console.log("PASS: real popup refresh re-anchored the normal QuickFill=false route and its native refusal disclosed nothing");
+    popupVaultReadyProof = true;
   }
   await blank();
   popup = await openPopup();
@@ -3279,7 +3301,7 @@ try {
     observe: vaultObserver({ go, root, env, state }),
     captureNative: (kind) => {
       assert(
-        browserScreenshotsAllowed(stage),
+        screenshotsAllowed(),
         "OTP stage forbids diagnostic screenshots",
       );
       const window = input([], true, true).window;
@@ -3343,8 +3365,29 @@ try {
     pageEval: (fn, arg) => page.evaluate(fn, arg),
   };
   if (!process.env.LOCKLARK_TEST_BROWSER_PARITY) {
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
       await acceptBrowserSave(acceptanceDriver);
+      normalReadyProof = true;
+    }
+    if (rotationRequested) {
+      assert(normalReadyProof &&
+        ([undefined, ""].includes(process.env.LOCKLARK_TEST_POPUP_VAULT) ||
+          (process.env.LOCKLARK_TEST_POPUP_VAULT === "1" && popupVaultReadyProof)),
+      "Rotation requires completed normal-mode proofs");
+      rotationScreenshotsBlocked = true;
+      const closePopups = async () => {
+        if (lastPopup) { await lastPopup.dismiss(); lastPopup = null; }
+        await page.bringToFront();
+        browserKey([{ key: "Escape" }], SOURCE_TITLE_PREFIX);
+        await eventually(async () => (await popupTargets()).length === 0, "Rotation action popup did not close");
+      };
+      const rotationReceipt = await acceptBrowserRotation({
+        ...acceptanceDriver, page, eventually, closePopups,
+        captureRotationValue: (produce) => scanController.captureRotationValue(fixture, state, produce),
+        key: readFileSync(key), cert: readFileSync(cert), returnURL: origin + "/login",
+      });
+      console.log("PASS: Linux browser rotation subjourney only " + JSON.stringify(rotationReceipt));
+    }
     await acceptBrowserOTP(acceptanceDriver);
   }
   await acceptBrowserPasskey({
@@ -3652,16 +3695,16 @@ try {
       } catch {}
     }
     try {
-      if (lastPopup && browserScreenshotsAllowed(stage)) {
+      if (lastPopup && screenshotsAllowed()) {
         const text = String((await lastPopup.text("body")) || "");
-        if (!privacyValues.some((value) => text.includes(value)))
+        if (!privacyValues().some((value) => text.includes(value)))
           await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
       }
     } catch {}
     if (nativeInput) {
       try {
         report.native = { available: true, ...nativeInput([], true, true) };
-        if (browserScreenshotsAllowed(stage)) {
+        if (screenshotsAllowed()) {
           execFileSync(
             "import",
             [

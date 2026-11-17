@@ -194,7 +194,13 @@ jobs:
             python scripts/personal_test_partition.py
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            go test -count=1 ./...
+            $vaultFileProduct = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark'
+            if (-not [System.IO.Path]::IsPathFullyQualified($vaultFileProduct) -or -not (Test-Path -LiteralPath $vaultFileProduct -PathType Leaf)) { throw 'VAULTFILE_PRODUCT_UNAVAILABLE' }
+            $env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct
+            go test -count=1 -run '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./cmd/locklark
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go test -count=1 -skip '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./...
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - if: runner.os == 'Linux'
         env:
@@ -481,7 +487,7 @@ jobs:
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs scripts/test_browser_rotation_site.mjs
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -515,7 +521,17 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
           sudo install -d -o root -g root -m 0755 /run/sshd
+      - name: Test native Onevra independent local vault creation
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
+        timeout-minutes: 10
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
+        env:
+          LOCKLARK_GO: go
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_TEST_SCENARIO: local-vault-file-create
       - name: Test reconciled E2E gates and component contracts
+        if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 -m unittest scripts/test_safari_package.py
@@ -693,7 +709,7 @@ jobs:
         if: ${{ matrix.browser == 'chromium' }}
         timeout-minutes: 15
         run: |
-          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' env LOCKLARK_TEST_BROWSER_ROTATION=1 node scripts/browser_native_acceptance.mjs
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/browser_otp_privacy_acceptance.py chromium
           # The route checkpoint is a separate mode that refuses the step-level
           # popup-vault override, so clear only that override for this run.
@@ -809,6 +825,14 @@ jobs:
       with:
         distribution: temurin
         java-version: '21'
+        cache: gradle
+        cache-dependency-path: |
+          mobile/android/build.gradle.kts
+          mobile/android/settings.gradle.kts
+          mobile/android/app/build.gradle.kts
+          mobile/android/policy/build.gradle.kts
+          mobile/android/gradle.properties
+          mobile/android/gradle/wrapper/gradle-wrapper.properties
     - name: Install fixed Android build components
       run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"'
     - name: Bind the real Go vault and build Android applications

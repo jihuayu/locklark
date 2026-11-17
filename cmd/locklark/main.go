@@ -24,6 +24,7 @@ COMMAND GROUPS
   personal      Manage an owner-only local vault in an interactive hidden terminal
   cli           Bind and run pinned developer CLIs with ephemeral credentials
   team          Bootstrap and inspect owner team profiles and trust pins
+  vault-file    Track, report status, import and resume local-directory vault-file operations
   plugin        Manage signed local plugin catalogs (third-party execution disabled)
 
 PERSONAL VAULT (locklark personal <action> --file PATH ...)
@@ -123,7 +124,7 @@ SYNTHETIC GATEWAY PREVIEW & MCP BRIDGE
 NOTES
   - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
   - onedrive login|status|logout store only a OneDrive refresh token, in the OS credential store, never a plaintext fallback.
-  - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
+  - Run "locklark <personal|cli|team|vault-file|plugin> --help" for detailed group help.
   - The metadata request command accepts only ` + preview.FixtureRef + `.
   - request records a pending request. It cannot release any credential.
 `
@@ -135,6 +136,8 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
+	case "vault-file":
+		return runVaultFile(args[1:], out)
 	case "team":
 		return runTeam(args[1:], out)
 	case "personal":

@@ -2546,20 +2546,32 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   );
   // Each key is addressed to the title of the tab that is ACTIVE when it is
   // sent: the active route page ("Locklark") for the switch away and the
-  // Control_L+r reload, the source page for the return and the popup Escape /
-  // open keys. Every default call is a single fixed action array, exactly once;
-  // the popup keys belong to openPopup, the checkpoint sends only its three.
-  for (const [key, prefix] of [
-    ["ROUTE_SWITCH_SOURCE", "ROUTE_TITLE_PREFIX"],
-    ["ROUTE_RETURN", "SOURCE_TITLE_PREFIX"],
-    ["ROUTE_RELOAD", "ROUTE_TITLE_PREFIX"],
-    ['[{ key: "Escape" }]', "SOURCE_TITLE_PREFIX"],
-    ['[{ key: "Control_L+Shift_L+y" }]', "SOURCE_TITLE_PREFIX"],
+  // Control_L+r reload, the source page for the return and popup keys.
+  // openPopup and rotation closePopups each dismiss once; the checkpoint
+  // sends only its three keys.
+  for (const [key, prefix, expected] of [
+    ["ROUTE_SWITCH_SOURCE", "ROUTE_TITLE_PREFIX", 1],
+    ["ROUTE_RETURN", "SOURCE_TITLE_PREFIX", 1],
+    ["ROUTE_RELOAD", "ROUTE_TITLE_PREFIX", 1],
+    ['[{ key: "Escape" }]', "SOURCE_TITLE_PREFIX", 2],
+    ['[{ key: "Control_L+Shift_L+y" }]', "SOURCE_TITLE_PREFIX", 1],
   ]) {
     const literal = "browserKey(" + key + ", " + prefix + ");";
     const call = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-    assert.equal(countMatches(source, call), 1, literal);
+    assert.equal(countMatches(source, call), expected, literal);
   }
+  const escapeCall = /browserKey\(\[\{ key: "Escape" \}\], SOURCE_TITLE_PREFIX\);/g;
+  const openPopupStart = source.indexOf("async function openPopup()");
+  const closePopupsStart = source.indexOf("const closePopups = async () =>");
+  assert.ok(openPopupStart >= 0 && closePopupsStart >= 0);
+  assert.equal(
+    countMatches(source.slice(openPopupStart, source.indexOf("let target;", openPopupStart)), escapeCall),
+    1,
+  );
+  assert.equal(
+    countMatches(source.slice(closePopupsStart, source.indexOf("const rotationReceipt =", closePopupsStart)), escapeCall),
+    1,
+  );
   // The default revocation checkpoint sends exactly its three physical keys;
   // the post-repair refusal and the opt-in idle journey each own one physical
   // Ctrl+W close.
@@ -2568,11 +2580,12 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.equal(countMatches(source, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/g), 2);
   // The whole harness inventory: the default route keys plus exactly two
   // physical Ctrl+W closes, one for the rejected post-repair route and one
-  // for the opt-in idle stale tab.
+  // for the opt-in idle stale tab, plus one rotation popup dismissal.
   const browserCalls = [...source.matchAll(/browserKey\((\[[^\n]*?\]|ROUTE_\w+), (\w+)\);/g)]
     .map((match) => match[1] + " -> " + match[2]);
   assert.deepEqual(browserCalls.sort((a, b) => a.localeCompare(b)), [
     "[{ key: \"Control_L+Shift_L+y\" }] -> SOURCE_TITLE_PREFIX",
+    "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
     "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
     "ROUTE_IDLE_CLOSE_STALE -> ROUTE_TITLE_PREFIX",
     "ROUTE_IDLE_CLOSE_STALE -> ROUTE_TITLE_PREFIX",
@@ -3117,6 +3130,10 @@ test("native failure projection drops raw window, ids, coords, clicks and unknow
       "解锁": { present: true, enabled: true, showing: false },
       "确认连接此扩展": { present: true, enabled: true, showing: true },
       "批准本次填充": { present: false, enabled: false, showing: false },
+      "批准本次暂存": { present: true, enabled: true, showing: true, value: canary },
+      "拒绝本次暂存": { present: true, enabled: true, showing: true, text: canary },
+      "批准本次保存": { present: false, enabled: false, showing: false, value: canary },
+      "拒绝本次保存": { present: false, enabled: false, showing: false, text: canary },
       [canary]: { present: true, enabled: true, showing: true },
     },
     extra: { canary, window: "0xEXTRA-WINDOW" },
@@ -3142,7 +3159,10 @@ test("native failure projection drops raw window, ids, coords, clicks and unknow
     );
     const projected = JSON.parse(json);
     assert.equal(projected.native.available, true);
-    assert.equal(projected.native.controlCount, 6);
+    assert.equal(projected.native.controlCount, 10);
+    for (const label of ["批准本次暂存", "拒绝本次暂存", "批准本次保存", "拒绝本次保存"]) {
+      assert.deepEqual(Object.keys(projected.native.controls[label]).sort(), ["enabled", "present", "showing"]);
+    }
     assert.deepEqual(projected.native.controls["金库文件"], {
       present: true, enabled: true, showing: true,
     });

@@ -219,6 +219,15 @@ class ClickMetadataTests(unittest.TestCase):
 
 
 class AllowlistTests(unittest.TestCase):
+    def test_staged_and_committed_save_controls_are_distinct_exact_literals(self):
+        labels = ("批准本次暂存", "拒绝本次暂存", "批准本次保存", "拒绝本次保存")
+        self.assertEqual(len(set(labels)), 4)
+        for label in labels:
+            self.assertIn(label, native.CONTROL_LABELS)
+            self.assertTrue(native.control_label_allowed(label))
+            for variant in (label + " ", " " + label, label + "。", label + "private"):
+                self.assertFalse(native.control_label_allowed(variant))
+
     def test_v2_approval_labels_are_exact_literals(self):
         for label in ("批准本次操作", "拒绝本次操作"):
             self.assertIn(label, native.CONTROL_LABELS)
@@ -373,6 +382,332 @@ class ReadOnlyInspectionRequestTests(unittest.TestCase):
         # The snapshot reports fixed control booleans, and an unobservable
         # AT-SPI tree propagates instead of being read as an absent control.
         self.assertIn('"present": len(snapshot.get(label, [])) == 1', window)
+
+
+class RecoveryRequestTests(unittest.TestCase):
+    """Strict purpose-bound schema; no synthetic value is ever printed."""
+
+    KIT = "LLR2-" + "A" * 52 + "-" + "B" * 52
+
+    def exact(self, **overrides):
+        request = {
+            "title": native.RECOVERY_TITLE,
+            "executable": os.path.realpath("/synthetic/locklark-desktop"),
+            "expected_pid": 123,
+            "preserve_focus": True,
+            "read_recovery": True,
+        }
+        request.update(overrides)
+        return request
+
+    def test_exact_schema_is_accepted_with_only_the_five_fixed_keys(self):
+        parsed = native.parse_recovery_request(self.exact())
+        self.assertTrue(parsed is not None)
+        self.assertEqual(set(parsed), set(native.RECOVERY_KEYS))
+        self.assertTrue(parsed["read_recovery"] is True)
+        self.assertTrue(parsed["preserve_focus"] is True)
+        self.assertTrue(parsed["expected_pid"] == 123)
+
+    def test_absence_of_the_key_selects_no_recovery_path(self):
+        self.assertIsNone(native.parse_recovery_request({"title": "ordinary"}))
+        without = self.exact()
+        del without["read_recovery"]
+        self.assertIsNone(native.parse_recovery_request(without))
+
+    def test_any_false_nested_or_malformed_key_goes_strict(self):
+        cases = (
+            {"read_recovery": False},
+            self.exact(read_recovery=False),
+            self.exact(read_recovery=1),
+            {**self.exact(), "actions": [{"read_recovery": True}]},
+            {**self.exact(), "inspect": True},
+            {**self.exact(), "title_prefix": native.RECOVERY_TITLE},
+            {**self.exact(), "chooser_action": "navigate"},
+            {**self.exact(), "wait_absent": True},
+            {**self.exact(), "owner": True},
+        )
+        for request in cases:
+            with self.assertRaises(RuntimeError) as error:
+                native.parse_recovery_request(request)
+            self.assertEqual(str(error.exception), "Exact private recovery request required")
+
+    def test_missing_keys_and_extra_keys_are_rejected(self):
+        for key in native.RECOVERY_KEYS - {"read_recovery"}:
+            request = self.exact()
+            del request[key]
+            with self.assertRaises(RuntimeError):
+                native.parse_recovery_request(request)
+        extra = self.exact()
+        extra["private"] = "synthetic-extra"
+        with self.assertRaises(RuntimeError):
+            native.parse_recovery_request(extra)
+
+    def test_title_executable_and_pid_are_exact(self):
+        bad_requests = []
+        for title in (native.RECOVERY_TITLE + " ", native.RECOVERY_TITLE[:-1], ""):
+            bad_requests.append(self.exact(title=title))
+        for executable in ("relative/edge", "/synthetic/edge/", "/synthetic/../edge",
+                           "/synthetic/edge\x00", ""):
+            bad_requests.append(self.exact(executable=executable))
+        for pid in (True, False, 0, -1, 1.0, "123", None):
+            bad_requests.append(self.exact(expected_pid=pid))
+        for preserve in (False, 1, "true", None):
+            bad_requests.append(self.exact(preserve_focus=preserve))
+        for request in bad_requests:
+            with self.assertRaises(RuntimeError):
+                native.parse_recovery_request(request)
+
+    def test_failure_reason_is_a_fixed_enum(self):
+        with self.assertRaises(RuntimeError) as error:
+            native.parse_recovery_request({"read_recovery": False})
+        self.assertEqual(native.failure_reason(error.exception), "recovery-request")
+
+    def test_identity_helper_binds_title_pid_and_executable(self):
+        expected = self.exact()
+        self.assertTrue(native.recovery_target_matches(expected, native.RECOVERY_TITLE, 123, True))
+        self.assertFalse(native.recovery_target_matches(expected, native.RECOVERY_TITLE + " ", 123, True))
+        self.assertFalse(native.recovery_target_matches(expected, native.RECOVERY_TITLE, 124, True))
+        self.assertFalse(native.recovery_target_matches(expected, native.RECOVERY_TITLE, True, True))
+        self.assertFalse(native.recovery_target_matches(expected, native.RECOVERY_TITLE, 123, False))
+
+    def test_wizard_labels_are_fixed_and_dynamic_kit_is_not_allowlisted(self):
+        labels = ("新建独立文件库", "准备创建", "确认并发布备份", "完成创建",
+                  "备份恢复码", "重新输入恢复码", "恢复码未逐字匹配",
+                  "关闭本地基线视图", "已验证本地初始版本 · 远端状态未核实")
+        for label in labels:
+            self.assertTrue(native.control_label_allowed(label))
+        self.assertFalse(self.KIT in native.CONTROL_LABELS)
+        self.assertFalse(native.control_label_allowed(self.KIT))
+
+    def test_private_stdout_pipe_is_required(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            self.assertTrue(native.recovery_stdout_is_pipe(write_fd))
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        with tempfile.TemporaryFile() as regular:
+            self.assertFalse(native.recovery_stdout_is_pipe(regular.fileno()))
+
+
+class RecoveryReaderTests(unittest.TestCase):
+    """Fake OS metadata: role/state/name only and fail-closed uniqueness."""
+
+    KIT = RecoveryRequestTests.KIT
+
+    def controls(self, nodes):
+        controls = native.NativeControls.__new__(native.NativeControls)
+        controls.title = native.RECOVERY_TITLE
+        controls.pid = 123
+        controls.go = Mock()
+        controls.window_refs = Mock(return_value=["window"])
+        controls.walk = Mock(side_effect=lambda _root, visit: [visit(node, 0) for node in nodes])
+        names = {node: value["name"] for node, value in nodes.items()}
+        roles = {node: value["role"] for node, value in nodes.items()}
+        states = {node: value.get("state") for node, value in nodes.items()}
+        controls.at = types.SimpleNamespace(
+            atspi_accessible_get_name=object(),
+            atspi_accessible_get_role_name=object(),
+            atspi_accessible_get_state_set=Mock(side_effect=lambda node: states[node]),
+            atspi_state_set_contains=Mock(
+                side_effect=lambda state, bit: state == "visible" and bit in (25, 30)),
+        )
+
+        def string(function, node):
+            if function is controls.at.atspi_accessible_get_name:
+                return names[node]
+            if function is controls.at.atspi_accessible_get_role_name:
+                return roles[node]
+            raise AssertionError("unexpected accessibility accessor")
+
+        controls.string = string
+        return controls
+
+    def test_one_visible_label_role_name_is_returned(self):
+        controls = self.controls({"node": {"name": self.KIT, "role": "label", "state": "visible"}})
+        result = controls.recovery()
+        self.assertTrue(result is not None)
+        self.assertTrue(len(result) == 110)
+
+    def test_old_text_and_entry_roles_are_rejected(self):
+        for role in ("text", "entry"):
+            with self.subTest(role=role):
+                controls = self.controls({
+                    "node": {"name": self.KIT, "role": role, "state": "visible"},
+                })
+                with self.assertRaisesRegex(RuntimeError, "Native recovery material not ready"):
+                    controls.recovery()
+
+    def test_non_label_hidden_and_nonmatching_names_are_ignored(self):
+        controls = self.controls({
+            "button": {"name": self.KIT, "role": "push button", "state": "visible"},
+            "hidden": {"name": self.KIT, "role": "label", "state": "hidden"},
+            "other": {"name": "LLR2-" + "A" * 51 + "-" + "B" * 52, "role": "label", "state": "visible"},
+        })
+        with self.assertRaisesRegex(RuntimeError, "Native recovery material not ready"):
+            controls.recovery()
+
+    def test_duplicate_visible_label_names_fail_closed(self):
+        controls = self.controls({
+            "one": {"name": self.KIT, "role": "label", "state": "visible"},
+            "two": {"name": self.KIT, "role": "label", "state": "visible"},
+        })
+        with self.assertRaisesRegex(RuntimeError, "Native recovery material must be unique"):
+            controls.recovery()
+
+    def test_missing_atspi_window_fails_closed(self):
+        controls = self.controls({})
+        controls.window_refs = Mock(return_value=[])
+        with self.assertRaisesRegex(RuntimeError, "Native accessibility window unavailable"):
+            controls.recovery()
+
+    def test_tree_budget_and_query_refusal_propagate(self):
+        for error, reason in (
+            (RuntimeError("Native accessibility tree limit"), "a11y-tree-limit"),
+            (native.AccessibilityQueryUnavailable("Native accessibility query failed"), "a11y-query"),
+        ):
+            controls = self.controls({})
+            controls.walk = Mock(side_effect=error)
+            with self.assertRaises(Exception) as caught:
+                controls.recovery()
+            self.assertEqual(native.failure_reason(caught.exception), reason)
+
+
+class NativeSnapshotLabelRoleTests(unittest.TestCase):
+    """Pinned MyGo RoleText is ATK "label"; only fixed statuses accept it."""
+
+    STATUS_LABELS = (
+        "恢复码未逐字匹配",
+        "已验证本地初始版本 · 远端状态未核实",
+        "解锁独立文件库",
+        "显示上次验证结果",
+        "本次刷新已验证",
+        "正在锁定本地文件库",
+        "本地文件库已锁定",
+        "锁定未完成，请核查本地状态",
+        "本地文件库暂不可用，请稍后重试",
+        "完整验证失败；请重新输入",
+    )
+
+    def controls(self, nodes):
+        controls = native.NativeControls.__new__(native.NativeControls)
+        controls.title = "synthetic-window"
+        controls.pid = None
+        controls.go = Mock()
+        controls.window_refs = Mock(return_value=["window"])
+        controls.walk = Mock(side_effect=lambda _root, visit: [visit(node, 0) for node in nodes])
+        names = {node: value["name"] for node, value in nodes.items()}
+        roles = {node: value["role"] for node, value in nodes.items()}
+        states = {node: value.get("state") for node, value in nodes.items()}
+        rects = {node: types.SimpleNamespace(
+            contents=types.SimpleNamespace(x=value["x"], y=0, width=10, height=5))
+                 for node, value in nodes.items()}
+        controls.at = types.SimpleNamespace(
+            atspi_accessible_get_name=object(),
+            atspi_accessible_get_role_name=object(),
+            atspi_accessible_get_state_set=Mock(side_effect=lambda node: states[node]),
+            atspi_state_set_contains=Mock(
+                side_effect=lambda state, bit: state == "visible" and bit in (8, 24, 25, 30)),
+            atspi_accessible_get_component_iface=Mock(side_effect=lambda node: node),
+            atspi_component_get_extents=Mock(side_effect=lambda node, _coord: rects[node]),
+            atspi_rect_free=Mock(),
+        )
+        controls.checked = lambda function, *args: function(*args)
+
+        def string(function, node):
+            if function is controls.at.atspi_accessible_get_name:
+                return names[node]
+            if function is controls.at.atspi_accessible_get_role_name:
+                return roles[node]
+            raise AssertionError("unexpected accessibility accessor")
+
+        controls.string = string
+        return controls
+
+    def test_fixed_status_label_roles_are_observable(self):
+        nodes = {label: {"name": label, "role": "label", "state": "visible", "x": index}
+                 for index, label in enumerate(self.STATUS_LABELS)}
+        snapshot = self.controls(nodes).snapshot()
+        self.assertEqual(set(snapshot), set(self.STATUS_LABELS))
+        for label in self.STATUS_LABELS:
+            self.assertEqual(len(snapshot[label]), 1)
+            self.assertTrue(snapshot[label][0]["enabled"])
+            self.assertTrue(snapshot[label][0]["showing"])
+
+    def test_label_role_allowlist_is_exactly_the_reviewed_status_set(self):
+        self.assertEqual(native.LABEL_ROLE_STATUS_LABELS, frozenset(self.STATUS_LABELS))
+        self.assertNotIn("Secret Key", native.LABEL_ROLE_STATUS_LABELS)
+        self.assertIn("Secret Key", native.CONTROL_LABELS)
+
+    def test_secret_key_label_role_is_ignored_and_entry_stays_unique(self):
+        only = self.controls({
+            "label": {"name": "Secret Key", "role": "label", "state": "visible", "x": 11},
+        }).snapshot()
+        self.assertNotIn("Secret Key", only)
+        both = self.controls({
+            "label": {"name": "Secret Key", "role": "label", "state": "visible", "x": 11},
+            "entry": {"name": "Secret Key", "role": "entry", "state": "visible", "x": 22},
+        }).snapshot()
+        self.assertEqual(len(both["Secret Key"]), 1)
+        self.assertEqual(both["Secret Key"][0]["x"], 22)
+
+    def test_ordinary_entry_and_button_roles_remain_accepted(self):
+        snapshot = self.controls({
+            "entry": {"name": "主密码", "role": "entry", "state": "visible", "x": 1},
+            "button": {"name": "解锁", "role": "push button", "state": "visible", "x": 2},
+        }).snapshot()
+        self.assertEqual(set(snapshot), {"主密码", "解锁"})
+
+
+class RecoveryDriverBoundaryTests(unittest.TestCase):
+    """Source-order guards for the no-focus/no-input private reader."""
+
+    source = open(native.__file__, encoding="utf-8").read()
+
+    def branch_source(self):
+        start = self.source.index("if recovery is not None:")
+        end = self.source.index("ownership = None", start)
+        return self.source[start:end]
+
+    def test_schema_check_precedes_x_open_and_owner_dispatch(self):
+        parse = self.source.index("recovery = parse_recovery_request(request)")
+        self.assertLess(parse, self.source.index('x = C.CDLL("libX11.so.6")'))
+        self.assertLess(parse, self.source.index(
+            "folder_mode, owner, owner_error = dispatch_owner_request(request)"))
+
+    def test_private_branch_has_no_focus_raise_click_or_xtest(self):
+        branch = self.branch_source()
+        for forbidden in ("XRaiseWindow(", "XSetInputFocus(", "XTestFakeKeyEvent(",
+                          "XTestFakeButtonEvent(", "XTestFakeMotionEvent(", "click("):
+            self.assertNotIn(forbidden, branch)
+        for required in ("normal_viewable(target)", "window_title(target)", "window_pid(target)",
+                         "expected_process(target)", "wait_window_viewable(recovery_map_state, discovery_deadline)",
+                         "NativeControls(recovery[\"title\"], recovery[\"expected_pid\"])",
+                         "recovery_stdout_is_pipe()", 'print(json.dumps({"recovery": kit})'):
+            self.assertIn(required, branch)
+        self.assertLess(branch.index("wait_window_viewable("),
+                        branch.index("NativeControls(recovery[\"title\"]"))
+        self.assertLess(branch.index("recovery_stdout_is_pipe()"),
+                        branch.index("NativeControls(recovery[\"title\"]"))
+        self.assertLess(branch.index("NativeControls(recovery[\"title\"]"),
+                        branch.index('print(json.dumps({"recovery": kit})'))
+        self.assertNotIn('"controls"', branch)
+        self.assertNotIn('"window"', branch)
+
+    def test_reader_uses_name_role_state_only(self):
+        method = self.source[self.source.index("    def recovery(self):"):
+                             self.source.index("    def ready(self, label):")]
+        for forbidden in ("atspi_accessible_get_value", "atspi_accessible_get_text",
+                          "atspi_text_get_text", "atspi_accessible_get_editable_text",
+                          "XTestFake", "XRaiseWindow", "XSetInputFocus", "click("):
+            self.assertNotIn(forbidden, method)
+        self.assertIn("self.window_refs()", method)
+        for required in ("atspi_accessible_get_name", "atspi_accessible_get_role_name",
+                         "atspi_accessible_get_state_set"):
+            self.assertIn(required, method)
+        self.assertIn("RECOVERY_MATERIAL.fullmatch(name)", method)
+        self.assertIn("matches.append(name)", method)
+        self.assertIn("return matches[0]", method)
 
 
 def owner_request(**overrides):

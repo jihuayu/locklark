@@ -2,10 +2,13 @@
 """Dependency and aggregate contract for the extension-producer workflow."""
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -138,6 +141,160 @@ def ci_required_shell() -> str:
         elif not line.strip() and shell:
             shell.append("")
     return "\n".join(shell)
+
+
+class VaultFileProductCIContract(unittest.TestCase):
+    STEP = "Test Go packages and native OpenSSH transport"
+    EARLY_PARENTS = (
+        "TestVaultFileResumeProductMinimum",
+        "TestVaultFileStatusProductMinimum",
+        "TestVaultFileStatusProductAbsentBackendMinimum",
+        "TestVaultFileDevicePublicProductMinimum",
+        "TestVaultFileOpenBaselineProductMinimum",
+        "TestVaultFileOpenBaselineProductItemReferencesMinimum",
+        "TestVaultFileTitleEditProductMinimum",
+    )
+    SELECTOR = "^(" + "|".join(EARLY_PARENTS) + ")$"
+    MINIMUM = f"go test -count=1 -run '{SELECTOR}' ./cmd/locklark"
+    REMAINING = f"go test -count=1 -skip '{SELECTOR}' ./..."
+    EXIT_CHECK = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+
+    @classmethod
+    def linux_commands(cls) -> list[str]:
+        commands = step_commands("go", cls.STEP)
+        split = commands.index("} else {")
+        if commands[-1] != "}" or commands[split - 3:split] != [
+            "if ($IsWindows) {",
+            "  python scripts/personal_test_partition.py",
+            "  " + cls.EXIT_CHECK,
+        ]:
+            raise AssertionError("Windows partition or Linux branch changed")
+        return [line[2:] for line in commands[split + 1:-1]]
+
+    def test_linux_reuses_one_product_and_partitions_minimum_before_remaining(self):
+        commands = self.linux_commands()
+        self.assertEqual(commands, [
+            "$vaultFileProduct = Join-Path $env:RUNNER_TEMP 'locklark-bin/locklark'",
+            "if (-not [System.IO.Path]::IsPathFullyQualified($vaultFileProduct) -or -not "
+            "(Test-Path -LiteralPath $vaultFileProduct -PathType Leaf)) "
+            "{ throw 'VAULTFILE_PRODUCT_UNAVAILABLE' }",
+            "$env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct",
+            self.MINIMUM, self.EXIT_CHECK, self.REMAINING, self.EXIT_CHECK,
+        ])
+        self.assertEqual(text().count("LOCKLARK_TEST_VAULTFILE_PRODUCT"), 1)
+        self.assertNotIn("go build", "\n".join(commands))
+        self.assertEqual(block("linux-build").count(
+            'go build -trimpath -o "$bin/locklark" ./cmd/locklark'
+        ), 1)
+        self.assertIn("if-no-files-found: error", block("linux-build"))
+        download = step_text("go", "Download Linux primary binaries")
+        self.assertIn("if: runner.os == 'Linux'", download)
+        self.assertIn("name: locklark-linux-bin", download)
+        self.assertIn("path: ${{ runner.temp }}/locklark-bin", download)
+
+    def test_exact_go_parent_partition_runs_every_parent_once(self):
+        commands = self.linux_commands()
+        minimum = re.fullmatch(r"go test -count=1 -run '([^']+)' ./cmd/locklark", commands[3])
+        remaining = re.fullmatch(r"go test -count=1 -skip '([^']+)' ./\.\.\.", commands[5])
+        self.assertIsNotNone(minimum)
+        self.assertIsNotNone(remaining)
+        run_pattern, skip_pattern = minimum[1], remaining[1]
+        for pattern in (run_pattern, skip_pattern):
+            self.assertTrue(pattern.startswith("^") and pattern.endswith("$"))
+        parents = {
+            name
+            for path in (ROOT / "cmd" / "locklark").glob("*_test.go")
+            for name in re.findall(
+                r"^func (Test[A-Za-z0-9_]+)\(t \*testing\.T\)",
+                path.read_text(encoding="utf-8"), re.MULTILINE,
+            )
+        }
+        self.assertTrue(set(self.EARLY_PARENTS) <= parents)
+        early = {name for name in parents if re.search(run_pattern, name)}
+        excluded = {name for name in parents if re.search(skip_pattern, name)}
+        self.assertEqual(early, set(self.EARLY_PARENTS))
+        self.assertEqual(excluded, set(self.EARLY_PARENTS))
+        self.assertTrue({
+            "TestVaultFileImportProductMinimum",
+            "TestVaultFileTrackProductMinimum",
+            "TestVaultFileStatusProductAmbiguousBackendRefusal",
+            "TestVaultFileStatusProductUnsafeBackendRefusal",
+            "TestVaultFileDevicePublicProductFactorRefusal",
+            "TestVaultFileOpenBaselineProductRefusals",
+            "TestVaultFileOpenBaselineProductItemReferencesRefusals",
+            "TestVaultFileOpenBaselineConfigPathRefusals",
+            "TestVaultFileTitleEditProductForeignAuthorReplayRefusal",
+            "TestVaultFileTitleEditProductRefusals",
+            "TestVaultFileTitleEditProductReplayAndStaleRemote",
+            "TestVaultFileTitleEditProductUnsafePaths",
+        } <= parents - excluded)
+        for name in parents:
+            with self.subTest(parent=name):
+                self.assertEqual(int(name in early) + int(name not in excluded), 1)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "pwsh dispatch mock is unavailable")
+    def test_actual_linux_commands_with_strict_mock_only_dispatch_and_propagate_exit(self):
+        # This fixture cannot execute a product or build anything. It checks
+        # only the extracted PowerShell's scheduling, argv, env and exit codes.
+        expected = [
+            ["test", "-count=1", "-run", self.SELECTOR, "./cmd/locklark"],
+            ["test", "-count=1", "-skip", self.SELECTOR, "./..."],
+        ]
+        for kind, fail_at, code, calls in (
+            ("file", -1, 0, 2), ("file", 0, 7, 1), ("file", 1, 11, 2),
+            ("missing", -1, None, 0), ("directory", -1, None, 0),
+            ("relative", -1, None, 0),
+        ):
+            with self.subTest(kind=kind, fail_at=fail_at), tempfile.TemporaryDirectory() as temporary:
+                root = pathlib.Path(temporary)
+                runner = root / "runner"
+                product = runner / "locklark-bin" / "locklark"
+                product.parent.mkdir(parents=True)
+                if kind == "directory":
+                    product.mkdir()
+                elif kind != "missing":
+                    product.write_text("not an executable product", encoding="utf-8")
+                    product.chmod(0o600)
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                log = root / "go-argv.jsonl"
+                fake_go = fake_bin / "go"
+                fake_go.write_text("#!" + sys.executable + "\n" + (
+                    "import json, os, pathlib, sys\n"
+                    "log = pathlib.Path(os.environ['VAULTFILE_DISPATCH_LOG'])\n"
+                    "seen = log.read_text().splitlines() if log.exists() else []\n"
+                    "expected = json.loads(os.environ['VAULTFILE_DISPATCH_EXPECTED'])\n"
+                    "index = len(seen)\n"
+                    "if index >= len(expected) or sys.argv[1:] != expected[index]: sys.exit(85)\n"
+                    "if os.environ.get('LOCKLARK_TEST_VAULTFILE_PRODUCT') != os.environ['VAULTFILE_DISPATCH_PRODUCT']: sys.exit(86)\n"
+                    "with log.open('a') as output: output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                    "sys.exit(int(os.environ['VAULTFILE_DISPATCH_EXIT']) if index == int(os.environ['VAULTFILE_DISPATCH_FAIL_AT']) else 0)\n"
+                ), encoding="utf-8")
+                fake_go.chmod(0o755)
+                script = root / "dispatch.ps1"
+                script.write_text(
+                    "$ErrorActionPreference = 'Stop'\n" + "\n".join(self.linux_commands()) + "\n",
+                    encoding="utf-8",
+                )
+                env = {**os.environ, "RUNNER_TEMP": "runner" if kind == "relative" else str(runner),
+                       "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                       "VAULTFILE_DISPATCH_LOG": str(log),
+                       "VAULTFILE_DISPATCH_EXPECTED": json.dumps(expected),
+                       "VAULTFILE_DISPATCH_PRODUCT": str(product),
+                       "VAULTFILE_DISPATCH_FAIL_AT": str(fail_at),
+                       "VAULTFILE_DISPATCH_EXIT": str(code or 0)}
+                env.pop("LOCKLARK_TEST_VAULTFILE_PRODUCT", None)
+                result = subprocess.run(
+                    [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
+                    env=env, cwd=root, text=True, capture_output=True, check=False,
+                )
+                if code is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("VAULTFILE_PRODUCT_UNAVAILABLE", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, code, result.stderr)
+                actual = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+                self.assertEqual(actual, expected[:calls])
 
 
 class ExtensionProducerWorkflowContract(unittest.TestCase):
@@ -300,13 +457,14 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
     READY = "Install native GUI acceptance tools"
     PEER = "Install independent notes KDBX reader"
     GATE = "Test reconciled E2E gates and component contracts"
+    A = "Test native Onevra independent local vault creation"
+    DAILY = "Test native desktop daily tools and clipboard ownership"
+    QUICK = "Test native desktop global quick search"
     CHROMIUM = "Test browser extension DOM"
     FIREFOX = "Test Firefox browser extension DOM"
     UPLOAD = "Preserve synthetic popup UI screenshots"
     READY_STEPS = (
-        "Test native desktop daily tools and clipboard ownership",
-        "Test native desktop global quick search",
-        PEER, CHROMIUM, FIREFOX,
+        A, DAILY, QUICK, PEER, CHROMIUM, FIREFOX,
     )
     PEER_STEPS = (
         "Test native imported multiline login notes and failure privacy",
@@ -329,17 +487,29 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
         for name, identifier in ids.items():
             self.assertEqual(step_fields("web-core", name).get("id"), identifier)
         self.assertNotIn("if", step_fields("web-core", self.READY))
-        self.assertNotIn("if", step_fields("web-core", self.GATE))
+        self.assertEqual(step_fields("web-core", self.GATE).get("if"),
+                         "${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}")
         self.assertNotIn("continue-on-error:", source)
         self.assertNotRegex(source, r"(?m)^\s*go build\b")
         self.assertIn('--skip-build --bin-dir "$RUNNER_TEMP/locklark-bin"', step_text("web-core", self.GATE))
         order = [
             "Download Linux primary binaries", "Make Linux binaries executable",
             "Smoke test downloaded CLI before acceptance", "Test browser extension",
-            self.READY, self.GATE,
+            self.READY, self.A, self.GATE,
         ]
         positions = [source.index(f"      - name: {name}\n") for name in order]
         self.assertEqual(positions, sorted(positions))
+        self.assertLess(source.index(f"      - name: {self.GATE}\n"),
+                        source.index(f"      - name: {self.DAILY}\n"))
+        a_fields = step_fields("web-core", self.A)
+        a_text = step_text("web-core", self.A)
+        self.assertEqual(a_fields.get("timeout-minutes"), "10")
+        self.assertEqual(a_fields.get("run"), step_fields("web-core", self.DAILY).get("run"))
+        for shared in ("LOCKLARK_GO: go",
+                       "LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop",
+                       "LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture",
+                       "LOCKLARK_TEST_SCENARIO: local-vault-file-create"):
+            self.assertIn(shared, a_text)
         self.assertFalse(web_core_step_enabled(self.READY, previous_failure=True))
         self.assertFalse(web_core_step_enabled(self.READY, cancelled=True))
 
@@ -350,6 +520,23 @@ class WebCoreIndependentAcceptanceContract(unittest.TestCase):
                     self.assertTrue(web_core_step_enabled(
                         name, previous_failure=previous_failure, outcomes=self.ready_outcomes(),
                     ))
+
+    def test_a_failure_still_runs_reconciled_e2e_and_keeps_job_red(self):
+        # A is now before the original E2E gate. Its failure must not be turned
+        # into an implicit-success skip of that gate, while the gate still
+        # requires the same native_gui_ready prerequisite.
+        self.assertTrue(web_core_step_enabled(
+            self.GATE, previous_failure=True, outcomes=self.ready_outcomes()))
+        self.assertFalse(web_core_step_enabled(
+            self.GATE, cancelled=True, outcomes=self.ready_outcomes()))
+        for status in ("failure", "skipped", "cancelled", ""):
+            outcomes = {**self.ready_outcomes(), "native_gui_ready": status}
+            self.assertFalse(web_core_step_enabled(
+                self.GATE, previous_failure=True, outcomes=outcomes))
+        # An A failure cannot be swallowed: the step has no continue-on-error.
+        source = block("web-core")
+        self.assertNotIn("continue-on-error:", source)
+        self.assertNotIn("always()", step_fields("web-core", self.A).get("if", ""))
 
     def test_unready_or_cancelled_blocks_every_independent_step(self):
         for status in ("failure", "skipped", "cancelled", ""):
