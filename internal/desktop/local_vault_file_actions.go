@@ -161,7 +161,13 @@ func (a *App) applyLocalVaultFileRefs(refs []localVaultFileRef, backendRoot stri
 				return
 			}
 		}
-		state.unopenedNotice = nil
+		// A present notice that fails exact validation must not fall through
+		// to ordinary old/new refs equality, which could otherwise keep the
+		// failed notice's finite created status.
+		a.invalidateLocalVaultFileProjectionView(localVaultFileStatusUnavailable)
+		state.refs = refs
+		state.refsBackendRoot = backendRoot
+		return
 	}
 	if state.selected != "" {
 		oldRef, oldOK := localVaultFileRefByPath(state.refs, state.selected)
