@@ -28,6 +28,7 @@ import (
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 	"github.com/oneo-me/onevra/source/shells/plain"
@@ -550,6 +551,11 @@ func (a *App) Lock() {
 	a.lastActivity = time.Time{}
 }
 func (a *App) unlock() {
+	if a.busy {
+		a.password = ""
+		a.secret = ""
+		return
+	}
 	path := a.path
 	pw := []byte(a.password)
 	secret := a.secret
@@ -572,27 +578,79 @@ func (a *App) unlock() {
 		a.status = "Secret Key 格式不正确"
 		return
 	}
+	settingsPath := a.settingsPath
+	generation := a.generation
+	idle := a.idleTimeout()
+	profileDir, backendRoot := localVaultFilePaths(settingsPath, path)
+	launch := a.launch
+	storeSecret := func() error { return a.storeDeviceSecret(path, secret) }
 	a.runContext(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
-		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
+		refs, listErr := listLocalVaultFileRefs(profileDir, backendRoot, path)
+		candidates := make([]vaultfileclient.LocalGenesisBatchCandidate, 0, len(refs))
+		candidateRefs := make([]int, 0, len(refs))
+		if listErr == nil {
+			for index, ref := range refs {
+				if ref.vaultID == "" || ref.journalPath == "" {
+					continue
+				}
+				candidates = append(candidates, vaultfileclient.LocalGenesisBatchCandidate{
+					ConfigPath: ref.path, WorkspaceRoot: backendRoot,
+					VaultID: ref.vaultID, JournalPath: ref.journalPath,
+				})
+				candidateRefs = append(candidateRefs, index)
+			}
+		} else {
+			refs = nil
+		}
+		fanoutIncomplete := listErr != nil || len(candidates) > vaultfileclient.MaxLocalGenesisBatchTargets
+		s, results, e := vaultfileclient.OpenLocalGenesisSessionsForAccount(ctx, path, pw, key, idle, candidates)
+		clear(pw)
+		clear(key)
 		if e != nil {
 			return outcome{err: e}
 		}
-		rememberErr := a.storeDeviceSecret(path, secret)
+		if s == nil {
+			return outcome{err: personal.ErrSessionLocked}
+		}
+		batch := newLocalVaultFileInitialBatch(s, results, refs, candidateRefs,
+			path, settingsPath, profileDir, backendRoot, generation)
 		if ctx.Err() != nil {
-			s.Lock()
+			batch.drain()
 			return outcome{err: personal.ErrSessionLocked}
 		}
 		rows, e := s.List("active")
 		if e != nil {
-			s.Lock()
+			batch.drain()
 			return outcome{err: e}
 		}
-		return outcome{drop: s.Lock, apply: func() {
-			a.session = s
+		batch.setRows(rows)
+		rememberErr := storeSecret()
+		if ctx.Err() != nil {
+			batch.drain()
+			return outcome{err: personal.ErrSessionLocked}
+		}
+		success := 0
+		for _, result := range results {
+			if result.Err != nil {
+				fanoutIncomplete = true
+			} else if result.Wrapper != nil {
+				success++
+			}
+		}
+		if len(refs) > 0 && success == 0 {
+			fanoutIncomplete = true
+		}
+		batch.fanoutIncomplete = fanoutIncomplete
+		return outcome{drop: func() { batch.drop(launch) }, apply: func() {
+			adoptedParent, adoptedRows, ok := a.adoptLocalVaultFileInitialBatch(batch)
+			if !ok {
+				return
+			}
+			a.session = adoptedParent
 			a.armIdleTimer()
-			a.rows = loginProjection(rows)
+			a.rows = loginProjection(adoptedRows)
 			a.scope = "active"
 			a.page = "vault"
 			a.v2Mode = !classicLayoutRequested()
@@ -602,8 +660,10 @@ func (a *App) unlock() {
 			_ = a.SetVaultPath(path)
 			a.touchActivity()
 			a.loadV2Metadata()
-			a.refreshLocalVaultFiles()
 			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
+			if batch.fanoutIncomplete {
+				a.status += localVaultFileInitialFanoutIncompleteSuffix
+			}
 			if rememberErr != nil {
 				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
 			}
