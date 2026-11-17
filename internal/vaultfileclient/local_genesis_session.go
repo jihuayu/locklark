@@ -334,9 +334,25 @@ func readLocalGenesisLocator(s *personal.Session, configPath, workspaceRoot, vau
 	if s == nil || !s.Unlocked() {
 		return zeroManifest, "", zeroCompanion, ErrLocalReview
 	}
+	return readLocalGenesisLocatorForAccount(s.VaultPath(), configPath, workspaceRoot, vaultID, "")
+}
+
+// readLocalGenesisLocatorForAccount is the pre-authentication locator shape
+// bound to one explicit account path. The batch adapter uses it before the
+// single account KDF; the existing Session-based constructor keeps the same
+// behavior by passing its VaultPath and no expected journal.
+func readLocalGenesisLocatorForAccount(accountPath, configPath, workspaceRoot, vaultID, expectedJournal string) (Manifest, string, Companion, error) {
+	var zeroManifest Manifest
+	var zeroCompanion Companion
+	if accountPath == "" || configPath == "" || workspaceRoot == "" || vaultID == "" {
+		return zeroManifest, "", zeroCompanion, ErrLocalReview
+	}
 	manifest, exists, err := ReadManifest(configPath)
 	if err != nil || !exists || manifest.VaultID != vaultID ||
-		manifest.PersonalFile != s.VaultPath() || manifest.BackendRoot != workspaceRoot {
+		manifest.PersonalFile != accountPath || manifest.BackendRoot != workspaceRoot {
+		return zeroManifest, "", zeroCompanion, ErrLocalReview
+	}
+	if expectedJournal != "" && manifest.Journal != expectedJournal {
 		return zeroManifest, "", zeroCompanion, ErrLocalReview
 	}
 	digest, err := ReadManifestDigest(configPath, manifest)

@@ -27,6 +27,8 @@ import sys
 import time
 
 
+NATIVE_INITIAL_CANCEL_LABEL = "取消解锁"
+
 CONTROL_LABELS = (
     "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
     "取消 / 使用其他验证器", "确认连接（每次敏感操作需批准）",
@@ -69,6 +71,7 @@ CONTROL_LABELS = (
     "显示上次验证结果", "本次刷新已验证", "正在锁定本地文件库",
     "本地文件库已锁定", "锁定未完成，请核查本地状态",
     "本地文件库暂不可用，请稍后重试", "完整验证失败；请重新输入",
+    "取消解锁",
 )
 
 # Pinned mygo@v0.7.4 maps the ui.RoleText primitive to the ATK role name

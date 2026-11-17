@@ -105,6 +105,8 @@ class ProfileAndLabelTests(unittest.TestCase):
         helper = desktop.local_vault_display_labels(manifests)
         subject = desktop.Acceptance.__new__(desktop.Acceptance)
         subject.values = set()
+        subject.codes = set()
+        subject.local_manifest_private_values = {}
         subject.local_a_manifest = {"path": str(a_path), "name": "alpha.llv", "vault_id": a_id}
         subject.read_local_vault_manifests = lambda: manifests
         subject.record_local_vault_b()
@@ -136,6 +138,8 @@ class ProfileAndLabelTests(unittest.TestCase):
         self.manifest("beta.llv", b_id, "a")
         subject = desktop.Acceptance.__new__(desktop.Acceptance)
         subject.values = set()
+        subject.codes = set()
+        subject.local_manifest_private_values = {}
         subject.local_a_manifest = {"path": str(a_path), "name": "alpha.llv",
                                     "vault_id": "ffffffffffffffffffffffffffffffff"}
         subject.read_local_vault_manifests = lambda: desktop.read_local_vault_manifests(self.profile)
@@ -383,6 +387,7 @@ class PrivacyRegistrationTests(unittest.TestCase):
             subject.fixture_path = root / "fixture.json"
             subject.values = set()
             subject.codes = set()
+            subject.local_manifest_private_values = {}
             subject.local_a_manifest = manifests[0]
             subject.read_local_vault_manifests = lambda: desktop.read_local_vault_manifests(profile)
             subject.record_local_vault_b()

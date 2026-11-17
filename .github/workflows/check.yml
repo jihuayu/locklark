@@ -26,6 +26,9 @@ jobs:
           go build -trimpath -o "$bin/locklark" ./cmd/locklark
           python3 scripts/cli_smoke.py --cli "$bin/locklark"
           go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
+          # Source-bound tagged acceptance configuration for native fence
+          # cases; the ordinary desktop binary remains the default artifact.
+          go build -trimpath -tags=locklark_native_acceptance -o "$bin/locklark-desktop-native-acceptance" ./cmd/locklark-desktop
           go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
           go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
           go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
@@ -529,6 +532,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_DESKTOP_FENCE_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop-native-acceptance
           LOCKLARK_TEST_SCENARIO: local-vault-file-create
       - name: Test reconciled E2E gates and component contracts
         if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
@@ -556,6 +560,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_DESKTOP_FENCE_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop-native-acceptance
       - name: Test native desktop global quick search
         if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
         timeout-minutes: 10
@@ -564,6 +569,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_DESKTOP_FENCE_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop-native-acceptance
       - name: Install independent notes KDBX reader
         id: notes_peer_ready
         if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' }}
@@ -582,6 +588,7 @@ jobs:
           LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark-bin/locklark
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
           LOCKLARK_DESKTOP_FIXTURE: ${{ runner.temp }}/locklark-bin/desktop-acceptance-fixture
+          LOCKLARK_DESKTOP_FENCE_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop-native-acceptance
           LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
       - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
         if: ${{ !cancelled() && steps.native_gui_ready.outcome == 'success' && steps.notes_peer_ready.outcome == 'success' }}

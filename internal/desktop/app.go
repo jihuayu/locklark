@@ -28,14 +28,16 @@ import (
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/locklark/internal/vaultfileclient"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 	"github.com/oneo-me/onevra/source/shells/plain"
 )
 
 type outcome struct {
-	apply, drop func()
-	err         error
+	apply, drop    func()
+	err            error
+	initialAccount *initialAccountUnlockOutcome
 }
 
 // errEmergencyKitRequired aborts a generated-key vault creation before any
@@ -58,6 +60,8 @@ type App struct {
 	quickShortcut                                          string
 	operationSequence                                      uint64
 	operation                                              *nativeOperation
+	accountUnlock                                          *accountUnlockAttempt
+	accountUnlockSequence                                  uint64
 	mutationUnknown                                        bool
 	website, generationLength                              string
 	regenerate                                             *personal.NativeLoginView
@@ -180,8 +184,10 @@ func New() *App {
 	a.importFull = true
 	return a
 }
-func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
-func (a *App) runContext(work func(context.Context) outcome) {
+func (a *App) run(work func() outcome)                             { a.runContext(func(context.Context) outcome { return work() }) }
+func (a *App) runContext(work func(context.Context) outcome)       { a.runContextKind(work, false) }
+func (a *App) runAccountUnlock(work func(context.Context) outcome) { a.runContextKind(work, true) }
+func (a *App) runContextKind(work func(context.Context) outcome, accountUnlock bool) {
 	if a.busy {
 		return
 	}
@@ -189,17 +195,28 @@ func (a *App) runContext(work func(context.Context) outcome) {
 	a.busy = true
 	a.status = "处理中…"
 	generation := a.generation
+	var attempt accountUnlockAttempt
+	if accountUnlock {
+		attempt = a.beginAccountUnlock(generation, a.operationSequence)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.launch(func() {
 		r := work(ctx)
+		nativeInitialUnlockFenceAfterWork(ctx, accountUnlock, attempt, &r)
 		cancel()
 		a.dispatch(func() {
 			if generation != a.generation {
+				if accountUnlock {
+					a.retireAccountUnlock(attempt)
+				}
 				if r.drop != nil {
 					r.drop()
 				}
 				return
+			}
+			if accountUnlock {
+				a.retireAccountUnlock(attempt)
 			}
 			a.busy = false
 			if r.err != nil {
@@ -486,6 +503,7 @@ func (a *App) Lock() {
 		}
 	}
 	a.operation = nil
+	a.accountUnlock = nil
 	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
@@ -550,6 +568,11 @@ func (a *App) Lock() {
 	a.lastActivity = time.Time{}
 }
 func (a *App) unlock() {
+	if a.busy {
+		a.password = ""
+		a.secret = ""
+		return
+	}
 	path := a.path
 	pw := []byte(a.password)
 	secret := a.secret
@@ -572,27 +595,82 @@ func (a *App) unlock() {
 		a.status = "Secret Key 格式不正确"
 		return
 	}
-	a.runContext(func(ctx context.Context) outcome {
+	settingsPath := a.settingsPath
+	generation := a.generation
+	idle := a.idleTimeout()
+	profileDir, backendRoot := localVaultFilePaths(settingsPath, path)
+	launch := a.launch
+	storeSecret := func() error { return a.storeDeviceSecret(path, secret) }
+	a.runAccountUnlock(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
-		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
+		refs, listErr := listLocalVaultFileRefs(profileDir, backendRoot, path)
+		candidates := make([]vaultfileclient.LocalGenesisBatchCandidate, 0, len(refs))
+		candidateRefs := make([]int, 0, len(refs))
+		if listErr == nil {
+			for index, ref := range refs {
+				if ref.vaultID == "" || ref.journalPath == "" {
+					continue
+				}
+				candidates = append(candidates, vaultfileclient.LocalGenesisBatchCandidate{
+					ConfigPath: ref.path, WorkspaceRoot: backendRoot,
+					VaultID: ref.vaultID, JournalPath: ref.journalPath,
+				})
+				candidateRefs = append(candidateRefs, index)
+			}
+		} else {
+			refs = nil
+		}
+		fanoutIncomplete := listErr != nil || len(candidates) > vaultfileclient.MaxLocalGenesisBatchTargets
+		s, results, e := vaultfileclient.OpenLocalGenesisSessionsForAccount(ctx, path, pw, key, idle, candidates)
+		clear(pw)
+		clear(key)
 		if e != nil {
 			return outcome{err: e}
 		}
-		rememberErr := a.storeDeviceSecret(path, secret)
+		if s == nil {
+			return outcome{err: personal.ErrSessionLocked}
+		}
+		batch := newLocalVaultFileInitialBatch(s, results, refs, candidateRefs,
+			path, settingsPath, profileDir, backendRoot, generation)
 		if ctx.Err() != nil {
-			s.Lock()
+			batch.drain()
 			return outcome{err: personal.ErrSessionLocked}
 		}
 		rows, e := s.List("active")
 		if e != nil {
-			s.Lock()
+			batch.drain()
 			return outcome{err: e}
 		}
-		return outcome{drop: s.Lock, apply: func() {
-			a.session = s
+		batch.setRows(rows)
+		rememberErr := storeSecret()
+		if ctx.Err() != nil {
+			batch.drain()
+			return outcome{err: personal.ErrSessionLocked}
+		}
+		success := 0
+		for _, result := range results {
+			if result.Err != nil {
+				fanoutIncomplete = true
+			} else if result.Wrapper != nil {
+				success++
+			}
+		}
+		if len(refs) > 0 && success == 0 {
+			fanoutIncomplete = true
+		}
+		batch.fanoutIncomplete = fanoutIncomplete
+		initial := newInitialAccountUnlockOutcome(batch, results)
+		return outcome{initialAccount: initial, drop: func() { batch.drop(launch) }, apply: func() {
+			adoptedParent, adoptedRows, ok := a.adoptLocalVaultFileInitialBatch(batch)
+			if !ok {
+				return
+			}
+			a.session = adoptedParent
 			a.armIdleTimer()
-			a.rows = loginProjection(rows)
+			a.rows = loginProjection(adoptedRows)
+			clearLocalVaultFileInitialRows(adoptedRows)
+			initial.fence.signalAdopted()
 			a.scope = "active"
 			a.page = "vault"
 			a.v2Mode = !classicLayoutRequested()
@@ -601,12 +679,19 @@ func (a *App) unlock() {
 			a.create = false
 			_ = a.SetVaultPath(path)
 			a.touchActivity()
-			a.loadV2Metadata()
-			a.refreshLocalVaultFiles()
-			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
-			if rememberErr != nil {
-				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
+			initialStatus := "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
+			if batch.fanoutIncomplete {
+				initialStatus += localVaultFileInitialFanoutIncompleteSuffix
 			}
+			if rememberErr != nil {
+				initialStatus += " · Secret Key 未能保存到此设备，下次请使用应急资料"
+			}
+			completionStatus := ""
+			if batch.fanoutIncomplete {
+				completionStatus = initialStatus
+			}
+			a.loadV2MetadataWithCompletion(completionStatus)
+			a.status = initialStatus
 			a.startBrowserBroker()
 			a.notifyBrowserBrokerUnlocked()
 		}}
@@ -998,6 +1083,11 @@ func (a *App) lockView(c *ui.Context) {
 				OnSubmit(a.unlock)
 		}
 
+		if attempt, ok := a.accountUnlockCancelToken(); ok {
+			oneui.Button(c, "取消解锁", oneui.ButtonSecondary).FillWidth().OnClick(func() {
+				a.cancelAccountUnlock(attempt)
+			})
+		}
 		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "解锁", oneui.ButtonPrimary).FillWidth().Disabled(a.busy).OnClick(a.unlock)
 			oneui.Button(c, "使用"+osunlock.Label()+"解锁", oneui.ButtonSecondary).FillWidth().Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)

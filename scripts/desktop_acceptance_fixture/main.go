@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -59,17 +60,35 @@ type localProjection struct {
 }
 
 func setup(out string) error {
+	f, err := newSyntheticFixture(out)
+	if err != nil {
+		return err
+	}
+	defer clearFixture(&f)
+	return writeSyntheticFixture(out, f)
+}
+
+func writeSyntheticFixture(out string, f fixture) error {
+	raw, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	return os.WriteFile(filepath.Join(out, "fixture.json"), raw, 0600)
+}
+
+func newSyntheticFixture(out string) (fixture, error) {
 	if !filepath.IsAbs(out) || os.Mkdir(out, 0700) != nil {
-		return errors.New("new absolute private fixture directory required")
+		return fixture{}, errors.New("new absolute private fixture directory required")
 	}
 	key, err := personal.NewSecret()
 	if err != nil {
-		return err
+		return fixture{}, err
 	}
 	defer clear(key)
 	var entropy [68]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
-		return err
+		return fixture{}, err
 	}
 	f := fixture{
 		Path: filepath.Join(out, "synthetic.ll"), Password: "Daily-master-" + hex.EncodeToString(entropy[:8]),
@@ -84,27 +103,27 @@ func setup(out string) error {
 	// independently computes HMAC-SHA1 with this period and eight digits.
 	f.OTPConfig = "otpauth://totp/daily?secret=" + f.OTPSeed + "&digits=8&period=20"
 	if err := personal.Create(f.Path, f.Password, key); err != nil {
-		return err
+		return fixture{}, err
 	}
 	for _, kind := range []string{"OTP", "other", "archived", "trashed"} {
 		id, err := personal.AddLogin(f.Path, f.Password, key, "Daily "+kind+" login", f.Username, f.Value)
 		if err != nil {
-			return err
+			return fixture{}, err
 		}
 		f.IDs[kind] = id
 		for field, value := range map[string]string{"url": f.URL, "otp": f.OTPConfig} {
 			row, err := find(f, key, id)
 			if err != nil {
-				return err
+				return fixture{}, err
 			}
 			if _, err = personal.EditLogin(f.Path, f.Password, key, personal.Edit{ID: id, Revision: row.Revision, Field: field, Value: value}); err != nil {
-				return err
+				return fixture{}, err
 			}
 		}
 		if kind == "archived" || kind == "trashed" {
 			row, err := find(f, key, id)
 			if err != nil {
-				return err
+				return fixture{}, err
 			}
 			if kind == "archived" {
 				_, err = personal.SetArchived(f.Path, f.Password, key, id, row.Revision, true)
@@ -112,21 +131,16 @@ func setup(out string) error {
 				_, err = personal.SetTrashed(f.Path, f.Password, key, id, row.Revision, true)
 			}
 			if err != nil {
-				return err
+				return fixture{}, err
 			}
 		}
 	}
 	id, err := personal.AddLogin(f.Path, f.Password, key, "Daily provider login", f.Username, f.ProviderValue)
 	if err != nil {
-		return err
+		return fixture{}, err
 	}
 	f.IDs["provider"] = id
-	raw, err := json.Marshal(f)
-	if err != nil {
-		return err
-	}
-	defer clear(raw)
-	return os.WriteFile(filepath.Join(out, "fixture.json"), raw, 0600)
+	return f, nil
 }
 
 func find(f fixture, key []byte, id string) (personal.Row, error) {
@@ -777,6 +791,318 @@ func verifyLocalWorkspace(f fixture, workspace string) (localProjection, error) 
 
 // localPairVault holds one manifest's bounded read-only facts. It is never
 // serialized; only the fixed localProjection leaves this file.
+type pairPrepareStage string
+
+const (
+	pairStagePaths              pairPrepareStage = "paths"
+	pairStageFixtureParent      pairPrepareStage = "fixture-parent"
+	pairStageWorkspaceParent    pairPrepareStage = "workspace-parent"
+	pairStageWorkspaceFresh     pairPrepareStage = "workspace-fresh"
+	pairStageFixtureSetup       pairPrepareStage = "fixture-setup"
+	pairStageFixtureWrite       pairPrepareStage = "fixture-write"
+	pairStageWorkspaceCreate    pairPrepareStage = "workspace-create"
+	pairStageVault1             pairPrepareStage = "vault-1-create"
+	pairStageVault2             pairPrepareStage = "vault-2-create"
+	pairStageObserver           pairPrepareStage = "observer"
+	pairStageObserverIncomplete pairPrepareStage = "observer-incomplete"
+)
+
+type pairCreateSubstage string
+
+const (
+	pairSubSelect        pairCreateSubstage = "select"
+	pairSubFactorParse   pairCreateSubstage = "factor-parse"
+	pairSubOpenFirst     pairCreateSubstage = "open-creation-1"
+	pairSubPrepareFirst  pairCreateSubstage = "prepare-1"
+	pairSubBackupPrepare pairCreateSubstage = "backup-prepare"
+	pairSubBackupPublish pairCreateSubstage = "backup-publish"
+	pairSubOpenSecond    pairCreateSubstage = "open-creation-2"
+	pairSubPrepareSecond pairCreateSubstage = "prepare-2"
+	pairSubComplete      pairCreateSubstage = "complete"
+	pairSubVerify        pairCreateSubstage = "verify"
+)
+
+type pairErrorClass string
+
+const (
+	pairErrorVerifyRejected pairErrorClass = "VERIFY_REJECTED"
+	pairErrorLocalReview    pairErrorClass = "LOCAL_REVIEW"
+	pairErrorUnknownReview  pairErrorClass = "UNKNOWN_REVIEW"
+	pairErrorCancelled      pairErrorClass = "CANCELLED"
+	pairErrorUnsupported    pairErrorClass = "UNSUPPORTED"
+	pairErrorBackend        pairErrorClass = "BACKEND"
+	pairErrorOther          pairErrorClass = "OTHER"
+)
+
+type pairObserverEvidence struct {
+	ManifestCount      int
+	ManifestPersonal   bool
+	ManifestBackend    bool
+	CompanionPresent   bool
+	ManifestDigest     bool
+	JournalPresent     bool
+	ArchivePresent     bool
+	PrivateModes       bool
+	BackendHashMatches bool
+	FactorsAbsent      bool
+}
+
+type initialPairError struct {
+	stage    pairPrepareStage
+	target   int
+	substage pairCreateSubstage
+	class    pairErrorClass
+	observer pairObserverEvidence
+	cause    error
+}
+
+func (e *initialPairError) Error() string {
+	return "initial pair preparation failed"
+}
+
+func (e *initialPairError) Unwrap() error {
+	return e.cause
+}
+
+func pairErrorClassOf(err error) pairErrorClass {
+	switch {
+	case errors.Is(err, vaultfileclient.ErrCreateVerification):
+		return pairErrorVerifyRejected
+	case errors.Is(err, vaultfileclient.ErrLocalReview):
+		return pairErrorLocalReview
+	case errors.Is(err, vaultfileclient.ErrCreateUnknown):
+		return pairErrorUnknownReview
+	case errors.Is(err, vaultfileclient.ErrCreateCancelled):
+		return pairErrorCancelled
+	case errors.Is(err, vaultfileclient.ErrCreateUnsupported):
+		return pairErrorUnsupported
+	case errors.Is(err, vaultfileclient.ErrBackend):
+		return pairErrorBackend
+	default:
+		return pairErrorOther
+	}
+}
+
+func pairObserverEvidenceOf(report localProjection) pairObserverEvidence {
+	return pairObserverEvidence{
+		ManifestCount:      report.ManifestCount,
+		ManifestPersonal:   report.ManifestPersonal,
+		ManifestBackend:    report.ManifestBackend,
+		CompanionPresent:   report.CompanionPresent,
+		ManifestDigest:     report.ManifestDigest,
+		JournalPresent:     report.JournalPresent,
+		ArchivePresent:     report.ArchivePresent,
+		PrivateModes:       report.PrivateModes,
+		BackendHashMatches: report.BackendHashMatches,
+		FactorsAbsent:      report.FactorsAbsent,
+	}
+}
+
+func pairStageError(stage pairPrepareStage, target int, substage pairCreateSubstage, cause error) error {
+	return &initialPairError{stage: stage, target: target, substage: substage, class: pairErrorClassOf(cause), cause: cause}
+}
+
+type createdLocalVault struct {
+	config, companion, journal, archive, profileDir, backendRoot string
+	kit                                                          []byte
+}
+
+func createPublishedLocalVault(f fixture, workspace, backendRoot string) (*createdLocalVault, pairCreateSubstage, error) {
+	profileDir := localProfileDir(workspace, f.Path)
+	var selectorRaw [16]byte
+	if _, err := rand.Read(selectorRaw[:]); err != nil {
+		return nil, pairSubSelect, err
+	}
+	selector := hex.EncodeToString(selectorRaw[:])
+	v := &createdLocalVault{
+		profileDir: profileDir, backendRoot: backendRoot,
+		config:    filepath.Join(profileDir, selector+".json"),
+		companion: filepath.Join(profileDir, selector+".json.baseline"),
+		journal:   filepath.Join(profileDir, selector+".journal"),
+		archive:   filepath.Join(profileDir, selector+".llb"),
+	}
+	proposal := vaultfileclient.Manifest{
+		Version: 1, Kind: vaultfileclient.CreateKind,
+		PersonalFile: f.Path, BackendRoot: backendRoot, Name: selector + ".llv",
+		Journal: v.journal, Archive: v.archive,
+	}
+	key, err := personal.ParseSecret(f.Secret)
+	if err != nil {
+		return nil, pairSubFactorParse, err
+	}
+	defer clear(key)
+	password, secret := []byte(f.Password), []byte(f.Secret)
+	defer clear(password)
+	defer clear(secret)
+
+	creation, err := vaultfileclient.OpenCreation(v.config, &proposal, password, secret)
+	if err != nil {
+		return nil, pairSubOpenFirst, err
+	}
+	backupRequired, err := creation.Prepare(context.Background())
+	creation.Close()
+	if err != nil {
+		return nil, pairSubPrepareFirst, err
+	}
+	if !backupRequired {
+		return nil, pairSubPrepareFirst, errors.New("fixture creation did not request a backup")
+	}
+	backup, err := personal.PrepareBackup(f.Path, v.archive, f.Password, key)
+	if err != nil {
+		return nil, pairSubBackupPrepare, err
+	}
+	if err := backup.Publish(); err != nil {
+		backup.Close()
+		return nil, pairSubBackupPublish, err
+	}
+	v.kit = []byte(backup.Material())
+	backup.Close()
+	if len(v.kit) == 0 {
+		return nil, pairSubBackupPublish, errors.New("fixture creation produced no backup material")
+	}
+
+	creation, err = vaultfileclient.OpenCreation(v.config, nil, password, secret)
+	if err != nil {
+		clear(v.kit)
+		return nil, pairSubOpenSecond, err
+	}
+	defer creation.Close()
+	backupRequired, err = creation.Prepare(context.Background())
+	if err != nil {
+		clear(v.kit)
+		return nil, pairSubPrepareSecond, err
+	}
+	if backupRequired {
+		clear(v.kit)
+		return nil, pairSubPrepareSecond, errors.New("fixture creation requested an unexpected backup")
+	}
+	if err := creation.Complete(context.Background(), password, secret, v.kit); err != nil {
+		clear(v.kit)
+		return nil, pairSubComplete, err
+	}
+	if err := creation.Verify(context.Background(), password, secret, v.kit); err != nil {
+		clear(v.kit)
+		return nil, pairSubVerify, err
+	}
+	return v, "", nil
+}
+
+func prepareLocalWorkspaceDirs(workspace, personalPath string) (string, string, error) {
+	parentExists, err := realDirectory(filepath.Dir(workspace))
+	if err != nil || !parentExists {
+		return "", "", errors.New("fixture workspace parent is unavailable")
+	}
+	if err := os.Mkdir(workspace, 0700); err != nil {
+		return "", "", err
+	}
+	profiles := filepath.Join(workspace, "profiles")
+	profileDir := localProfileDir(workspace, personalPath)
+	backendRoot := localBackendRoot(workspace)
+	for _, dir := range []string{profiles, profileDir, backendRoot} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			return "", "", err
+		}
+	}
+	return profileDir, backendRoot, nil
+}
+
+func clearFixture(f *fixture) {
+	if f == nil {
+		return
+	}
+	f.Path = ""
+	f.Password = ""
+	f.Secret = ""
+	f.Username = ""
+	f.Value = ""
+	f.URL = ""
+	f.OTPSeed = ""
+	f.OTPConfig = ""
+	f.ProviderValue = ""
+	f.ProviderCanary = ""
+	f.IDs = nil
+}
+
+func localPairProjectionComplete(report localProjection) bool {
+	return report.ManifestCount == 2 && report.ManifestPersonal && report.ManifestBackend &&
+		report.CompanionPresent && report.ManifestDigest && report.JournalPresent &&
+		report.ArchivePresent && report.PrivateModes && report.BackendHashMatches && report.FactorsAbsent
+}
+
+func pathContains(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func createInitialPairFixture(fixtureDir, workspace string) (fixture, error) {
+	if !filepath.IsAbs(fixtureDir) || !filepath.IsAbs(workspace) ||
+		filepath.Clean(fixtureDir) != fixtureDir || filepath.Clean(workspace) != workspace ||
+		fixtureDir == workspace || pathContains(fixtureDir, workspace) || pathContains(workspace, fixtureDir) {
+		return fixture{}, pairStageError(pairStagePaths, 0, "", nil)
+	}
+	parentExists, err := realDirectory(filepath.Dir(fixtureDir))
+	if err != nil || !parentExists {
+		return fixture{}, pairStageError(pairStageFixtureParent, 0, "", nil)
+	}
+	workspaceParent, err := realDirectory(filepath.Dir(workspace))
+	if err != nil || !workspaceParent {
+		return fixture{}, pairStageError(pairStageWorkspaceParent, 0, "", nil)
+	}
+	if _, err := os.Lstat(workspace); !os.IsNotExist(err) {
+		return fixture{}, pairStageError(pairStageWorkspaceFresh, 0, "", nil)
+	}
+	f, err := newSyntheticFixture(fixtureDir)
+	if err != nil {
+		return fixture{}, pairStageError(pairStageFixtureSetup, 0, "", err)
+	}
+	if err := prepareInitialPairForFixture(f, workspace); err != nil {
+		clearFixture(&f)
+		return fixture{}, err
+	}
+	if err := writeSyntheticFixture(fixtureDir, f); err != nil {
+		clearFixture(&f)
+		return fixture{}, pairStageError(pairStageFixtureWrite, 0, "", err)
+	}
+	return f, nil
+}
+
+func prepareInitialPairForFixture(f fixture, workspace string) error {
+	if _, backendRoot, err := prepareLocalWorkspaceDirs(workspace, f.Path); err != nil {
+		return pairStageError(pairStageWorkspaceCreate, 0, "", err)
+	} else {
+		for i := 0; i < 2; i++ {
+			stage := pairStageVault1
+			target := 1
+			if i == 1 {
+				stage = pairStageVault2
+				target = 2
+			}
+			created, substage, err := createPublishedLocalVault(f, workspace, backendRoot)
+			if err != nil {
+				return pairStageError(stage, target, substage, err)
+			}
+			clear(created.kit)
+		}
+	}
+	report, err := verifyLocalPairWorkspace(f, workspace)
+	if err != nil {
+		return &initialPairError{
+			stage: pairStageObserver, class: pairErrorClassOf(err),
+			observer: pairObserverEvidenceOf(report), cause: err,
+		}
+	}
+	if !localPairProjectionComplete(report) {
+		return &initialPairError{
+			stage: pairStageObserverIncomplete, class: pairErrorOther,
+			observer: pairObserverEvidenceOf(report),
+		}
+	}
+	return nil
+}
+
 type localPairVault struct {
 	config, base, companionPath, expectedJournal, expectedArchive string
 	manifest                                                      vaultfileclient.Manifest
@@ -1018,6 +1344,10 @@ const usageText = `Usage: desktop_acceptance_fixture [options]
         read-only bounded local create workspace verification
   -verify-local-pair
         read-only bounded two-vault local workspace verification
+  -prepare-initial-pair
+        create exactly two strict local generation-zero targets in a fresh fixture directory
+  -prepare-workspace
+        absolute fresh local vaultfile workspace for -prepare-initial-pair
   -h, -help
         show this fixed help text
 `
@@ -1032,6 +1362,8 @@ func run(args []string) error {
 	hold := flags.Bool("hold-readonly", false, "hold a read-only original-file lock until private stdin closes")
 	verifyLocalDir := flags.String("verify-local", "", "read-only bounded local create workspace verification")
 	verifyLocalPairDir := flags.String("verify-local-pair", "", "read-only bounded two-vault local workspace verification")
+	prepareInitialPairDir := flags.String("prepare-initial-pair", "", "fresh initial-pair fixture directory")
+	prepareWorkspaceDir := flags.String("prepare-workspace", "", "fresh initial-pair local workspace")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(os.Stdout, usageText)
@@ -1040,11 +1372,27 @@ func run(args []string) error {
 		return err
 	}
 	if *out != "" {
-		if *input != "" || *privatePipe || *stale != "" || *hold || *verifyLocalDir != "" || *verifyLocalPairDir != "" || flags.NArg() != 0 {
-			return errors.New("one operation required")
+		if *input != "" || *privatePipe || *stale != "" || *hold ||
+			*verifyLocalDir != "" || *verifyLocalPairDir != "" ||
+			*prepareInitialPairDir != "" || *prepareWorkspaceDir != "" || flags.NArg() != 0 {
+			return errors.New("invalid fixture arguments")
 		}
 		return setup(*out)
 	}
+	if *prepareInitialPairDir != "" {
+		if *input != "" || *privatePipe || *stale != "" || *hold ||
+			*verifyLocalDir != "" || *verifyLocalPairDir != "" ||
+			*prepareWorkspaceDir == "" || flags.NArg() != 0 {
+			return errors.New("invalid fixture arguments")
+		}
+		f, err := createInitialPairFixture(*prepareInitialPairDir, *prepareWorkspaceDir)
+		clearFixture(&f)
+		return err
+	}
+	if *prepareWorkspaceDir != "" {
+		return errors.New("invalid fixture arguments")
+	}
+
 	operations := 0
 	for _, enabled := range []bool{*privatePipe, *stale != "", *hold, *verifyLocalDir != "", *verifyLocalPairDir != ""} {
 		if enabled {
