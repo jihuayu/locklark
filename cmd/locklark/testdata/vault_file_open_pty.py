@@ -82,6 +82,14 @@ def selftest():
     extra_rejected = not refusal_matches(expected + b"X", expected, "CANCELLED", 1, 2, False, None)
     echo_rejected = not refusal_matches(expected, expected, "CANCELLED", 1, 2, True, None)
     items_rejected = not refusal_matches(expected, expected, "CANCELLED", 1, 2, False, [])
+    generic_items = verdict_payload("HARNESS_ERROR", items_present=True)
+    generic_items_ok = (generic_items["status"] == "HARNESS_ERROR" and
+                        generic_items["items_present"] is True and
+                        generic_items["items"] is None)
+    normal_no_items = verdict_payload("HARNESS_ERROR")
+    normal_no_items_ok = (normal_no_items["items_present"] is False and
+                          normal_no_items["items"] is None)
+    items_rejected = items_rejected and generic_items_ok and normal_no_items_ok
     print(json.dumps({
         "drain_ok": drain_ok,
         "strict_exact_ok": exact_ok,
@@ -126,19 +134,32 @@ def opened_items(transcript, include_item_ids):
     return value["items"]
 
 
-def verdict(status, echoed=False, items=None, phase=0, exit_class_value="unknown",
-            normalized_len=0, expected_len=0, normalized_matches_expected=False):
-    print(json.dumps({
+def verdict_payload(status, echoed=False, items=None, items_present=None, phase=0,
+                   exit_class_value="unknown", normalized_len=0, expected_len=0,
+                   normalized_matches_expected=False):
+    if items_present is None:
+        items_present = items is not None
+    return {
         "status": status,
         "echoed": echoed,
         "items": items,
         "phase": phase,
         "exit_class": exit_class_value,
-        "items_present": items is not None,
+        "items_present": items_present,
         "normalized_len": normalized_len,
         "expected_len": expected_len,
         "normalized_matches_expected": normalized_matches_expected,
-    }), flush=True)
+    }
+
+
+def verdict(status, echoed=False, items=None, items_present=None, phase=0,
+            exit_class_value="unknown", normalized_len=0, expected_len=0,
+            normalized_matches_expected=False):
+    print(json.dumps(verdict_payload(
+        status, echoed=echoed, items=items, items_present=items_present, phase=phase,
+        exit_class_value=exit_class_value, normalized_len=normalized_len,
+        expected_len=expected_len, normalized_matches_expected=normalized_matches_expected,
+    )), flush=True)
 
 
 def main():
@@ -236,6 +257,7 @@ def main():
         verdict(
             "HARNESS_ERROR",
             echoed,
+            items_present=items is not None,
             phase=phase,
             exit_class_value=exit_class_value,
             normalized_len=normalized_len,
