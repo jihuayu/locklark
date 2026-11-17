@@ -8,6 +8,19 @@ from unittest import mock
 import desktop_native_fence as fence
 
 
+def _finite_clock(values):
+    sequence = iter(values)
+    last = values[-1]
+
+    def now():
+        try:
+            return next(sequence)
+        except StopIteration:
+            return last
+
+    return now
+
+
 class _Peer:
     def __init__(self, client):
         control = client._child_control_read
@@ -99,6 +112,129 @@ class NativeFenceClientTests(unittest.TestCase):
                 continue
             with self.assertRaises(OSError):
                 os.fstat(fd)
+
+    def test_absolute_deadlines_cannot_be_bypassed(self):
+        client = fence.NativeFenceClient()
+        client._event_buffer.extend(b"READY_HELD 2\n")
+        with mock.patch.object(fence.time, "monotonic", _finite_clock([0.0, 0.6])):
+            self._assert_code(
+                fence.NativeFenceErrorCode.EVENT_TIMEOUT,
+                lambda: client.ready(timeout=0.5),
+            )
+
+        client = fence.NativeFenceClient()
+        client._event_buffer.extend(b"READY_HELD 2\n")
+        with mock.patch.object(fence.time, "monotonic", _finite_clock([0.0, 0.0, 0.6])):
+            self._assert_code(
+                fence.NativeFenceErrorCode.EVENT_TIMEOUT,
+                lambda: client.ready(timeout=0.5),
+            )
+
+        client = fence.NativeFenceClient()
+        client._event_eof = True
+        with mock.patch.object(fence.time, "monotonic", _finite_clock([0.0, 0.6])):
+            self._assert_code(
+                fence.NativeFenceErrorCode.EVENT_TIMEOUT,
+                lambda: client._confirm_terminal_eof(0.5),
+            )
+
+        client = fence.NativeFenceClient()
+        state = {"read": False}
+
+        def fake_read(fd, count):
+            state["read"] = True
+            return b""
+
+        def eof_clock():
+            return 0.6 if state["read"] else 0.0
+
+        with mock.patch.object(
+            fence.select, "select", return_value=([client._event_read], [], [])
+        ), mock.patch.object(fence.os, "read", side_effect=fake_read), mock.patch.object(
+            fence.time, "monotonic", eof_clock
+        ):
+            self._assert_code(
+                fence.NativeFenceErrorCode.EVENT_TIMEOUT,
+                lambda: client._confirm_terminal_eof(0.5),
+            )
+        self.assertTrue(state["read"])
+
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        write_mock = mock.Mock()
+        with mock.patch.object(fence.os, "write", write_mock), mock.patch.object(
+            fence.time, "monotonic", _finite_clock([0.0, 0.6])
+        ):
+            self._assert_code(
+                fence.NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT,
+                lambda: client.release(timeout=0.5),
+            )
+        write_mock.assert_not_called()
+
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        write_mock = mock.Mock(side_effect=InterruptedError)
+        with mock.patch.object(fence.os, "write", write_mock), mock.patch.object(
+            fence.time, "monotonic", _finite_clock([0.0, 0.0, 0.6])
+        ):
+            self._assert_code(
+                fence.NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT,
+                lambda: client.release(timeout=0.5),
+            )
+        self.assertEqual(write_mock.call_count, 1)
+
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        write_mock = mock.Mock(side_effect=BlockingIOError)
+        select_mock = mock.Mock(side_effect=InterruptedError)
+        with mock.patch.object(fence.os, "write", write_mock), mock.patch.object(
+            fence.select, "select", select_mock
+        ), mock.patch.object(
+            fence.time, "monotonic", _finite_clock([0.0, 0.0, 0.0, 0.6])
+        ):
+            self._assert_code(
+                fence.NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT,
+                lambda: client.release(timeout=0.5),
+            )
+        self.assertEqual(write_mock.call_count, 1)
+        self.assertEqual(select_mock.call_count, 1)
+
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        write_mock = mock.Mock(return_value=1)
+        with mock.patch.object(fence.os, "write", write_mock), mock.patch.object(
+            fence.time, "monotonic", _finite_clock([0.0, 0.0, 0.6])
+        ):
+            self._assert_code(
+                fence.NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT,
+                lambda: client.release(timeout=0.5),
+            )
+        self.assertEqual(write_mock.call_count, 1)
+
+    def test_stdio_fd_allocations_fail_closed(self):
+        calls = {"count": 0}
+        closed = []
+
+        def fake_pipe():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return (0, 1)
+            return (2, 3)
+
+        def fake_close(fd):
+            closed.append(fd)
+
+        def fake_set_blocking(fd, blocking):
+            raise AssertionError("STDIO_SET_BLOCKING_CALLED")
+
+        with self.assertRaises(fence.NativeFenceError) as caught:
+            fence._allocate_owned_pipes(fake_pipe, fake_close, fake_set_blocking)
+        self.assertEqual(caught.exception.code, fence.NativeFenceErrorCode.STDIO_CONFLICT)
+        self.assertEqual(len(closed), 4)
 
     def test_spawn_parameters_and_lifecycle(self):
         client = fence.NativeFenceClient()

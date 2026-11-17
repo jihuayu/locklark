@@ -25,6 +25,7 @@ class NativeFenceErrorCode(enum.Enum):
     CLOSED = "CLOSED"
     INVALID_STATE = "INVALID_STATE"
     PIPE_CREATE = "PIPE_CREATE"
+    STDIO_CONFLICT = "STDIO_CONFLICT"
     EVENT_TIMEOUT = "EVENT_TIMEOUT"
     EVENT_EOF = "EVENT_EOF"
     EVENT_INCOMPLETE = "EVENT_INCOMPLETE"
@@ -94,6 +95,30 @@ def _safe_close(fd: Optional[int]) -> None:
         pass
 
 
+def _allocate_owned_pipes(pipe_factory, close_fd, set_blocking):
+    created = []
+    try:
+        control_read, control_write = pipe_factory()
+        created.extend((control_read, control_write))
+        event_read, event_write = pipe_factory()
+        created.extend((event_read, event_write))
+        if any(fd < 3 for fd in created):
+            raise NativeFenceError(NativeFenceErrorCode.STDIO_CONFLICT)
+        set_blocking(control_write, False)
+        set_blocking(event_read, False)
+    except NativeFenceError:
+        for fd in created:
+            close_fd(fd)
+        created.clear()
+        raise
+    except Exception:
+        for fd in created:
+            close_fd(fd)
+        created.clear()
+        raise NativeFenceError(NativeFenceErrorCode.PIPE_CREATE) from None
+    return control_read, control_write, event_read, event_write
+
+
 class NativeFenceClient:
     """Owned inherited-pipe client for the future tagged native fence child.
 
@@ -120,24 +145,18 @@ class NativeFenceClient:
         self._event_buffer = bytearray()
         self._event_eof = False
         self._event_total = 0
+        self._child_control_read: Optional[int] = None
+        self._control_write: Optional[int] = None
+        self._event_read: Optional[int] = None
+        self._child_event_write: Optional[int] = None
 
-        created = []
-        try:
-            control_read, control_write = os.pipe()
-            created.extend((control_read, control_write))
-            event_read, event_write = os.pipe()
-            created.extend((event_read, event_write))
-            os.set_blocking(control_write, False)
-            os.set_blocking(event_read, False)
-        except Exception:
-            for fd in created:
-                _safe_close(fd)
-            raise NativeFenceError(NativeFenceErrorCode.PIPE_CREATE) from None
-
-        self._child_control_read: Optional[int] = control_read
-        self._control_write: Optional[int] = control_write
-        self._event_read: Optional[int] = event_read
-        self._child_event_write: Optional[int] = event_write
+        control_read, control_write, event_read, event_write = _allocate_owned_pipes(
+            os.pipe, _safe_close, os.set_blocking
+        )
+        self._child_control_read = control_read
+        self._control_write = control_write
+        self._event_read = event_read
+        self._child_event_write = event_write
 
     def __repr__(self) -> str:
         return "<NativeFenceClient>"
@@ -193,6 +212,7 @@ class NativeFenceClient:
         frame = self._read_frame(deadline)
         if frame.kind != "READY_HELD" or frame.count is None:
             self._fail(NativeFenceErrorCode.EVENT_UNEXPECTED)
+        self._require_before(deadline)
         self._ready = True
         self._child_count = frame.count
         return ReadyObservation(frame.count)
@@ -222,6 +242,7 @@ class NativeFenceClient:
         if not second.parent_locked:
             self._fail(NativeFenceErrorCode.EVENT_LOCKED)
         self._confirm_terminal_eof(deadline)
+        self._require_before(deadline)
         self._terminal = True
         observation = CancelObservation(second.count, True)
         self.close()
@@ -238,6 +259,7 @@ class NativeFenceClient:
         if frame.count != self._child_count:
             self._fail(NativeFenceErrorCode.EVENT_COUNT)
         self._confirm_terminal_eof(deadline)
+        self._require_before(deadline)
         self._terminal = True
         observation = AdoptObservation(frame.count)
         self.close()
@@ -272,24 +294,35 @@ class NativeFenceClient:
         value = float(value)
         return value if value > 0 else default
 
+    def _require_before(
+        self,
+        deadline: float,
+        code: NativeFenceErrorCode = NativeFenceErrorCode.EVENT_TIMEOUT,
+    ) -> None:
+        if time.monotonic() >= deadline:
+            self._fail(code)
+
     def _fail(self, code: NativeFenceErrorCode) -> None:
         self.close()
         raise NativeFenceError(code) from None
 
     def _read_frame(self, deadline: float) -> _Frame:
         while True:
+            self._require_before(deadline)
             newline = self._event_buffer.find(b"\n")
             if newline >= 0:
                 if newline + 1 > _MAX_EVENT_FRAME:
                     self._fail(NativeFenceErrorCode.EVENT_OVERSIZE)
                 frame = bytes(self._event_buffer[: newline + 1])
                 del self._event_buffer[: newline + 1]
+                self._require_before(deadline)
                 return self._parse_frame(frame)
             if len(self._event_buffer) >= _MAX_EVENT_FRAME:
                 self._fail(NativeFenceErrorCode.EVENT_OVERSIZE)
             if self._event_eof:
                 if self._event_buffer:
                     self._fail(NativeFenceErrorCode.EVENT_INCOMPLETE)
+                self._require_before(deadline)
                 self._fail(NativeFenceErrorCode.EVENT_EOF)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -297,16 +330,20 @@ class NativeFenceClient:
             try:
                 readable, _, _ = select.select([self._event_read], [], [], remaining)
             except InterruptedError:
+                self._require_before(deadline)
                 continue
             except (OSError, ValueError):
                 self._fail(NativeFenceErrorCode.EVENT_EOF)
             if not readable:
                 self._fail(NativeFenceErrorCode.EVENT_TIMEOUT)
+            self._require_before(deadline)
             try:
                 chunk = os.read(self._event_read, 4096)
             except InterruptedError:
+                self._require_before(deadline)
                 continue
             except BlockingIOError:
+                self._require_before(deadline)
                 continue
             except OSError:
                 self._fail(NativeFenceErrorCode.EVENT_EOF)
@@ -366,6 +403,7 @@ class NativeFenceClient:
         return value
 
     def _confirm_terminal_eof(self, deadline: float) -> None:
+        self._require_before(deadline)
         if self._event_buffer:
             code = (
                 NativeFenceErrorCode.EVENT_TOTAL_OVERSIZE
@@ -374,28 +412,35 @@ class NativeFenceClient:
             )
             self._fail(code)
         if self._event_eof:
+            self._require_before(deadline)
             return
         while True:
+            self._require_before(deadline)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._fail(NativeFenceErrorCode.EVENT_TIMEOUT)
             try:
                 readable, _, _ = select.select([self._event_read], [], [], remaining)
             except InterruptedError:
+                self._require_before(deadline)
                 continue
             except (OSError, ValueError):
                 self._fail(NativeFenceErrorCode.EVENT_EOF)
             if not readable:
                 self._fail(NativeFenceErrorCode.EVENT_TIMEOUT)
+            self._require_before(deadline)
             try:
                 chunk = os.read(self._event_read, 4096)
             except InterruptedError:
+                self._require_before(deadline)
                 continue
             except BlockingIOError:
+                self._require_before(deadline)
                 continue
             except OSError:
                 self._fail(NativeFenceErrorCode.EVENT_EOF)
             if chunk == b"":
+                self._require_before(deadline)
                 self._event_eof = True
                 return
             self._event_total += len(chunk)
@@ -410,9 +455,11 @@ class NativeFenceClient:
         deadline = time.monotonic() + timeout
         offset = 0
         while offset < len(payload):
+            self._require_before(deadline, NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT)
             try:
                 written = os.write(self._control_write, payload[offset:])
             except InterruptedError:
+                self._require_before(deadline, NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT)
                 continue
             except BlockingIOError:
                 remaining = deadline - time.monotonic()
@@ -421,14 +468,21 @@ class NativeFenceClient:
                 try:
                     _, writable, _ = select.select([], [self._control_write], [], remaining)
                 except InterruptedError:
+                    self._require_before(
+                        deadline, NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT
+                    )
                     continue
                 except (OSError, ValueError):
                     self._fail(NativeFenceErrorCode.CONTROL_WRITE_FAILED)
                 if not writable:
                     self._fail(NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT)
+                self._require_before(
+                    deadline, NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT
+                )
                 continue
             except OSError:
                 self._fail(NativeFenceErrorCode.CONTROL_WRITE_FAILED)
             if written <= 0:
                 self._fail(NativeFenceErrorCode.CONTROL_WRITE_FAILED)
             offset += written
+            self._require_before(deadline, NativeFenceErrorCode.CONTROL_WRITE_TIMEOUT)
