@@ -1468,8 +1468,10 @@ class LocalVaultOracleTests(unittest.TestCase):
 
 
 class LocalVaultFlowBoundary:
-    def __init__(self, kit):
-        self.kit, self.events, self.reader_calls = kit, [], 0
+    def __init__(self, kit, kit_b):
+        self.kit, self.kit_b = kit, kit_b
+        self.kits = {kit, kit_b}
+        self.events, self.reader_calls = [], 0
         self.fields = {}
         self.prepare_enabled = False
         self.prepare_waits = 0
@@ -1486,6 +1488,10 @@ class LocalVaultFlowBoundary:
         self.events.append(("wait", label))
 
     def click(self, label):
+        if label == "新建独立文件库":
+            # A and B are separate real dialogs; the second one starts empty.
+            self.fields = {}
+            self.prepare_enabled = False
         if label == "准备创建":
             self.prepare_clicks.append(self.prepare_enabled)
             if not self.prepare_enabled:
@@ -1493,7 +1499,7 @@ class LocalVaultFlowBoundary:
         self.events.append(("click", label))
 
     def fill(self, label, value):
-        if value == self.kit:
+        if value in self.kits:
             marker = "kit"
         elif value == desktop.WRONG_RECOVERY_CONFIRMATION:
             marker = "wrong"
@@ -1507,39 +1513,66 @@ class LocalVaultFlowBoundary:
 
 
 class LocalVaultFlowTests(unittest.TestCase):
-    """Real control order with the wrong-kit refusal kept intact."""
+    """Real control order with the wrong-kit refusal kept intact for A/B."""
 
     KIT = LocalVaultScenarioContractTests.KIT
 
     def test_control_order_wrong_kit_then_literal_kit_and_baseline(self):
-        boundary = LocalVaultFlowBoundary(self.KIT)
+        kit_a = self.KIT
+        kit_b = "LLR2-" + "C" * 52 + "-" + "D" * 52
+        boundary = LocalVaultFlowBoundary(kit_a, kit_b)
         subject = Acceptance.__new__(Acceptance)
         subject.fixture = {"Password": "synthetic-master", "Secret": "synthetic-secret"}
         subject.values = set()
         subject.phase = boundary.phase
         subject.wait, subject.click, subject.fill = boundary.wait, boundary.click, boundary.fill
-        subject.read_recovery = lambda: (boundary.events.append(("reader",)),
-                                         setattr(boundary, "reader_calls", boundary.reader_calls + 1),
-                                         subject.values.add(self.KIT), self.KIT)[-1]
-        subject.observe = Mock(side_effect=[
-            {"items": [{"id": "one"}, {"id": "two"}], "audit_safe": True},
-            {"items": [{"id": "one"}, {"id": "two"}], "audit_safe": True},
-        ])
+        kits = [kit_a, kit_b]
+
+        def read_recovery():
+            boundary.events.append(("reader",))
+            kit = kits[boundary.reader_calls]
+            boundary.reader_calls += 1
+            subject.values.add(kit)
+            return kit
+
+        subject.read_recovery = read_recovery
+        subject.observe = Mock(return_value={
+            "items": [{"id": "one"}, {"id": "two"}], "audit_safe": True})
         subject.controls = Mock(side_effect=[
             {"备份恢复码": {"present": False}, "关闭本地基线视图": {"present": True}},
-            {"备份恢复码": {"present": True}, "关闭本地基线视图": {"present": True}},
+            {"备份恢复码": {"present": False}, "关闭本地基线视图": {"present": True}},
+            {"备份恢复码": {"present": False}, "关闭本地基线视图": {"present": True}},
+            {"使用应急资料…": {"present": True},
+             "刷新本地文件库": {"present": False},
+             "锁定本地文件库": {"present": False},
+             "解锁本地文件库": {"present": False},
+             "关闭本地基线视图": {"present": False}},
         ])
         subject.verify_local_vault = Mock()
+        subject.verify_local_vault_pair = Mock()
+        subject.record_local_vault_a = Mock()
+        subject.record_local_vault_b = Mock()
+        subject.local_vault_pair_flow = Mock()
         subject.local_vault_file_create()
         events = boundary.events
-        self.assertEqual(boundary.reader_calls, 1)
-        self.assertTrue(self.KIT in subject.values)
-        self.assertEqual(subject.observe.call_count, 2)
-        self.assertEqual(subject.controls.call_count, 2)
-        subject.verify_local_vault.assert_called_once_with()
+        self.assertEqual(boundary.reader_calls, 2)
+        self.assertTrue(kit_a in subject.values)
+        self.assertTrue(kit_b in subject.values)
+        self.assertTrue(kit_a != kit_b)
+        self.assertEqual(subject.local_kit_a, kit_a)
+        self.assertEqual(subject.observe.call_count, 3)
+        self.assertEqual(subject.controls.call_count, 4)
         self.assertEqual(boundary.prepare_waits, 0)
-        self.assertEqual(boundary.prepare_clicks, [True])
-        self.assertEqual(events.count(("click", "准备创建")), 1)
+        self.assertEqual(boundary.prepare_clicks, [True, True])
+        self.assertEqual(events.count(("click", "准备创建")), 2)
+        self.assertEqual(events.count(("reader",)), 2)
+        self.assertEqual(events.count(("click", "完成创建")), 2)
+        self.assertEqual(events.count(("wait", "关闭本地基线视图")), 2)
+        subject.verify_local_vault.assert_called_once_with()
+        subject.verify_local_vault_pair.assert_called_once_with()
+        subject.record_local_vault_a.assert_called_once_with()
+        subject.record_local_vault_b.assert_called_once_with()
+        subject.local_vault_pair_flow.assert_called_once_with()
         self.assertLess(events.index(("click", "新建独立文件库")),
                         events.index(("wait", "主密码")))
         self.assertLess(events.index(("wait", "主密码")),
@@ -1549,10 +1582,10 @@ class LocalVaultFlowTests(unittest.TestCase):
         self.assertLess(events.index(("fill", "Secret Key", "other")),
                         events.index(("click", "准备创建")))
         self.assertLess(events.index(("wait", "重新输入恢复码")), events.index(("reader",)))
-        first_publish = [index for index, event in enumerate(events)
-                         if event == ("click", "确认并发布备份")][0]
-        second_publish = [index for index, event in enumerate(events)
-                          if event == ("click", "确认并发布备份")][1]
+        publish_indices = [index for index, event in enumerate(events)
+                           if event == ("click", "确认并发布备份")]
+        self.assertEqual(len(publish_indices), 3)
+        first_publish, second_publish, b_publish = publish_indices
         self.assertLess(events.index(("fill", "重新输入恢复码", "wrong")), first_publish)
         self.assertLess(first_publish, events.index(("wait", "恢复码未逐字匹配")))
         wrong_wait = events.index(("wait", "恢复码未逐字匹配"))
@@ -1568,6 +1601,10 @@ class LocalVaultFlowTests(unittest.TestCase):
                         events.index(("wait", "关闭本地基线视图")))
         self.assertLess(events.index(("wait", "关闭本地基线视图")),
                         events.index(("wait", "已验证本地初始版本 · 远端状态未核实")))
+        reader_indices = [index for index, event in enumerate(events)
+                          if event == ("reader",)]
+        self.assertGreater(reader_indices[1], events.index(("wait", "关闭本地基线视图")))
+        self.assertLess(reader_indices[1], b_publish)
 
 
 class LocalVaultRunnerTests(unittest.TestCase):
@@ -1631,8 +1668,8 @@ class LocalVaultRunnerTests(unittest.TestCase):
         lines = [item.args[0] for item in output.call_args_list]
         text = "\n".join(lines)
         self.assertTrue(any("PASS:" in line for line in lines))
-        self.assertIn("Onevra independent local vault A create", text)
-        self.assertIn("local baseline", text)
+        self.assertIn("local vault A/B create", text)
+        self.assertIn("pair observer", text)
         self.assertNotIn("T4", text)
         self.assertNotIn("sync", text)
 
