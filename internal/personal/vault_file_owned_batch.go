@@ -52,10 +52,11 @@ type ownedVaultFileBatchRequest struct {
 // credential, material, identity, path or authority.
 var vaultFileOwnedBatchAuthForTest func()
 
-// vaultFileOwnedBatchUndeliveredForTest observes public summary buffers just
-// before an undelivered batch clears them. It is nil in production and carries
-// no factor, material, identity, token authority or persistent state.
-var vaultFileOwnedBatchUndeliveredForTest func(current []VaultFileBaselineItem, results []OwnedVaultFileChildResult)
+// vaultFileOwnedBatchUndeliveredForTest observes only public summary buffer
+// references just before an undelivered batch clears them. It is nil in
+// production and carries no token, parent, path, identity, material or
+// authority.
+var vaultFileOwnedBatchUndeliveredForTest func(current []VaultFileBaselineItem, accumulated [][]VaultFileBaselineItem)
 
 func clearOwnedVaultFileBatchResults(results []OwnedVaultFileChildResult) {
 	for i := range results {
@@ -194,9 +195,9 @@ func cloneOwnedVaultFileChildItems(items []VaultFileBaselineItem) []VaultFileBas
 // sessions. Requests are validated, deep-copied and deduplicated before the
 // single authentication. The returned parent is unpublished until the batch is
 // delivered; any account-level failure, cancellation, common-budget expiry or
-// zero-success delivery locks and drains only this new parent and waits for its
-// children's real Close completion. Existing other sessions and siblings are
-// never touched.
+// account-level inability to deliver locks and drains only this new parent and
+// waits for its children's real Close completion. Existing other sessions and
+// siblings are never touched.
 func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, password, key []byte, idle time.Duration, targets []OwnedVaultFileTarget) (*Session, []OwnedVaultFileChildResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -224,7 +225,11 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 	}
 	drainWith := func(current []VaultFileBaselineItem, err error) (*Session, []OwnedVaultFileChildResult, error) {
 		if vaultFileOwnedBatchUndeliveredForTest != nil {
-			vaultFileOwnedBatchUndeliveredForTest(current, results)
+			accumulated := make([][]VaultFileBaselineItem, len(results))
+			for i := range results {
+				accumulated[i] = results[i].Items
+			}
+			vaultFileOwnedBatchUndeliveredForTest(current, accumulated)
 		}
 		clearVaultFileChildItems(current)
 		clearOwnedVaultFileBatchResults(results)

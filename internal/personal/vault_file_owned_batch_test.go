@@ -251,6 +251,35 @@ func TestUnlockSessionWithOwnedVaultFileChildrenCancellationDrainsOnlyBatch(t *t
 	siblingToken, _ := openOwnedChild(t, fx.session, sibling, fx.password, fx.key)
 	assertOwnedChildRead(t, fx.session, siblingToken)
 
+	t.Run("clear-helper-descriptor-copy", func(t *testing.T) {
+		siblingItems, err := fx.session.ReadVaultFileChild(siblingToken, VaultFileChildOptions{IncludeItemIDs: true})
+		if err != nil || len(siblingItems) != 1 {
+			t.Fatal("OWNED_BATCH_HELPER_REAL_SUMMARY_MISSING")
+		}
+		delivered := cloneOwnedVaultFileChildItems(siblingItems)
+		resultItems := cloneOwnedVaultFileChildItems(siblingItems)
+		results := []OwnedVaultFileChildResult{{
+			Index: 0,
+			Token: siblingToken,
+			Items: resultItems,
+			Err:   errors.New("synthetic-target-error"),
+		}}
+		clearOwnedVaultFileBatchResults(results)
+		if results[0].Index != 0 || results[0].Token != (VaultFileChildToken{}) ||
+			results[0].Items != nil || results[0].Err != nil {
+			t.Fatal("OWNED_BATCH_HELPER_DESCRIPTOR_NOT_CLEARED")
+		}
+		for _, item := range resultItems {
+			if item != (VaultFileBaselineItem{}) {
+				t.Fatal("OWNED_BATCH_HELPER_RESULT_ITEMS_NOT_CLEARED")
+			}
+		}
+		if len(delivered) != 1 || delivered[0] == (VaultFileBaselineItem{}) {
+			t.Fatal("OWNED_BATCH_HELPER_DELIVERED_COPY_CLEARED")
+		}
+		assertOwnedChildRead(t, fx.session, siblingToken)
+	})
+
 	var batchCloses atomic.Int32
 	vaultFileChildBeforeHandleClose = func() { batchCloses.Add(1) }
 	t.Cleanup(func() { vaultFileChildBeforeHandleClose = nil })
@@ -266,18 +295,15 @@ func TestUnlockSessionWithOwnedVaultFileChildrenCancellationDrainsOnlyBatch(t *t
 
 	var observed bool
 	var observedCurrent []VaultFileBaselineItem
-	var observedResults []OwnedVaultFileChildResult
-	var observedResultItems [][]VaultFileBaselineItem
+	var observedAccumulated [][]VaultFileBaselineItem
 	var currentNonEmpty, resultNonEmpty bool
-	vaultFileOwnedBatchUndeliveredForTest = func(current []VaultFileBaselineItem, results []OwnedVaultFileChildResult) {
+	vaultFileOwnedBatchUndeliveredForTest = func(current []VaultFileBaselineItem, accumulated [][]VaultFileBaselineItem) {
 		observed = true
 		observedCurrent = current
-		observedResults = results
-		observedResultItems = make([][]VaultFileBaselineItem, len(results))
+		observedAccumulated = accumulated
 		currentNonEmpty = len(current) > 0
-		for i := range results {
-			observedResultItems[i] = results[i].Items
-			if len(results[i].Items) > 0 {
+		for _, items := range accumulated {
+			if len(items) > 0 {
 				resultNonEmpty = true
 			}
 		}
@@ -300,16 +326,11 @@ func TestUnlockSessionWithOwnedVaultFileChildrenCancellationDrainsOnlyBatch(t *t
 			t.Fatal("OWNED_BATCH_CANCEL_CURRENT_SUMMARY_NOT_CLEARED")
 		}
 	}
-	for _, items := range observedResultItems {
+	for _, items := range observedAccumulated {
 		for _, item := range items {
 			if item != (VaultFileBaselineItem{}) {
 				t.Fatal("OWNED_BATCH_CANCEL_RESULT_SUMMARY_NOT_CLEARED")
 			}
-		}
-	}
-	for _, result := range observedResults {
-		if result.Token != (VaultFileChildToken{}) || result.Items != nil {
-			t.Fatal("OWNED_BATCH_CANCEL_RESULT_OWNERSHIP_NOT_CLEARED")
 		}
 	}
 	assertOwnedChildRead(t, fx.session, siblingToken)
