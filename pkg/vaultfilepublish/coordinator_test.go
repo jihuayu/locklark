@@ -56,11 +56,12 @@ type fakeBackend struct {
 	// readErr makes every Read fail.
 	readErr error
 
-	reads     int
-	replaces  int
-	lastExp   vaultfilebackend.Revision
-	lastValue []byte
-	values    [][]byte
+	durability *fakeDurability
+	reads      int
+	replaces   int
+	lastExp    vaultfilebackend.Revision
+	lastValue  []byte
+	values     [][]byte
 }
 
 func (f *fakeBackend) Read(_ context.Context, _ string) (vaultfilebackend.ReadResult, error) {
@@ -1425,4 +1426,19 @@ func TestMemoryBackendRoundTrip(t *testing.T) {
 	if !sawBase {
 		t.Fatal("proposal verifier never saw the stored base")
 	}
+}
+
+type fakeDurability struct {
+	err   error
+	calls int
+	last  vaultfilebackend.Revision
+}
+
+func (f *fakeBackend) ProveDurable(_ context.Context, _ string, expected vaultfilebackend.Revision) error {
+	if f.durability == nil {
+		return nil
+	}
+	f.durability.calls++
+	f.durability.last = expected
+	return f.durability.err
 }
