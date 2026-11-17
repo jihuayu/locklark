@@ -202,7 +202,7 @@ jobs:
             $env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct
             go test -count=1 -run '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./cmd/locklark
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            go test${{ runner.os == 'Linux' && ' -p 1' || '' }} -count=1 -skip '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./...
+            go test -count=1 -skip '^(TestVaultFileResumeProductMinimum|TestVaultFileStatusProductMinimum|TestVaultFileStatusProductAbsentBackendMinimum|TestVaultFileDevicePublicProductMinimum|TestVaultFileOpenBaselineProductMinimum|TestVaultFileOpenBaselineProductItemReferencesMinimum|TestVaultFileTitleEditProductMinimum)$' ./...
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - if: runner.os == 'Linux'
