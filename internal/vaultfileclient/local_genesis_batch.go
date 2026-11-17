@@ -62,14 +62,16 @@ type localGenesisBatchGroup struct {
 	err            error
 }
 
-// These parameterless test seams are nil in production. They carry no factor,
-// key, identity, recovery kit or unwrap capability. The after-auth seam runs
-// after the single personal batch returns and before the client locator
-// re-read. The before-delivery seam receives only the already-built public
-// result handles immediately before the final context/parent delivery gate.
+// These test seams are nil in production. They carry no factor, key, identity,
+// recovery kit, wrapper, token, parent or unwrap capability. The after-auth
+// seam runs after the single personal batch returns and before the client
+// locator re-read. The before-delivery seam is parameterless and triggers only
+// the final cancellation boundary. The cleanup observer receives only bounded
+// finite counts/status after each real wrapper Close has returned.
 var (
 	localGenesisBatchAfterAuthForTest      func()
-	localGenesisBatchBeforeDeliveryForTest func([]LocalGenesisBatchResult)
+	localGenesisBatchBeforeDeliveryForTest func()
+	localGenesisBatchCleanupForTest        func(closedWrappers, summaryBuffers int, summariesCleared bool)
 )
 
 func validLocalGenesisBatchCandidate(candidate LocalGenesisBatchCandidate) bool {
@@ -265,8 +267,22 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 	consumed := make([]bool, len(childResults))
 	wrappedTokens := make(map[personal.VaultFileChildToken]*LocalGenesisSession)
 	cleanup := func(err error) (*personal.Session, []LocalGenesisBatchResult, error) {
+		summaryBuffers := 0
+		for index := range results {
+			if results[index].Baseline.VaultID != "" || len(results[index].Baseline.Items) != 0 {
+				summaryBuffers++
+			}
+		}
+		closedWrappers := 0
 		for _, wrapper := range wrappers {
 			_ = wrapper.Close()
+			if wrapper != nil && wrapper.state != nil {
+				select {
+				case <-wrapper.state.closeDone:
+					closedWrappers++
+				default:
+				}
+			}
 		}
 		for position := range childResults {
 			if consumed[position] {
@@ -281,6 +297,17 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 		for index := range results {
 			clearLocalGenesisItems(results[index].Baseline.Items)
 			results[index] = LocalGenesisBatchResult{}
+		}
+		summariesCleared := true
+		for index := range results {
+			if results[index].Wrapper != nil || results[index].Baseline.VaultID != "" ||
+				len(results[index].Baseline.Items) != 0 || results[index].Err != nil {
+				summariesCleared = false
+				break
+			}
+		}
+		if localGenesisBatchCleanupForTest != nil {
+			localGenesisBatchCleanupForTest(closedWrappers, summaryBuffers, summariesCleared)
 		}
 		parent.Lock()
 		return nil, nil, err
@@ -368,7 +395,7 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 	}
 
 	if localGenesisBatchBeforeDeliveryForTest != nil {
-		localGenesisBatchBeforeDeliveryForTest(results)
+		localGenesisBatchBeforeDeliveryForTest()
 	}
 	if err := ctx.Err(); err != nil {
 		return cleanup(err)

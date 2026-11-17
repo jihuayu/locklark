@@ -156,28 +156,27 @@ func TestOpenLocalGenesisSessionsForAccount(t *testing.T) {
 	t.Run("cancellation-closes-delivery", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		var captured []LocalGenesisBatchResult
-		localGenesisBatchBeforeDeliveryForTest = func(results []LocalGenesisBatchResult) {
-			captured = append([]LocalGenesisBatchResult(nil), results...)
-			cancel()
+		observed := false
+		closedWrappers, summaryBuffers := 0, 0
+		summariesCleared := false
+		localGenesisBatchBeforeDeliveryForTest = func() { cancel() }
+		localGenesisBatchCleanupForTest = func(closed, summaries int, cleared bool) {
+			observed = true
+			closedWrappers, summaryBuffers, summariesCleared = closed, summaries, cleared
 		}
-		t.Cleanup(func() { localGenesisBatchBeforeDeliveryForTest = nil })
+		t.Cleanup(func() {
+			localGenesisBatchBeforeDeliveryForTest = nil
+			localGenesisBatchCleanupForTest = nil
+		})
 		parent, results, err := openLocalGenesisBatchForTest(t, f, ctx,
 			[]LocalGenesisBatchCandidate{candidateA, candidateB})
 		localGenesisBatchBeforeDeliveryForTest = nil
+		localGenesisBatchCleanupForTest = nil
 		if !errors.Is(err, context.Canceled) || parent != nil || results != nil {
 			t.Fatal("LOCAL_BATCH_CANCEL_DELIVERED")
 		}
-		if len(captured) != 2 {
-			t.Fatal("LOCAL_BATCH_CANCEL_RESULT_COUNT")
-		}
-		for index := range captured {
-			if captured[index].Wrapper == nil || captured[index].Err != nil {
-				t.Fatal("LOCAL_BATCH_CANCEL_WRAPPER_MISSING")
-			}
-			if _, err := captured[index].Wrapper.Summary(); err == nil {
-				t.Fatal("LOCAL_BATCH_CANCEL_WRAPPER_STILL_OPEN")
-			}
+		if !observed || closedWrappers != 2 || summaryBuffers != 2 || !summariesCleared {
+			t.Fatal("LOCAL_BATCH_CANCEL_CLEANUP_INCOMPLETE")
 		}
 	})
 
