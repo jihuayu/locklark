@@ -349,35 +349,130 @@ class PairProjectionTests(unittest.TestCase):
 
 class PrivacyRegistrationTests(unittest.TestCase):
     def test_dynamic_ids_and_labels_are_registered_and_scanned(self):
-        with tempfile.TemporaryDirectory() as private:
-            root = pathlib.Path(private)
+        a_id = "01234567000000000000000000000000"
+        b_id = "01234567111111111111111111111111"
+
+        def new_case():
+            private = tempfile.TemporaryDirectory()
+            self.addCleanup(private.cleanup)
+            root = pathlib.Path(private.name)
+            settings = root / "settings"
+            settings.mkdir()
+            profile = desktop.local_vault_profile_dir(
+                settings / "settings.json", root / "personal.ll")
+            profile.mkdir(parents=True)
+            return root, profile
+
+        def write_manifest(root, profile, filename, name, vault_id, personal_name=None):
+            record = {
+                "version": 1, "kind": "vault_file_create", "vault_id": vault_id,
+                "personal_file": str(root / (personal_name or ("personal-" + filename))),
+                "backend_root": str(root / ("backend-" + filename)),
+                "name": name,
+                "journal": str(root / ("journal-" + filename)),
+                "archive": str(root / ("archive-" + filename)),
+            }
+            path = profile / filename
+            path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            return path
+
+        def register(root, profile):
+            manifests = desktop.read_local_vault_manifests(profile)
             subject = desktop.Acceptance.__new__(desktop.Acceptance)
             subject.state = root
             subject.fixture_path = root / "fixture.json"
             subject.values = set()
             subject.codes = set()
-            manifests = [
-                {"path": str(root / "a.json"), "name": "alpha.llv",
-                 "vault_id": "01234567000000000000000000000000"},
-                {"path": str(root / "b.json"), "name": "beta.llv",
-                 "vault_id": "01234567111111111111111111111111"},
-            ]
             subject.local_a_manifest = manifests[0]
-            subject.read_local_vault_manifests = lambda: manifests
+            subject.read_local_vault_manifests = lambda: desktop.read_local_vault_manifests(profile)
             subject.record_local_vault_b()
+            return subject, manifests
+
+        with self.subTest(case="own-metadata"):
+            root, profile = new_case()
+            write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, manifests = register(root, profile)
             for manifest in manifests:
                 self.assertIn(manifest["vault_id"], subject.values)
                 self.assertIn(manifest["name"], subject.values)
                 self.assertNotIn(manifest["path"], subject.values)
-                pathlib.Path(manifest["path"]).write_text(
-                    json.dumps({"vault_id": manifest["vault_id"], "name": manifest["name"]}),
-                    encoding="utf-8")
             self.assertIn(subject.local_a_label, subject.values)
             self.assertIn(subject.local_b_label, subject.values)
             self.assertEqual(subject.scan(), 2)
+
+        with self.subTest(case="own-metadata-collision"):
+            root, profile = new_case()
+            path = write_manifest(root, profile, "a.json", "alpha.llv", a_id,
+                                  personal_name="alpha.llv")
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, _ = register(root, profile)
+            # The collision is written before the snapshot is captured. No
+            # post-capture mutation is needed for the separate path occurrence.
+            before = path.read_bytes()
+            with self.assertRaises(desktop.AcceptanceFailure):
+                subject.scan()
+            self.assertEqual(subject.privacy_failure, "known-value")
+            self.assertEqual(path.read_bytes(), before)
+
+        with self.subTest(case="other-file"):
+            root, profile = new_case()
+            write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, _ = register(root, profile)
             (root / "leak.log").write_text(subject.local_b_label, encoding="utf-8")
             with self.assertRaises(desktop.AcceptanceFailure):
                 subject.scan()
+            self.assertEqual(subject.privacy_failure, "known-value")
+
+        with self.subTest(case="replacement"):
+            root, profile = new_case()
+            write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, manifests = register(root, profile)
+            target = pathlib.Path(manifests[0]["path"])
+            replacement = root / "replacement.tmp"
+            replacement.write_bytes(target.read_bytes())
+            os.replace(replacement, target)
+            with self.assertRaises(desktop.AcceptanceFailure):
+                subject.scan()
+
+        with self.subTest(case="content-change"):
+            root, profile = new_case()
+            write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, manifests = register(root, profile)
+            target = pathlib.Path(manifests[0]["path"])
+            before = target.stat()
+            record = json.loads(target.read_text(encoding="utf-8"))
+            record["personal_file"] = str(root / "personal-x.json")
+            target.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            after = target.stat()
+            self.assertEqual((after.st_dev, after.st_ino, after.st_size),
+                             (before.st_dev, before.st_ino, before.st_size))
+            with self.assertRaises(desktop.AcceptanceFailure):
+                subject.scan()
+
+        with self.subTest(case="symlink"):
+            root, profile = new_case()
+            write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            write_manifest(root, profile, "b.json", "beta.llv", b_id)
+            subject, manifests = register(root, profile)
+            target = pathlib.Path(manifests[0]["path"])
+            outside = root / "outside-target"
+            outside.write_bytes(target.read_bytes())
+            target.unlink()
+            target.symlink_to(outside)
+            with self.assertRaises(desktop.AcceptanceFailure):
+                subject.scan()
+
+        with self.subTest(case="duplicate-key"):
+            root, profile = new_case()
+            path = write_manifest(root, profile, "a.json", "alpha.llv", a_id)
+            raw = path.read_text(encoding="utf-8")
+            path.write_text(raw[:-1] + ', "name": "gamma.llv"}', encoding="utf-8")
+            with self.assertRaises(desktop.AcceptanceFailure):
+                desktop.read_local_vault_manifests(profile)
 
 
 class FlowFake:

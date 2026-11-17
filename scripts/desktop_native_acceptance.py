@@ -180,11 +180,148 @@ def local_vault_profile_dir(settings_path, personal_path):
 def _local_vault_manifest_json(raw):
     def reject_constant(value):
         raise AcceptanceFailure()
+    def reject_duplicates(pairs):
+        record = {}
+        for key, value in pairs:
+            if key in record:
+                raise AcceptanceFailure()
+            record[key] = value
+        return record
     try:
-        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant)
+        value = json.loads(raw.decode("utf-8"), parse_constant=reject_constant,
+                           object_pairs_hook=reject_duplicates)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         raise AcceptanceFailure() from None
     return value
+
+
+def _validate_local_vault_manifest(record):
+    required = {"version", "kind", "vault_id", "personal_file", "backend_root",
+                "name", "journal", "archive"}
+    if type(record) is not dict or set(record) != required:
+        raise AcceptanceFailure()
+    if type(record.get("version")) is not int or record["version"] != 1 or \
+            record.get("kind") != "vault_file_create":
+        raise AcceptanceFailure()
+    if type(record.get("vault_id")) is not str or LOCAL_VAULT_ID.fullmatch(record["vault_id"]) is None:
+        raise AcceptanceFailure()
+    if not local_vault_valid_name(record.get("name")):
+        raise AcceptanceFailure()
+    for field in ("personal_file", "backend_root", "journal", "archive"):
+        value = record.get(field)
+        if type(value) is not str or not os.path.isabs(value) or os.path.normpath(value) != value:
+            raise AcceptanceFailure()
+    return record
+
+
+def _parse_local_vault_manifest(raw):
+    return _validate_local_vault_manifest(_local_vault_manifest_json(raw))
+
+
+def _local_vault_manifest_spans(raw):
+    """Return only the top-level name/vault_id value byte spans of a valid manifest."""
+    try:
+        text = raw.decode("utf-8")
+        decoder = json.JSONDecoder()
+        index, length = 0, len(text)
+
+        def whitespace(value):
+            while value < length and text[value] in " \t\r\n":
+                value += 1
+            return value
+
+        index = whitespace(index)
+        if index >= length or text[index] != "{":
+            raise AcceptanceFailure()
+        index += 1
+        seen, spans = set(), []
+        while True:
+            index = whitespace(index)
+            if index < length and text[index] == "}":
+                index += 1
+                break
+            key, index = decoder.raw_decode(text, index)
+            if type(key) is not str or key in seen:
+                raise AcceptanceFailure()
+            seen.add(key)
+            index = whitespace(index)
+            if index >= length or text[index] != ":":
+                raise AcceptanceFailure()
+            start = whitespace(index + 1)
+            value, index = decoder.raw_decode(text, start)
+            if key in ("name", "vault_id"):
+                if type(value) is not str:
+                    raise AcceptanceFailure()
+                spans.append((start + 1, index - 1))
+            index = whitespace(index)
+            if index < length and text[index] == ",":
+                index += 1
+                continue
+            if index < length and text[index] == "}":
+                index += 1
+                break
+            raise AcceptanceFailure()
+        if whitespace(index) != length or len(spans) != 2:
+            raise AcceptanceFailure()
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise AcceptanceFailure() from None
+    return sorted((len(text[:start].encode("utf-8")),
+                   len(text[:end].encode("utf-8"))) for start, end in spans)
+
+
+def _stable_local_vault_manifest(path, expected):
+    """No-follow bounded reread; fail closed unless it is the captured snapshot."""
+    path = pathlib.Path(path)
+    expected_identity = (expected["device"], expected["inode"])
+    try:
+        before = os.lstat(path)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or \
+            (before.st_dev, before.st_ino) != expected_identity:
+        raise AcceptanceFailure()
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != expected["size"] or \
+                (opened.st_dev, opened.st_ino) != expected_identity:
+            raise AcceptanceFailure()
+        with os.fdopen(descriptor, "rb", closefd=True) as source:
+            descriptor = -1
+            raw = source.read(LOCAL_PROFILE_FILE_LIMIT + 1)
+    except OSError:
+        raise AcceptanceFailure() from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if len(raw) > LOCAL_PROFILE_FILE_LIMIT or len(raw) != expected["size"] or \
+            hashlib.sha256(raw).digest() != expected["digest"]:
+        raise AcceptanceFailure()
+    record = _parse_local_vault_manifest(raw)
+    if record["name"] != expected["name"] or record["vault_id"] != expected["vault_id"]:
+        raise AcceptanceFailure()
+    try:
+        after = os.lstat(path)
+    except OSError:
+        raise AcceptanceFailure() from None
+    if stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode) or \
+            after.st_size != expected["size"] or \
+            (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+        raise AcceptanceFailure()
+    return raw
+
+
+def _local_manifest_guard(manifest):
+    try:
+        return {"name": manifest["name"], "vault_id": manifest["vault_id"],
+                "device": manifest["device"], "inode": manifest["inode"],
+                "size": manifest["size"], "digest": manifest["digest"]}
+    except (KeyError, TypeError):
+        raise AcceptanceFailure() from None
 
 
 def read_local_vault_manifests(profile_dir):
@@ -214,35 +351,32 @@ def read_local_vault_manifests(profile_dir):
             raise AcceptanceFailure() from None
         if not stat.S_ISREG(entry_info.st_mode) or entry_info.st_size > LOCAL_PROFILE_FILE_LIMIT:
             raise AcceptanceFailure()
+        descriptor = -1
         try:
             descriptor = os.open(entry.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        except OSError:
-            raise AcceptanceFailure() from None
-        try:
+            opened_info = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_info.st_mode) or \
+                    opened_info.st_size > LOCAL_PROFILE_FILE_LIMIT or \
+                    (opened_info.st_dev, opened_info.st_ino) != (entry_info.st_dev, entry_info.st_ino):
+                raise AcceptanceFailure()
             with os.fdopen(descriptor, "rb", closefd=True) as source:
+                descriptor = -1
                 raw = source.read(LOCAL_PROFILE_FILE_LIMIT + 1)
         except OSError:
             raise AcceptanceFailure() from None
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         if len(raw) > LOCAL_PROFILE_FILE_LIMIT:
             raise AcceptanceFailure()
-        record = _local_vault_manifest_json(raw)
-        required = {"version", "kind", "vault_id", "personal_file", "backend_root",
-                    "name", "journal", "archive"}
-        if type(record) is not dict or set(record) != required:
-            raise AcceptanceFailure()
-        if type(record.get("version")) is not int or record["version"] != 1 or \
-                record.get("kind") != "vault_file_create":
-            raise AcceptanceFailure()
-        if type(record.get("vault_id")) is not str or LOCAL_VAULT_ID.fullmatch(record["vault_id"]) is None:
-            raise AcceptanceFailure()
-        if not local_vault_valid_name(record.get("name")):
-            raise AcceptanceFailure()
-        for field in ("personal_file", "backend_root", "journal", "archive"):
-            value = record.get(field)
-            if type(value) is not str or not os.path.isabs(value) or os.path.normpath(value) != value:
-                raise AcceptanceFailure()
+        record = _parse_local_vault_manifest(raw)
         manifests.append({"path": entry.path, "name": record["name"],
-                          "vault_id": record["vault_id"]})
+                          "vault_id": record["vault_id"],
+                          "device": opened_info.st_dev, "inode": opened_info.st_ino,
+                          "size": len(raw), "digest": hashlib.sha256(raw).digest()})
     manifests.sort(key=lambda item: item["path"])
     return manifests
 
@@ -825,7 +959,7 @@ class Acceptance:
         self.local_a_manifest = manifests[0]
         self.local_a_label = labels[0]
         self.local_manifest_private_values = {
-            pathlib.Path(manifest["path"]): {manifest["vault_id"], manifest["name"]}
+            pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
             for manifest in manifests
         }
         for manifest, label in zip(manifests, labels):
@@ -855,7 +989,7 @@ class Acceptance:
         self.local_labels = [self.local_a_label, self.local_b_label]
         self.local_a_manifest, self.local_b_manifest = manifests[a_index], manifests[b_index]
         self.local_manifest_private_values = {
-            pathlib.Path(manifest["path"]): {manifest["vault_id"], manifest["name"]}
+            pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
             for manifest in manifests
         }
         for manifest, label in zip(manifests, labels):
@@ -1362,28 +1496,40 @@ class Acceptance:
         if hasattr(self, "fixture"):
             for window in range(int(self.started) // 20, int(time.time()) // 20 + 1):
                 self.otp(window * 20)
+        patterns = set()
+        for value in self.values:
+            patterns.update((value.encode(), json.dumps(value, ensure_ascii=True)[1:-1].encode(), urllib.parse.quote(value, safe="").encode()))
         manifest_private_values = getattr(self, "local_manifest_private_values", {})
         count = 0
         for path in self.state.rglob("*"):
-            if not path.is_file() or path == self.fixture_path or \
-                    path.suffix not in (".log", ".txt", ".json", ".jsonl"):
+            if path == self.fixture_path:
                 continue
-            allowed = manifest_private_values.get(path, ())
-            patterns = set()
-            for value in self.values:
-                if value and value in allowed:
+            allowed = ()
+            expected = manifest_private_values.get(path)
+            if expected is not None:
+                data = _stable_local_vault_manifest(path, expected)
+                allowed = _local_vault_manifest_spans(data)
+            else:
+                if not path.is_file() or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
                     continue
-                patterns.update((value.encode(), json.dumps(value, ensure_ascii=True)[1:-1].encode(), urllib.parse.quote(value, safe="").encode()))
-            data = path.read_bytes()
+                data = path.read_bytes()
             # Syntax-level barrier for a dynamically issued recovery kit that
             # was never registered in self.values (for example when the
             # fixture reader fails). A match is kept in memory only.
             if RECOVERY_KIT_PATTERN.search(data) is not None:
                 self.privacy_failure = "recovery-kit"
                 raise AcceptanceFailure()
-            if any(value and value in data for value in patterns):
-                self.privacy_failure = "known-value"
-                raise AcceptanceFailure()
+            # Only a complete match occupying one exact current manifest
+            # name/vault_id value span is exempt; all other occurrences scan.
+            for pattern in patterns:
+                if not pattern:
+                    continue
+                start = data.find(pattern)
+                while start >= 0:
+                    if (start, start + len(pattern)) not in allowed:
+                        self.privacy_failure = "known-value"
+                        raise AcceptanceFailure()
+                    start = data.find(pattern, start + 1)
             # Codes are short: match a complete independent token, so an
             # unrelated hexadecimal ID substring cannot produce a false hit.
             for code in self.codes:
@@ -1391,6 +1537,10 @@ class Acceptance:
                     self.privacy_failure = "otp-code"
                     raise AcceptanceFailure()
             count += 1
+        # A vanished prevalidated manifest is not a pass. Revalidate every
+        # captured path after the walk so replacement during scan also fails.
+        for path, expected in manifest_private_values.items():
+            _stable_local_vault_manifest(path, expected)
         return count
 
     def close(self):
