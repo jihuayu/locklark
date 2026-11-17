@@ -77,6 +77,10 @@ def native_initial_privacy_failure_detail(value):
             native_initial_privacy_failure_category(value))
 
 
+def native_initial_fixture_path(state):
+    return pathlib.Path(state) / "vault" / "fixture.json"
+
+
 def local_scenario(scenario):
     return scenario in LOCAL_SCENARIOS
 
@@ -545,7 +549,7 @@ class Acceptance:
         fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
         self.fixture_prebuilt = bool(fixture)
         self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
-        self.fixture_path = self.state / "vault" / "fixture.json"
+        self.fixture_path = native_initial_fixture_path(self.state)
         # Exact validated local-vault manifests are private product state, not
         # ordinary diagnostics. Permit only each file's own name/ID while still
         # scanning it for every other registered value and every recovery kit.
@@ -2111,7 +2115,7 @@ def native_initial_privacy_scan(privacy, states):
             continue
         scanner = Acceptance.__new__(Acceptance)
         scanner.state = pathlib.Path(state)
-        scanner.fixture_path = scanner.state / ".no-fixture"
+        scanner.fixture_path = native_initial_fixture_path(scanner.state)
         scanner.values = privacy.values
         scanner.codes = privacy.codes
         scanner.local_manifest_private_values = privacy.local_manifest_private_values

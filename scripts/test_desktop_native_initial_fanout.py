@@ -841,5 +841,71 @@ class SharedPrivacyRegistryTests(unittest.TestCase):
                 self.assertEqual(subject.privacy_failure, "known-value")
 
 
+class AggregateFixturePathPrivacyTests(unittest.TestCase):
+    @staticmethod
+    def _single_case_fixture_path(state):
+        return pathlib.Path(state) / "vault" / "fixture.json"
+
+    @staticmethod
+    def _old_aggregate_fixture_path(state):
+        return pathlib.Path(state) / ".no-fixture"
+
+    @staticmethod
+    def _write_marker(path, marker):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(marker.encode())
+
+    def test_corrected_aggregate_path_skips_only_private_input_file(self):
+        marker = "synthetic-privacy-marker"
+        with tempfile.TemporaryDirectory() as root:
+            state = pathlib.Path(root) / "correct"
+            state.mkdir()
+            private = self._single_case_fixture_path(state)
+            self._write_marker(private, marker)
+            if desktop.native_initial_fixture_path(state) != private:
+                self.fail("AGGREGATE_FIXTURE_PATH_NOT_SINGLE_CASE_LAYOUT")
+            privacy = desktop.NativeInitialPrivacyRegistry()
+            privacy.values.add(marker)
+            if desktop.native_initial_privacy_scan(privacy, [state]) is not None:
+                self.fail("CORRECT_PRIVATE_INPUT_WAS_SCANNED")
+
+        with tempfile.TemporaryDirectory() as root:
+            state = pathlib.Path(root) / "old"
+            state.mkdir()
+            self._write_marker(self._single_case_fixture_path(state), marker)
+            privacy = desktop.NativeInitialPrivacyRegistry()
+            privacy.values.add(marker)
+            scanner = desktop.Acceptance.__new__(desktop.Acceptance)
+            scanner.state = state
+            scanner.fixture_path = self._old_aggregate_fixture_path(state)
+            scanner.values = privacy.values
+            scanner.codes = privacy.codes
+            scanner.local_manifest_private_values = privacy.local_manifest_private_values
+            scanner.privacy_failure = None
+            try:
+                scanner.scan()
+            except desktop.AcceptanceFailure:
+                old_code = scanner.privacy_failure
+            else:
+                old_code = None
+            if old_code is None:
+                self.fail("OLD_AGGREGATE_LAYOUT_DID_NOT_FAIL")
+
+        with tempfile.TemporaryDirectory() as root:
+            state = pathlib.Path(root) / "ordinary"
+            state.mkdir()
+            self._write_marker(self._single_case_fixture_path(state), marker)
+            self._write_marker(state / "ordinary-output.json", marker)
+            privacy = desktop.NativeInitialPrivacyRegistry()
+            privacy.values.add(marker)
+            ordinary_code = desktop.native_initial_privacy_scan(privacy, [state])
+            if ordinary_code is None or ordinary_code not in desktop.NATIVE_INITIAL_PRIVACY_FAILURE_CODES:
+                self.fail("ORDINARY_OUTPUT_WAS_NOT_PRIVACY_VALUE")
+            if old_code != ordinary_code:
+                self.fail("OLD_AGGREGATE_LAYOUT_DID_NOT_MATCH_PRIVACY_VALUE")
+        if desktop.native_initial_fixture_path(pathlib.Path("/tmp")) == self._old_aggregate_fixture_path(pathlib.Path("/tmp")):
+            self.fail("OLD_AGGREGATE_PATH_STILL_USED")
+
+
 if __name__ == "__main__":
     unittest.main()
