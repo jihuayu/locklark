@@ -294,7 +294,7 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 
 	var ownedSnapshot *vaultFileOwnedSnapshot
 	if mode.owned {
-		snapshot, ownedErr := s.authenticateVaultFileOwnedTarget(parentPath, password, key, checkpoint.VaultID)
+		snapshot, ownedErr := s.authenticateVaultFileOwnedTarget(parentPath, parentMaterial, parentSlot, checkpoint.VaultID)
 		if vaultFileOwnedInitialAuthReady != nil {
 			vaultFileOwnedInitialAuthReady()
 		}
@@ -1036,17 +1036,23 @@ func verifyVaultFileChildFactors(path string, slotDigest [32]byte, material, pas
 }
 
 // authenticateVaultFileOwnedTarget authenticates the real account state and
-// audit with the same freshly supplied factors, then returns the unique public
-// custody projection for vaultID. It never trusts the candidate checkpoint for
-// ownership and clears every private owner record before returning.
-func (s *Session) authenticateVaultFileOwnedTarget(path string, password, key []byte, vaultID string) (VaultFileOwnershipPublic, error) {
+// audit after the caller has already proved the freshly supplied factors
+// against this exact captured parent slot/material, then returns the unique
+// public custody projection for vaultID. Reusing the captured verified
+// material avoids a second password KDF while the slot-digest check still binds
+// the read to the same authenticated parent. The temporary verifier session is
+// local only and is never registered or exposed. It never trusts the candidate
+// checkpoint for ownership and clears every private owner record before
+// returning.
+func (s *Session) authenticateVaultFileOwnedTarget(path string, material []byte, slotDigest [32]byte, vaultID string) (VaultFileOwnershipPublic, error) {
 	db, err := existingWithReadOnly(path, true)
 	if err != nil {
 		return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
 	}
+	verified := &Session{material: material, slotDigest: slotDigest}
 	var snapshot VaultFileOwnershipPublic
 	viewErr := db.View(func(tx *bolt.Tx) error {
-		auth, err := authenticateStateItems(tx, string(password), key, vaultFileOwnerListAction, nil, false)
+		auth, err := authenticateStateItems(tx, "", nil, vaultFileOwnerListAction, verified, false)
 		if err != nil {
 			return errVaultFileChildInvalidSlot
 		}
