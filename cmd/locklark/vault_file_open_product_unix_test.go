@@ -181,6 +181,49 @@ type openBaselinePTYResult struct {
 		Title    string `json:"title"`
 		Category string `json:"category"`
 	} `json:"items"`
+	Phase                     int    `json:"phase"`
+	ExitClass                 string `json:"exit_class"`
+	ItemsPresent              bool   `json:"items_present"`
+	NormalizedLen             int    `json:"normalized_len"`
+	ExpectedLen               int    `json:"expected_len"`
+	NormalizedMatchesExpected bool   `json:"normalized_matches_expected"`
+}
+
+func finiteOpenBaselinePTYStatus(value string) string {
+	switch value {
+	case "CANCELLED", "VERIFY_REJECTED", "CONFIG_REJECTED", "JOURNAL_REJECTED",
+		"BACKEND_REJECTED", "LOCAL_UNKNOWN", "UNSUPPORTED", "TARGET_EXISTS",
+		"HARNESS_ERROR", "LOCAL_BASELINE":
+		return value
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func finiteOpenBaselinePTYExitClass(value string) string {
+	switch value {
+	case "exited-0", "exited-1", "exited-other", "signaled", "other", "timeout", "unknown", "not-run":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func finiteOpenBaselinePTYPhase(phase int) int {
+	if phase < 0 || phase > 2 {
+		return 0
+	}
+	return phase
+}
+
+func finiteOpenBaselinePTYCount(count int) int {
+	if count < 0 {
+		return 0
+	}
+	if count > maxVaultFileBaselineOutput {
+		return maxVaultFileBaselineOutput
+	}
+	return count
 }
 
 func runOpenBaselineProduct(t *testing.T, product, config string, password []byte, secret string, missing bool, expectedRefusal string) openBaselinePTYResult {
@@ -222,6 +265,40 @@ func runOpenBaselineProductMode(t *testing.T, product, config string, password [
 		t.Fatal("OPEN_PTY_VERDICT_INVALID")
 	}
 	return result
+}
+
+func assertOpenBaselinePTYDrainClassifier(t *testing.T) {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("PTY_SELFTEST_PYTHON_UNAVAILABLE")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, filepath.Join("testdata", "vault_file_open_pty.py"), "selftest")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil || ctx.Err() != nil || stderr.Len() != 0 {
+		t.Fatal("PTY_SELFTEST_EXEC_FAILED")
+	}
+	var result struct {
+		DrainOK             bool `json:"drain_ok"`
+		StrictExactOK       bool `json:"strict_exact_ok"`
+		StrictExtraRejected bool `json:"strict_extra_rejected"`
+		StrictEchoRejected  bool `json:"strict_echo_rejected"`
+		StrictItemsRejected bool `json:"strict_items_rejected"`
+	}
+	decoder := json.NewDecoder(&stdout)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF {
+		t.Fatal("PTY_SELFTEST_OUTPUT_FAILED")
+	}
+	if !result.DrainOK || !result.StrictExactOK || !result.StrictExtraRejected ||
+		!result.StrictEchoRejected || !result.StrictItemsRejected {
+		t.Fatalf("PTY_SELFTEST_CASE_FAILED drain=%t exact=%t extra=%t echo=%t items=%t",
+			result.DrainOK, result.StrictExactOK, result.StrictExtraRejected,
+			result.StrictEchoRejected, result.StrictItemsRejected)
+	}
 }
 
 func TestVaultFileOpenBaselineProductMinimum(t *testing.T) {
@@ -380,9 +457,17 @@ func TestVaultFileOpenBaselineProductRefusals(t *testing.T) {
 		t.Helper()
 		result := runOpenBaselineProduct(t, product, config, pw, key, missing, want)
 		if result.Status != want || result.Echoed || result.Items != nil {
-			t.Fatal("OPEN_REFUSAL_OUTPUT_FAILED")
+			t.Fatalf("OPEN_REFUSAL_OUTPUT_FAILED status=%s want=%s phase=%d exit_class=%s echoed=%t items_present=%t normalized_len=%d expected_len=%d normalized_matches_expected=%t",
+				finiteOpenBaselinePTYStatus(result.Status), want, finiteOpenBaselinePTYPhase(result.Phase),
+				finiteOpenBaselinePTYExitClass(result.ExitClass), result.Echoed, result.ItemsPresent,
+				finiteOpenBaselinePTYCount(result.NormalizedLen), finiteOpenBaselinePTYCount(result.ExpectedLen),
+				result.NormalizedMatchesExpected)
 		}
 	}
+
+	t.Run("pty-drain-classifier", func(t *testing.T) {
+		assertOpenBaselinePTYDrainClassifier(t)
+	})
 	// SDK policy validation precedes proof signature checks. Both mutations
 	// below are impossible valid policies; assert the SDK's typed structural
 	// denial on both the policy value and the exact malformed wire fixture
