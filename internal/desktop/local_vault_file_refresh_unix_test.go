@@ -15,13 +15,14 @@ import (
 func localVaultRefreshSelect(t *testing.T, f *localVaultSessionFixture, scope localVaultFileSessionScope) {
 	t.Helper()
 	f.app.closeLocalVaultFileView()
-	f.app.localVaultFiles.refs = []localVaultFileRef{{
+	ref := localVaultFileRef{
 		path:        scope.configPath,
 		vaultID:     scope.vaultID,
 		name:        "本地文件库标签",
 		journalPath: scope.journalPath,
-	}}
-	f.app.localVaultFiles.selected = scope.configPath
+	}
+	f.app.localVaultFiles.refs = []localVaultFileRef{ref}
+	f.app.selectLocalVaultFile(ref)
 }
 
 func localVaultRefreshStaged(t *testing.T, op *localVaultFileRefreshOperation) localVaultFileRefreshResult {
@@ -147,7 +148,7 @@ func TestDesktopLocalVaultRefreshBorrowsCurrentWrapperAcrossSiblingClose(t *test
 	if f.app.localVaultFiles.viewVerification == localVaultFileViewFresh {
 		t.Fatal("LOCAL_REFRESH_NAVIGATION_KEPT_FRESH")
 	}
-	f.app.localVaultFiles.selected = bScope.configPath
+	localVaultRefreshSelect(t, f, bScope)
 	if got := f.app.localVaultFileRefreshCaption(); got != localVaultFileCachedCaption {
 		t.Fatal("LOCAL_REFRESH_RESELECT_DID_NOT_SHOW_CACHED")
 	}

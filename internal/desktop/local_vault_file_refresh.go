@@ -292,7 +292,8 @@ func (a *App) completeLocalVaultFileRefresh(op *localVaultFileRefreshOperation, 
 			if a.syncLocalVaultFileSessions() == personal.VaultFileCacheActive &&
 				a.localVaultFileRefreshCurrentExact(op) &&
 				a.localVaultFileRefreshViewCurrent(op) &&
-				result.summary.VaultID == op.scope.vaultID {
+				result.summary.VaultID == op.scope.vaultID &&
+				a.setLocalVaultFileProjectionOrigin(op.scope, op.slot) {
 				slot := op.slot
 				items := append([]personal.VaultFileBaselineItem(nil), result.summary.Items...)
 				slot.summary = localVaultFileSessionSummaryClone(result.summary)
@@ -320,7 +321,7 @@ func (a *App) completeLocalVaultFileRefresh(op *localVaultFileRefreshOperation, 
 			// Only this exact current wrapper is detached; stale or cancelled
 			// borrowed reads never reach this branch and never Close a child.
 			a.detachLocalVaultFileSessionWrapper(op.slot)
-			if viewCurrent {
+			if viewCurrent && a.setLocalVaultFileProjectionOrigin(op.scope, op.slot) {
 				state.items = nil
 				state.viewVerification = localVaultFileViewFailed
 			}
@@ -366,11 +367,22 @@ func (a *App) localVaultFileRefreshViewCurrent(op *localVaultFileRefreshOperatio
 		return false
 	}
 	state := &a.localVaultFiles
-	return op.scope.configPath != "" &&
-		op.viewSelected == op.scope.configPath &&
-		state.selected == op.viewSelected &&
-		state.selected == op.scope.configPath &&
-		state.viewSequence == op.viewSequence
+	if op.scope.configPath == "" || op.viewSelected != op.scope.configPath ||
+		state.selected != op.viewSelected ||
+		state.selected != op.scope.configPath ||
+		state.viewSequence != op.viewSequence {
+		return false
+	}
+	ref, _, ok := a.localVaultFileSelectedSnapshotRef()
+	if !ok || ref.path != op.scope.configPath || ref.vaultID != op.scope.vaultID ||
+		ref.journalPath != op.scope.journalPath {
+		return false
+	}
+	slot, ok := a.localVaultFileSelectedStoredSlot()
+	if !ok || slot != op.slot {
+		return false
+	}
+	return true
 }
 
 // cancelLocalVaultFileRefreshExact clears only this operation's undelivered

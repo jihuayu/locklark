@@ -72,40 +72,129 @@ func (a *App) localVaultFileSelectedScopeMatches(scope localVaultFileSessionScop
 		ref.journalPath == scope.journalPath
 }
 
-// localVaultFileCurrentScopeGate is the common display-only read gate. It
-// resolves the unique exact stored slot for the selected reviewed snapshot ref
-// and requires the current parent/App generation/map entry, a nonblocking
-// Active routing snapshot whose current settings workspace root still matches
-// the stored backend root, and the same exact binding at the delivery
-// boundary. It grants no read, authority or grant and never calls VaultPath.
-func (a *App) localVaultFileCurrentScopeGate() (localVaultFileSessionScope, *localVaultFileSessionSlot, bool) {
-	ref, _, ok := a.localVaultFileSelectedSnapshotRef()
-	if !ok || a.session == nil {
-		return localVaultFileSessionScope{}, nil, false
-	}
-	slot, ok := a.localVaultFileSelectedStoredSlot()
-	if !ok {
-		return localVaultFileSessionScope{}, nil, false
-	}
-	scope := slot.scope
-	if scope.configPath != ref.path || scope.vaultID != ref.vaultID ||
-		scope.journalPath != ref.journalPath || scope.backendRoot == "" ||
+// setLocalVaultFileProjectionOrigin atomically binds the accepted projection
+// data to the exact current view. It is called only on the UI goroutine after
+// the view sequence has advanced and the exact slot is still current.
+func (a *App) setLocalVaultFileProjectionOrigin(scope localVaultFileSessionScope, slot *localVaultFileSessionSlot) bool {
+	state := &a.localVaultFiles
+	if slot == nil || a.session == nil || slot.scope != scope ||
 		slot.parent != a.session || slot.appGeneration != a.generation ||
-		slot.retiring || a.localVaultFiles.sessionSlots[scope] != slot {
+		state.sessionSlots[scope] != slot {
+		return false
+	}
+	state.projectionOrigin = &localVaultFileProjectionOrigin{
+		scope:        scope,
+		parent:       a.session,
+		generation:   a.generation,
+		slot:         slot,
+		slotSequence: slot.sequence,
+		viewSequence: state.viewSequence,
+	}
+	return true
+}
+
+// invalidateLocalVaultFileProjectionView cancels only this view's pending
+// projection delivery, advances the view sequence, and clears the accepted
+// projection binding and data. It never closes or mutates an adopted wrapper.
+func (a *App) invalidateLocalVaultFileProjectionView(status string) {
+	state := &a.localVaultFiles
+	a.cancelLocalVaultFileRefreshViewReads(state.selected, state.viewSequence)
+	state.viewSequence++
+	state.items = nil
+	state.projectionOrigin = nil
+	state.viewVerification = localVaultFileViewUnverified
+	state.status = status
+}
+
+func localVaultFileRefByPath(refs []localVaultFileRef, path string) (localVaultFileRef, bool) {
+	for _, ref := range refs {
+		if ref.path == path {
+			return ref, true
+		}
+	}
+	return localVaultFileRef{}, false
+}
+
+// applyLocalVaultFileRefs is the one production list-callback acceptance
+// helper. It compares the new selected full tuple against the accepted origin,
+// or the old selected full tuple when no origin exists. Only name and display
+// prefix changes are display metadata; any path/VaultID/journal/backend-root
+// drift or disappearance invalidates the old view without closing children.
+func (a *App) applyLocalVaultFileRefs(refs []localVaultFileRef, backendRoot string, listErr error) {
+	state := &a.localVaultFiles
+	if listErr != nil {
+		a.invalidateLocalVaultFileProjectionView(localVaultFileStatusReview)
+		state.refs = nil
+		state.refsBackendRoot = ""
+		state.status = "本地文件库目录待核查"
+		return
+	}
+	if origin := state.projectionOrigin; origin != nil {
+		ref, ok := localVaultFileRefByPath(refs, origin.scope.configPath)
+		if ok && ref.vaultID == origin.scope.vaultID &&
+			ref.journalPath == origin.scope.journalPath &&
+			backendRoot == origin.scope.backendRoot {
+			state.refs = refs
+			state.refsBackendRoot = backendRoot
+			return
+		}
+		a.invalidateLocalVaultFileProjectionView(localVaultFileStatusUnavailable)
+		state.refs = refs
+		state.refsBackendRoot = backendRoot
+		return
+	}
+	if state.selected != "" {
+		oldRef, oldOK := localVaultFileRefByPath(state.refs, state.selected)
+		newRef, newOK := localVaultFileRefByPath(refs, state.selected)
+		if !oldOK || !newOK || oldRef.vaultID != newRef.vaultID ||
+			oldRef.journalPath != newRef.journalPath ||
+			state.refsBackendRoot != backendRoot {
+			a.invalidateLocalVaultFileProjectionView(localVaultFileStatusUnavailable)
+		}
+	}
+	state.refs = refs
+	state.refsBackendRoot = backendRoot
+}
+
+// localVaultFileCurrentScopeGate is the common display-only read gate. It
+// starts from the accepted projection origin, so a different same-configPath
+// tuple can never authorize global items or provenance. If the reviewed ref is
+// present it must match the origin full tuple; if it has not arrived yet, the
+// origin itself proves the already-presented creation target. The current
+// parent/generation/map/slot pointer/sequence/view sequence and nonblocking
+// workspace root are revalidated at the delivery boundary.
+func (a *App) localVaultFileCurrentScopeGate() (localVaultFileSessionScope, *localVaultFileSessionSlot, bool) {
+	state := &a.localVaultFiles
+	origin := state.projectionOrigin
+	if origin == nil || a.session == nil || origin.parent != a.session ||
+		origin.generation != a.generation || state.selected != origin.scope.configPath ||
+		state.viewSequence != origin.viewSequence || origin.slot == nil ||
+		origin.slot.scope != origin.scope || origin.slot.parent != a.session ||
+		origin.slot.appGeneration != a.generation ||
+		origin.slot.sequence != origin.slotSequence ||
+		state.sessionSlots[origin.scope] != origin.slot || origin.slot.retiring {
 		return localVaultFileSessionScope{}, nil, false
+	}
+	if ref, _, ok := a.localVaultFileSelectedSnapshotRef(); ok {
+		if ref.path != origin.scope.configPath || ref.vaultID != origin.scope.vaultID ||
+			ref.journalPath != origin.scope.journalPath {
+			return localVaultFileSessionScope{}, nil, false
+		}
 	}
 	personalPath, cache := a.localVaultFileRoutingPath()
 	if cache != personal.VaultFileCacheActive || personalPath == "" {
 		return localVaultFileSessionScope{}, nil, false
 	}
 	_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
-	if currentRoot != scope.backendRoot {
+	if currentRoot != origin.scope.backendRoot {
 		return localVaultFileSessionScope{}, nil, false
 	}
-	// Revalidate the exact binding and current workspace root after the
-	// nonblocking snapshot, immediately before returning metadata.
-	if a.localVaultFiles.sessionSlots[scope] != slot || slot.parent != a.session ||
-		slot.appGeneration != a.generation || slot.retiring {
+	if state.projectionOrigin != origin || state.selected != origin.scope.configPath ||
+		state.viewSequence != origin.viewSequence ||
+		state.sessionSlots[origin.scope] != origin.slot ||
+		origin.slot.parent != a.session ||
+		origin.slot.appGeneration != a.generation ||
+		origin.slot.sequence != origin.slotSequence || origin.slot.retiring {
 		return localVaultFileSessionScope{}, nil, false
 	}
 	personalPath, cache = a.localVaultFileRoutingPath()
@@ -113,12 +202,13 @@ func (a *App) localVaultFileCurrentScopeGate() (localVaultFileSessionScope, *loc
 		return localVaultFileSessionScope{}, nil, false
 	}
 	_, currentRoot = localVaultFilePaths(a.settingsPath, personalPath)
-	if currentRoot != scope.backendRoot ||
-		a.localVaultFiles.sessionSlots[scope] != slot || slot.parent != a.session ||
-		slot.appGeneration != a.generation || slot.retiring {
+	if currentRoot != origin.scope.backendRoot ||
+		state.sessionSlots[origin.scope] != origin.slot || origin.slot.parent != a.session ||
+		origin.slot.appGeneration != a.generation ||
+		origin.slot.sequence != origin.slotSequence || origin.slot.retiring {
 		return localVaultFileSessionScope{}, nil, false
 	}
-	return scope, slot, true
+	return origin.scope, origin.slot, true
 }
 
 func (a *App) localVaultFileCurrentLiveScopeGate() (localVaultFileSessionScope, *localVaultFileSessionSlot, bool) {

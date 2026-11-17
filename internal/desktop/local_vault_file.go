@@ -31,12 +31,27 @@ type localVaultFileRef struct {
 	path, vaultID, name, journalPath string
 }
 
+type localVaultFileProjectionOrigin struct {
+	scope        localVaultFileSessionScope
+	parent       *personal.Session
+	generation   uint64
+	slot         *localVaultFileSessionSlot
+	slotSequence uint64
+	viewSequence uint64
+}
+
 type localVaultFileState struct {
 	refs         []localVaultFileRef
 	selected     string
 	items        []personal.VaultFileBaselineItem
 	status       string
 	listSequence uint64
+	// refsBackendRoot is the captured list worker workspace for the current
+	// refs. It is routing metadata only and never authority.
+	refsBackendRoot string
+	// projectionOrigin is the exact accepted UI projection binding. It is
+	// never a wrapper, token, factor, material or capability and never grants.
+	projectionOrigin *localVaultFileProjectionOrigin
 	// displayLabelRefs and displayLabels are a private display-only snapshot.
 	// They are recomputed from the exact current refs whenever list metadata
 	// differs, including when tests assign refs directly. The snapshot is never
@@ -204,10 +219,9 @@ func (a *App) refreshLocalVaultFiles() {
 				return
 			}
 			if err != nil {
-				a.localVaultFiles.refs = nil
-				a.localVaultFiles.status = "本地文件库目录待核查"
+				a.applyLocalVaultFileRefs(nil, backendRoot, err)
 			} else {
-				a.localVaultFiles.refs = refs
+				a.applyLocalVaultFileRefs(refs, backendRoot, nil)
 			}
 			if a.win != nil {
 				a.win.Invalidate()
@@ -222,6 +236,7 @@ func (a *App) closeLocalVaultFileView() {
 	a.cancelLocalVaultFileRefreshView()
 	state := &a.localVaultFiles
 	state.selected, state.items, state.status = "", nil, ""
+	state.projectionOrigin = nil
 }
 
 // localVaultFileNavigationScope resolves one navigation ref through the
@@ -297,8 +312,15 @@ func (a *App) selectLocalVaultFile(ref localVaultFileRef) {
 		state.status = localVaultFileStatusReview
 		return
 	}
+	slot := a.localVaultFiles.sessionSlots[scope]
+	if !a.setLocalVaultFileProjectionOrigin(scope, slot) {
+		clearLocalVaultFileSessionSummary(&summary)
+		state.status = localVaultFileStatusReview
+		return
+	}
 	state.items = summary.Items
 	state.status = localVaultFileStatusReady
+	state.viewVerification = localVaultFileViewCached
 }
 
 // localVaultFileDisplayLabelSnapshot returns one whole-list snapshot shared by

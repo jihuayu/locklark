@@ -560,8 +560,13 @@ func (a *App) presentAdoptedLocalVaultFileSession(op *localVaultFileSessionOpera
 	a.closeLocalVaultFileView()
 	state := &a.localVaultFiles
 	state.selected = op.scope.configPath
+	if !a.setLocalVaultFileProjectionOrigin(op.scope, op.slot) {
+		clearLocalVaultFileSessionSummary(&summary)
+		return false
+	}
 	state.status = "已验证本地初始版本 · 远端状态未核实"
 	state.items = summary.Items
+	state.viewVerification = localVaultFileViewCached
 	a.refreshLocalVaultFiles()
 	return true
 }
