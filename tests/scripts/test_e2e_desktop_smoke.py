@@ -401,8 +401,8 @@ _DISPLAY_ONLY_SETTINGS = {"security.revealPasswords"}
 
 # Keys emitted by the locked smoke settings document. The document must match
 # them exactly so schema drift shows up here. The complete Settings declaration
-# has one additional local-only field, app.vaultPath; the smoke document must
-# never emit it or any login factor.
+# has additional local-only fields (app.vaultPath and system-unlock settings);
+# the smoke document must never emit them or any login factor.
 _SCHEMA_KEYS = {
     "security.autolock.minutes",
     "security.clipboard.clearAfterSeconds",
@@ -418,9 +418,18 @@ _SCHEMA_KEYS = {
     "app.defaultVaultForSaving",
 }
 
-# Exact complete Settings declaration: the smoke-emitted keys plus only the
-# known local app.vaultPath. This is intentionally not the smoke document.
-_SETTINGS_DECLARED_KEYS = _SCHEMA_KEYS | {"app.vaultPath"}
+# Known local-only persisted settings that the smoke document must not emit.
+_LOCAL_ONLY_SETTINGS = {
+    "app.vaultPath",
+    "security.systemUnlock.autoRenew",
+    "security.systemUnlock.enabled",
+    "security.systemUnlock.expiresAt",
+    "security.systemUnlock.expiry",
+}
+
+# Exact complete Settings declaration: the smoke-emitted keys plus the
+# known local-only settings. This is intentionally not the smoke document.
+_SETTINGS_DECLARED_KEYS = _SCHEMA_KEYS | _LOCAL_ONLY_SETTINGS
 
 
 def _settings_struct_body(source: str) -> str:
@@ -1380,7 +1389,7 @@ class ProductContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertEqual(_settings_schema_keys(settings_source), _SETTINGS_DECLARED_KEYS)
-        self.assertEqual(_SETTINGS_DECLARED_KEYS - _SCHEMA_KEYS, {"app.vaultPath"})
+        self.assertEqual(_SETTINGS_DECLARED_KEYS - _SCHEMA_KEYS, _LOCAL_ONLY_SETTINGS)
         self.assertNotIn("app.vaultPath", _SCHEMA_KEYS)
 
     def test_settings_schema_introspection_ignores_unrelated_json_structs(self):
