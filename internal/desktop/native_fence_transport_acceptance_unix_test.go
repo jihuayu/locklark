@@ -240,6 +240,22 @@ func nativeFenceTestReadSentinel(t *testing.T, fd int, timeout time.Duration) by
 	}
 }
 
+func nativeFenceTestReleasedTransport(t *testing.T, attemptID uint64, childCount int, readyFrame string) *nativeFenceTestHarness {
+	t.Helper()
+	harness := newNativeFenceTestHarness(t, 2*time.Second, 100*time.Millisecond, 2*time.Second)
+	nativeFenceTestClaim(t, harness.transport, attemptID, childCount)
+	result := nativeFenceTestHold(t, harness.transport, context.Background())
+	if frame := nativeFenceTestReadFrame(t, harness.eventIn, time.Second); frame != readyFrame {
+		t.Fatal("NATIVE_FENCE_TEST_READY_FRAME_MISMATCH")
+	}
+	nativeFenceTestWrite(t, harness.controlOut, "RELEASE\n")
+	held := nativeFenceTestResult(t, result)
+	if held.verdict != nativeFenceVerdictReleased || held.reason != nativeFenceReasonNone || held.transportFailed {
+		t.Fatal("NATIVE_FENCE_TEST_RELEASE_VERDICT_MISMATCH")
+	}
+	return harness
+}
+
 func TestNativeFenceTransportDescriptors(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		transport := newNativeFenceTransport(-1, -1)
@@ -339,9 +355,8 @@ func TestNativeFenceTransportReleaseAdopt(t *testing.T) {
 	if held.verdict != nativeFenceVerdictReleased || held.reason != nativeFenceReasonNone || held.transportFailed {
 		t.Fatal("NATIVE_FENCE_TEST_RELEASE_VERDICT_MISMATCH")
 	}
-	if drained := harness.transport.publishDrained(101, 2, true); drained.status != nativeFenceNotifyRejected || drained.reason != nativeFenceReasonState {
-		t.Fatal("NATIVE_FENCE_TEST_DRAINED_BEFORE_ABORT_ACCEPTED")
-	}
+	// A released operation may instead be dropped by the original adoption
+	// gate; that released-drop DRAINED path is covered separately.
 	if adopted := harness.transport.publishAdopted(101, 2); adopted.status != nativeFenceNotifyDone {
 		t.Fatal("NATIVE_FENCE_TEST_ADOPT_NOT_DONE")
 	}
@@ -583,7 +598,7 @@ func TestNativeFenceTransportAttemptIsolation(t *testing.T) {
 	if stale := second.transport.publishAdopted(161, 1); stale.status != nativeFenceNotifyIgnored || stale.reason != nativeFenceReasonAttempt {
 		t.Fatal("NATIVE_FENCE_TEST_OLD_ADOPT_AFFECTED_B")
 	}
-	if stale := second.transport.publishDrained(161, 1, true); stale.status != nativeFenceNotifyRejected {
+	if stale := second.transport.publishDrained(161, 1, true); stale.status != nativeFenceNotifyIgnored || stale.reason != nativeFenceReasonAttempt {
 		t.Fatal("NATIVE_FENCE_TEST_OLD_DRAIN_TERMINALIZED_B")
 	}
 	if adopted := second.transport.publishAdopted(262, 1); adopted.status != nativeFenceNotifyDone {
@@ -901,4 +916,72 @@ func TestNativeFenceTransportEINTRWriteBounded(t *testing.T) {
 		t.Fatal("NATIVE_FENCE_TEST_EINTR_WRITE_LOCK_HELD")
 	}
 	harness.transport.mu.Unlock()
+}
+
+func TestNativeFenceTransportReleasedDropDrain(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		harness := nativeFenceTestReleasedTransport(t, 401, 2, "READY_HELD 2")
+		if drained := harness.transport.publishDrained(401, 2, true); drained.status != nativeFenceNotifyDone || drained.reason != nativeFenceReasonNone || drained.transportFailed {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_NOT_DONE")
+		}
+		if frame := nativeFenceTestReadFrame(t, harness.eventIn, time.Second); frame != "DRAINED 2 1" {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAINED_FRAME_MISMATCH")
+		}
+		nativeFenceTestExpectEOF(t, harness.eventIn, time.Second)
+		if !nativeFenceTestFDClosed(harness.controlIn) {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASE_READER_OPEN")
+		}
+		if duplicate := harness.transport.publishDrained(401, 2, true); duplicate.status != nativeFenceNotifyIgnored {
+			t.Fatal("NATIVE_FENCE_TEST_DUPLICATE_RELEASED_DRAIN_NOT_IGNORED")
+		}
+		if late := harness.transport.publishAdopted(401, 2); late.status != nativeFenceNotifyIgnored {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_ADOPT_NOT_IGNORED")
+		}
+		if stale := harness.transport.publishDrained(499, 1, false); stale.status != nativeFenceNotifyIgnored {
+			t.Fatal("NATIVE_FENCE_TEST_STALE_RELEASED_DRAIN_NOT_IGNORED")
+		}
+	})
+
+	t.Run("wrong-attempt-count", func(t *testing.T) {
+		harness := nativeFenceTestReleasedTransport(t, 402, 2, "READY_HELD 2")
+		if stale := harness.transport.publishDrained(499, 2, true); stale.status != nativeFenceNotifyIgnored || stale.reason != nativeFenceReasonAttempt {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_STALE_ATTEMPT_ACCEPTED")
+		}
+		if overbound := harness.transport.publishDrained(402, 3, true); overbound.status != nativeFenceNotifyRejected || overbound.reason != nativeFenceReasonCount {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_OVERBOUND_ACCEPTED")
+		}
+		if oversized := harness.transport.publishDrained(402, nativeFenceMaxChildren+1, true); oversized.status != nativeFenceNotifyRejected || oversized.reason != nativeFenceReasonCount {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_OVERSIZE_ACCEPTED")
+		}
+		if drained := harness.transport.publishDrained(402, 2, false); drained.status != nativeFenceNotifyDone {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_NOT_DONE")
+		}
+		if frame := nativeFenceTestReadFrame(t, harness.eventIn, time.Second); frame != "DRAINED 2 0" {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAINED_FRAME_MISMATCH")
+		}
+		nativeFenceTestExpectEOF(t, harness.eventIn, time.Second)
+	})
+
+	t.Run("pre-release-waiting", func(t *testing.T) {
+		harness := newNativeFenceTestHarness(t, 2*time.Second, 100*time.Millisecond, 2*time.Second)
+		nativeFenceTestClaim(t, harness.transport, 403, 2)
+		result := nativeFenceTestHold(t, harness.transport, context.Background())
+		if frame := nativeFenceTestReadFrame(t, harness.eventIn, time.Second); frame != "READY_HELD 2" {
+			t.Fatal("NATIVE_FENCE_TEST_READY_FRAME_MISMATCH")
+		}
+		if early := harness.transport.publishDrained(403, 2, true); early.status != nativeFenceNotifyRejected || early.reason != nativeFenceReasonState {
+			t.Fatal("NATIVE_FENCE_TEST_PRE_RELEASE_DRAIN_ACCEPTED")
+		}
+		nativeFenceTestWrite(t, harness.controlOut, "RELEASE\n")
+		if held := nativeFenceTestResult(t, result); held.verdict != nativeFenceVerdictReleased {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASE_VERDICT_MISMATCH")
+		}
+		if drained := harness.transport.publishDrained(403, 2, true); drained.status != nativeFenceNotifyDone {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAIN_NOT_DONE")
+		}
+		if frame := nativeFenceTestReadFrame(t, harness.eventIn, time.Second); frame != "DRAINED 2 1" {
+			t.Fatal("NATIVE_FENCE_TEST_RELEASED_DRAINED_FRAME_MISMATCH")
+		}
+		nativeFenceTestExpectEOF(t, harness.eventIn, time.Second)
+	})
 }

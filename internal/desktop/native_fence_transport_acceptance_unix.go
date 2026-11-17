@@ -367,7 +367,7 @@ func (t *nativeFenceTransport) publishDrained(attemptID uint64, closedCount int,
 			reason: nativeFenceReasonTerminal,
 		}
 	}
-	if t.phase != nativeFencePhaseAborted {
+	if t.phase != nativeFencePhaseAborted && t.phase != nativeFencePhaseReleased {
 		return nativeFenceNotifyResult{
 			status: nativeFenceNotifyRejected,
 			reason: nativeFenceReasonState,
@@ -385,6 +385,9 @@ func (t *nativeFenceTransport) publishDrained(attemptID uint64, closedCount int,
 			reason: nativeFenceReasonCount,
 		}
 	}
+	// A released operation may still be dropped by the original App adoption
+	// gate. The private owner then reports the observed drain. This frame is a
+	// finite caller observation only, never cleanup proof or an ADOPTED grant.
 	written := t.writeFrameLocked(nativeFenceDrainedFrame(closedCount, parentLocked))
 	t.terminal = true
 	t.stopTerminalLocked()
