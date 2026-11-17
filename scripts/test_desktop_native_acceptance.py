@@ -1477,6 +1477,7 @@ class LocalVaultFlowBoundary:
         self.prepare_clicks = []
         self.expected_recovery_marker = None
         self.recovery_input_marker = None
+        self.final_recovery_marker = None
 
     def phase(self, value):
         self.events.append(("phase", value))
@@ -1511,6 +1512,7 @@ class LocalVaultFlowBoundary:
             self.prepare_enabled = False
             self.expected_recovery_marker = None
             self.recovery_input_marker = None
+            self.final_recovery_marker = None
         if label == "准备创建":
             self.prepare_clicks.append(self.prepare_enabled)
             if not self.prepare_enabled:
@@ -1519,12 +1521,17 @@ class LocalVaultFlowBoundary:
             if self.recovery_input_marker not in (None, "wrong") and \
                     self.recovery_input_marker != self.expected_recovery_marker:
                 raise AcceptanceFailure()
+        if label == "完成创建":
+            if self.final_recovery_marker != self.expected_recovery_marker:
+                raise AcceptanceFailure()
         self.events.append(("click", label))
 
     def fill(self, label, value):
         marker = self.recovery_marker(value)
         if label == "重新输入恢复码":
             self.recovery_input_marker = marker
+        if label == "备份恢复码":
+            self.final_recovery_marker = marker
         if label in ("主密码", "Secret Key"):
             self.fields[label] = value
             self.prepare_enabled = (bool(self.fields.get("主密码")) and
@@ -1634,6 +1641,12 @@ class LocalVaultFlowTests(unittest.TestCase):
         self.assertLess(events.index(("fill", "重新输入恢复码", "kit-b")), b_publish)
         self.assertLess(events.index(("fill", "备份恢复码", "kit-a")),
                         events.index(("fill", "备份恢复码", "kit-b")))
+        b_final_fill = events.index(("fill", "备份恢复码", "kit-b"))
+        self.assertGreater(b_final_fill, b_publish)
+        complete_indices = [index for index, event in enumerate(events)
+                            if event == ("click", "完成创建")]
+        self.assertEqual(len(complete_indices), 2)
+        self.assertLess(b_final_fill, complete_indices[1])
 
         cross = LocalVaultFlowBoundary(kit_a, kit_b)
         cross.expect_recovery(kit_b)
