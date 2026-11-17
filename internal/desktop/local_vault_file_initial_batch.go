@@ -16,6 +16,72 @@ const (
 // after the real wrapper Close calls and parent Lock have returned. It is nil in
 // production and never receives a factor, key, wrapper, token, parent, path,
 // identity or authority-bearing result.
+const localVaultFileInitialDrainLimit = 64
+
+type localVaultFileInitialDrainState uint8
+
+const (
+	localVaultFileInitialDrainNotReady localVaultFileInitialDrainState = iota
+	localVaultFileInitialDrainComplete
+	localVaultFileInitialDrainInvalid
+)
+
+type localVaultFileInitialDrainSummary struct {
+	state          localVaultFileInitialDrainState
+	closedWrappers int
+	parentLocked   bool
+	refsCleared    bool
+	rowsCleared    bool
+}
+
+func localVaultFileInitialDrainResult(closed int, parentLocked, refsCleared, rowsCleared bool) localVaultFileInitialDrainSummary {
+	summary := localVaultFileInitialDrainSummary{
+		closedWrappers: closed,
+		parentLocked:   parentLocked,
+		refsCleared:    refsCleared,
+		rowsCleared:    rowsCleared,
+	}
+	if closed < 0 || closed > localVaultFileInitialDrainLimit {
+		summary.closedWrappers = localVaultFileInitialDrainLimit
+		summary.state = localVaultFileInitialDrainInvalid
+		return summary
+	}
+	if !parentLocked || !refsCleared || !rowsCleared {
+		summary.state = localVaultFileInitialDrainInvalid
+		return summary
+	}
+	summary.state = localVaultFileInitialDrainComplete
+	return summary
+}
+
+func clearLocalVaultFileInitialRefs(refs []localVaultFileRef) {
+	for index := range refs {
+		refs[index] = localVaultFileRef{}
+	}
+}
+
+func localVaultFileInitialRefsCleared(refs []localVaultFileRef) bool {
+	for _, ref := range refs {
+		if ref != (localVaultFileRef{}) {
+			return false
+		}
+	}
+	return true
+}
+
+func localVaultFileInitialRowsCleared(rows []personal.Row) bool {
+	for _, row := range rows {
+		if row.Kind != "" || row.RestoreState != "" || row.Category != "" ||
+			row.Subtitle != "" || row.State != "" || row.ID != "" ||
+			row.Title != "" || row.Revision != "" || row.WatchtowerFlags != nil ||
+			row.StrengthScore != nil || row.StrengthCategory != "" ||
+			row.ReuseCount != 0 || row.BreachCount != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 var localVaultFileInitialBatchDrainForTest func(closedWrappers int, parentLocked bool)
 
 // localVaultFileInitialBatch is the private ownership envelope for the one
@@ -37,6 +103,7 @@ type localVaultFileInitialBatch struct {
 
 	adopted, dropRequested, draining bool
 	done                             chan struct{}
+	summary                          localVaultFileInitialDrainSummary
 }
 
 func clearLocalVaultFileInitialRows(rows []personal.Row) {
@@ -121,6 +188,15 @@ func (b *localVaultFileInitialBatch) drop(launch func(func())) {
 // drain closes only the exact wrappers/parent owned by this unpublished batch.
 // Wrapper Close is synchronous and waits for the real child close barrier;
 // parent Lock follows. It never touches an older or newer independent parent.
+func (b *localVaultFileInitialBatch) drainSummary() localVaultFileInitialDrainSummary {
+	if b == nil {
+		return localVaultFileInitialDrainSummary{state: localVaultFileInitialDrainInvalid}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.summary
+}
+
 func (b *localVaultFileInitialBatch) drain() {
 	if b == nil {
 		return
@@ -139,7 +215,14 @@ func (b *localVaultFileInitialBatch) drain() {
 	b.draining = true
 	parent := b.parent
 	results := b.results
-	clearLocalVaultFileInitialRows(b.rows)
+	refs := b.refs
+	rows := b.rows
+	clearLocalVaultFileInitialRows(rows)
+	rowsCleared := localVaultFileInitialRowsCleared(rows)
+	clearLocalVaultFileInitialRefs(refs)
+	refsCleared := localVaultFileInitialRefsCleared(refs)
+	b.refs = nil
+	b.candidateRefs = nil
 	b.rows = nil
 	b.mu.Unlock()
 
@@ -161,10 +244,12 @@ func (b *localVaultFileInitialBatch) drain() {
 		clearLocalVaultFileSessionSummary(&results[index].Baseline)
 		results[index] = vaultfileclient.LocalGenesisBatchResult{}
 	}
-	parentLocked := true
+	parentLocked := false
+	observerParentLocked := true
 	if parent != nil {
 		parent.Lock()
 		parentLocked = !parent.Unlocked()
+		observerParentLocked = parentLocked
 	}
 
 	b.mu.Lock()
@@ -173,18 +258,15 @@ func (b *localVaultFileInitialBatch) drain() {
 	b.refs = nil
 	b.candidateRefs = nil
 	b.rows = nil
+	b.summary = localVaultFileInitialDrainResult(closedWrappers, parentLocked, refsCleared, rowsCleared)
 	close(b.done)
 	b.mu.Unlock()
 
 	if localVaultFileInitialBatchDrainForTest != nil {
-		localVaultFileInitialBatchDrainForTest(closedWrappers, parentLocked)
+		localVaultFileInitialBatchDrainForTest(closedWrappers, observerParentLocked)
 	}
 }
 
-// adoptLocalVaultFileInitialBatch performs the exact UI-side adoption gates and
-// installs only the frozen refs and successful wrappers/summaries. It never
-// clears adopted summary storage. Failure immediately clears projection state
-// and hands the whole private batch to the existing drain owner.
 func (a *App) adoptLocalVaultFileInitialBatch(batch *localVaultFileInitialBatch) (*personal.Session, []personal.Row, bool) {
 	fail := func() (*personal.Session, []personal.Row, bool) {
 		if batch != nil {
