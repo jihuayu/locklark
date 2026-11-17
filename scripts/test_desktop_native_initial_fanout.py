@@ -1,8 +1,10 @@
+import ast
 import collections
 import contextlib
 import io
 import json
 import pathlib
+import re
 import sys
 import tempfile
 import unittest
@@ -10,8 +12,24 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import browser_native_x11 as native
 import desktop_native_acceptance as desktop
 from desktop_native_acceptance import Acceptance, AcceptanceFailure
+
+
+def _product_cancel_caption():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    lines = (root / "internal/desktop/app.go").read_text(encoding="utf-8").splitlines()
+    cancel = next((i for i, line in enumerate(lines) if "a.cancelAccountUnlock(attempt)" in line), None)
+    if cancel is None:
+        raise AssertionError("NATIVE_CANCEL_ACTION_MISSING")
+    button = next((i for i in range(cancel, -1, -1) if "oneui.Button(c," in lines[i]), None)
+    if button is None:
+        raise AssertionError("NATIVE_CANCEL_BUTTON_MISSING")
+    match = re.search(r'"(?:\\.|[^"\\])*"', lines[button])
+    if match is None:
+        raise AssertionError("NATIVE_CANCEL_CAPTION_MISSING")
+    return ast.literal_eval(match.group(0))
 
 
 class _App:
@@ -556,7 +574,17 @@ class NativeInitialHeldCancelTests(unittest.TestCase):
             with self.assertRaises(AcceptanceFailure):
                 Acceptance.native_initial_cancel_within_budget(subject, 10.0)
         self.assertEqual(subject.reason, "native-initial-cancel-timeout")
-        subject.click.assert_called_once_with("取消解锁")
+        caption = _product_cancel_caption()
+        if desktop.NATIVE_INITIAL_CANCEL_LABEL != caption:
+            self.fail("NATIVE_CANCEL_SELECTOR_MISMATCH")
+        if caption not in native.CONTROL_LABELS or not native.control_label_allowed(caption):
+            self.fail("NATIVE_CANCEL_LABEL_NOT_ALLOWLISTED")
+        calls = subject.click.call_args_list
+        if len(calls) != 1 or calls[0].args != (caption,):
+            self.fail("NATIVE_CANCEL_CLICK_SELECTOR_MISMATCH")
+        for variant in (caption + " ", " " + caption):
+            if native.control_label_allowed(variant):
+                self.fail("NATIVE_CANCEL_LABEL_FUZZY_MATCH")
         sleep.assert_not_called()
 
 

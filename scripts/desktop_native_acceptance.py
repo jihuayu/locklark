@@ -21,7 +21,7 @@ import time
 import urllib.parse
 
 from desktop_native_probe import PROBE_REASONS, safe_diagnostic
-from browser_native_x11 import CONTROL_LABELS, FAILURE_REASONS, safe_click_record
+from browser_native_x11 import CONTROL_LABELS, FAILURE_REASONS, NATIVE_INITIAL_CANCEL_LABEL, safe_click_record
 from desktop_clipboard_owner import current_owner
 from desktop_native_fence_launch import NativeFenceLaunchError, launch_owned_desktop_child
 from desktop_native_fence import NativeFenceClient
@@ -1341,7 +1341,7 @@ class Acceptance:
             require(controls.get(label, {}).get("present") is False)
 
     def native_initial_cancel_within_budget(self, ready_at):
-        self.click("取消解锁")
+        self.click(NATIVE_INITIAL_CANCEL_LABEL)
         elapsed = time.monotonic() - ready_at
         if elapsed > NATIVE_INITIAL_CANCEL_BUDGET_SECONDS:
             self.reason = "native-initial-cancel-timeout"
