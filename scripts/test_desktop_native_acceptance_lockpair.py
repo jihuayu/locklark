@@ -15,6 +15,20 @@ LABELS = ["alpha.llv · 01234567", "beta.llv · 012345671"]
 PAIR_OK = {"manifest_count": 2, **{field: True for field in desktop.LOCAL_PROJECTION_FIELDS}}
 
 
+def valid_select_click():
+    return {
+        "label": "pointer", "x": 1, "y": 2,
+        "before": {"x": 1, "y": 2, "button_mask": 0, "pointer_available": True},
+        "after": {"x": 1, "y": 2, "button_mask": 0, "pointer_available": True},
+        "x_test": {"motion": True, "down": True, "up": True},
+    }
+
+
+def select_response(target_index):
+    return {"action": "select-sidebar", "target_index": target_index,
+            "clicks": [valid_select_click()]}
+
+
 class ProfileAndLabelTests(unittest.TestCase):
     def setUp(self):
         self.private = tempfile.TemporaryDirectory()
@@ -104,8 +118,8 @@ class ProfileAndLabelTests(unittest.TestCase):
         subject.host = pathlib.Path(os.path.realpath(sys.executable))
         subject.app = Mock(pid=4321)
         subject.command = Mock(side_effect=[
-            json.dumps({"action": "select-sidebar", "target_index": 0, "clicks": [{}]}).encode(),
-            json.dumps({"action": "select-sidebar", "target_index": 1, "clicks": [{}]}).encode(),
+            json.dumps(select_response(0)).encode(),
+            json.dumps(select_response(1)).encode(),
         ])
         subject.local_vault_target("select-sidebar", subject.local_labels, subject.local_a_index)
         subject.local_vault_target("select-sidebar", subject.local_labels, subject.local_b_index)
@@ -153,7 +167,7 @@ class ProfileAndLabelTests(unittest.TestCase):
 
 class TargetContractTests(unittest.TestCase):
     def test_strict_select_and_wait_responses(self):
-        select = {"action": "select-sidebar", "target_index": 0, "clicks": [{"x": 1}]}
+        select = select_response(0)
         self.assertEqual(desktop.parse_local_vault_target_response("select-sidebar", 0, select), select)
         wait = {"action": "wait-title", "matched": True}
         self.assertEqual(desktop.parse_local_vault_target_response("wait-title", 1, wait), wait)
@@ -206,10 +220,7 @@ class TargetContractTests(unittest.TestCase):
         subject.native_elapsed_ms = 0
         subject.last_native_click = {}
         subject.reason = "acceptance"
-        subject.command = Mock(return_value=json.dumps({
-            "action": "select-sidebar", "target_index": 0,
-            "clicks": [{"x": 3, "y": 4, "label": LABELS[0]}],
-        }).encode())
+        subject.command = Mock(return_value=json.dumps(select_response(0)).encode())
         subject.local_vault_target("select-sidebar", LABELS, 0)
         request = json.loads(subject.command.call_args.args[1])
         self.assertEqual(request["expected_pid"], 4321)
@@ -224,6 +235,101 @@ class TargetContractTests(unittest.TestCase):
         with self.assertRaises(desktop.AcceptanceFailure):
             subject.local_vault_target("wait-title", LABELS, 0)
         self.assertEqual(subject.reason, "native-response-schema")
+
+
+class ClosedResponsePrivacyTests(unittest.TestCase):
+    @staticmethod
+    def target_subject(payload):
+        subject = desktop.Acceptance.__new__(desktop.Acceptance)
+        subject.host = pathlib.Path(os.path.realpath(sys.executable))
+        subject.app = Mock(pid=4321)
+        subject.native_action = "none"
+        subject.native_failed_index = None
+        subject.native_x_error_codes = []
+        subject.native_elapsed_ms = 0
+        subject.last_native_click = {"label": "sentinel"}
+        subject.reason = "acceptance"
+        subject.command = Mock(return_value=json.dumps(payload).encode())
+        return subject
+
+    def test_current_emitter_positive_and_safe_projection(self):
+        source = {
+            "x": 9, "y": 10,
+            "before": {"x": 9, "y": 10, "button_mask": 0, "pointer_available": True},
+            "after": {"x": 9, "y": 10, "button_mask": 0, "pointer_available": True},
+            "x_test": {"motion": True, "down": True, "up": True},
+            "label": "private", "target": "0xdeadbeef", "focus": "0xdead",
+        }
+        emitted = x11.local_vault_select_output(0, source)
+        parsed = desktop.parse_local_vault_target_response("select-sidebar", 0, emitted)
+        self.assertTrue(parsed == emitted)
+        subject = self.target_subject(emitted)
+        subject.local_vault_target("select-sidebar", LABELS, 0)
+        click = subject.last_native_click
+        self.assertEqual(click.get("label"), "pointer")
+        self.assertEqual(set(click), {"label", "x", "y", "before", "after", "x_test"})
+        self.assertTrue("target" not in click)
+        for phase in ("before", "after"):
+            self.assertTrue("focus" not in click[phase])
+
+    def test_closed_unknown_target_and_focus_fields_reject_before_projection(self):
+        base = select_response(0)
+        cases = {}
+        for name, path in (
+                ("click-target", ("clicks", 0, "target")),
+                ("before-focus", ("clicks", 0, "before", "focus")),
+                ("after-focus", ("clicks", 0, "after", "focus")),
+                ("click-unknown", ("clicks", 0, "extra")),
+                ("pointer-unknown", ("clicks", 0, "before", "extra")),
+                ("x-test-unknown", ("clicks", 0, "x_test", "extra")),
+                ("dynamic-label", ("clicks", 0, "label")),
+                ("before-missing", ("clicks", 0, "before", "x"))):
+            result = json.loads(json.dumps(base))
+            cursor = result
+            for key in path[:-1]:
+                cursor = cursor[key]
+            cursor[path[-1]] = LABELS[0] if name == "dynamic-label" else "0xdeadbeef"
+            if name == "before-missing":
+                del result["clicks"][0]["before"]["x"]
+            cases[name] = result
+        for name, result in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(desktop.AcceptanceFailure):
+                    desktop.parse_local_vault_target_response("select-sidebar", 0, result)
+
+        malicious = json.loads(json.dumps(base))
+        malicious["clicks"][0]["target"] = "0xdeadbeef"
+        malicious["clicks"][0]["before"]["focus"] = "0xdeadbeef"
+        subject = self.target_subject(malicious)
+        with self.assertRaises(desktop.AcceptanceFailure):
+            subject.local_vault_target("select-sidebar", LABELS, 0)
+        self.assertTrue(subject.last_native_click == {"label": "sentinel"})
+        serialized = json.dumps(subject.last_native_click)
+        self.assertTrue("0xdeadbeef" not in serialized)
+        self.assertTrue("focus" not in serialized)
+        self.assertEqual(subject.reason, "native-response-schema")
+
+    def test_int_bool_confusion_and_false_x_test_reject(self):
+        cases = []
+        for name, path, value in (
+                ("click-x-bool", ("clicks", 0, "x"), True),
+                ("click-y-bool", ("clicks", 0, "y"), False),
+                ("before-x-bool", ("clicks", 0, "before", "x"), True),
+                ("pointer-int", ("clicks", 0, "before", "pointer_available"), 1),
+                ("motion-int", ("clicks", 0, "x_test", "motion"), 1),
+                ("motion-false", ("clicks", 0, "x_test", "motion"), False),
+                ("down-false", ("clicks", 0, "x_test", "down"), False),
+                ("up-false", ("clicks", 0, "x_test", "up"), False)):
+            result = json.loads(json.dumps(select_response(0)))
+            cursor = result
+            for key in path[:-1]:
+                cursor = cursor[key]
+            cursor[path[-1]] = value
+            cases.append((name, result))
+        for name, result in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(desktop.AcceptanceFailure):
+                    desktop.parse_local_vault_target_response("select-sidebar", 0, result)
 
 
 class PairProjectionTests(unittest.TestCase):

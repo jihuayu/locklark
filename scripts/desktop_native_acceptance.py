@@ -69,6 +69,9 @@ LOCAL_VAULT_BIDI_CONTROLS = frozenset({
     0x061C, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
     0x2066, 0x2067, 0x2068, 0x2069,
 })
+# Actual select emitter's static pointer label. The request's dynamic vault
+# label is never the emitted click label and never enters this response.
+LOCAL_VAULT_TARGET_CLICK_LABEL = "pointer"
 PRIVACY_FAILURE_PREFIX = "Desktop native privacy barrier: failed reason="
 CLEANUP_FAILURE_PREFIX = "Desktop native cleanup failed reason="
 
@@ -244,6 +247,33 @@ def read_local_vault_manifests(profile_dir):
     return manifests
 
 
+def _local_vault_pointer_state(value):
+    if type(value) is not dict or set(value) != {"x", "y", "button_mask", "pointer_available"}:
+        return False
+    if any(type(value.get(key)) is not int for key in ("x", "y", "button_mask")):
+        return False
+    return type(value.get("pointer_available")) is bool
+
+
+def _local_vault_select_click(value):
+    if type(value) is not dict or set(value) != {"label", "x", "y", "before", "after", "x_test"}:
+        return False
+    if value.get("label") != LOCAL_VAULT_TARGET_CLICK_LABEL:
+        return False
+    if type(value.get("x")) is not int or type(value.get("y")) is not int:
+        return False
+    if not _local_vault_pointer_state(value.get("before")) or \
+            not _local_vault_pointer_state(value.get("after")):
+        return False
+    x_test = value.get("x_test")
+    if type(x_test) is not dict or set(x_test) != {"motion", "down", "up"}:
+        return False
+    for key in ("motion", "down", "up"):
+        if type(x_test.get(key)) is not bool or x_test[key] is not True:
+            return False
+    return True
+
+
 def parse_local_vault_target_response(action, target_index, result):
     """Strict finite response for one dedicated local-vault target action."""
     if type(result) is not dict:
@@ -255,7 +285,8 @@ def parse_local_vault_target_response(action, target_index, result):
                 result["target_index"] != target_index:
             raise AcceptanceFailure()
         clicks = result.get("clicks")
-        if type(clicks) is not list or len(clicks) != 1 or type(clicks[0]) is not dict:
+        if type(clicks) is not list or len(clicks) != 1 or \
+                not _local_vault_select_click(clicks[0]):
             raise AcceptanceFailure()
         return result
     if action == "wait-title":
