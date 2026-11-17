@@ -35,8 +35,9 @@ import (
 )
 
 type outcome struct {
-	apply, drop func()
-	err         error
+	apply, drop    func()
+	err            error
+	initialAccount *initialAccountUnlockOutcome
 }
 
 // errEmergencyKitRequired aborts a generated-key vault creation before any
@@ -658,7 +659,7 @@ func (a *App) unlock() {
 			fanoutIncomplete = true
 		}
 		batch.fanoutIncomplete = fanoutIncomplete
-		return outcome{drop: func() { batch.drop(launch) }, apply: func() {
+		return outcome{initialAccount: newInitialAccountUnlockOutcome(batch, results), drop: func() { batch.drop(launch) }, apply: func() {
 			adoptedParent, adoptedRows, ok := a.adoptLocalVaultFileInitialBatch(batch)
 			if !ok {
 				return
