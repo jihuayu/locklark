@@ -1470,12 +1470,13 @@ class LocalVaultOracleTests(unittest.TestCase):
 class LocalVaultFlowBoundary:
     def __init__(self, kit, kit_b):
         self.kit, self.kit_b = kit, kit_b
-        self.kits = {kit, kit_b}
         self.events, self.reader_calls = [], 0
         self.fields = {}
         self.prepare_enabled = False
         self.prepare_waits = 0
         self.prepare_clicks = []
+        self.expected_recovery_marker = None
+        self.recovery_input_marker = None
 
     def phase(self, value):
         self.events.append(("phase", value))
@@ -1487,24 +1488,43 @@ class LocalVaultFlowBoundary:
                 raise AcceptanceFailure()
         self.events.append(("wait", label))
 
+    def recovery_marker(self, value):
+        if value == self.kit:
+            return "kit-a"
+        if value == self.kit_b:
+            return "kit-b"
+        if value == desktop.WRONG_RECOVERY_CONFIRMATION:
+            return "wrong"
+        return "other"
+
+    def expect_recovery(self, value):
+        marker = self.recovery_marker(value)
+        if marker not in ("kit-a", "kit-b"):
+            raise AcceptanceFailure()
+        self.expected_recovery_marker = marker
+        return marker
+
     def click(self, label):
         if label == "新建独立文件库":
             # A and B are separate real dialogs; the second one starts empty.
             self.fields = {}
             self.prepare_enabled = False
+            self.expected_recovery_marker = None
+            self.recovery_input_marker = None
         if label == "准备创建":
             self.prepare_clicks.append(self.prepare_enabled)
             if not self.prepare_enabled:
                 raise AcceptanceFailure()
+        if label == "确认并发布备份":
+            if self.recovery_input_marker not in (None, "wrong") and \
+                    self.recovery_input_marker != self.expected_recovery_marker:
+                raise AcceptanceFailure()
         self.events.append(("click", label))
 
     def fill(self, label, value):
-        if value in self.kits:
-            marker = "kit"
-        elif value == desktop.WRONG_RECOVERY_CONFIRMATION:
-            marker = "wrong"
-        else:
-            marker = "other"
+        marker = self.recovery_marker(value)
+        if label == "重新输入恢复码":
+            self.recovery_input_marker = marker
         if label in ("主密码", "Secret Key"):
             self.fields[label] = value
             self.prepare_enabled = (bool(self.fields.get("主密码")) and
@@ -1532,6 +1552,7 @@ class LocalVaultFlowTests(unittest.TestCase):
             boundary.events.append(("reader",))
             kit = kits[boundary.reader_calls]
             boundary.reader_calls += 1
+            boundary.expect_recovery(kit)
             subject.values.add(kit)
             return kit
 
@@ -1589,13 +1610,13 @@ class LocalVaultFlowTests(unittest.TestCase):
         self.assertLess(events.index(("fill", "重新输入恢复码", "wrong")), first_publish)
         self.assertLess(first_publish, events.index(("wait", "恢复码未逐字匹配")))
         wrong_wait = events.index(("wait", "恢复码未逐字匹配"))
-        self.assertNotIn(("fill", "备份恢复码", "kit"), events[:wrong_wait])
-        self.assertLess(wrong_wait, events.index(("fill", "重新输入恢复码", "kit")))
-        self.assertLess(events.index(("fill", "重新输入恢复码", "kit")), second_publish)
+        self.assertNotIn(("fill", "备份恢复码", "kit-a"), events[:wrong_wait])
+        self.assertLess(wrong_wait, events.index(("fill", "重新输入恢复码", "kit-a")))
+        self.assertLess(events.index(("fill", "重新输入恢复码", "kit-a")), second_publish)
         self.assertLess(second_publish, events.index(("wait", "备份恢复码")))
         self.assertLess(events.index(("wait", "备份恢复码")),
-                        events.index(("fill", "备份恢复码", "kit")))
-        self.assertLess(events.index(("fill", "备份恢复码", "kit")),
+                        events.index(("fill", "备份恢复码", "kit-a")))
+        self.assertLess(events.index(("fill", "备份恢复码", "kit-a")),
                         events.index(("click", "完成创建")))
         self.assertLess(events.index(("click", "完成创建")),
                         events.index(("wait", "关闭本地基线视图")))
@@ -1605,6 +1626,20 @@ class LocalVaultFlowTests(unittest.TestCase):
                           if event == ("reader",)]
         self.assertGreater(reader_indices[1], events.index(("wait", "关闭本地基线视图")))
         self.assertLess(reader_indices[1], b_publish)
+        self.assertLess(reader_indices[0],
+                        events.index(("fill", "重新输入恢复码", "kit-a")))
+        self.assertLess(events.index(("fill", "重新输入恢复码", "kit-a")), second_publish)
+        self.assertLess(reader_indices[1],
+                        events.index(("fill", "重新输入恢复码", "kit-b")))
+        self.assertLess(events.index(("fill", "重新输入恢复码", "kit-b")), b_publish)
+        self.assertLess(events.index(("fill", "备份恢复码", "kit-a")),
+                        events.index(("fill", "备份恢复码", "kit-b")))
+
+        cross = LocalVaultFlowBoundary(kit_a, kit_b)
+        cross.expect_recovery(kit_b)
+        cross.fill("重新输入恢复码", kit_a)
+        with self.assertRaises(AcceptanceFailure):
+            cross.click("确认并发布备份")
 
 
 class LocalVaultRunnerTests(unittest.TestCase):
