@@ -135,6 +135,97 @@ class RuntimeWrapperTests(unittest.TestCase):
                          ("search", "native-visible", "back-to-list", "offscreen"))
         self.assertEqual((failure["control_enabled"], failure["control_visible"]), ("true", "false"))
 
+    def scroll_record(self, **changes):
+        # Independent copy of the Android fixture's fixed emission order.
+        fields = (
+            ("scroll_y", "0"), ("scroll_span", "80"), ("scroll_range", "120"),
+            ("scroll_top", "10"), ("scroll_height", "100"),
+            ("scroll_pad_top", "5"), ("scroll_pad_bottom", "5"),
+            ("viewport_top", "0"), ("viewport_bottom", "80"),
+            ("safe_top", "10"), ("safe_bottom", "90"),
+            ("target_top", "20"), ("target_bottom", "40"),
+            ("screen_top", "30"), ("screen_bottom", "50"),
+        )
+        self.assertTrue(set(changes).issubset({key for key, _ in fields}))
+        return b" ".join((key + "=" + changes.get(key, value)).encode() for key, value in fields)
+
+    def diagnosed_scroll(self, record):
+        raw = b"INSTRUMENTATION_STATUS: locklark_scroll=" + record + b"\nINSTRUMENTATION_STATUS_CODE: -2\n"
+        return safe_diagnostic(raw)
+
+    def test_clipped_phase_and_scroll_snapshot_remain_with_failure(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=search\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=clipped\n"
+               b"INSTRUMENTATION_STATUS: locklark_scroll=" + self.scroll_record() + b"\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n"
+               b"INSTRUMENTATION_STATUS: locklark_scroll=scroll=none\n")
+        result = safe_diagnostic(raw)
+        self.assertEqual(result["failed_contexts"][0]["control_phase"], "clipped")
+        self.assertEqual(result["scroll"], result["failed_contexts"][0]["scroll"])
+        self.assertEqual(result["scroll"]["state"], "measured")
+        invalid = safe_diagnostic(raw.replace(b"phase=clipped", b"phase=clipped-private"))
+        self.assertEqual(invalid["failed_contexts"][0]["control_phase"], "unknown")
+        self.assertNotIn("clipped-private", str(invalid))
+
+    def test_scroll_projection_uses_only_scroll_offset_and_range(self):
+        expected = {"state": "measured", "valid": True, "clamped": False,
+                    "has_range": "true", "at_start": "true", "at_end": "false"}
+        self.assertEqual(self.diagnosed_scroll(self.scroll_record())["scroll"], expected)
+        at_end = self.diagnosed_scroll(self.scroll_record(scroll_y="120"))["scroll"]
+        self.assertEqual((at_end["has_range"], at_end["at_start"], at_end["at_end"]),
+                         ("true", "false", "true"))
+        no_range = self.diagnosed_scroll(self.scroll_record(scroll_range="0"))["scroll"]
+        self.assertEqual((no_range["has_range"], no_range["at_start"], no_range["at_end"]),
+                         ("false", "true", "true"))
+        bounded = self.diagnosed_scroll(self.scroll_record(scroll_top="-999999", screen_bottom="999999"))["scroll"]
+        self.assertTrue(bounded["valid"])
+        self.assertEqual(bounded["state"], "measured")
+        self.assertNotIn("999999", str(bounded))
+
+    def test_scroll_projection_keeps_clamped_and_missing_ranges_unknown(self):
+        offset = self.diagnosed_scroll(self.scroll_record(scroll_y="clamped"))["scroll"]
+        self.assertEqual((offset["state"], offset["valid"], offset["clamped"]), ("measured", True, True))
+        self.assertEqual((offset["has_range"], offset["at_start"], offset["at_end"]),
+                         ("true", "unknown", "unknown"))
+        span = self.diagnosed_scroll(self.scroll_record(scroll_range="clamped"))["scroll"]
+        self.assertEqual((span["has_range"], span["at_start"], span["at_end"]),
+                         ("unknown", "true", "unknown"))
+        unrelated = self.diagnosed_scroll(self.scroll_record(screen_top="clamped"))["scroll"]
+        self.assertTrue(unrelated["clamped"])
+        self.assertEqual((unrelated["has_range"], unrelated["at_start"], unrelated["at_end"]),
+                         ("true", "true", "false"))
+
+    def test_scroll_projection_accepts_only_exact_none_and_detached_states(self):
+        for value, state in ((b"scroll=none", "none"), (b"scroll=detached", "detached")):
+            with self.subTest(state=state):
+                projection = self.diagnosed_scroll(value)["scroll"]
+                self.assertEqual(projection, {"state": state, "valid": True, "clamped": False,
+                                              "has_range": "unknown", "at_start": "unknown", "at_end": "unknown"})
+        absent = safe_diagnostic(b"INSTRUMENTATION_STATUS_CODE: -2\n")["scroll"]
+        self.assertEqual((absent["state"], absent["valid"]), ("unknown", False))
+
+    def test_scroll_projection_rejects_malformed_records_without_leaking_values(self):
+        record = self.scroll_record()
+        cases = (
+            b"", b"scroll=other", b"scroll=none private-canary", record + b" unknown=private-canary",
+            record + b" scroll_y=1", record.replace(b"scroll_span=80 ", b""),
+            record.replace(b"scroll_span=80", b"scroll_y=80"),
+            record.replace(b"scroll_y=0", b"scroll_y=1000000"),
+            record.replace(b"scroll_y=0", b"scroll_y=-1000000"),
+            record.replace(b"scroll_y=0", b"scroll_y=01"),
+            record.replace(b"scroll_y=0", b"scroll_y=+1"),
+            record.replace(b"scroll_y=0", b"scroll_y=private-canary"),
+            b"private-canary" * 100,
+        )
+        for case_index, candidate in enumerate(cases):
+            with self.subTest(case=case_index):
+                result = self.diagnosed_scroll(candidate)
+                self.assertEqual(result["scroll"], {"state": "invalid", "valid": False, "clamped": False,
+                                                     "has_range": "unknown", "at_start": "unknown", "at_end": "unknown"})
+                self.assertEqual(result["failed_contexts"][0]["scroll"], result["scroll"])
+                self.assertNotIn("private-canary", str(result))
+                self.assertNotIn("1000000", str(result))
+
     def test_autofill_fill_stages_are_fixed_and_unknown_ones_redacted(self):
         raw = (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=dataset-visible\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n")
