@@ -72,23 +72,70 @@ func (a *App) localVaultFileSelectedScopeMatches(scope localVaultFileSessionScop
 		ref.journalPath == scope.journalPath
 }
 
-// localVaultFileCurrentItems is the only view projection path for cached items.
-// It requires the current exact stored slot, current parent/App generation and
-// the existing cache Active boundary, so detached or Busy views cannot render
-// old items while a sibling wrapper remains preserved.
-func (a *App) localVaultFileCurrentItems() []personal.VaultFileBaselineItem {
-	scope, ok := a.localVaultFileSelectedStoredScope()
+// localVaultFileCurrentScopeGate is the common display-only read gate. It
+// resolves the unique exact stored slot for the selected reviewed snapshot ref
+// and requires the current parent/App generation/map entry, a nonblocking
+// Active routing snapshot whose current settings workspace root still matches
+// the stored backend root, and the same exact binding at the delivery
+// boundary. It grants no read, authority or grant and never calls VaultPath.
+func (a *App) localVaultFileCurrentScopeGate() (localVaultFileSessionScope, *localVaultFileSessionSlot, bool) {
+	ref, _, ok := a.localVaultFileSelectedSnapshotRef()
+	if !ok || a.session == nil {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	slot, ok := a.localVaultFileSelectedStoredSlot()
 	if !ok {
-		return nil
+		return localVaultFileSessionScope{}, nil, false
 	}
-	path, cache := a.localVaultFileRoutingPath()
-	if cache != personal.VaultFileCacheActive || path == "" {
-		return nil
-	}
-	slot := a.localVaultFiles.sessionSlots[scope]
-	if slot == nil || slot.retiring || slot.session == nil ||
+	scope := slot.scope
+	if scope.configPath != ref.path || scope.vaultID != ref.vaultID ||
+		scope.journalPath != ref.journalPath || scope.backendRoot == "" ||
 		slot.parent != a.session || slot.appGeneration != a.generation ||
-		a.localVaultFiles.sessionSlots[scope] != slot {
+		slot.retiring || a.localVaultFiles.sessionSlots[scope] != slot {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	personalPath, cache := a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	_, currentRoot := localVaultFilePaths(a.settingsPath, personalPath)
+	if currentRoot != scope.backendRoot {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	// Revalidate the exact binding and current workspace root after the
+	// nonblocking snapshot, immediately before returning metadata.
+	if a.localVaultFiles.sessionSlots[scope] != slot || slot.parent != a.session ||
+		slot.appGeneration != a.generation || slot.retiring {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	personalPath, cache = a.localVaultFileRoutingPath()
+	if cache != personal.VaultFileCacheActive || personalPath == "" {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	_, currentRoot = localVaultFilePaths(a.settingsPath, personalPath)
+	if currentRoot != scope.backendRoot ||
+		a.localVaultFiles.sessionSlots[scope] != slot || slot.parent != a.session ||
+		slot.appGeneration != a.generation || slot.retiring {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	return scope, slot, true
+}
+
+func (a *App) localVaultFileCurrentLiveScopeGate() (localVaultFileSessionScope, *localVaultFileSessionSlot, bool) {
+	scope, slot, ok := a.localVaultFileCurrentScopeGate()
+	if !ok || slot.session == nil || slot.summary.VaultID == "" ||
+		slot.summary.VaultID != scope.vaultID {
+		return localVaultFileSessionScope{}, nil, false
+	}
+	return scope, slot, true
+}
+
+// localVaultFileCurrentItems is the only view projection path for cached items.
+// It requires the common scope/workspace gate plus a live nonretiring session
+// and matching retained summary, so detached, Busy or changed-workspace views
+// cannot render old items while a sibling wrapper remains preserved.
+func (a *App) localVaultFileCurrentItems() []personal.VaultFileBaselineItem {
+	if _, _, ok := a.localVaultFileCurrentLiveScopeGate(); !ok {
 		return nil
 	}
 	return a.localVaultFiles.items

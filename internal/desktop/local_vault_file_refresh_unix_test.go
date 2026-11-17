@@ -15,6 +15,12 @@ import (
 func localVaultRefreshSelect(t *testing.T, f *localVaultSessionFixture, scope localVaultFileSessionScope) {
 	t.Helper()
 	f.app.closeLocalVaultFileView()
+	f.app.localVaultFiles.refs = []localVaultFileRef{{
+		path:        scope.configPath,
+		vaultID:     scope.vaultID,
+		name:        "本地文件库标签",
+		journalPath: scope.journalPath,
+	}}
 	f.app.localVaultFiles.selected = scope.configPath
 }
 

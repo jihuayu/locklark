@@ -424,30 +424,29 @@ func (a *App) invalidateLocalVaultFileRefreshFresh(scope localVaultFileSessionSc
 }
 
 // localVaultFileRefreshCaption is the controller feedback for the view layer.
-// Fresh is possible only from an accepted successful Summary callback; a pure
-// cache or navigated-back selection reports the cached caption.
+// Every state first passes the shared exact selected-scope/workspace gate, so
+// changed settings roots withhold old captions as well as old items. Fresh and
+// Cached additionally require a live nonretiring session and matching retained
+// summary; Failed may still be shown for the right workspace when the real
+// Summary failure terminally closed the current wrapper.
 func (a *App) localVaultFileRefreshCaption() string {
-	if a.syncLocalVaultFileSessions() != personal.VaultFileCacheActive {
+	scope, slot, ok := a.localVaultFileCurrentScopeGate()
+	if !ok {
 		return ""
 	}
-	state := &a.localVaultFiles
-	switch state.viewVerification {
-	case localVaultFileViewFresh:
-		return localVaultFileFreshCaption
+	switch a.localVaultFiles.viewVerification {
 	case localVaultFileViewFailed:
 		return localVaultFileFailedCaption
+	case localVaultFileViewFresh:
+		if slot.session == nil || slot.summary.VaultID == "" ||
+			slot.summary.VaultID != scope.vaultID {
+			return ""
+		}
+		return localVaultFileFreshCaption
 	}
-	if a.session == nil || state.selected == "" {
+	if slot.session == nil || slot.summary.VaultID == "" ||
+		slot.summary.VaultID != scope.vaultID {
 		return ""
 	}
-	for _, slot := range state.sessionSlots {
-		if slot == nil || slot.retiring || slot.session == nil ||
-			slot.scope.configPath != state.selected || slot.parent != a.session ||
-			slot.appGeneration != a.generation || slot.summary.VaultID == "" ||
-			slot.summary.VaultID != slot.scope.vaultID {
-			continue
-		}
-		return localVaultFileCachedCaption
-	}
-	return ""
+	return localVaultFileCachedCaption
 }

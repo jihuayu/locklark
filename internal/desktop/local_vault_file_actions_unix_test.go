@@ -3,6 +3,8 @@
 package desktop
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -327,5 +329,130 @@ func TestDesktopLocalVaultLockWaitersArePerMarker(t *testing.T) {
 	}
 	if _, err := bSession.Summary(); err == nil {
 		t.Fatal("LOCAL_ACTIONS_MARKER_B_READABLE")
+	}
+}
+
+func TestDesktopLocalVaultWorkspaceChangeWithholdsProjection(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	f.openVault(t, q, bScope)
+	aSlot := f.app.localVaultFiles.sessionSlots[aScope]
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if aSlot == nil || aSlot.session == nil || bSlot == nil || bSlot.session == nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_SETUP_FAILED")
+	}
+	bSession := bSlot.session
+	aRef := localVaultNavigationRef(aPath, aManifest)
+	bRef := localVaultNavigationRef(bPath, bManifest)
+	f.app.localVaultFiles.refs = []localVaultFileRef{aRef, bRef}
+	f.app.selectLocalVaultFile(aRef)
+
+	op := f.app.beginLocalVaultFileRefresh(aScope)
+	if op == nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_REFRESH_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if f.app.localVaultFiles.viewVerification != localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileFreshCaption {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FRESH_PRECONDITION_FAILED")
+	}
+
+	parent, generation := f.app.session, f.app.generation
+	oldSettings := f.app.settingsPath
+	otherSettings := filepath.Join(t.TempDir(), "settings.json")
+	if err := f.app.ConfigureSettingsPath(otherSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_CONFIGURE_FAILED")
+	}
+	if f.app.session != parent || f.app.generation != generation {
+		t.Fatal("LOCAL_WORKSPACE_GATE_PARENT_CHANGED")
+	}
+	if items := f.app.localVaultFileCurrentItems(); items != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FRESH_ITEMS_NOT_WITHHELD")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != "" {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FRESH_CAPTION_NOT_WITHHELD")
+	}
+
+	if err := f.app.ConfigureSettingsPath(oldSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_RESTORE_FAILED")
+	}
+	f.app.selectLocalVaultFile(aRef)
+	if f.app.localVaultFiles.viewVerification == localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_WORKSPACE_GATE_CACHED_PRECONDITION_FAILED")
+	}
+	if err := f.app.ConfigureSettingsPath(otherSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_CACHED_CONFIGURE_FAILED")
+	}
+	if items := f.app.localVaultFileCurrentItems(); items != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_CACHED_ITEMS_NOT_WITHHELD")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != "" {
+		t.Fatal("LOCAL_WORKSPACE_GATE_CACHED_CAPTION_NOT_WITHHELD")
+	}
+
+	if err := f.app.ConfigureSettingsPath(oldSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_RESTORE_FAILED")
+	}
+	if err := os.Remove(aManifest.Journal); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_JOURNAL_REMOVE_FAILED")
+	}
+	failed := f.app.beginLocalVaultFileRefresh(aScope)
+	if failed == nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if f.app.localVaultFiles.viewVerification != localVaultFileViewFailed ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileFailedCaption {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_PRECONDITION_FAILED")
+	}
+	if len(q.launches) != 1 {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_CLEANUP_COUNT")
+	}
+	q.runLaunch(t)
+	if err := f.app.ConfigureSettingsPath(otherSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_CONFIGURE_FAILED")
+	}
+	if items := f.app.localVaultFileCurrentItems(); items != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_ITEMS_NOT_WITHHELD")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != "" {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FAILED_CAPTION_NOT_WITHHELD")
+	}
+
+	// The display read gate is not a revocation gate: the exact stored A
+	// target remains lockable while its projection is withheld from this
+	// changed workspace, and B is untouched.
+	f.app.localVaultFiles.selected = aPath
+	q.launches, q.dispatches = nil, nil
+	f.app.clickLocalVaultFileLockAction()
+	if len(q.launches) != 2 {
+		t.Fatal("LOCAL_WORKSPACE_GATE_LOCK_LAUNCH_COUNT")
+	}
+	q.runLaunch(t)
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if f.app.localVaultFiles.status != localVaultFileLockStatusLocked {
+		t.Fatal("LOCAL_WORKSPACE_GATE_LOCK_NOT_LOCKED")
+	}
+	if outcome, done := f.app.localVaultFileLockResult(aScope); !done || outcome != localVaultFileLockOutcomeSucceeded {
+		t.Fatal("LOCAL_WORKSPACE_GATE_LOCK_NOT_FINITE")
+	}
+	if f.app.localVaultFiles.sessionSlots[bScope] != bSlot || bSlot.session != bSession {
+		t.Fatal("LOCAL_WORKSPACE_GATE_LOCK_CHANGED_B")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_WORKSPACE_GATE_B_LOST")
+	}
+
+	if err := f.app.ConfigureSettingsPath(oldSettings); err != nil {
+		t.Fatal("LOCAL_WORKSPACE_GATE_FINAL_RESTORE_FAILED")
 	}
 }
