@@ -23,6 +23,7 @@ import urllib.parse
 from desktop_native_probe import PROBE_REASONS, safe_diagnostic
 from browser_native_x11 import CONTROL_LABELS, FAILURE_REASONS, safe_click_record
 from desktop_clipboard_owner import current_owner
+from desktop_native_fence_launch import NativeFenceLaunchError, launch_owned_desktop_child
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -471,7 +472,9 @@ def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
 
 
 class Acceptance:
-    def __init__(self):
+    def __init__(self, *, native_fence_client=None):
+        # Optional private pipe owner; None keeps the ordinary launch path.
+        self.native_fence_client = native_fence_client
         self.stage = "setup"
         self.state = pathlib.Path(tempfile.mkdtemp(prefix="locklark-desktop-acceptance-"))
         self.diagnostics = self.state / "diagnostics"
@@ -1282,7 +1285,12 @@ class Acceptance:
             if scenario == LOCAL_SCENARIO:
                 self.write_private_settings()
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "OTPSeed", "OTPConfig", "ProviderValue", "ProviderCanary"))
-        self.app = subprocess.Popen(self.app_command(), env=self.env, stdout=self.log, stderr=self.log)
+        # Only this real owned Go desktop child may receive the private fence
+        # descriptors. The probe below keeps the unmodified base environment.
+        self.app = launch_owned_desktop_child(
+            subprocess.Popen, self.app_command(), self.env,
+            stdout=self.log, stderr=self.log,
+            native_fence_client=getattr(self, "native_fence_client", None))
         self.probe = subprocess.Popen([sys.executable, str(ROOT / "scripts/desktop_native_probe.py")],
                                       env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=self.log, text=True, bufsize=1)
@@ -1630,15 +1638,20 @@ class Acceptance:
         return count
 
     def close(self):
-        for child in (self.app, self.probe,*self.foreign_owners):
-            if child is None:
-                continue
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=5)
+        try:
+            for child in (self.app, self.probe,*self.foreign_owners):
+                if child is None:
+                    continue
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+        finally:
+            client = getattr(self, "native_fence_client", None)
+            if client is not None:
+                client.close()
         self.log.close()
 
     def run(self):
@@ -1696,7 +1709,7 @@ class Acceptance:
         except Exception as error:
             # Never include an arbitrary assertion, subprocess command, native
             # exception, JSON payload, password, seed or code in diagnostics.
-            error_class = {AcceptanceFailure:"acceptance", OSError:"os", BrokenPipeError:"pipe", json.JSONDecodeError:"json"}.get(type(error), "unexpected")
+            error_class = {AcceptanceFailure:"acceptance", OSError:"os", BrokenPipeError:"pipe", json.JSONDecodeError:"json", NativeFenceLaunchError:"fence-launch"}.get(type(error), "unexpected")
             failure = {"stage":self.stage, "reason":self.reason, "native_action":self.native_action,
                        "native_elapsed_ms":self.native_elapsed_ms, "error_class":error_class,
                        "native_x_error_codes":self.native_x_error_codes,
