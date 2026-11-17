@@ -715,6 +715,39 @@ class DefaultAggregateTests(unittest.TestCase):
         self.assertIn("reason=PRIVACY", output)
         self.assertNotIn("NATIVE_INITIAL_AGGREGATE PASS", output)
 
+    def test_privacy_failure_category_is_closed_and_fails_nonzero(self):
+        known = sorted(desktop.NATIVE_INITIAL_PRIVACY_FAILURE_CODES)
+        if not known:
+            self.fail("PRIVACY_CATEGORY_SET_EMPTY")
+        for code in known:
+            if desktop.native_initial_privacy_failure_category(code) != code:
+                self.fail("PRIVACY_CATEGORY_KNOWN_PASSTHROUGH_FAILED")
+            detail = desktop.native_initial_privacy_failure_detail(code)
+            if code not in detail:
+                self.fail("PRIVACY_CATEGORY_DETAIL_MISSING_KNOWN")
+        hostile = "untrusted-privacy-category"
+        unclassified = desktop.NATIVE_INITIAL_PRIVACY_FAILURE_UNCLASSIFIED
+        if desktop.native_initial_privacy_failure_category(hostile) != unclassified:
+            self.fail("PRIVACY_CATEGORY_HOSTILE_NOT_UNCLASSIFIED")
+        for value in (None, 0, b"bytes", {"key": "value"}):
+            if desktop.native_initial_privacy_failure_category(value) != unclassified:
+                self.fail("PRIVACY_CATEGORY_NON_STRING_NOT_UNCLASSIFIED")
+        for privacy_code in (known[0], hostile):
+            detail = desktop.native_initial_privacy_failure_detail(privacy_code)
+            if privacy_code == hostile and hostile in detail:
+                self.fail("PRIVACY_CATEGORY_HOSTILE_ECHOED")
+            with patch.object(desktop, desktop.native_initial_privacy_scan.__name__,
+                              return_value=privacy_code):
+                code, output, _ = self.run_aggregate(
+                    self.environ(),
+                    [(0, None), (0, self.basic_coverage()), (0, self.held_coverage())])
+            if code != 1:
+                self.fail("PRIVACY_FAILURE_EXIT_NOT_NONZERO")
+            if detail not in output:
+                self.fail("PRIVACY_FAILURE_DETAIL_MISSING")
+            if hostile in output:
+                self.fail("PRIVACY_FAILURE_HOSTILE_ECHOED")
+
     def test_missing_fixture_artifact_fails_before_cases(self):
         environ = self.environ()
         environ.pop("LOCKLARK_DESKTOP_FIXTURE")

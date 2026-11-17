@@ -55,6 +55,28 @@ NATIVE_INITIAL_LEGACY_CASE = "NATIVE_INITIAL_LEGACY"
 NATIVE_INITIAL_CANCEL_BUDGET_SECONDS = 5.0
 NATIVE_INITIAL_REQUIRED_READY_CHILDREN = 2
 
+NATIVE_INITIAL_PRIVACY_FAILURE_CODES = frozenset({
+    "recovery-kit",
+    "known-value",
+    "otp-code",
+})
+NATIVE_INITIAL_PRIVACY_FAILURE_UNCLASSIFIED = "privacy_failure"
+NATIVE_INITIAL_PRIVACY_FAILURE_PREFIX = "PRIVACY"
+NATIVE_INITIAL_PRIVACY_FAILURE_SEPARATOR = ":"
+
+
+def native_initial_privacy_failure_category(value):
+    if type(value) is str and value in NATIVE_INITIAL_PRIVACY_FAILURE_CODES:
+        return value
+    return NATIVE_INITIAL_PRIVACY_FAILURE_UNCLASSIFIED
+
+
+def native_initial_privacy_failure_detail(value):
+    return (NATIVE_INITIAL_PRIVACY_FAILURE_PREFIX +
+            NATIVE_INITIAL_PRIVACY_FAILURE_SEPARATOR +
+            native_initial_privacy_failure_category(value))
+
+
 def local_scenario(scenario):
     return scenario in LOCAL_SCENARIOS
 
@@ -2166,7 +2188,7 @@ def run_default_aggregate(environ=None, acceptance_factory=None, client_factory=
         privacy_failure = native_initial_privacy_scan(
             privacy, [result.state for result in results if result.state is not None])
         if privacy_failure is not None:
-            failure = "PRIVACY"
+            failure = native_initial_privacy_failure_detail(privacy_failure)
     print("NATIVE_INITIAL_CASE legacy=%s basic=%s held_cancel=%s" % (
         "PASS" if legacy.code == 0 else "FAIL",
         "PASS" if basic.code == 0 else "FAIL",
