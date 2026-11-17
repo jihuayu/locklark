@@ -186,17 +186,29 @@ func (a *App) clickLocalVaultFileUnlockAction() {
 }
 
 func (a *App) clickLocalVaultFileRefreshAction() {
-	scope, ok := a.localVaultFileSelectedStoredScope()
+	slot, ok := a.localVaultFileSelectedStoredSlot()
 	if !ok {
 		a.localVaultFiles.status = localVaultFileStatusUnavailable
 		return
 	}
+	scope := slot.scope
+	// A new manual request supersedes this selected view's prior provenance and
+	// pending projection before any begin/refusal check. This never closes the
+	// borrowed wrapper or touches another scope or sibling.
+	a.invalidateLocalVaultFileRefreshFresh(scope)
+	a.cancelLocalVaultFileRefreshExact(slot.refresh)
 	if a.localVaultFileLockBlocks(scope) {
 		a.localVaultFiles.status = localVaultFileLockStatusUnavailable
 		return
 	}
 	if a.beginLocalVaultFileRefresh(scope) == nil {
 		a.localVaultFiles.status = localVaultFileStatusUnavailable
+		return
+	}
+	if a.localVaultFiles.status == localVaultFileStatusUnavailable {
+		// Clear only the prior finite transient refusal feedback; Fresh remains
+		// reserved for the accepted worker's exact Summary callback.
+		a.localVaultFiles.status = localVaultFileStatusReady
 	}
 }
 

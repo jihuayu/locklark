@@ -456,3 +456,149 @@ func TestDesktopLocalVaultWorkspaceChangeWithholdsProjection(t *testing.T) {
 		t.Fatal("LOCAL_WORKSPACE_GATE_FINAL_RESTORE_FAILED")
 	}
 }
+
+func TestDesktopLocalVaultRefusedRefreshDoesNotRestoreFresh(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	bPath, bManifest := f.createVault(t)
+	aScope, bScope := f.scope(aPath, aManifest), f.scope(bPath, bManifest)
+	f.openVault(t, q, aScope)
+	f.openVault(t, q, bScope)
+	aSlot := f.app.localVaultFiles.sessionSlots[aScope]
+	bSlot := f.app.localVaultFiles.sessionSlots[bScope]
+	if aSlot == nil || aSlot.session == nil || bSlot == nil || bSlot.session == nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_SETUP_FAILED")
+	}
+	aSession, bSession := aSlot.session, bSlot.session
+	aRef := localVaultNavigationRef(aPath, aManifest)
+	bRef := localVaultNavigationRef(bPath, bManifest)
+	f.app.localVaultFiles.refs = []localVaultFileRef{aRef, bRef}
+	f.app.selectLocalVaultFile(aRef)
+
+	holdParent := func() (func(), chan error) {
+		field := prepareLocalVaultBusyField(t, f.parent)
+		entered := make(chan struct{})
+		releaseCh := make(chan struct{})
+		done := make(chan error, 1)
+		var once sync.Once
+		release := func() { once.Do(func() { close(releaseCh) }) }
+		t.Cleanup(release)
+		go func() {
+			done <- f.parent.Consume(field, func(_ []byte) error {
+				close(entered)
+				<-releaseCh
+				return nil
+			})
+		}()
+		<-entered
+		return release, done
+	}
+
+	first := f.app.beginLocalVaultFileRefresh(aScope)
+	if first == nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_FIRST_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if f.app.localVaultFiles.viewVerification != localVaultFileViewFresh ||
+		f.app.localVaultFileRefreshCaption() != localVaultFileFreshCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_NOT_FRESH_PRECONDITION")
+	}
+	parent, generation := f.app.session, f.app.generation
+
+	release, done := holdParent()
+	f.app.clickLocalVaultFileRefreshAction()
+	if len(q.launches) != 0 {
+		release()
+		t.Fatal("LOCAL_REFUSED_REFRESH_QUEUED_NEW_WORKER")
+	}
+	if f.app.localVaultFiles.status != localVaultFileStatusUnavailable {
+		release()
+		t.Fatal("LOCAL_REFUSED_REFRESH_NOT_FINITE_UNAVAILABLE")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != "" {
+		release()
+		t.Fatal("LOCAL_REFUSED_REFRESH_BUSY_CAPTION_NOT_WITHHELD")
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_CONSUME_FAILED")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_RESTORED_FRESH_OR_LOST_CACHE")
+	}
+	if f.app.localVaultFiles.viewVerification == localVaultFileViewFresh {
+		t.Fatal("LOCAL_REFUSED_REFRESH_RESTORED_FRESH_STATE")
+	}
+	if aSlot.session != aSession || bSlot.session != bSession {
+		t.Fatal("LOCAL_REFUSED_REFRESH_CHANGED_WRAPPER")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFUSED_REFRESH_B_LOST")
+	}
+
+	f.app.clickLocalVaultFileRefreshAction()
+	if f.app.localVaultFiles.status != localVaultFileStatusReady {
+		t.Fatal("LOCAL_REFUSED_REFRESH_RETRY_NOT_FINITE_READY")
+	}
+	if len(q.launches) != 1 {
+		t.Fatal("LOCAL_REFUSED_REFRESH_RETRY_WORKER_COUNT")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_RETRY_CLAIMED_FRESH")
+	}
+	q.runLaunch(t)
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_PRE_CALLBACK_CLAIMED_FRESH")
+	}
+	q.runDispatch(t)
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileFreshCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_ACCEPTED_CALLBACK_NOT_FRESH")
+	}
+	if f.app.session != parent || f.app.generation != generation {
+		t.Fatal("LOCAL_REFUSED_REFRESH_PARENT_CHANGED")
+	}
+	if _, err := f.parent.VaultFileOwnerships(); err != nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_PARENT_PROOF_CHANGED")
+	}
+
+	// Hold one older staged Summary dispatch, then refuse a newer manual
+	// request while Busy. The exact selected projection is cancelled, so the
+	// late old dispatch cannot restore Fresh after the refusal.
+	old := f.app.beginLocalVaultFileRefresh(aScope)
+	if old == nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_OLD_BEGIN_FAILED")
+	}
+	q.runLaunch(t)
+	if len(q.dispatches) != 1 {
+		t.Fatal("LOCAL_REFUSED_REFRESH_OLD_NOT_STAGED")
+	}
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_OLD_START_NOT_CACHED")
+	}
+	release, done = holdParent()
+	f.app.clickLocalVaultFileRefreshAction()
+	if len(q.launches) != 0 {
+		release()
+		t.Fatal("LOCAL_REFUSED_REFRESH_OLD_REQUEST_QUEUED")
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal("LOCAL_REFUSED_REFRESH_OLD_CONSUME_FAILED")
+	}
+	q.runDispatch(t)
+	if caption := f.app.localVaultFileRefreshCaption(); caption != localVaultFileCachedCaption {
+		t.Fatal("LOCAL_REFUSED_REFRESH_LATE_OLD_CALLBACK_SET_FRESH")
+	}
+	if f.app.localVaultFiles.viewVerification == localVaultFileViewFresh {
+		t.Fatal("LOCAL_REFUSED_REFRESH_LATE_OLD_STATE_SET_FRESH")
+	}
+	if aSlot.session != aSession || bSlot.session != bSession {
+		t.Fatal("LOCAL_REFUSED_REFRESH_LATE_OLD_CHANGED_WRAPPER")
+	}
+	if summary, err := bSession.Summary(); err != nil || summary.VaultID != bManifest.VaultID {
+		t.Fatal("LOCAL_REFUSED_REFRESH_LATE_OLD_B_LOST")
+	}
+}
