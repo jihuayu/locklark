@@ -19,9 +19,11 @@ const (
 	maxOwnedVaultFileBatchRootID  = 256
 )
 
-// OwnedVaultFileTarget freezes one exact journal and caller-trusted checkpoint
-// for an initial owned-child batch. The checkpoint is copied before any
-// authentication; the caller may mutate its slices after this call returns.
+// OwnedVaultFileTarget freezes one exact journal and candidate checkpoint for
+// an initial owned-child batch. The checkpoint is copied before any
+// authentication; its target root becomes trusted only through the separately
+// authenticated local owner record. The caller may mutate its slices after this
+// call returns.
 type OwnedVaultFileTarget struct {
 	JournalPath string
 	Checkpoint  vaultfile.PolicyCheckpoint
@@ -69,8 +71,11 @@ func sameOwnedVaultFileBatchRequest(a, b ownedVaultFileBatchRequest) bool {
 }
 
 func prepareOwnedVaultFileBatch(targets []OwnedVaultFileTarget) ([]ownedVaultFileBatchRequest, error) {
-	if len(targets) == 0 || len(targets) > maxOwnedVaultFileBatchTargets {
+	if len(targets) > maxOwnedVaultFileBatchTargets {
 		return nil, ErrVaultFileBaselineVerification
+	}
+	if len(targets) == 0 {
+		return nil, nil
 	}
 	out := make([]ownedVaultFileBatchRequest, 0, len(targets))
 	for index, target := range targets {
@@ -230,13 +235,16 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 		return drain(ErrSessionLocked)
 	}
 
-	vaultIDs := make([]string, 0, len(requests))
-	for _, request := range requests {
-		vaultIDs = append(vaultIDs, request.checkpoint.VaultID)
-	}
-	snapshots, err := parent.authenticateVaultFileOwnedTargets(parentPath, parentMaterial, parentSlot, vaultIDs)
-	if err != nil {
-		return drain(err)
+	var snapshots map[string]VaultFileOwnershipPublic
+	if len(requests) > 0 {
+		vaultIDs := make([]string, 0, len(requests))
+		for _, request := range requests {
+			vaultIDs = append(vaultIDs, request.checkpoint.VaultID)
+		}
+		snapshots, err = parent.authenticateVaultFileOwnedTargets(parentPath, parentMaterial, parentSlot, vaultIDs)
+		if err != nil {
+			return drain(err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return drain(err)
@@ -259,8 +267,6 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 	for i := range results {
 		results[i].Index = i
 	}
-	var firstErr error
-	successes := 0
 	for _, request := range requests {
 		if err := ctx.Err(); err != nil {
 			return drain(err)
@@ -279,27 +285,31 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 			if !ownedBatchTargetErrorLocal(openErr) {
 				return drain(openErr)
 			}
-			if firstErr == nil {
-				firstErr = openErr
-			}
 			for _, index := range request.indices {
 				results[index].Err = openErr
 			}
 			continue
 		}
-		successes++
 		for _, index := range request.indices {
 			results[index].Index = index
 			results[index].Token = token
 			results[index].Items = cloneOwnedVaultFileChildItems(items)
 		}
 	}
-	if successes == 0 {
-		parent.Lock()
-		if firstErr == nil {
-			firstErr = ErrVaultFileOwnership
-		}
-		return nil, results, firstErr
+	// Delivery boundary: a valid account remains deliverable even when every
+	// target failed locally or the target set was empty. This recheck does not
+	// touch or refresh proof/idle timestamps.
+	if err := ctx.Err(); err != nil {
+		return drain(err)
+	}
+	if !time.Now().Before(fullFactorDeadline) {
+		return drain(context.DeadlineExceeded)
+	}
+	parent.mu.Lock()
+	activeErr := parent.active(false)
+	parent.mu.Unlock()
+	if activeErr != nil {
+		return drain(activeErr)
 	}
 	return parent, results, nil
 }

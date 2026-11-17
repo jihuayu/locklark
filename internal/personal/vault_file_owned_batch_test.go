@@ -149,19 +149,57 @@ func TestUnlockSessionWithOwnedVaultFileChildrenIsolatesAndRejects(t *testing.T)
 		}
 	})
 
-	t.Run("all-targets-fail-no-parent", func(t *testing.T) {
+	t.Run("all-targets-fail-account-usable", func(t *testing.T) {
 		wrongA := cloneVaultFileCheckpoint(fx.a.checkpoint)
 		wrongA.OwnerRootKeyID = wrongA.OwnerRootKeyID + "-wrong"
 		authCount.Store(0)
 		parent, results, err := UnlockSessionWithOwnedVaultFileChildren(
 			context.Background(), fx.session.path, fx.password, fx.key, time.Minute,
 			[]OwnedVaultFileTarget{{JournalPath: fx.a.journal, Checkpoint: wrongA, Options: VaultFileChildOptions{IncludeItemIDs: true}}})
-		if err == nil || parent != nil || len(results) != 1 ||
+		if err != nil || parent == nil || len(results) != 1 ||
 			!errors.Is(results[0].Err, ErrVaultFileOwnership) {
-			t.Fatal("OWNED_BATCH_ALL_FAIL_DELIVERED")
+			t.Fatal("OWNED_BATCH_ALL_FAIL_LOST_ACCOUNT")
 		}
+		t.Cleanup(parent.Lock)
 		if authCount.Load() != 1 {
 			t.Fatal("OWNED_BATCH_ALL_FAIL_AUTH_NOT_ONCE")
+		}
+		if ownedChildAllCount(parent) != 0 {
+			t.Fatal("OWNED_BATCH_ALL_FAIL_GRANTED_CHILD")
+		}
+		if _, err := parent.List("active"); err != nil {
+			t.Fatal("OWNED_BATCH_ALL_FAIL_ACCOUNT_UNUSABLE")
+		}
+	})
+
+	t.Run("empty-targets-valid-account", func(t *testing.T) {
+		authCount.Store(0)
+		parent, results, err := UnlockSessionWithOwnedVaultFileChildren(
+			context.Background(), fx.session.path, fx.password, fx.key, time.Minute, nil)
+		if err != nil || parent == nil || len(results) != 0 {
+			t.Fatal("OWNED_BATCH_EMPTY_FAILED")
+		}
+		t.Cleanup(parent.Lock)
+		if authCount.Load() != 1 {
+			t.Fatal("OWNED_BATCH_EMPTY_AUTH_NOT_ONCE")
+		}
+		if ownedChildAllCount(parent) != 0 {
+			t.Fatal("OWNED_BATCH_EMPTY_GRANTED_CHILD")
+		}
+		if _, err := parent.List("active"); err != nil {
+			t.Fatal("OWNED_BATCH_EMPTY_ACCOUNT_UNUSABLE")
+		}
+	})
+
+	t.Run("empty-targets-wrong-account", func(t *testing.T) {
+		authCount.Store(0)
+		parent, results, err := UnlockSessionWithOwnedVaultFileChildren(
+			context.Background(), fx.session.path, []byte("wrong-empty-batch-factor"), fx.key, time.Minute, nil)
+		if err == nil || parent != nil || results != nil {
+			t.Fatal("OWNED_BATCH_EMPTY_WRONG_ACCOUNT_DELIVERED")
+		}
+		if authCount.Load() != 0 {
+			t.Fatal("OWNED_BATCH_EMPTY_WRONG_ACCOUNT_AUTH_OBSERVED")
 		}
 	})
 
