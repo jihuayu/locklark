@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 )
 
@@ -70,6 +72,9 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 	f := newLocalVaultSessionFixture(t)
 	aPath, aManifest := f.createVault(t)
 	bPath, bManifest := f.createVault(t)
+	if _, err := f.parent.AddLogin("Initial fanout login", "fanout-user", "fanout-value"); err != nil {
+		t.Fatal("LOCAL_INITIAL_FANOUT_PRIMARY_FIXTURE_FAILED")
+	}
 
 	t.Run("explicit-unlock-adopts-ab-without-navigation-auth", func(t *testing.T) {
 		a, q := newInitialFanoutTestApp(t, f, f.settingsPath)
@@ -84,6 +89,9 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 		q.runDispatch(t)
 		if a.session == nil || a.session == f.parent {
 			t.Fatal("LOCAL_INITIAL_FANOUT_PARENT_NOT_ADOPTED")
+		}
+		if len(a.rows) != 1 || a.rows[0].Kind != "login" || a.rows[0].Title != "Initial fanout login" {
+			t.Fatal("LOCAL_INITIAL_FANOUT_PROJECTION_LOST")
 		}
 		if len(a.localVaultFiles.refs) != 2 || len(a.localVaultFiles.sessionSlots) != 2 {
 			t.Fatal("LOCAL_INITIAL_FANOUT_AB_NOT_ADOPTED")
@@ -273,4 +281,50 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 			t.Fatal("LOCAL_INITIAL_FANOUT_SYSTEM_PATH_FANNED_OUT")
 		}
 	})
+}
+
+func TestLocalVaultFileInitialRowBackingClear(t *testing.T) {
+	score := 9
+	raw := []personal.Row{
+		{Kind: "login", ID: "row-id", Title: "row-title", WatchtowerFlags: []string{"flag-one"}, StrengthScore: &score},
+		{Kind: "ssh", ID: "ssh-id", Title: "ssh-title"},
+	}
+	delivered := loginProjection(raw)
+	if len(delivered) != 1 || delivered[0].Kind != "login" ||
+		delivered[0].ID != "row-id" || delivered[0].Title != "row-title" {
+		t.Fatal("LOCAL_INITIAL_FANOUT_PROJECTION_FILTER_FAILED")
+	}
+	if len(delivered[0].WatchtowerFlags) != 1 || delivered[0].WatchtowerFlags[0] != "flag-one" ||
+		delivered[0].StrengthScore == nil || *delivered[0].StrengthScore != score {
+		t.Fatal("LOCAL_INITIAL_FANOUT_PROJECTION_NESTED_LOST")
+	}
+	clearLocalVaultFileInitialRows(raw)
+	for index := range raw {
+		if !reflect.DeepEqual(raw[index], personal.Row{}) {
+			t.Fatal("LOCAL_INITIAL_FANOUT_RAW_ROW_NOT_CLEARED")
+		}
+	}
+	if delivered[0].Title != "row-title" || len(delivered[0].WatchtowerFlags) != 1 ||
+		delivered[0].WatchtowerFlags[0] != "flag-one" ||
+		delivered[0].StrengthScore == nil || *delivered[0].StrengthScore != score {
+		t.Fatal("LOCAL_INITIAL_FANOUT_DELIVERED_MUTATED")
+	}
+
+	dropRows := []personal.Row{{Kind: "login", ID: "drop-id", Title: "drop-title"}}
+	dropBatch := &localVaultFileInitialBatch{rows: dropRows, done: make(chan struct{})}
+	dropBatch.drop(nil)
+	for index := range dropRows {
+		if !reflect.DeepEqual(dropRows[index], personal.Row{}) {
+			t.Fatal("LOCAL_INITIAL_FANOUT_DROP_ROW_NOT_CLEARED")
+		}
+	}
+
+	drainRows := []personal.Row{{Kind: "login", ID: "drain-id", Title: "drain-title"}}
+	drainBatch := &localVaultFileInitialBatch{rows: drainRows, done: make(chan struct{})}
+	drainBatch.drain()
+	for index := range drainRows {
+		if !reflect.DeepEqual(drainRows[index], personal.Row{}) {
+			t.Fatal("LOCAL_INITIAL_FANOUT_DRAIN_ROW_NOT_CLEARED")
+		}
+	}
 }

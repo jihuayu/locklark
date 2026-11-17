@@ -39,6 +39,12 @@ type localVaultFileInitialBatch struct {
 	done                             chan struct{}
 }
 
+func clearLocalVaultFileInitialRows(rows []personal.Row) {
+	for index := range rows {
+		rows[index] = personal.Row{}
+	}
+}
+
 func newLocalVaultFileInitialBatch(parent *personal.Session, results []vaultfileclient.LocalGenesisBatchResult,
 	refs []localVaultFileRef, candidateRefs []int, accountPath, settingsPath, profileDir, backendRoot string,
 	generation uint64) *localVaultFileInitialBatch {
@@ -102,6 +108,7 @@ func (b *localVaultFileInitialBatch) drop(launch func(func())) {
 		return
 	}
 	b.dropRequested = true
+	clearLocalVaultFileInitialRows(b.rows)
 	b.rows = nil
 	b.mu.Unlock()
 	if launch == nil {
@@ -132,6 +139,7 @@ func (b *localVaultFileInitialBatch) drain() {
 	b.draining = true
 	parent := b.parent
 	results := b.results
+	clearLocalVaultFileInitialRows(b.rows)
 	b.rows = nil
 	b.mu.Unlock()
 

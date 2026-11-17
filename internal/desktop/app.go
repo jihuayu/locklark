@@ -651,6 +651,7 @@ func (a *App) unlock() {
 			a.session = adoptedParent
 			a.armIdleTimer()
 			a.rows = loginProjection(adoptedRows)
+			clearLocalVaultFileInitialRows(adoptedRows)
 			a.scope = "active"
 			a.page = "vault"
 			a.v2Mode = !classicLayoutRequested()
