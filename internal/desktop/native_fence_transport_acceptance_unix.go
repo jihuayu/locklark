@@ -16,6 +16,26 @@ const (
 	nativeFenceCancelledFrame = "CANCELLED\n"
 )
 
+type nativeFenceTestWriteResult uint8
+
+const (
+	nativeFenceTestWriteReal nativeFenceTestWriteResult = iota
+	nativeFenceTestWriteEINTR
+)
+
+// nativeFenceTestSeam carries only finite phase signals and a finite syscall
+// result enum for deterministic tagged tests. It is nil/zero in production and
+// is never exposed as an observer or control API.
+type nativeFenceTestSeam struct {
+	readPhase    chan<- struct{}
+	readResume   <-chan struct{}
+	readPaused   bool
+	acceptPhase  chan<- struct{}
+	acceptResume <-chan struct{}
+	acceptPaused bool
+	writeResult  nativeFenceTestWriteResult
+}
+
 // nativeFenceTransport is a one-shot finite protocol controller. It carries
 // only numeric pipe descriptors, finite state, an internal attempt identity and
 // a bounded child count. It holds no application, session, wrapper, token,
@@ -44,6 +64,8 @@ type nativeFenceTransport struct {
 	disposed      bool
 	inputClosed   bool
 	eventClosed   bool
+
+	test nativeFenceTestSeam
 }
 
 func newNativeFenceTransport(controlInFD, eventOutFD int) *nativeFenceTransport {
@@ -204,29 +226,46 @@ func (t *nativeFenceTransport) hold(ctx context.Context) nativeFenceHoldResult {
 
 	reason := t.readRelease(ctx, deadline)
 	if reason == nativeFenceReasonNone {
-		return t.finishReleased()
+		return t.finishReleased(ctx, deadline)
 	}
 	return t.finishAbort(reason, false)
+}
+
+func nativeFenceAcceptRelease(ctx context.Context, deadline time.Time) nativeFenceReason {
+	select {
+	case <-ctx.Done():
+		return nativeFenceReasonCancelled
+	default:
+	}
+	if !time.Now().Before(deadline) {
+		return nativeFenceReasonTimeout
+	}
+	return nativeFenceReasonNone
 }
 
 func (t *nativeFenceTransport) readRelease(ctx context.Context, deadline time.Time) nativeFenceReason {
 	frame := make([]byte, 0, nativeFenceInputFrameLimit)
 	buffer := make([]byte, nativeFenceInputFrameLimit+1)
 	for {
-		select {
-		case <-ctx.Done():
-			return nativeFenceReasonCancelled
-		default:
+		if reason := nativeFenceAcceptRelease(ctx, deadline); reason != nativeFenceReasonNone {
+			return reason
 		}
-		if !time.Now().Before(deadline) {
-			return nativeFenceReasonTimeout
+		t.nativeFenceTestPauseRead()
+		if reason := nativeFenceAcceptRelease(ctx, deadline); reason != nativeFenceReasonNone {
+			return reason
 		}
-		count, err := syscall.Read(t.controlInFD, buffer)
+		count, err, owned := t.readControlNonblocking(buffer)
+		if !owned {
+			return nativeFenceReasonState
+		}
 		if count > 0 {
 			frame = append(frame, buffer[:count]...)
 			if newline := bytes.IndexByte(frame, '\n'); newline >= 0 {
 				if newline > nativeFenceInputFrameLimit || string(frame[:newline]) != nativeFenceReleasePayload {
 					return nativeFenceReasonFrame
+				}
+				if reason := nativeFenceAcceptRelease(ctx, deadline); reason != nativeFenceReasonNone {
+					return reason
 				}
 				return nativeFenceReasonNone
 			}
@@ -253,19 +292,40 @@ func (t *nativeFenceTransport) readRelease(ctx context.Context, deadline time.Ti
 	}
 }
 
-func (t *nativeFenceTransport) finishReleased() nativeFenceHoldResult {
+// readControlNonblocking serializes the owned-FD check and one nonblocking
+// read with close/dispose, so a closed reader can never touch a reused FD.
+func (t *nativeFenceTransport) readControlNonblocking(buffer []byte) (int, error, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.disposed || t.inputClosed || t.controlInFD < 0 {
+		return 0, nil, false
+	}
+	count, err := syscall.Read(t.controlInFD, buffer)
+	return count, err, true
+}
+
+// finishReleased rechecks the same context and original absolute deadline at
+// the release linearization point. A cancellation or expiry that already
+// happened aborts rather than releasing.
+func (t *nativeFenceTransport) finishReleased(ctx context.Context, deadline time.Time) nativeFenceHoldResult {
+	t.nativeFenceTestPauseAccept()
+	t.mu.Lock()
 	if t.disposed {
+		t.mu.Unlock()
 		return nativeFenceHoldResult{
 			verdict:         nativeFenceVerdictInvalid,
 			reason:          nativeFenceReasonState,
 			transportFailed: true,
 		}
 	}
+	if reason := nativeFenceAcceptRelease(ctx, deadline); reason != nativeFenceReasonNone {
+		t.mu.Unlock()
+		return t.finishAbort(reason, false)
+	}
 	t.phase = nativeFencePhaseReleased
 	t.closeInputLocked()
 	t.armTerminalLocked()
+	t.mu.Unlock()
 	return nativeFenceHoldResult{
 		verdict: nativeFenceVerdictReleased,
 		reason:  nativeFenceReasonNone,
@@ -410,6 +470,7 @@ func (t *nativeFenceTransport) closeInputLocked() {
 	}
 	t.inputClosed = true
 	_ = syscall.Close(t.controlInFD)
+	t.controlInFD = -1
 }
 
 func (t *nativeFenceTransport) closeEventLocked() {
@@ -454,10 +515,21 @@ func (t *nativeFenceTransport) writeFrameLocked(frame string) bool {
 	if t.eventClosed || t.disposed {
 		return false
 	}
+	// The deadline is absolute across every retry, including EINTR and partial
+	// writes; no retry renews it.
 	deadline := time.Now().Add(t.writeTimeout)
 	pending := []byte(frame)
 	for len(pending) > 0 {
-		count, err := syscall.Write(t.eventOutFD, pending)
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		var count int
+		var err error
+		if t.test.writeResult == nativeFenceTestWriteEINTR {
+			err = syscall.EINTR
+		} else {
+			count, err = syscall.Write(t.eventOutFD, pending)
+		}
 		if count > 0 {
 			pending = pending[count:]
 		}
@@ -480,6 +552,34 @@ func (t *nativeFenceTransport) writeFrameLocked(frame string) bool {
 		return false
 	}
 	return true
+}
+
+func (t *nativeFenceTransport) nativeFenceTestPauseRead() {
+	if t.test.readPhase == nil || t.test.readPaused {
+		return
+	}
+	t.test.readPaused = true
+	nativeFenceTestSignalAndWait(t.test.readPhase, t.test.readResume)
+}
+
+func (t *nativeFenceTransport) nativeFenceTestPauseAccept() {
+	if t.test.acceptPhase == nil || t.test.acceptPaused {
+		return
+	}
+	t.test.acceptPaused = true
+	nativeFenceTestSignalAndWait(t.test.acceptPhase, t.test.acceptResume)
+}
+
+func nativeFenceTestSignalAndWait(phase chan<- struct{}, resume <-chan struct{}) {
+	select {
+	case phase <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		return
+	}
+	select {
+	case <-resume:
+	case <-time.After(5 * time.Second):
+	}
 }
 
 func nativeFenceReadyFrame(childCount int) string {
