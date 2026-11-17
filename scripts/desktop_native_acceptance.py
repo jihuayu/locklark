@@ -24,6 +24,7 @@ from desktop_native_probe import PROBE_REASONS, safe_diagnostic
 from browser_native_x11 import CONTROL_LABELS, FAILURE_REASONS, safe_click_record
 from desktop_clipboard_owner import current_owner
 from desktop_native_fence_launch import NativeFenceLaunchError, launch_owned_desktop_child
+from desktop_native_fence import NativeFenceClient
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -44,10 +45,38 @@ RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 RECOVERY_KIT_TEXT = re.compile(r"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 LOCAL_SCENARIO = "local-vault-file-create"
 NATIVE_INITIAL_SCENARIO = "native-initial-account-fanout"
-LOCAL_SCENARIOS = (LOCAL_SCENARIO, NATIVE_INITIAL_SCENARIO)
+NATIVE_INITIAL_TAGGED_SCENARIO = "native-initial-tagged-held-cancel"
+NATIVE_INITIAL_SCENARIOS = (NATIVE_INITIAL_SCENARIO, NATIVE_INITIAL_TAGGED_SCENARIO)
+LOCAL_SCENARIOS = (LOCAL_SCENARIO, *NATIVE_INITIAL_SCENARIOS)
+
+NATIVE_INITIAL_BASIC_CASE = "NATIVE_INITIAL_BASIC"
+NATIVE_INITIAL_HELD_CANCEL_CASE = "NATIVE_INITIAL_HELD_CANCEL"
+NATIVE_INITIAL_LEGACY_CASE = "NATIVE_INITIAL_LEGACY"
+NATIVE_INITIAL_CANCEL_BUDGET_SECONDS = 5.0
+NATIVE_INITIAL_REQUIRED_READY_CHILDREN = 2
 
 def local_scenario(scenario):
     return scenario in LOCAL_SCENARIOS
+
+
+class NativeInitialPrivacyRegistry:
+    """The one known-value/manifest registry shared by every aggregate case."""
+
+    def __init__(self):
+        self.values = set()
+        self.codes = set()
+        self.local_manifest_private_values = {}
+
+
+def native_initial_host_paths(environ):
+    """Return the distinct ordinary and tagged hosts, or None if unusable."""
+    ordinary = environ.get("LOCKLARK_DESKTOP_HOST")
+    tagged = environ.get("LOCKLARK_DESKTOP_FENCE_HOST")
+    if not ordinary or not tagged:
+        return None
+    if os.path.realpath(ordinary) == os.path.realpath(tagged):
+        return None
+    return ordinary, tagged
 WRONG_RECOVERY_CONFIRMATION = "not-the-issued-recovery-code"
 LOCAL_SETTINGS_DEFAULTS = {
     "security.autolock.minutes": 5,
@@ -472,27 +501,38 @@ def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
 
 
 class Acceptance:
-    def __init__(self, *, native_fence_client=None):
+    def __init__(self, *, native_fence_client=None, scenario=None, host=None, privacy=None):
         # Optional private pipe owner; None keeps the ordinary launch path.
         self.native_fence_client = native_fence_client
+        self.privacy_registry = privacy
         self.stage = "setup"
         self.state = pathlib.Path(tempfile.mkdtemp(prefix="locklark-desktop-acceptance-"))
         self.diagnostics = self.state / "diagnostics"
         self.diagnostics.mkdir(mode=0o700)
-        self.host = pathlib.Path(os.environ["LOCKLARK_DESKTOP_HOST"]).resolve(strict=True)
+        self.scenario = scenario if scenario is not None else os.environ.get("LOCKLARK_TEST_SCENARIO")
+        if host is not None:
+            selected_host = host
+        elif self.scenario == NATIVE_INITIAL_TAGGED_SCENARIO:
+            selected_host = os.environ["LOCKLARK_DESKTOP_FENCE_HOST"]
+        else:
+            selected_host = os.environ["LOCKLARK_DESKTOP_HOST"]
+        self.host = pathlib.Path(selected_host).resolve(strict=True)
         require(bool(os.environ.get("DISPLAY")))
-        self.scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
         self.env = self.scenario_env(self.scenario, os.environ)
         self.go = os.environ.get("LOCKLARK_GO", "go")
         fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
         self.fixture_prebuilt = bool(fixture)
         self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
         self.fixture_path = self.state / "vault" / "fixture.json"
-        self.values, self.codes = set(), set()
         # Exact validated local-vault manifests are private product state, not
         # ordinary diagnostics. Permit only each file's own name/ID while still
         # scanning it for every other registered value and every recovery kit.
-        self.local_manifest_private_values = {}
+        if privacy is None:
+            self.values, self.codes = set(), set()
+            self.local_manifest_private_values = {}
+        else:
+            self.values, self.codes = privacy.values, privacy.codes
+            self.local_manifest_private_values = privacy.local_manifest_private_values
         self.started = time.time()
         self.app, self.probe = None, None
         self.reason = "acceptance"
@@ -500,9 +540,11 @@ class Acceptance:
         self.target_factor_submissions = 0
         self.target_refreshes = 0
         self.actual_refresh_provenance = False
+        self.last_refresh_item_count = 0
         self.a_locked = False
         self.a_locked_observed = False
         self.late_result_coverage = None
+        self.case_coverage = None
         self.native_action = "none"
         self.last_native_click = {}
         self.native_failed_index = None
@@ -908,14 +950,20 @@ class Acceptance:
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]}, {"click_label":"解锁"},
                     {"wait_label":"新建登录"}])
 
-    def unlock_onevra(self):
+    def unlock_onevra_submit(self):
         self.account_factor_submissions = getattr(self, "account_factor_submissions", 0) + 1
         self.phase("unlock-onevra")
         self.input([{"click_label":"使用应急资料…"},
                     {"click_label":"主密码"}, {"text":self.fixture["Password"]},
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]},
-                    {"click_label":"解锁"},
-                    {"wait_label":"新建登录"}])
+                    {"click_label":"解锁"}])
+
+    def unlock_onevra_wait(self):
+        self.wait("新建登录")
+
+    def unlock_onevra(self):
+        self.unlock_onevra_submit()
+        self.unlock_onevra_wait()
 
     def read_recovery(self):
         """Read one kit from the private pipe and register it immediately."""
@@ -982,10 +1030,10 @@ class Acceptance:
         labels = self.local_vault_labels(manifests)
         self.local_a_manifest = manifests[0]
         self.local_a_label = labels[0]
-        self.local_manifest_private_values = {
+        self.local_manifest_private_values.update({
             pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
             for manifest in manifests
-        }
+        })
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
@@ -1012,10 +1060,10 @@ class Acceptance:
         self.local_a_label, self.local_b_label = labels[a_index], labels[b_index]
         self.local_labels = [self.local_a_label, self.local_b_label]
         self.local_a_manifest, self.local_b_manifest = manifests[a_index], manifests[b_index]
-        self.local_manifest_private_values = {
+        self.local_manifest_private_values.update({
             pathlib.Path(manifest["path"]): _local_manifest_guard(manifest)
             for manifest in manifests
-        }
+        })
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
@@ -1069,6 +1117,11 @@ class Acceptance:
         self.wait("显示上次验证结果")
         self.click("刷新本地文件库")
         self.wait("本次刷新已验证")
+        snapshot = self.observe()
+        require(snapshot.get("audit_safe") is True)
+        items = snapshot.get("items")
+        require(type(items) is list and len(items) > 0)
+        self.last_refresh_item_count = len(items)
         self.target_refreshes = getattr(self, "target_refreshes", 0) + 1
         self.actual_refresh_provenance = True
 
@@ -1217,47 +1270,128 @@ class Acceptance:
         self.local_vault_pair_flow()
         self.final_local_vault_pair_validation(before_ids)
 
-    def native_initial_account_fanout_basic(self):
-        require(getattr(self, "account_factor_submissions", 0) == 1)
-        require(getattr(self, "target_factor_submissions", 0) == 0)
+    def native_initial_pair_evidence(self, expected_account_submits, expected_target_submits, phase_prefix):
+        require(type(expected_account_submits) is int and expected_account_submits >= 1)
+        require(type(expected_target_submits) is int and expected_target_submits >= 0)
+        require(getattr(self, "account_factor_submissions", 0) == expected_account_submits)
+        require(getattr(self, "target_factor_submissions", 0) == expected_target_submits)
         self.record_prebuilt_local_pair()
         before = self.observe()
         before_ids = sorted(item["id"] for item in before["items"])
         labels = self.local_labels
         a_index, b_index = self.local_a_index, self.local_b_index
-        self.refresh_local_vault(labels, a_index, "native-initial-refresh-a")
-        self.refresh_local_vault(labels, b_index, "native-initial-refresh-b")
+        self.refresh_local_vault(labels, a_index, phase_prefix + "-refresh-a")
+        self.refresh_local_vault(labels, b_index, phase_prefix + "-refresh-b")
         require(getattr(self, "target_refreshes", 0) >= 2)
         require(getattr(self, "actual_refresh_provenance", False) is True)
-        self.select_local_vault(labels, a_index, "native-initial-select-a-lock")
+        require(getattr(self, "last_refresh_item_count", 0) > 0)
+        self.select_local_vault(labels, a_index, phase_prefix + "-select-a-lock")
         self.wait("显示上次验证结果")
         self.click("锁定本地文件库")
         self.wait("本地文件库已锁定")
         self.a_locked = True
-        self.refresh_local_vault(labels, b_index, "native-initial-refresh-b-after-lock")
-        self.select_local_vault(labels, a_index, "native-initial-select-a-locked")
+        self.refresh_local_vault(labels, b_index, phase_prefix + "-refresh-b-after-lock")
+        self.select_local_vault(labels, a_index, phase_prefix + "-select-a-locked")
         self.wait("解锁本地文件库")
         self.a_locked_observed = True
         self.final_local_vault_pair_validation(before_ids)
         return {
-            "basic": True,
-            "accountSubmits": getattr(self, "account_factor_submissions", 0),
-            "targetSubmits": getattr(self, "target_factor_submissions", 0),
+            "accountSubmits": expected_account_submits,
+            "targetSubmits": expected_target_submits,
             "actualRefreshes": getattr(self, "target_refreshes", 0),
+            "freshItemCount": getattr(self, "last_refresh_item_count", 0),
             "aLocked": self.a_locked,
             "aLockedObserved": self.a_locked_observed,
             "accountLocked": True,
         }
 
+    def native_initial_account_fanout_basic(self):
+        coverage = self.native_initial_pair_evidence(1, 0, "native-initial")
+        coverage["case"] = NATIVE_INITIAL_BASIC_CASE
+        coverage["basic"] = True
+        return coverage
+
     def native_initial_account_fanout(self):
         coverage = self.native_initial_account_fanout_basic()
+        self.case_coverage = coverage
+        self.late_result_coverage = "NOT_RUN_IN_BASIC_CASE"
         self.phase("native-initial-counts account=%d target=%d refresh=%d" % (
             coverage["accountSubmits"], coverage["targetSubmits"], coverage["actualRefreshes"]))
         self.phase("native-initial-basic-flow-complete")
-        self.late_result_coverage = "NOT_RUN_UNPROVEN"
-        self.phase("native-initial-late-not-run")
-        self.reason = "LATE_RESULT_NOT_RUN"
-        raise AcceptanceFailure()
+
+    def native_initial_window_identity(self):
+        require(self.app is not None)
+        require(self.app.poll() is None)
+        result = self.input(inspect=True)
+        window = result.get("window")
+        require(type(window) is int and window > 0)
+        return self.app.pid, window
+
+    def native_initial_tagged_host_is_distinct(self):
+        ordinary = os.environ.get("LOCKLARK_DESKTOP_HOST", "")
+        return bool(ordinary and self.host and
+                    os.path.realpath(str(self.host)) != os.path.realpath(ordinary))
+
+    def native_initial_require_locked_form(self, phase):
+        self.phase(phase)
+        controls = self.controls()
+        require(controls.get("使用应急资料…", {}).get("present") is True)
+        for label in ("刷新本地文件库", "锁定本地文件库",
+                      "解锁本地文件库", "关闭本地基线视图"):
+            require(controls.get(label, {}).get("present") is False)
+
+    def native_initial_cancel_within_budget(self, ready_at):
+        self.click("取消解锁")
+        elapsed = time.monotonic() - ready_at
+        if elapsed > NATIVE_INITIAL_CANCEL_BUDGET_SECONDS:
+            self.reason = "native-initial-cancel-timeout"
+            raise AcceptanceFailure()
+        return elapsed
+
+    def native_initial_held_cancel(self):
+        client = getattr(self, "native_fence_client", None)
+        require(client is not None)
+        require(self.native_initial_tagged_host_is_distinct())
+        pid, window = self.native_initial_window_identity()
+        self.unlock_onevra_submit()
+        ready = client.ready()
+        require(ready.child_count == NATIVE_INITIAL_REQUIRED_READY_CHILDREN)
+        ready_at = time.monotonic()
+        require(client.has_pending_event() is False)
+        self.native_initial_cancel_within_budget(ready_at)
+        cancelled = client.wait_cancelled_drained()
+        require(cancelled.closed_count == NATIVE_INITIAL_REQUIRED_READY_CHILDREN)
+        require(cancelled.parent_locked is True)
+        same_process = self.app.poll() is None and self.app.pid == pid
+        require(same_process)
+        same_window = self.native_initial_window_identity()[1] == window
+        require(same_window)
+        self.native_initial_require_locked_form("native-initial-held-cancelled")
+        self.phase("native-initial-retry-submit")
+        self.unlock_onevra_submit()
+        self.unlock_onevra_wait()
+        require(self.app.poll() is None and self.app.pid == pid)
+        require(self.native_initial_window_identity()[1] == window)
+        evidence = self.native_initial_pair_evidence(2, 0, "native-initial-retry")
+        coverage = {
+            "case": NATIVE_INITIAL_HELD_CANCEL_CASE,
+            "initialAccountSubmits": 1,
+            "retryAccountSubmits": 1,
+            "totalAccountSubmits": 2,
+            "targetSubmits": 0,
+            "readyChildCount": ready.child_count,
+            "cancelled": True,
+            "drainedCount": cancelled.closed_count,
+            "parentLocked": cancelled.parent_locked,
+            "sameProcess": same_process,
+            "sameWindow": same_window,
+            "retryActualRefreshes": evidence["actualRefreshes"],
+            "retryFreshItemCount": evidence["freshItemCount"],
+            "accountLocked": evidence["accountLocked"],
+        }
+        self.case_coverage = coverage
+        self.phase("native-initial-held-counts initial=1 retry=1 total=2 target=0")
+        self.phase("native-initial-held-flow-complete")
 
     def build_fixture(self):
         if self.fixture_prebuilt:
@@ -1277,7 +1411,7 @@ class Acceptance:
     def setup(self):
         self.build_fixture()
         scenario = getattr(self, "scenario", None)
-        if scenario == NATIVE_INITIAL_SCENARIO:
+        if scenario in NATIVE_INITIAL_SCENARIOS:
             self.prepare_initial_pair_fixture()
         else:
             self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
@@ -1296,7 +1430,10 @@ class Acceptance:
                                       stderr=self.log, text=True, bufsize=1)
         require(bool(select.select([self.probe.stdout], [], [], 15)[0]))
         require(json.loads(self.probe.stdout.readline()).get("ready") is True)
-        if local_scenario(scenario):
+        if scenario == NATIVE_INITIAL_TAGGED_SCENARIO:
+            # The held-cancel case performs its own single account submission.
+            self.phase("native-initial-held-locked")
+        elif local_scenario(scenario):
             self.unlock_onevra()
         else:
             self.unlock()
@@ -1678,11 +1815,13 @@ class Acceptance:
             elif failure_stage:
                 raise AcceptanceFailure()
             if scenario:
-                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO, NATIVE_INITIAL_SCENARIO))
+                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO, *NATIVE_INITIAL_SCENARIOS))
                 if scenario == LOCAL_SCENARIO:
                     self.local_vault_file_create()
                 elif scenario == NATIVE_INITIAL_SCENARIO:
                     self.native_initial_account_fanout()
+                elif scenario == NATIVE_INITIAL_TAGGED_SCENARIO:
+                    self.native_initial_held_cancel()
                 elif scenario == "provider":
                     self.provider_acceptance()
                 else:
@@ -1842,7 +1981,8 @@ class Acceptance:
                     "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
                     "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
                     LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A/B create, wrong-kit refusal, fresh recovery, pair observer, lock/refresh/unlock and cached navigation",
-                    NATIVE_INITIAL_SCENARIO: "NATIVE_INITIAL_ACCOUNT_FANOUT_BASIC_ONLY LATE_RESULT=NOT_RUN_UNPROVEN",
+                    NATIVE_INITIAL_SCENARIO: "NATIVE_INITIAL_ACCOUNT_FANOUT_BASIC_ONLY LATE_RESULT=NOT_RUN_IN_BASIC_CASE",
+                    NATIVE_INITIAL_TAGGED_SCENARIO: "PASS: real native initial owned-pair held-cancel and retry",
                 }.get(scenario,"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
                 # Only now, after the scan passed, may the fixed success line
                 # enter the transcript. A rewrite failure also yields no PASS.
@@ -1894,9 +2034,160 @@ class Acceptance:
             print(message, flush=True)
 
 
+class NativeInitialCaseResult:
+    __slots__ = ("case", "code", "state", "coverage", "failure")
+
+    def __init__(self, case, code, state=None, coverage=None, failure=None):
+        self.case = case
+        self.code = code
+        self.state = state
+        self.coverage = coverage
+        self.failure = failure
+
+
+def native_initial_basic_coverage_ok(coverage):
+    if not isinstance(coverage, dict):
+        return False
+    return (
+        coverage.get("case") == NATIVE_INITIAL_BASIC_CASE
+        and coverage.get("accountSubmits") == 1
+        and coverage.get("targetSubmits") == 0
+        and type(coverage.get("actualRefreshes")) is int
+        and coverage["actualRefreshes"] >= 2
+        and type(coverage.get("freshItemCount")) is int
+        and coverage["freshItemCount"] > 0
+        and coverage.get("accountLocked") is True
+    )
+
+
+def native_initial_held_coverage_ok(coverage):
+    if not isinstance(coverage, dict):
+        return False
+    return (
+        coverage.get("case") == NATIVE_INITIAL_HELD_CANCEL_CASE
+        and coverage.get("initialAccountSubmits") == 1
+        and coverage.get("retryAccountSubmits") == 1
+        and coverage.get("totalAccountSubmits") == 2
+        and coverage.get("targetSubmits") == 0
+        and coverage.get("readyChildCount") == NATIVE_INITIAL_REQUIRED_READY_CHILDREN
+        and coverage.get("cancelled") is True
+        and coverage.get("drainedCount") == NATIVE_INITIAL_REQUIRED_READY_CHILDREN
+        and coverage.get("parentLocked") is True
+        and coverage.get("sameProcess") is True
+        and coverage.get("sameWindow") is True
+        and type(coverage.get("retryActualRefreshes")) is int
+        and coverage["retryActualRefreshes"] >= 2
+        and type(coverage.get("retryFreshItemCount")) is int
+        and coverage["retryFreshItemCount"] > 0
+        and coverage.get("accountLocked") is True
+    )
+
+
+def native_initial_privacy_scan(privacy, states):
+    for state in states:
+        if state is None:
+            continue
+        scanner = Acceptance.__new__(Acceptance)
+        scanner.state = pathlib.Path(state)
+        scanner.fixture_path = scanner.state / ".no-fixture"
+        scanner.values = privacy.values
+        scanner.codes = privacy.codes
+        scanner.local_manifest_private_values = privacy.local_manifest_private_values
+        scanner.started = time.time()
+        scanner.privacy_failure = None
+        try:
+            scanner.scan()
+        except AcceptanceFailure:
+            return getattr(scanner, "privacy_failure", None) or "scan-error"
+    return None
+
+
+def _run_native_initial_case(case, scenario, host, uses_fence,
+                             acceptance_factory, client_factory, privacy):
+    if not host:
+        return NativeInitialCaseResult(case, 1, failure="HOST_UNAVAILABLE")
+    client = None
+    try:
+        if uses_fence:
+            client = client_factory()
+        subject = acceptance_factory(
+            scenario=scenario, host=host,
+            native_fence_client=client, privacy=privacy)
+        code = subject.run()
+        return NativeInitialCaseResult(
+            case, code, getattr(subject, "state", None),
+            getattr(subject, "case_coverage", None))
+    except Exception:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return NativeInitialCaseResult(case, 1, failure="CASE_EXCEPTION")
+
+
+def run_default_aggregate(environ=None, acceptance_factory=None, client_factory=None):
+    """Run the old default flow and both native initial cases as one gate."""
+    environ = os.environ if environ is None else environ
+    acceptance_factory = Acceptance if acceptance_factory is None else acceptance_factory
+    client_factory = NativeFenceClient if client_factory is None else client_factory
+    if not environ.get("LOCKLARK_DESKTOP_FIXTURE"):
+        print("NATIVE_INITIAL_AGGREGATE FAIL reason=ARTIFACT_UNAVAILABLE")
+        return 1
+    ordinary = environ.get("LOCKLARK_DESKTOP_HOST")
+    tagged_hosts = native_initial_host_paths(environ)
+    privacy = NativeInitialPrivacyRegistry()
+    legacy = _run_native_initial_case(
+        NATIVE_INITIAL_LEGACY_CASE, None, ordinary, False,
+        acceptance_factory, client_factory, privacy)
+    basic = _run_native_initial_case(
+        NATIVE_INITIAL_BASIC_CASE, NATIVE_INITIAL_SCENARIO, ordinary, False,
+        acceptance_factory, client_factory, privacy)
+    if tagged_hosts is None:
+        held = NativeInitialCaseResult(
+            NATIVE_INITIAL_HELD_CANCEL_CASE, 1, failure="HOST_UNAVAILABLE")
+    else:
+        held = _run_native_initial_case(
+            NATIVE_INITIAL_HELD_CANCEL_CASE, NATIVE_INITIAL_TAGGED_SCENARIO,
+            tagged_hosts[1], True, acceptance_factory, client_factory, privacy)
+    results = (legacy, basic, held)
+    failure = None
+    if legacy.code != 0:
+        failure = legacy.failure or "LEGACY_FAILED"
+    elif basic.code != 0:
+        failure = basic.failure or "BASIC_FAILED"
+    elif held.code != 0:
+        failure = held.failure or "HELD_CANCEL_FAILED"
+    elif not native_initial_basic_coverage_ok(basic.coverage):
+        failure = "BASIC_COVERAGE"
+    elif not native_initial_held_coverage_ok(held.coverage):
+        failure = "HELD_CANCEL_COVERAGE"
+    if failure is None:
+        privacy_failure = native_initial_privacy_scan(
+            privacy, [result.state for result in results if result.state is not None])
+        if privacy_failure is not None:
+            failure = "PRIVACY"
+    print("NATIVE_INITIAL_CASE legacy=%s basic=%s held_cancel=%s" % (
+        "PASS" if legacy.code == 0 else "FAIL",
+        "PASS" if basic.code == 0 else "FAIL",
+        "PASS" if held.code == 0 else "FAIL"))
+    if failure is not None:
+        print("NATIVE_INITIAL_AGGREGATE FAIL reason=" + failure)
+        return 1
+    print("NATIVE_INITIAL_COUNTS basic_account=1 held_initial=1 held_retry=1 held_total=2 target=0")
+    print("NATIVE_INITIAL_AGGREGATE PASS")
+    return 0
+
+
+def main():
+    if os.environ.get("LOCKLARK_TEST_SCENARIO"):
+        return Acceptance().run()
+    return run_default_aggregate()
+
+
 if __name__ == "__main__":
     try:
-        sys.exit(Acceptance().run())
+        sys.exit(main())
     except Exception:
         print("Desktop native acceptance unavailable at setup", file=sys.stderr)
         sys.exit(1)
