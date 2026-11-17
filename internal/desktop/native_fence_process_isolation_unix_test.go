@@ -31,25 +31,28 @@ func nativeFenceRunIsolatedChild(t *testing.T, caseName, childTest string) {
 	if os.Getenv(nativeFenceChildCaseEnv) != "" {
 		t.Skip("native fence isolation child execution")
 	}
-	dir := os.Getenv(nativeFenceChildArtifactDirEnv)
-	if dir == "" {
-		created, err := os.MkdirTemp("", "locklark-native-fence-child-")
-		if err != nil {
-			t.Fatal("NATIVE_FENCE_CHILD_ARTIFACT_DIR_FAILED")
-		}
-		_ = os.Chmod(created, 0700)
-		dir = created
+	parentDir := os.Getenv(nativeFenceChildArtifactDirEnv)
+	if parentDir == "" {
+		parentDir = os.TempDir()
 	}
-	stdoutPath := filepath.Join(dir, "child-"+caseName+".stdout")
-	stderrPath := filepath.Join(dir, "child-"+caseName+".stderr")
-	stdout, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	dir, err := os.MkdirTemp(parentDir, "locklark-native-fence-child-")
 	if err != nil {
-		t.Fatal("NATIVE_FENCE_CHILD_STDOUT_OPEN_FAILED")
+		t.Fatal("NATIVE_FENCE_CHILD_ARTIFACT_SUBDIR_FAILED")
 	}
-	stderr, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
+	if err := os.Chmod(dir, 0700); err != nil {
+		_ = os.Remove(dir)
+		t.Fatal("NATIVE_FENCE_CHILD_ARTIFACT_SUBDIR_MODE_FAILED")
+	}
+	stdoutPath := filepath.Join(dir, "stdout.log")
+	stderrPath := filepath.Join(dir, "stderr.log")
+	stdout, ok := nativeFenceChildCaptureFile(stdoutPath)
+	if !ok {
+		t.Fatal("NATIVE_FENCE_CHILD_STDOUT_CREATE_FAILED")
+	}
+	stderr, ok := nativeFenceChildCaptureFile(stderrPath)
+	if !ok {
 		_ = stdout.Close()
-		t.Fatal("NATIVE_FENCE_CHILD_STDERR_OPEN_FAILED")
+		t.Fatal("NATIVE_FENCE_CHILD_STDERR_CREATE_FAILED")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -77,6 +80,23 @@ func nativeFenceRunIsolatedChild(t *testing.T, caseName, childTest string) {
 			caseName, stdoutPath, stdoutBytes, stdoutHash, stderrPath, stderrBytes, stderrHash)
 	}
 	t.Logf("NATIVE_FENCE_CHILD_PASS case=%s stdout=%s stderr=%s", caseName, stdoutPath, stderrPath)
+}
+
+func nativeFenceChildCaptureFile(path string) (*os.File, bool) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, false
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return nil, false
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		_ = file.Close()
+		return nil, false
+	}
+	return file, true
 }
 
 func nativeFenceChildEnvironment(base []string, caseName, dir string) []string {
