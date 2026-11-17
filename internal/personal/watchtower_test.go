@@ -230,3 +230,33 @@ func TestWatchtowerOldAPIContract(t *testing.T) {
 	}
 	_ = path
 }
+
+// TestWatchtowerHIBPIntentDoesNotDecryptItems pins the #102 accept criterion for
+// the HIBP flow: the local report and the final checked report decrypt the vault
+// payload, while the pre-network intent phase commits its linked audit event
+// without a payload decrypt. All three authenticated phases and their order are
+// retained.
+func TestWatchtowerHIBPIntentDoesNotDecryptItems(t *testing.T) {
+	path, key, session := watchtowerFixture(t)
+	defer session.Lock()
+	sum := sha1.Sum([]byte("password"))
+	hexSum := strings.ToUpper(hex.EncodeToString(sum[:]))
+	session.hibp = &fakeRangeLookup{results: map[string]map[string]int{hexSum[:5]: {hexSum[5:]: 42}}}
+	var decrypts int
+	itemDecryptObserver = func() { decrypts++ }
+	defer func() { itemDecryptObserver = nil }()
+	report, err := session.WatchtowerContext(context.Background(), "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.HIBPChecked || report.Counts.Vulnerable != 1 {
+		t.Fatalf("checked report=%+v", report)
+	}
+	if decrypts != 2 {
+		t.Fatalf("HIBP watchtower decrypted item payloads %d times, want local + final only", decrypts)
+	}
+	actions := auditActions(t, path, key)
+	if countAction(actions, watchtowerAction) != 1 || countAction(actions, hibpAction) != 2 {
+		t.Fatalf("phases changed: %v", actions)
+	}
+}

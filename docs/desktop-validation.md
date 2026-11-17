@@ -2,6 +2,8 @@
 
 本文保留初始桌面批次的历史证据。后续当前行为：剪贴板改用系统 ownership lease，见[日常桌面验收](desktop-daily-validation.md)；全局快捷搜索见[快捷搜索验收](desktop-quick-search-validation.md)；导入 profile 已扩展为 `login-notes-v2`，原生备注与迁移见[登录备注验收](login-notes-validation.md)。下述 `login-v1` 和剪贴板比较内容的描述属于初始批次。
 
+2026-11-13 的本机解锁收口把 Secret Key 交给 MyGo `Secrets` 对应的系统凭据存储，账号键只含规范化绝对金库路径的 SHA-256 摘要，不含路径正文。首次授权、授权丢失或主动退出当前设备时，用户从创建时复制或保存的 `.txt` 应急文件输入一次；普通设置 JSON 不保存 Secret Key。主窗口最小化或关闭时隐藏到托盘，关闭事件同时锁定金库；托盘“退出”才结束进程。设置页分为安全与开发者分区；开发者分区暴露已接通的 SSH Agent、全部内置 CLI 配置、CLI 请求活动、审计、导入导出和 MCP 说明，桌面 Watchtower 入口已移除。CLI 配置仅持久化程序指纹、金库目标及槽位；CLI 请求活动把本机未签名请求记录与金库签名执行事件分开展示，并明确本机记录不具签名账本的防篡改保证。相关行为有桌面单测覆盖，真实 Windows Credential Manager、托盘点击与系统重启后的凭据持久性仍须按下方平台清单人工验收。
+
 基线 `5b0ce38`，分支 `codex/desktop-browser`；本批只关闭有证据的桌面基础能力，不关闭持续任务中的 Next.js、完整迁移、浏览器扩展、手机、团队同步或发布范围。
 
 ## 实现
@@ -39,3 +41,5 @@ Windows Hello 每次解密提示、拒绝/取消、TPM 清除/密钥失效、休
 2026-11-09 第二轮 macOS 审计补记：新增 `osunlock.Biometry()` 能力探测（`canEvaluatePolicy` 不弹提示），安全设置中的快捷解锁标签/说明反映“Touch ID / 系统密码 / 不可用”，无 Touch ID 时文案不再声称会弹 Touch ID；补充 `errSecAuthFailed(-25293)`、`errSecNotAvailable(-25291)`、`errSecServiceNotAvailable(-67585)`、`errSecInteractionRequired(-25315)` 的分类与 UI 文案；修复 passkey 原生适配器失败时返回 `-1` 导致错误分类丢失的问题。新增 `scripts/macos_verify_touchid.sh` 检查 ad-hoc、TeamIdentifier、`keychain-access-groups`、embedded profile、codesign、Gatekeeper 与 stapling。自签名证书实验：`codesign` 可签名但 `TeamIdentifier=not set`，带 keychain group 的进程被 AMFI SIGKILL（exit 137），`security verify-cert` 为 `CSSMERR_TP_NOT_TRUSTED`，因此不能替代 Apple Developer ID；成功 Touch ID 验收仍被签名身份阻塞。
 
 2026-11-10 第三轮 macOS 复审：在 macOS 27.0.1 arm64 重新构建 current main 的 ad-hoc `.app`，`bioutil -r` 仍显示 Touch ID 解锁启用，`security find-identity -v -p codesigning` 仍为 0 个有效身份；`scripts/macos_verify_touchid.sh` 继续 FAIL（ad-hoc、无 TeamIdentifier、无 `keychain-access-groups`、无 embedded profile），Gatekeeper/stapling 为 NOTE。该结果再次确认本地无法完成签名后的 Touch ID 成功验收；本轮未发现新的 Touch ID 代码级高优先级问题，未把静态检查或 ad-hoc 能力探测写成真机成功。
+
+2026-11-10 Windows 11 专业版 24H2（10.0.26100，amd64）补记：`go test ./internal/desktop ./internal/osunlock ./internal/personal`、`go vet ./...` 与 Windows 桌面端编译通过；真实 MyGo 原生窗口成功创建并生成截图 `onevra-stage1-windows-native.png`。MyGo 0.7.4 生产打包生成 `Locklark.exe`、`locklark-setup-0.1.0-amd64.exe`、签名更新归档和 `update-windows-amd64.json`；NSIS 静默安装到隔离目录后，版本信息、开始菜单快捷方式和卸载项正确，安装版可启动，随后静默卸载成功清除目录、注册表项和快捷方式。该轮按用户要求**未触发 Windows Hello 提示**，不构成 Hello、TPM、拒绝/取消或休眠锁屏验收。当前 Windows 包未配置 Authenticode，签名状态为 `NotSigned`，SmartScreen 警告仍待发布证书解决。

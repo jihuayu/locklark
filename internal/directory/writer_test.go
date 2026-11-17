@@ -170,7 +170,7 @@ func TestWriterReaderAndRollback(t *testing.T) {
 			}
 			return errors.New("injected rollback")
 		})
-	}, f.cfg, f.sequencer, p, s, false)
+	}, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes)
 	db.Close()
 	if e != ErrStorage || !reflect.DeepEqual(r, Receipt{}) {
 		t.Fatal("failed update returned receipt", e)

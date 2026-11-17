@@ -106,7 +106,7 @@ class NotesAcceptance(Acceptance):
 
     def setup(self):
         self.phase("normal-cli-import" if not self.baseline else "baseline-cli-import-without-notes")
-        self.command([self.go, "build", "-o", str(self.fixture_binary), "./scripts/desktop_acceptance_fixture"])
+        self.build_fixture()
         self.fixture = import_notes(self.cli, self.state / "vault", with_notes=not self.baseline)
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "ExportPassword"))
         for key in ("NotesOriginal", "NotesEdited", "NotesRejected", "NotesConflict"):

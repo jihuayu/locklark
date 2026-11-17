@@ -1,10 +1,12 @@
 package desktop
 
 import (
-	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
 	"path/filepath"
 	"testing"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/personal"
 )
 
 func TestNativeUnlockFieldsAreMasked(t *testing.T) {
@@ -24,6 +26,28 @@ func TestNativeUnlockFieldsAreMasked(t *testing.T) {
 	a.Lock()
 	if a.password != "" || a.secret != "" {
 		t.Fatal("lock retained factors")
+	}
+}
+
+func TestMainWindowCloseHidesToTrayUnlessQuitting(t *testing.T) {
+	a := New()
+	a.password = "must-clear"
+	generation := a.generation
+
+	closeEvent := &mygo.CloseEvent{}
+	a.handleMainWindowClose(closeEvent)
+	if !closeEvent.DefaultPrevented() {
+		t.Fatal("window close was not converted to hide-to-tray")
+	}
+	if a.generation == generation || a.password != "" {
+		t.Fatal("hide-to-tray did not clear the unlocked window state")
+	}
+
+	a.quitting = true
+	quitClose := &mygo.CloseEvent{}
+	a.handleMainWindowClose(quitClose)
+	if quitClose.DefaultPrevented() {
+		t.Fatal("quit path cannot close the main window")
 	}
 }
 

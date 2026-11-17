@@ -17,6 +17,13 @@ import org.locklark.android.security.ForegroundGate
 import org.locklark.android.security.GuardedWork
 import org.locklark.android.security.NativeFailures
 import java.io.File
+import java.io.IOException
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -32,14 +39,18 @@ class BoundOperationTest {
         // This is a real Android AtomicFile first write, before any OS auth.
         // The isolated Context changes only the test's private storage root.
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", "capsule-storage") })
-        val isolated = File(root, "capsule-storage-" + UUID.randomUUID()).apply { mkdirs() }
+        val capsuleName = "capsule-storage-" + UUID.randomUUID()
+        val isolated = File(root, capsuleName).apply { mkdirs() }
         val context = object : ContextWrapper(instrumentation.targetContext) {
             override fun getNoBackupFilesDir(): File = isolated
         }
-        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        var scenario: ActivityScenario<MainActivity>? = null
+        var scenarioFailure: Throwable? = null
         try {
+            val launched = ActivityScenario.launch(MainActivity::class.java)
+            scenario = launched
             lateinit var activity: MainActivity
-            scenario.onActivity { activity = it }
+            launched.onActivity { activity = it }
             val prompt = NativeCryptoPrompt(activity) { false }
             // Demonstrate the old pathname chmod failure on the real platform.
             val legacy = AtomicFile(File(isolated, "legacy-installation"))
@@ -58,7 +69,16 @@ class BoundOperationTest {
             assertFalse("Atomic staging file retained", File(installation.path + ".new").exists())
             PlatformCapsuleStore(context, prompt) { false }
             assertTrue("Existing installation changed", installation.readText() == original)
-        } finally { scenario.close() }
+        } catch (error: Throwable) {
+            scenarioFailure = error
+            throw error
+        } finally {
+            // The isolated tree belongs only to this UUID; the Activity never
+            // reads it after the scenario is closed.
+            runCleanup(scenarioFailure,
+                { scenario?.close() },
+                { deleteOwnedCapsuleTree(root, capsuleName) })
+        }
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", "bound-operation") })
         val fixture = File(root, "instrumentation-canaries.json")
         val canaries = if (fixture.exists()) JSONArray(fixture.readText()) else JSONArray()
@@ -94,13 +114,15 @@ class BoundOperationTest {
         } finally { source.delete(); linked.delete(); fs.delete() }
 
         // Positive actual JNI calls use the same two-copy pattern as the UI.
-        val positivePath = File(appRoot,"positive-jni-" + UUID.randomUUID() + ".ll")
+        val positiveName = "positive-jni-" + UUID.randomUUID() + ".ll"
+        val positivePath = File(appRoot, positiveName)
         val positive = Mobilecore.open(positivePath.absolutePath)
         lateinit var api: mobilecore.Vault
-        instrumentation.runOnMainSync { api = positive.captureOperation() }
         val positivePassword = password.toByteArray(); val positiveKey = accountKey.toByteArray()
         val createPassword = positivePassword.copyOf(); val createKey = positiveKey.copyOf()
+        var positiveFailure: Throwable? = null
         try {
+            instrumentation.runOnMainSync { api = positive.captureOperation() }
             instrumentation.sendStatus(0, android.os.Bundle().apply {
                 putString("locklark_stage","binding-create"); putString("locklark_core_phase","create")
             })
@@ -122,24 +144,36 @@ class BoundOperationTest {
             }
             assertTrue("Positive JNI vault not unlocked",positive.isUnlocked())
             assertTrue("Positive JNI authenticated list invalid",api.list("active").count() == 0L)
+        } catch (error: Throwable) {
+            positiveFailure = error
+            throw error
         } finally {
             positivePassword.fill(0); positiveKey.fill(0); createPassword.fill(0); createKey.fill(0)
-            positive.requestLock(); positive.close()
+            // Lock and close the native handle before removing only this
+            // synthetic vault and its exact AtomicFile-style sidecars.
+            runCleanup(positiveFailure,
+                { positive.requestLock() },
+                { positive.close() },
+                { deleteOwnedFile(positivePath, appRoot, positiveName, listOf(".new", ".bak")) })
         }
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage","bound-operation") })
-        val path = File(root, "bound-operation-" + UUID.randomUUID() + ".ll")
+        val negativeName = "bound-operation-" + UUID.randomUUID() + ".ll"
+        val path = File(root, negativeName)
         val base = Mobilecore.open(path.absolutePath)
-        lateinit var captured: mobilecore.Vault
-        val gate = ForegroundGate(); gate.start()
-        instrumentation.runOnMainSync { captured = base.captureOperation() }
-        val stamp = gate.begin()
         val checked = CountDownLatch(1); val release = CountDownLatch(1)
         val pw = password.toByteArray(); val key = accountKey.toByteArray()
         val worker = Executors.newSingleThreadExecutor()
+        var negativeFailure: Throwable? = null
+        var gate: ForegroundGate? = null
         try {
+            val foreground = ForegroundGate().also { it.start() }
+            gate = foreground
+            lateinit var captured: mobilecore.Vault
+            instrumentation.runOnMainSync { captured = base.captureOperation() }
+            val stamp = foreground.begin()
             val result = worker.submit<Boolean> {
                 runCatching {
-                    GuardedWork.run(gate, stamp, null, { pw.fill(0); key.fill(0) }) {
+                    GuardedWork.run(foreground, stamp, null, { pw.fill(0); key.fill(0) }) {
                         checked.countDown()
                         check(release.await(5,TimeUnit.SECONDS))
                         captured.create(pw,key)
@@ -147,14 +181,94 @@ class BoundOperationTest {
                 }.isFailure
             }
             assertTrue("Preflight barrier unavailable", checked.await(5,TimeUnit.SECONDS))
-            instrumentation.runOnMainSync { gate.stop(); base.requestLock() }
+            instrumentation.runOnMainSync { foreground.stop(); base.requestLock() }
             release.countDown()
             assertTrue("Stale captured Go operation was accepted", result.get(10,TimeUnit.SECONDS))
             assertFalse("Cancelled creation wrote a database", path.exists())
             assertTrue("Cancelled factor buffers retained", pw.all { it == 0.toByte() } && key.all { it == 0.toByte() })
+        } catch (error: Throwable) {
+            negativeFailure = error
+            throw error
         } finally {
-            release.countDown(); base.requestLock(); worker.shutdownNow(); base.close()
+            release.countDown()
             pw.fill(0); key.fill(0)
+            // The base handle is locked and closed before the exact negative
+            // path is removed, including after a failed or partial operation.
+            runCleanup(negativeFailure,
+                { if (gate != null) instrumentation.runOnMainSync { gate?.stop() } },
+                { base.requestLock() },
+                { worker.shutdownNow() },
+                { base.close() },
+                { deleteOwnedFile(path, root, negativeName, listOf(".new", ".bak")) })
         }
+    }
+
+    /**
+     * Runs ordered cleanup steps. A cleanup failure becomes the test failure
+     * only when the body did not already fail; otherwise it is attached as a
+     * suppressed exception so the original assertion stays visible.
+     */
+    private fun runCleanup(primary: Throwable?, vararg steps: () -> Unit) {
+        var failure: Throwable? = null
+        for (step in steps) {
+            try {
+                step()
+            } catch (error: Throwable) {
+                if (failure == null) failure = error else failure.addSuppressed(error)
+            }
+        }
+        val cleanupFailure = failure ?: return
+        if (primary == null) throw cleanupFailure
+        primary.addSuppressed(cleanupFailure)
+    }
+
+    /** Removes only [expectedName] under [parent] plus its exact sidecars. */
+    private fun deleteOwnedFile(path: File, parent: File, expectedName: String, sidecarSuffixes: List<String>) {
+        require(path.name == expectedName) { "Owned fixture name mismatch" }
+        require(!Files.isSymbolicLink(path.toPath())) { "Owned fixture must not be a symbolic link" }
+        require(path.canonicalFile.parentFile == parent.canonicalFile) { "Owned fixture escaped its directory" }
+        val owned = ArrayList<File>()
+        owned.add(path)
+        for (suffix in sidecarSuffixes) owned.add(File(parent, expectedName + suffix))
+        for (file in owned) {
+            require(file.canonicalFile.parentFile == parent.canonicalFile) { "Owned fixture escaped its directory" }
+            require(!Files.isSymbolicLink(file.toPath())) { "Owned fixture must not be a symbolic link" }
+            if (!Files.exists(file.toPath(), LinkOption.NOFOLLOW_LINKS)) continue
+            require(!Files.isDirectory(file.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Owned fixture must be a file" }
+            if (!Files.deleteIfExists(file.toPath())) throw IOException("Owned fixture cleanup failed")
+        }
+    }
+
+    /**
+     * Deletes exactly the UUID-named capsule directory created by this test.
+     * The name and canonical containment are checked before any traversal, and
+     * symbolic links are never followed.
+     */
+    private fun deleteOwnedCapsuleTree(root: File, expectedName: String) {
+        val id = expectedName.removePrefix("capsule-storage-")
+        require(expectedName.startsWith("capsule-storage-") && UUID.fromString(id).toString() == id) {
+            "Owned capsule directory name mismatch"
+        }
+        val owned = File(root, expectedName)
+        require(!Files.isSymbolicLink(owned.toPath())) { "Owned capsule directory must not be a symbolic link" }
+        val canonical = owned.canonicalFile
+        require(canonical.parentFile == root.canonicalFile && canonical.name == expectedName) {
+            "Owned capsule directory escaped its root"
+        }
+        if (!Files.exists(canonical.toPath(), LinkOption.NOFOLLOW_LINKS)) return
+        require(Files.isDirectory(canonical.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            "Owned capsule directory is not a directory"
+        }
+        Files.walkFileTree(canonical.toPath(), object : SimpleFileVisitor<Path>() {
+            override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                Files.delete(file)
+                return FileVisitResult.CONTINUE
+            }
+            override fun postVisitDirectory(directory: Path, error: IOException?): FileVisitResult {
+                if (error != null) throw error
+                Files.delete(directory)
+                return FileVisitResult.CONTINUE
+            }
+        })
     }
 }

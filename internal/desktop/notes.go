@@ -129,10 +129,10 @@ func (a *App) notesEditorView(c *ui.Context) {
 				ui.Text(c, "修订: "+draft.target.Revision).FontSize(12).TextColor(t.TextMuted)
 			})
 			ui.Text(c, "这是可见的秘密正文。仅按保存按钮提交，Enter 只换行；取消不修改金库。").FontSize(13).TextColor(t.Warning)
-			ui.TextArea(c, &draft.value).Label("备注正文（可见多行）").Height(260).Disabled(a.busy)
+			ui.TextArea(c, &draft.value).Label("备注正文（可见多行）").Height(260).Disabled(a.uiBusy(c))
 			ui.Row(c).Gap(8).Children(func() {
-				ui.PrimaryButton(c, "保存备注").Disabled(a.busy).OnClick(func() { a.saveNotes(draft) })
-				ui.Button(c, "取消编辑备注").Disabled(a.busy).OnClick(func() {
+				ui.PrimaryButton(c, "保存备注").Disabled(a.uiBusy(c)).OnClick(func() { a.saveNotes(draft) })
+				ui.Button(c, "取消编辑备注").Disabled(a.uiBusy(c)).OnClick(func() {
 					if a.notesEditor == draft {
 						a.clearNotesEditor()
 						a.clearDailyExposure()

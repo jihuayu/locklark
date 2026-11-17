@@ -119,7 +119,7 @@ func TestNativePasskeyChoicePanelScrollsWithCancelPinned(t *testing.T) {
 	launched := 0
 	a.launch = func(func()) { launched++ }
 	a.dispatch = func(fn func()) { fn() }
-	tester := ui.NewTester(func(c *ui.Context) { a.browserPasskeyView(c, view, "") }, 1000, 640)
+	tester := ui.NewTester(func(c *ui.Context) { a.browserPasskeyView(c, a.browser, view, "") }, 1000, 640)
 	if !tester.HasText("添加第二个 Passkey 会升级该登录的加密格式；旧客户端将拒绝打开金库。请仅在核对账号后明确批准。") {
 		t.Fatal("missing explicit upgrade warning")
 	}

@@ -1,0 +1,18 @@
+--- /Users/jihuayu/.local/share/rootyard-deepseek-skill-source-20261110/deepseek-subagent/scripts/deepseek_agent.py
++++ /Users/jihuayu/.local/share/rootyard-deepseek-skill-source-20261110/deepseek-subagent/scripts/deepseek_agent.py
+@@ -397,5 +397,15 @@
++def worker_guard_module():
++    module = os.environ.get("DEEPSEEK_WORKER_GUARD_MODULE")
++    if not module or not os.path.isabs(module):
++        raise AgentError("Worker guard module is not configured.")
++    return module
++
++
+ def patch_payload(model, base_url, max_tokens):
+     return [
++        {"insert": [{"id": "deepseek-worker-guard",
++                     "name": worker_guard_module(),
++                     "inject": ["tools"]}]},
+         {"id": "agent-default-model",
+          "config": {"provider": "deepseek-gateway", "model": model}},
+         {"id": "llm-pi-ai",

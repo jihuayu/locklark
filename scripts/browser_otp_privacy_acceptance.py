@@ -4,12 +4,88 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 
 from browser_otp_hmac import codes
+
+
+def _owned_private_directory(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o700
+    )
+
+
+def require_private_parent(path):
+    """Accept only one canonical, owned, 0700 real directory."""
+    path = Path(path)
+    try:
+        if not path.is_absolute() or path.resolve(strict=True) != path:
+            raise ValueError
+    except (OSError, RuntimeError):
+        raise ValueError("privacy-state") from None
+    if not _owned_private_directory(path):
+        raise ValueError("privacy-state")
+    return path
+
+
+def find_private_child_state(parent):
+    """Find the one child state under the wrapper-owned parent, no global scan."""
+    parent = require_private_parent(parent)
+    try:
+        children = [
+            child
+            for child in parent.iterdir()
+            if child.name.startswith("locklark-browser-acceptance-")
+        ]
+    except OSError:
+        raise ValueError("privacy-state") from None
+    if len(children) != 1:
+        raise ValueError("privacy-state")
+    child = require_private_parent(children[0])
+    vault = child / "vault"
+    if not _owned_private_directory(vault):
+        raise ValueError("privacy-state")
+    fixture = vault / "fixture.json"
+    try:
+        info = fixture.lstat()
+    except OSError:
+        raise ValueError("privacy-state") from None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise ValueError("privacy-state")
+    return child
+
+
+def create_private_state_parent(prefix="locklark-browser-otp-privacy-"):
+    """Create the wrapper's own parent and canonicalize only that new path.
+
+    macOS temp paths commonly traverse a symlink such as /var -> /private/var.
+    The wrapper owns this fresh directory, so resolving it strictly after
+    creation is safe. Externally supplied parents still go through the strict
+    require_private_parent rules and are never canonicalized for the caller.
+    """
+    created = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        state = created.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("privacy-state") from None
+    os.chmod(state, 0o700)
+    return require_private_parent(state)
 
 
 def check_output(raw, fixture, first, last):
@@ -36,9 +112,12 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     script = "browser_native_acceptance.mjs" if args.engine == "chromium" else "browser_firefox_native_acceptance.mjs"
-    state = Path(tempfile.mkdtemp(prefix="locklark-browser-otp-privacy-"))
-    os.chmod(state, 0o700)
-    environment = dict(os.environ, LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments")
+    state = create_private_state_parent()
+    environment = dict(
+        os.environ,
+        LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments",
+        LOCKLARK_TEST_PRIVATE_STATE_PARENT=str(state),
+    )
     first = time.time()
     with (state / "controller.log").open("xb") as log:
         os.chmod(log.name, 0o600)
@@ -59,12 +138,17 @@ def main():
     text = raw.decode("utf-8", errors="replace")
     if process.returncode != 1 or "otp-6:positive:driver-arguments-failure" not in text:
         raise ValueError("privacy-failure-stage")
-    marker = (r"Synthetic diagnostic directory: (/tmp/locklark-browser-acceptance-[A-Za-z0-9]+)/(diagnostics-[A-Za-z0-9]+)"
-              if args.engine == "chromium" else r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)")
-    match = re.search(marker, text)
-    if not match:
-        raise ValueError("privacy-state")
-    private = Path(match.group(1))
+    if args.engine == "chromium":
+        # The public failure console intentionally no longer prints the private
+        # diagnostics path. The wrapper-owned state directory is this run's
+        # exclusive parent, so only that parent is inspected and validated.
+        private = find_private_child_state(state)
+    else:
+        marker = r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)"
+        match = re.search(marker, text)
+        if not match:
+            raise ValueError("privacy-state")
+        private = Path(match.group(1))
     fixture = json.loads((private / "vault/fixture.json").read_text())
     check_output(raw, fixture, first, last)
     diagnostics = list(private.glob("diagnostics-*"))
@@ -75,7 +159,7 @@ def main():
         if manifest.exists() or manifest.is_symlink():
             raise ValueError("privacy-manifest")
     print("PASS: real " + args.engine + " OTP argument failure exits 1; full controller canary scan, no OTP screenshots")
-    print("Private fault artifacts: " + str(state))
+    print("Private fault artifacts: [private]")
 
 
 if __name__ == "__main__":

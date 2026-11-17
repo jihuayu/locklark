@@ -3,7 +3,6 @@ package browserhost
 import (
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -70,6 +69,14 @@ func (c *Connection) passkeyRemove(r Request) error {
 	// A preapproval passkey owns the Session's single mutation slot. Removal
 	// must refuse busy instead of preempting a native approval; a queued result
 	// after PerformPasskey has released the slot is revoked by the epoch.
+	// A passkey whose review already advanced this Session's revocation epoch
+	// can no longer deliver. It must be retired here, not mistaken for a new
+	// native approval, and its already-queued command refusal is not a result
+	// of this removal. The approved removal executes under the exact gate its
+	// native review reserved and never registers a second one.
+	if refuseID, _ := c.expireConcurrentPasskey(); refuseID != "" {
+		go c.refuse(refuseID)
+	}
 	if c.passkey != nil || c.save != nil || c.otp != nil || c.pending != nil || c.stagedBusy || c.upload != nil {
 		return c.refuse(r.ID)
 	}
@@ -77,8 +84,8 @@ func (c *Connection) passkeyRemove(r Request) error {
 	if s == nil || !s.Unlocked() {
 		return c.refuse(r.ID)
 	}
-	gate := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
-	if s.RegisterMutation(gate) != nil {
+	gate := r.v2Reserved
+	if gate == nil {
 		return c.refuse(r.ID)
 	}
 	var revision string

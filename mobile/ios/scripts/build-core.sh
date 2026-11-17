@@ -12,9 +12,10 @@ export GOBIN="$ios_dir/Build/Tools"
 export PATH="$GOBIN:$PATH"
 mkdir -p "$GOBIN"
 cd "$repo_dir"
-mobile_version="$("$go_bin" list -m -f '{{.Version}}' golang.org/x/mobile)"
-"$go_bin" install "golang.org/x/mobile/cmd/gomobile@$mobile_version"
-"$go_bin" install "golang.org/x/mobile/cmd/gobind@$mobile_version"
+for tool in gomobile gobind; do
+  # go.mod tool directive: builds the exact golang.org/x/mobile require version.
+  "$go_bin" install "golang.org/x/mobile/cmd/$tool"
+done
 gomobile init
 gomobile bind -target=ios,iossimulator -iosversion=17.0 -prefix Mobilecore -trimpath -o "$ios_dir/Build/Mobilecore.xcframework" ./mobile/core
 test -f "$ios_dir/Build/Mobilecore.xcframework/Info.plist"

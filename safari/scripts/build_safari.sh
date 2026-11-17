@@ -13,6 +13,16 @@ GROUP="${LOCKLARK_APP_GROUP_ID:-$FIXED_APP_GROUP}"
 UNSIGNED="${LOCKLARK_UNSIGNED_CI:-0}"
 HELPER="${LOCKLARK_SAFARI_HELPER:-$ROOT/dist/locklark-browser-safari}"
 ALLOW_MISSING_HELPER="${LOCKLARK_ALLOW_MISSING_HELPER:-0}"
+REQUIRE_SET=0
+REQUIRE_PREBUILT=0
+if [ "${LOCKLARK_BROWSER_REQUIRE_PREBUILT+x}" = x ]; then
+  REQUIRE_SET=1
+  REQUIRE_PREBUILT="$LOCKLARK_BROWSER_REQUIRE_PREBUILT"
+fi
+PREPARED_DIR="${LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR:-}"
+CHROMIUM_DIR="${LOCKLARK_BROWSER_EXTENSION_CHROMIUM:-}"
+FIREFOX_DIR="${LOCKLARK_BROWSER_EXTENSION_FIREFOX:-}"
+SAFARI_DIR="${LOCKLARK_BROWSER_EXTENSION_SAFARI:-}"
 
 fail() {
   echo "error: $*" >&2
@@ -39,15 +49,55 @@ else
   echo "warning: unsigned CI compile only; this is not an installed/signed Safari package" >&2
 fi
 
-command -v node >/dev/null 2>&1 || fail "node is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
-# The Safari verifier holds the Safari package to the tracked Chromium
-# baseline (content scripts, action, options_ui, commands, name, version),
-# so a clean tree must build the default Chromium + Firefox baseline
-# first. Safari stays an explicit opt-in mode and never replaces it.
-node "$ROOT/browser-extension/build.js"
-node "$ROOT/browser-extension/build.js" safari
+# The prebuilt branch consumes one producer's real browserrelease pairs and
+# unpacked outputs. It is all-or-nothing: no partial product, missing env,
+# alternate path or fallback to build.js is accepted. The three directories
+# must be the exact dist directories the Xcode project already references.
+if [ "$REQUIRE_SET" = 1 ]; then
+  case "$REQUIRE_PREBUILT" in
+    0|1) ;;
+    *) fail "LOCKLARK_BROWSER_REQUIRE_PREBUILT must be 0 or 1" ;;
+  esac
+fi
+
+PREBUILT_INPUTS=0
+if [ "${LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR+x}" = x ]; then PREBUILT_INPUTS=1; fi
+if [ "${LOCKLARK_BROWSER_EXTENSION_CHROMIUM+x}" = x ]; then PREBUILT_INPUTS=1; fi
+if [ "${LOCKLARK_BROWSER_EXTENSION_FIREFOX+x}" = x ]; then PREBUILT_INPUTS=1; fi
+if [ "${LOCKLARK_BROWSER_EXTENSION_SAFARI+x}" = x ]; then PREBUILT_INPUTS=1; fi
+
+if [ "$REQUIRE_PREBUILT" = "1" ]; then
+  [[ -n "$PREPARED_DIR" && -d "$PREPARED_DIR" ]] \
+    || fail "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR is required and must exist"
+  for product in chromium firefox safari; do
+    case "$product" in
+      chromium) dir="$CHROMIUM_DIR"; env_name="LOCKLARK_BROWSER_EXTENSION_CHROMIUM" ;;
+      firefox) dir="$FIREFOX_DIR"; env_name="LOCKLARK_BROWSER_EXTENSION_FIREFOX" ;;
+      safari) dir="$SAFARI_DIR"; env_name="LOCKLARK_BROWSER_EXTENSION_SAFARI" ;;
+    esac
+    expected="$ROOT/browser-extension/dist/$product"
+    [[ -n "$dir" && -d "$dir" ]] \
+      || fail "$env_name is required and must exist"
+    [[ "$(cd "$dir" && pwd -P)" == "$(cd "$expected" && pwd -P)" ]] \
+      || fail "$env_name must be $expected"
+  done
+  for product in chromium firefox safari; do
+    PYTHONPATH="$ROOT/scripts" python3 -m browserrelease.prebuilt \
+      --product "$product" --prepared-dir "$PREPARED_DIR" \
+      --dist "$ROOT/browser-extension/dist/$product" --root "$ROOT" \
+      || fail "strict prebuilt verification failed for $product"
+  done
+elif [ "$PREBUILT_INPUTS" = 1 ] || { [ "$REQUIRE_SET" = 1 ] && [ "$REQUIRE_PREBUILT" != "0" ]; }; then
+  fail "prebuilt inputs require LOCKLARK_BROWSER_REQUIRE_PREBUILT=1 and a complete environment"
+else
+  command -v node >/dev/null 2>&1 || fail "node is required"
+  # Developer path is reachable only with no prebuilt inputs at all. Keep the
+  # original default Chromium + Firefox baseline and explicit Safari order.
+  node "$ROOT/browser-extension/build.js"
+  node "$ROOT/browser-extension/build.js" safari
+fi
 python3 "$ROOT/scripts/test_safari_package.py" --verify-dist
 
 if [[ -f "$HELPER" && -x "$HELPER" ]]; then

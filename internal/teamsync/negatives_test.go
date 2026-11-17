@@ -76,7 +76,7 @@ func TestHTTPSFreshSignedForkAndIllegalTransitionRejected(t *testing.T) {
 	if _, e = directory.Commit(branchPath, f.cfg, f.seq, p, s); e != nil {
 		t.Fatal(e)
 	}
-	fork, e = directory.ExportHistory(branchPath, f.cfg, f.cfg.Genesis())
+	_, fork, e = directory.ReadHistory(branchPath, f.cfg, f.cfg.Genesis())
 	if e != nil {
 		t.Fatal(e)
 	}

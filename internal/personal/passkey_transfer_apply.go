@@ -264,7 +264,7 @@ func buildPasskeyTransferApplyCandidates(auth *authenticatedState, built *passke
 		if idErr != nil {
 			return nil, idErr
 		}
-		next := vault.Item{ID: id, Kind: "login", Category: vault.CategoryLogin, Title: mapping.NewTitle, Username: mapping.NewUsername, CreatedAt: now, UpdatedAt: now}
+		next := vault.Item{ID: id, Kind: "login", Category: vault.CategoryLogin, Title: mapping.NewTitle, URL: "https://" + group.Public.RPID, Username: mapping.NewUsername, CreatedAt: now, UpdatedAt: now}
 		records := make([][]byte, 0, len(group.Records))
 		for _, index := range group.Records {
 			records = append(records, built.Decoded[index].Record)

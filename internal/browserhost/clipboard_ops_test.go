@@ -600,8 +600,48 @@ func TestClipboardGenericCancelDropsQueuedJob(t *testing.T) {
 	if !fake.runNext() {
 		t.Fatal("cancelled job did not dispatch")
 	}
+	if fake.runNext() {
+		t.Fatal("cancelled job or later work dispatched again")
+	}
 	if writes, _ := fake.count(); writes != 0 {
 		t.Fatalf("cancelled queued job wrote natively: %d", writes)
+	}
+	if clipboardOfferPending(clipboardManager(c)) {
+		t.Fatal("cancelled queued job left a pending offer")
+	}
+}
+
+// TestClipboardGenericCancelIgnoresInterleavedResponse pins request-ID
+// correlation on the wire. A cancelled response for the cancel request is
+// followed by an unrelated asynchronous redacted copy-result, as async work for
+// another request can append after it; the selector must return the frame whose
+// ID equals the cancel request, not the last frame.
+func TestClipboardGenericCancelIgnoresInterleavedResponse(t *testing.T) {
+	out := &memoryPipe{}
+	cancelID, asyncID := reqID(90), reqID(91)
+	writeResponse(t, out, Response{ID: cancelID, Type: "cancelled"})
+	writeResponse(t, out, Response{ID: asyncID, Type: "copy-result", CopyMode: "native", State: "refused"})
+
+	cancel := Request{V: 1, ID: cancelID, Type: "cancel"}
+	if got := clipboardReply(t, out, 0, cancel.ID, time.Second); got.ID != cancel.ID || got.Type != "cancelled" {
+		t.Fatalf("cancel reply id match=%t type=%q", got.ID == cancel.ID, got.Type)
+	}
+	if got := clipboardReply(t, out, 0, asyncID, time.Second); got.ID != asyncID || got.Type != "copy-result" || got.State != "refused" || got.Copied {
+		t.Fatalf("async reply id match=%t type=%q state=%q", got.ID == asyncID, got.Type, got.State)
+	}
+}
+
+// writeResponse appends one framed response to out using the wire encoding
+// memoryPipe records. It carries only the metadata supplied by the caller.
+func writeResponse(t *testing.T, out *memoryPipe, r Response) {
+	t.Helper()
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := binary.NativeEndian.AppendUint32(nil, uint32(len(raw)))
+	if _, err := out.Write(append(frame, raw...)); err != nil {
+		t.Fatal(err)
 	}
 }
 

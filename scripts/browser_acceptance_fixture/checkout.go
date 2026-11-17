@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
@@ -21,7 +22,55 @@ const (
 	syntheticCardBrand  = "visa"
 	cardYearBase        = 2029
 	cardYearSpan        = 7
+	// The PAN read supplies its 12 random digits plus the two expiry limbs, so
+	// the synthetic number is 0000 followed by 12 digits, as before. The
+	// verification and PIN reads are independent and map one-to-one onto eight
+	// decimal digits. No byte is ever shared between the PAN, CVV and PIN.
+	panPrefix             = "0000"
+	panDigits             = 12
+	panExpiryBytes        = 2
+	panEntropyBytes       = panDigits + panExpiryBytes
+	cardVerificationBytes = 8
+	cardPINBytes          = 8
 )
+
+// generateCheckoutCard reads all synthetic card material from entropy in
+// non-overlapping reads: PAN digits plus the expiry limbs, card verification
+// digits and PIN digits each come from their own read, so a deterministic
+// reader can prove which bytes landed where. The expiry keeps its year and
+// month range by reusing the original limb formulas on its dedicated bytes.
+func generateCheckoutCard(entropy io.Reader) (number, verification, pin, expiry string, err error) {
+	if entropy == nil {
+		return "", "", "", "", errors.New("missing synthetic checkout entropy")
+	}
+	defer func() {
+		if err != nil {
+			number, verification, pin, expiry = "", "", "", ""
+		}
+	}()
+	var pan [panEntropyBytes]byte
+	defer clear(pan[:])
+	var cvv [cardVerificationBytes]byte
+	defer clear(cvv[:])
+	var cardPIN [cardPINBytes]byte
+	defer clear(cardPIN[:])
+	if _, err = io.ReadFull(entropy, pan[:]); err != nil {
+		return "", "", "", "", err
+	}
+	year := cardYearBase + int(pan[panDigits+1]%cardYearSpan)
+	month := 1 + int(pan[panDigits]%12)
+	if _, err = io.ReadFull(entropy, cvv[:]); err != nil {
+		return "", "", "", "", err
+	}
+	if _, err = io.ReadFull(entropy, cardPIN[:]); err != nil {
+		return "", "", "", "", err
+	}
+	return panPrefix + digitString(pan[:panDigits]),
+		digitString(cvv[:]),
+		digitString(cardPIN[:]),
+		fmt.Sprintf("%04d-%02d", year, month),
+		nil
+}
 
 // digitString maps already random bytes onto decimal digits. The values are
 // disposable test data, never a real payment instrument.
@@ -37,17 +86,16 @@ func digitString(entropy []byte) string {
 // keeps an obviously non-issuer 0000 prefix so it can never be mistaken for a
 // real card, while the remaining digits stay random enough to work as canaries.
 func checkoutCardValues(f *fixture) error {
-	var entropy [16]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
+	number, verification, pin, expiry, err := generateCheckoutCard(rand.Reader)
+	if err != nil {
 		return err
 	}
-	defer clear(entropy[:])
 	f.CardTitle = syntheticCardTitle
 	f.CardHolder = syntheticCardHolder
-	f.CardNumber = "0000" + digitString(entropy[0:12])
-	f.CardVerification = digitString(entropy[12:15])
-	f.CardPIN = digitString(entropy[3:7])
-	f.CardExpiry = fmt.Sprintf("%04d-%02d", cardYearBase+int(entropy[15])%cardYearSpan, 1+int(entropy[7])%12)
+	f.CardNumber = number
+	f.CardVerification = verification
+	f.CardPIN = pin
+	f.CardExpiry = expiry
 	return nil
 }
 

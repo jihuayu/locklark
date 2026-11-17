@@ -53,17 +53,16 @@ type v2State struct {
 	editing     bool
 	draft       *ItemDraft
 
-	historyOpen    bool
-	settingsOpen   bool
-	showWatchtower bool
-	watchtower     *WatchtowerReport
-	watchtowerErr  string
-	ignored        map[string]bool
-
+	historyOpen     bool
+	settingsOpen    bool
+	settingsSection string
+	watchtower      *WatchtowerReport
+	ignored         map[string]bool
 
 	generator generatorState
 
 	revealed       map[string]bool
+	narrowPassword narrowPasswordDisclosure
 	revealUntil    time.Time
 	largeTypeOpen  bool
 	largeTypeKey   string
@@ -109,6 +108,10 @@ func newV2State() v2State {
 // resetV2 drops every draft, revealed value and selection. Settings are
 // deliberately not part of v2State and therefore survive a lock.
 func (a *App) resetV2() {
+	if a.v2.draft != nil {
+		clear(a.v2.draft.SSHSeed)
+		clear(a.v2.draft.SSHPublicKey)
+	}
 	a.v2 = newV2State()
 }
 
@@ -241,7 +244,7 @@ func legacyRows(rows []personal.ItemSummary) []personal.Row {
 
 // navigate switches the sidebar view. Supported targets:
 //
-//	all, favorites, watchtower, recently_deleted, archive
+//	all, favorites, recently_deleted, archive
 //	category:<slug>, tag:<name>, vault:<id|all>
 //	<category slug>            (e.g. "credit_card")
 func (a *App) navigate(target string) {
@@ -262,7 +265,6 @@ func (a *App) navigate(target string) {
 		a.v2.nav = navWatchtower
 		a.v2.category = ""
 		a.v2.tag = ""
-		a.v2.showWatchtower = true
 	case "recently_deleted", "recently deleted", "trash", "trashed", "recentlydeleted", "回收站", "最近删除":
 		a.v2.nav = navRecentlyDelete
 		a.v2.category = ""
@@ -334,7 +336,6 @@ func (a *App) FilterByTag(tag string) {
 	a.touchActivity()
 	a.reloadV2(false)
 }
-
 
 func (a *App) showAllItems()        { a.navigate(navAllItems) }
 func (a *App) showFavorites()       { a.navigate(navFavorites) }
@@ -543,6 +544,7 @@ func (a *App) selectItem(id, revision string) {
 	a.v2.generator.open = false
 	a.v2.historyOpen = false
 	a.v2.confirmPurge = false
+	a.hideNarrowPassword()
 	s := a.session
 	if s == nil {
 		if a.v2.detail != nil && a.v2.detail.ID == id {
@@ -566,6 +568,7 @@ func (a *App) selectItem(id, revision string) {
 			selected := personal.Row{Kind: detail.Kind, ID: detail.ID, Title: detail.Title, Revision: detail.Revision, State: detail.State, RestoreState: detail.RestoreState}
 			a.selected = &selected
 			a.status = "已选择条目：" + detail.Title
+			a.revealPasswordByDefault()
 		}}
 	})
 }
@@ -645,11 +648,9 @@ func (a *App) createVault(name, description, icon string) (vault.VaultMeta, erro
 	if !ok {
 		return vault.VaultMeta{}, personal.ErrMutationRefused
 	}
-	if a.status != "已创建金库："+created.Name {
-		// runNative already recorded the concrete error.
-		return vault.VaultMeta{}, personal.ErrMutationRefused
-	}
-	return created, nil
+	// The create is asynchronous; the concrete meta and any failure reach the UI
+	// through the applied snapshot and a.status, never through this frame.
+	return vault.VaultMeta{}, nil
 }
 
 // CreateVault is the exported alias used by external callers.
@@ -700,7 +701,8 @@ func (a *App) moveSelectedToVault(targetVaultID string, copyItem bool) (string, 
 	if !ok {
 		return "", "", personal.ErrMutationRefused
 	}
-	return newID, newRevision, nil
+	// The move is asynchronous; its new ids are selected by the apply closure.
+	return "", "", nil
 }
 
 func (a *App) MoveItemToVault(targetVaultID string, copyItem bool) (string, string, error) {
@@ -787,14 +789,15 @@ func (a *App) emptyTrash(olderThan *time.Duration) (int, error) {
 		return 0, personal.ErrSessionLocked
 	}
 	s := a.session
-	purged, err := 0, error(nil)
+	var purged int
 	var snap v2Snapshot
 	filter, query := a.currentFilter(), a.currentV2Query()
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
-		purged, err = s.EmptyTrash(olderThan, g)
+		count, err := s.EmptyTrash(olderThan, g)
 		if err != nil {
 			return nativeResult{err: err}
 		}
+		purged = count
 		snap = a.captureV2(s, filter)
 		snap.query = query
 		return nativeResult{err: snap.err}
@@ -804,10 +807,12 @@ func (a *App) emptyTrash(olderThan *time.Duration) (int, error) {
 		}
 		a.status = fmt.Sprintf("已永久删除 %d 个回收站条目", purged)
 	})
-	if !ok || err != nil {
-		return 0, err
+	if !ok {
+		return 0, personal.ErrMutationRefused
 	}
-	return purged, nil
+	// The purge is asynchronous; its count and any failure are reported by the
+	// apply closure and a.status, never through this frame.
+	return 0, nil
 }
 
 // PurgeExpiredTrash removes trashed items older than the 30-day retention.
@@ -828,6 +833,9 @@ func idleLockLabel(d time.Duration) string {
 
 func (a *App) openSettings() {
 	a.v2.settingsOpen = true
+	if a.v2.settingsSection == "" {
+		a.v2.settingsSection = settingsSectionSecurity
+	}
 	a.touchActivity()
 }
 
@@ -835,4 +843,3 @@ func (a *App) closeSettings() {
 	a.v2.settingsOpen = false
 	a.touchActivity()
 }
-

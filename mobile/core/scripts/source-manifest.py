@@ -8,6 +8,13 @@ import pathlib
 import shutil
 import subprocess
 
+# Expected binding tools. Their exact version and h1 hash are recorded here and
+# checked independently against each tool's build info, because tools installed
+# from go.mod tool directives may be built with a different go.sum line than
+# tools installed at a fixed version.
+MOBILE_VERSION = "v0.0.0-20260908204917-8b95e45f8d3e"
+MOBILE_SUM = "h1:zYnHsDmxfxKH/x9DjYNAdoIdMsP8enB1Ncb10b3pdHk="
+
 parser = argparse.ArgumentParser()
 phase = parser.add_mutually_exclusive_group(required=True)
 phase.add_argument("--prepare", action="store_true")
@@ -46,11 +53,18 @@ sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
 artifact = output / "mobilecore.aar"
 manifest_file = output / "source-manifest.json"
 prepared_file = output / "source-manifest-before.json"
-mobile_module = json.loads(subprocess.check_output([go_bin, "list", "-m", "-json", "golang.org/x/mobile"], cwd=root, text=True))
-binding_tools = {key: mobile_module[key] for key in ("Version", "Sum", "GoModSum") if key in mobile_module}
+binding_tools = {"Version": MOBILE_VERSION, "Sum": MOBILE_SUM}
 for name in ("gobind", "gomobile"):
     executable = shutil.which(name)
     if executable is None: raise SystemExit("Binding tool missing from PATH: " + name)
+    tool_version = tool_sum = None
+    for line in subprocess.check_output([go_bin, "version", "-m", executable], cwd=root, text=True).splitlines():
+        fields = line.replace("\t", " ").split()
+        if len(fields) >= 4 and fields[0] == "mod" and fields[1] == "golang.org/x/mobile":
+            tool_version, tool_sum = fields[2], fields[3]
+    if tool_version != MOBILE_VERSION or tool_sum != MOBILE_SUM:
+        raise SystemExit("Binding tool " + name + " is " + str(tool_version) + " " + str(tool_sum)
+                         + ", expected " + MOBILE_VERSION + " " + MOBILE_SUM)
     binding_tools[name + "_sha256"] = hashlib.sha256(pathlib.Path(executable).read_bytes()).hexdigest()
 manifest = {
     "source_head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),

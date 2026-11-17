@@ -3,7 +3,26 @@
   const api = globalThis.browser || globalThis.chrome;
   const core = globalThis.LocklarkCore || null;
   const vaultEnabled = document.body?.dataset?.vault === "1";
-  let busy = false,
+  // A persistent route tab reuses this page at popup.html#route=<64 hex>. The
+  // fragment carries only the opaque worker token; the target lives in the
+  // background. Any #route fragment that is not exactly one token fails
+  // closed instead of behaving like the action popup.
+  const initialHash = String(globalThis.location?.hash || "");
+  const routeRequested = /^#route(?:=|$)/.test(initialHash);
+  const routeToken = /^#route=([a-f0-9]{64})$/.exec(initialHash)?.[1] || "";
+  const routeMode = routeToken !== "";
+  // Kept separate from the per-copy native clipboard port: this channel only
+  // carries this route's token and tells the page when the worker revoked it.
+  const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
+  // The worker's route TTL: a claim may never report a deadline farther away
+  // than this from the moment the page validates it.
+  const ROUTE_TTL_MS = 120000;
+  // The route claim's original absolute deadline stays here if a callback
+  // lets the local timer fire a little early. Re-arming always uses exactly
+  // this instant; it is never restarted from a full TTL.
+  let routeExpiryTimer = null,
+    routeExpiryDeadline = 0,
+    busy = false,
     renderedCandidates = "",
     renderedHistory = "",
     renderedBanner = "",
@@ -17,6 +36,13 @@
     popupInactive = false,
     nativeClipboardClient = null,
     nativeCopyBusy = false,
+    routeClosed = false,
+    // True only while a route copy the user clicked while the page was
+    // visible is still in flight. It lets that one operation survive the
+    // desktop V2 approval bringing its window forward and hiding the browser.
+    routeCopyInFlight = false,
+    routeLifecyclePort = null,
+    routeLifecycleReady = false,
     generatedPassword = "",
     generatedProfile = null,
     generatedDataWiped = false,
@@ -26,6 +52,88 @@
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
+  function freshNonce() {
+    try {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      return [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      return "";
+    }
+  }
+  // A card fill is authorized only from a trusted click in this extension page.
+  // `userActivation.isActive` is required wherever the API exists; a browser
+  // without it still needs the trusted click and a fresh nonce. New nonces are
+  // minted only while the popup is open and not already busy with an action.
+  // The proof carries only the nonce and its mint time; the worker consumes it
+  // exactly once and binds it to the tab/document the browser reports.
+  function cardGesture(event) {
+    try {
+      if (event?.isTrusted !== true) return null;
+      if (popupInactive || busy) return null;
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      if (activation != null && activation.isActive !== true) return null;
+      const nonce = freshNonce();
+      return nonce
+        ? { v: 2, scope: "credit_card", at: Date.now(), nonce }
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  const DETAIL_FILL_DIAGNOSTIC_FLAG =
+    "__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__";
+  const DETAIL_FILL_DIAGNOSTIC_LOG =
+    "__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__";
+  const DETAIL_FILL_DIAGNOSTIC_PHASES = new Set([
+    "handler-entry",
+    "early-guard",
+    "gesture-refused",
+    "request-sent",
+    "reply-null",
+    "reply-present",
+    "adopt-refused",
+    "adopted",
+  ]);
+  function detailFillDiagnosticEnabled() {
+    try {
+      return (
+        typeof globalThis !== "undefined" &&
+        globalThis[DETAIL_FILL_DIAGNOSTIC_FLAG] === true
+      );
+    } catch {
+      return false;
+    }
+  }
+  function beginDetailFillDiagnostic(event) {
+    if (!detailFillDiagnosticEnabled()) return null;
+    let userActivation = false;
+    try {
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      userActivation = activation != null && activation.isActive === true;
+    } catch {}
+    const log = [
+      {
+        phase: "handler-entry",
+        isTrusted: event?.isTrusted === true,
+        userActivation,
+      },
+    ];
+    try {
+      globalThis[DETAIL_FILL_DIAGNOSTIC_LOG] = log;
+    } catch {
+      return null;
+    }
+    return log;
+  }
+  function markDetailFillDiagnostic(log, phase) {
+    if (!log || !DETAIL_FILL_DIAGNOSTIC_PHASES.has(phase)) return;
+    if (log.some((record) => record.phase === phase)) return;
+    log.push({ phase });
+  }
   // Only an explicit generate reply may repopulate the preview while a
   // lock/hide-time wipe is still unconfirmed; generic state polls may not.
   const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
@@ -764,14 +872,21 @@
         (row.title || "（无标题）") +
         (row.subtitle ? " · " + row.subtitle : "");
       button.disabled = state.pending || busy;
-      button.addEventListener("click", () =>
-        void act({
+      button.addEventListener("click", (event) => {
+        const message = {
           type: "fill",
           id: row.id,
           revision: row.revision,
           ...(category === "login" ? {} : { category }),
-        }),
-      );
+        };
+        if (category !== "credit_card") {
+          void act(message);
+          return;
+        }
+        const userGesture = cardGesture(event);
+        if (!userGesture) return;
+        void act({ ...message, userGesture });
+      });
       if (category !== "login") {
         container.append(button);
         list.append(container);
@@ -817,6 +932,8 @@
     }
   }
   async function send(message, generation = actionGeneration) {
+    // A route page only ever sends route-claim/route-copy-field/route-close.
+    if (routeRequested) return null;
     const sequence = ++requestSequence;
     const epoch = connectionEpoch;
     try {
@@ -1287,7 +1404,7 @@
         star.textContent = "★";
         title.prepend?.(star);
       }
-      row.addEventListener("click", () => void openDetail(item));
+      row.addEventListener("click", () => void openVaultRow(item));
       list.append(row);
     }
     list.scrollTop = scrollTop;
@@ -1429,7 +1546,33 @@
       void refreshVault(true);
     }, 120);
   }
+  // A non-QuickFill click must not read detail from this transient action
+  // popup: native V2 approval focuses the desktop app and destroys the popup.
+  // Ask the worker for a persistent route tab instead.
+  async function openVaultRow(item) {
+    if (!item || vaultBusy || !lastState?.connected || popupInactive) return;
+    if (lastState.quickFill !== false) {
+      await openDetail(item);
+      return;
+    }
+    const operation = beginVaultOperation();
+    try {
+      const reply = await api.runtime.sendMessage({
+        type: "open-route",
+        id: item.id,
+        revision: item.revision,
+        quick_fill: false,
+      });
+      if (operation !== vaultOperation) return;
+      if (!reply?.routeCreated) toast("无法在新标签页打开详情，请重试");
+    } catch {
+      if (operation === vaultOperation) toast("无法在新标签页打开详情，请重试");
+    } finally {
+      finishVaultOperation(operation);
+    }
+  }
   async function openDetail(item) {
+    if (routeRequested) return;
     if (!item || vaultBusy || !lastState?.connected || popupInactive) return;
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
@@ -1460,6 +1603,198 @@
       if (detailReadOperation === operation) detailReadOperation = 0;
       finishVaultOperation(operation);
     }
+  }
+  function clearRouteDeadline() {
+    if (routeExpiryTimer !== null) clearTimeout(routeExpiryTimer);
+    routeExpiryTimer = null;
+    routeExpiryDeadline = 0;
+  }
+  // The page's own copy of the grant's deadline is the absolute UTC epoch-ms
+  // instant the claim returned. It is never rebuilt from a rounded remainder.
+  // Recheck it at the instant of arming so a claim that expired between
+  // validation and this call still fails closed. No pageshow, visibility
+  // change or later route message ever re-derives or extends it.
+  function armRouteDeadline(deadline) {
+    clearRouteDeadline();
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(deadline) ||
+      deadline <= now ||
+      deadline - now > ROUTE_TTL_MS
+    )
+      return false;
+    routeExpiryDeadline = deadline;
+    routeExpiryTimer = setTimeout(fireRouteDeadline, deadline - now);
+    return true;
+  }
+  // Any grant still live but past an authoritative deadline is dead, so the
+  // page fails closed rather than wait for a timer the worker may never fire.
+  function routeDeadlinePassed() {
+    return routeExpiryDeadline > 0 && Date.now() >= routeExpiryDeadline;
+  }
+  // The timer never wipes on its own: it rechecks the same absolute deadline,
+  // so an early delivery re-arms the remaining wait instead of ending a live
+  // route. Reaching the deadline goes through the ordinary revocation path.
+  function fireRouteDeadline() {
+    routeExpiryTimer = null;
+    if (routeClosed || routeExpiryDeadline <= 0) return;
+    const remaining = routeExpiryDeadline - Date.now();
+    if (remaining > 0) {
+      routeExpiryTimer = setTimeout(fireRouteDeadline, remaining);
+      return;
+    }
+    revokeRouteView();
+  }
+  function routeReportClose() {
+    if (!routeToken) return;
+    try {
+      const sent = api.runtime.sendMessage({
+        type: "route-close",
+        token: routeToken,
+      });
+      sent?.catch?.(() => {});
+    } catch {}
+  }
+  // One fixed status string, or "" to clear it. Only these literals ever
+  // reach #status from the route path.
+  function showRouteStatus(message) {
+    if (els?.status) els.status.textContent = message;
+  }
+
+  // Back, Escape and pagehide all end the route page's view exactly once.
+  // The browser tab itself is never closed, and no detail is kept.
+  function closeRouteView(message = "已关闭此条目") {
+    if (!routeRequested || routeClosed) return;
+    routeClosed = true;
+    routeCopyInFlight = false;
+    wipeDetail();
+    clearRevealedSecrets();
+    if (els?.detailView) els.detailView.hidden = true;
+    if (els?.vaultView) els.vaultView.hidden = true;
+    if (document.body) document.body.dataset.view = "closed";
+    if (els?.status) els.status.textContent = message;
+    clearRouteDeadline();
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    routeLifecycleReady = false;
+    try {
+      port?.disconnect();
+    } catch {}
+    routeReportClose();
+  }
+  // A real worker revocation (tab switch, source move, lock, close, expiry)
+  // reaches this page on the lifecycle port. Cancel any in-flight native copy
+  // before wiping so a late prepared/result can never commit or show success.
+  function revokeRouteView() {
+    if (!routeRequested || routeClosed) return;
+    routeClosed = true;
+    routeCopyInFlight = false;
+    routeLifecycleReady = false;
+    clearRouteDeadline();
+    closeNativeClipboard();
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    wipeDetail();
+    clearRevealedSecrets();
+    if (els?.detailView) els.detailView.hidden = true;
+    if (els?.vaultView) els.vaultView.hidden = true;
+    if (document.body) document.body.dataset.view = "closed";
+    if (els?.status) els.status.textContent = "条目已失效，请重新从金库打开";
+    try {
+      port?.disconnect();
+    } catch {}
+    routeReportClose();
+  }
+  function failRoute() {
+    if (routeClosed) return;
+    routeClosed = true;
+    routeCopyInFlight = false;
+    wipeDetail();
+    if (els?.detailView) els.detailView.hidden = true;
+    if (els?.vaultView) els.vaultView.hidden = true;
+    if (document.body) document.body.dataset.view = "closed";
+    if (els?.status) els.status.textContent = "无法打开此条目";
+    clearRouteDeadline();
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    routeLifecycleReady = false;
+    try {
+      port?.disconnect();
+    } catch {}
+    routeReportClose();
+  }
+  // Validate the claim and return its original absolute deadline in UTC epoch
+  // milliseconds, or 0 on any malformed, expired or overlong reply. The page
+  // arms this exact instant and never guesses a TTL of its own.
+  function validRouteClaim(reply) {
+    const detail = reply?.detail;
+    const deadline = reply?.expires_at_ms;
+    const now = Date.now();
+    if (
+      !reply ||
+      reply.type !== "route-claimed" ||
+      reply.token !== routeToken ||
+      // A finite, still-future deadline no farther than the worker's standard
+      // 120-second TTL is required. There is no seconds rounding or grace.
+      !Number.isSafeInteger(deadline) ||
+      deadline <= now ||
+      deadline - now > ROUTE_TTL_MS ||
+      !detail ||
+      typeof detail.id !== "string" ||
+      !/^[a-f0-9]{32}$/.test(detail.id) ||
+      typeof detail.revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(detail.revision) ||
+      reply.item_id !== detail.id ||
+      reply.revision !== detail.revision
+    )
+      return 0;
+    return deadline;
+  }
+  // The route page has no action-popup state: the claim is the only read and
+  // its already-approved detail is the only thing rendered.
+  async function claimRoute() {
+    if (!routeLifecycleReady || routeClosed) return;
+    // Visible proof that this page reached its claim. Nothing else changes:
+    // the same token, protocol and native request go out below.
+    showRouteStatus("正在请求桌面审批…");
+    let reply = null;
+    try {
+      reply = await api.runtime.sendMessage({
+        type: "route-claim",
+        token: routeToken,
+      });
+    } catch {}
+    // A claim that resolves after Back/pagehide is dropped, and its grant has
+    // already been revoked by the route-close report.
+    if (routeClosed || popupInactive) return;
+    const deadline = routeToken ? validRouteClaim(reply) : 0;
+    if (!deadline) {
+      failRoute();
+      return;
+    }
+    // Only the worker's original absolute deadline arms the wipe. If it
+    // passed between validation and arming, fail closed before any detail
+    // can be assigned or rendered.
+    if (!armRouteDeadline(deadline) || routeDeadlinePassed()) {
+      revokeRouteView();
+      return;
+    }
+    showRouteStatus("");
+    const detail = reply.detail;
+    lastState = {
+      connected: true,
+      quickFill: false,
+      candidates: [],
+      vaultItems: [],
+      historySupported: false,
+      origin: "",
+      pending: false,
+      loginOverrides: {},
+    };
+    lastDetail = detail;
+    renderDetail(detail);
+    showView("detail");
+    els?.detailBack?.focus?.();
   }
   function detailFields(detail) {
     const fields = core ? core.flattenItemFields(detail) : [];
@@ -2036,16 +2371,26 @@
       if (els.checkoutStatus) els.checkoutStatus.textContent = "";
     }
     if (!picker || picker.used || options.keepChoice) return;
+    // The picker was started by a consumed one-time gesture; an unused list is
+    // withdrawn together with its choice set.
     const nonce = picker.nonce;
     Promise.resolve()
       .then(() => api.runtime.sendMessage({ type: "checkout-cancel", nonce }))
       .catch(() => {});
   }
-  async function startCheckoutPicker(detail, event) {
+  async function startCheckoutPicker(detail, event, diagnostic) {
+    if (!detail || !lastState?.connected || popupInactive || busy) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
     // Only a real user gesture may enumerate checkout frames.
-    if (event?.isTrusted !== true) return;
-    if (!detail || !lastState?.connected || popupInactive || busy) return;
+    const userGesture = cardGesture(event);
+    if (!userGesture) {
+      markDetailFillDiagnostic(diagnostic, "gesture-refused");
+      return;
+    }
     if (!checkoutChoicesSupported(detail)) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
       toast("当前原生宿主或浏览器不支持选择结账表单");
       return;
     }
@@ -2053,18 +2398,32 @@
     clearCheckoutPickerView({ keepChoice: true });
     const generation = ++actionGeneration;
     busy = true;
+    markDetailFillDiagnostic(diagnostic, "request-sent");
     const state = await send(
-      { type: "checkout-frames", id: detail.id, revision: detail.revision },
+      {
+        type: "checkout-frames",
+        id: detail.id,
+        revision: detail.revision,
+        userGesture,
+      },
       generation,
     );
-    if (generation !== actionGeneration || popupInactive) return;
+    if (generation !== actionGeneration || popupInactive) {
+      markDetailFillDiagnostic(diagnostic, "early-guard");
+      return;
+    }
     busy = false;
     if (lastDetail) renderDetail(lastDetail);
+    markDetailFillDiagnostic(
+      diagnostic,
+      state ? "reply-present" : "reply-null",
+    );
     const view =
       state && detail === lastDetail
         ? adoptCheckoutPickerView(state.checkoutPicker, detail)
         : null;
     if (!view) {
+      markDetailFillDiagnostic(diagnostic, "adopt-refused");
       toast(state?.status || "无法列出当前页面的结账表单");
       return;
     }
@@ -2077,10 +2436,10 @@
       if (lastDetail) renderDetail(lastDetail);
     }, view.expiresAt - Date.now());
     renderCheckoutPicker();
+    markDetailFillDiagnostic(diagnostic, "adopted");
   }
   async function chooseCheckoutFrame(picker, choice, event) {
     // An explicit gesture for this exact opaque key; nothing is preselected.
-    if (event?.isTrusted !== true) return;
     if (!picker || picker !== checkoutPicker || picker.used) return;
     if (!checkoutChoiceKey(choice)) return;
     if (!picker.candidates.some((entry) => entry.choice === choice)) return;
@@ -2091,6 +2450,9 @@
       toast("选择结账表单已过期，请重新选择");
       return;
     }
+    // The picker's one-time gesture was consumed when it was opened; this
+    // click only selects one of its opaque candidates.
+    if (event?.isTrusted !== true) return;
     picker.used = true;
     if (checkoutPickerTimer) {
       clearTimeout(checkoutPickerTimer);
@@ -2209,7 +2571,7 @@
           : field.value;
       if (concealed && revealed) value.classList.add("revealed");
       row.append(label, value);
-      if (concealed || field.revealable === true) {
+      if (!routeRequested && (concealed || field.revealable === true)) {
         const toggle = document.createElement("button");
         toggle.type = "button";
         toggle.dataset.action = "toggle-reveal";
@@ -2229,8 +2591,11 @@
       copy.type = "button";
       copy.dataset.action = "copy-field";
       copy.textContent = "复制";
+      // A route page sends every field copy through the worker's native
+      // per-field approval (and its route-copy-field fallback), never a bare
+      // local clipboard write of the displayed value.
       copy.addEventListener("click", () =>
-        concealed || field.revealable || field.has_value
+        routeRequested || concealed || field.revealable || field.has_value
           ? void copySecret(field, detail, copy)
           : void copyValue(field.value, copy),
       );
@@ -2243,16 +2608,20 @@
       row.className = "detail-url";
       const label = document.createElement("span");
       label.textContent = url;
-      const open = document.createElement("button");
-      open.type = "button";
-      open.dataset.action = "open-and-fill";
-      open.textContent = "打开并填充";
-      open.addEventListener("click", () => void openAndFill(detail, url));
-      const copy = document.createElement("button");
-      copy.type = "button";
-      copy.textContent = "复制网址";
-      copy.addEventListener("click", () => void copyValue(url, copy));
-      row.append(label, open, copy);
+      row.append(label);
+      // A route page never targets a page: no open-and-fill, no URL copy.
+      if (!routeRequested) {
+        const open = document.createElement("button");
+        open.type = "button";
+        open.dataset.action = "open-and-fill";
+        open.textContent = "打开并填充";
+        open.addEventListener("click", () => void openAndFill(detail, url));
+        const copy = document.createElement("button");
+        copy.type = "button";
+        copy.textContent = "复制网址";
+        copy.addEventListener("click", () => void copyValue(url, copy));
+        row.append(open, copy);
+      }
       els.detailUrls.append(row);
     }
     els.detailTags.replaceChildren();
@@ -2262,7 +2631,7 @@
       item.textContent = tag;
       els.detailTags.append(item);
     }
-    renderPasskeyDetail(detail);
+    if (!routeRequested) renderPasskeyDetail(detail);
     const cardCheckout = checkoutChoicesSupported(detail);
     // A matched page candidate still owns the ordinary fill path. A reviewed
     // card with a canonical identity is the one exception: the candidate list
@@ -2290,8 +2659,31 @@
         checkoutPicker.revision !== detail.revision)
     )
       clearCheckoutPickerView();
-    renderCheckoutPicker();
-    renderAttachments(detail);
+    if (routeRequested) {
+      // Read/copy only in this checkpoint. Unsupported operations are hidden
+      // and disabled so they cannot issue ordinary actions.
+      for (const control of [
+        els.detailFill, els.detailOtp, els.detailOpenFill, els.detailEdit,
+        els.detailFavorite, els.detailArchive, els.detailTrash, els.detailAddSite,
+        els.detailHistory, els.detailHistoryLoad, els.detailHistoryList,
+        els.passkeyDetail, els.attachmentList, els.attachmentStatus,
+        els.attachmentFile, els.attachmentUpload, els.attachmentCancel,
+        els.attachmentUnsupported, els.checkoutPicker,
+      ]) {
+        if (control) control.hidden = true;
+      }
+      for (const control of [
+        els.detailFill, els.detailOtp, els.detailOpenFill, els.detailEdit,
+        els.detailFavorite, els.detailArchive, els.detailTrash, els.detailAddSite,
+        els.detailHistoryLoad, els.attachmentFile, els.attachmentUpload,
+        els.attachmentCancel,
+      ]) {
+        if (control) control.disabled = true;
+      }
+    } else {
+      renderCheckoutPicker();
+      renderAttachments(detail);
+    }
   }
   globalThis.addEventListener?.("pagehide", () => {
     popupInactive = true;
@@ -2308,6 +2700,7 @@
     clearCheckoutPickerView();
   });
   globalThis.addEventListener?.("pageshow", () => {
+    if (routeRequested) return;
     if (!popupInactive) return;
     popupInactive = false;
     // Force a fresh metadata read: the invalidated search query's finalizer
@@ -2334,6 +2727,17 @@
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
       if (document.visibilityState !== "hidden") return;
+      // A hidden route past its deadline always wipes, even mid-copy: the
+      // copy's port must not outlive the grant. This only checks the deadline
+      // already armed; it never re-derives or extends it.
+      if (routeRequested && routeDeadlinePassed()) {
+        revokeRouteView();
+        return;
+      }
+      // Otherwise the route's already-started native copy may outlive this
+      // focus shift; wiping here would close its port before prepare/commit.
+      // Everything else (and every ordinary popup) is cleared as before.
+      if (routeRequested && routeCopyInFlight) return;
       clearRevealedSecrets();
       clearCheckoutPickerView();
     });
@@ -2365,11 +2769,20 @@
     return secret;
   }
   function detailLeaseLive(detail, generation) {
+    // A route copy that began while visible stays live while desktop approval
+    // hides the page. No other operation gets that allowance, and a hidden
+    // route can never start one (routeCopyInFlight is only set by a click that
+    // already passed the visible check below).
+    const routeFocus =
+      routeRequested && routeCopyInFlight === true;
     return generation === secretGeneration && !popupInactive &&
-      document.visibilityState !== "hidden" && lastState?.connected === true &&
+      (routeFocus || document.visibilityState !== "hidden") &&
+      lastState?.connected === true &&
       document.body?.dataset?.view === "detail" && lastDetail === detail;
   }
   async function revealSecret(field, detail) {
+    // Reveal is not available in this route checkpoint.
+    if (routeRequested) return;
     const generation = secretGeneration;
     if (!detailLeaseLive(detail, generation)) return;
     const key = field.id || field.label;
@@ -2514,6 +2927,9 @@
     const generation = secretGeneration;
     if (!detailLeaseLive(detail, generation) || nativeCopyBusy) return;
     nativeCopyBusy = true;
+    // Only this one user-clicked route copy may continue while hidden.
+    if (routeRequested && document.visibilityState !== "hidden")
+      routeCopyInFlight = true;
     const key = field.id || field.label;
     try {
       const client = openNativeClipboard();
@@ -2549,19 +2965,37 @@
       // Legacy mode is selected only before any native prepare or commit.
       closeNativeClipboard();
       if (!detailLeaseLive(detail, generation)) return;
-      const reply = await api.runtime.sendMessage({
-        type: "copy-field",
-        id: detail.id,
-        revision: detail.revision,
-        field: key,
-      });
+      // A route page never asks for an ordinary copy (or reveal): it names
+      // its opaque token and the exact approved target, and the worker still
+      // runs the native per-field approval.
+      const reply = routeRequested
+        ? await api.runtime.sendMessage({
+            type: "route-copy-field",
+            token: routeToken,
+            item_id: detail.id,
+            revision: detail.revision,
+            field: key,
+          })
+        : await api.runtime.sendMessage({
+            type: "copy-field",
+            id: detail.id,
+            revision: detail.revision,
+            field: key,
+          });
       const result = reply?.copiedField;
       if (!detailLeaseLive(detail, generation)) {
         if (result) result.value = "";
         return;
       }
-      if (!result || typeof result.value !== "string")
+      if (
+        !result ||
+        typeof result.value !== "string" ||
+        (routeRequested &&
+          (result.field !== key || result.revision !== detail.revision))
+      ) {
+        if (result) result.value = "";
         throw Error("refused");
+      }
       const value = result.value;
       result.value = "";
       await writeClipboard(value, button, result.clearAfterSeconds);
@@ -2569,6 +3003,7 @@
       if (detailLeaseLive(detail, generation))
         toast("复制结果未确认，请核实剪贴板后再操作");
     } finally {
+      routeCopyInFlight = false;
       closeNativeClipboard();
       nativeCopyBusy = false;
     }
@@ -2614,7 +3049,7 @@
     return urls[0];
   }
   async function openAndFill(detail, url) {
-    if (!detail || !url) return;
+    if (routeRequested || !detail || !url) return;
     try {
       const reply = await api.runtime.sendMessage({
         type: "open-and-fill",
@@ -3467,6 +3902,7 @@
     toast("宿主未确认清空，请升级原生宿主");
   }
   function classifyDetailAction(message) {
+    if (routeRequested) return Promise.resolve(null);
     const detail = lastDetail;
     const generation = passkeyDetailGeneration;
     return api.runtime.sendMessage(message).then((reply) => {
@@ -3613,10 +4049,13 @@
       }
     });
   }
-  async function detailAddSiteAndFill() {
+  async function detailAddSiteAndFill(event) {
     const detail = lastDetail;
     const origin = detailCurrentOrigin();
     if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
+    // Mint while this click is still the current action; two awaits follow.
+    const userGesture = checkoutIsCard(detail) ? cardGesture(event) : null;
+    if (checkoutIsCard(detail) && !userGesture) return;
     try {
       const reply = await classifyDetailAction({
         type: "add-site",
@@ -3636,6 +4075,7 @@
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       });
     } catch {
       toast("无法添加到当前网站");
@@ -3707,6 +4147,85 @@
         void api.tabs?.create?.({ url });
       }
     } catch {}
+  }
+  // A route tab keeps the detail view only: the action-popup chrome is hidden
+  // and never wired, and the fragment's token is the only selector.
+  const ROUTE_HIDDEN_SELECTORS = [
+    "#vault-view", "#locked-view", "#candidates", "#pending-save-banner",
+    "#generator-section", "#watchtower-site-banner", "#watchtower-panel",
+    "#native-guidance", "#lock-btn", "#options-btn", "#connect", "#refresh",
+    "#save-new", "#cancel-otp", "#disconnect", "#auto-login", "#passkey-save",
+    "#passkey-use", "#offer-save-logins", "#clear-never-save",
+    "#site-disable-inline", "#site-never-save", "#unlock-connect",
+    "#open-options", "#save-warning", "#native-retry", "#native-unlock",
+    "#native-copy-command", "#commit-staged-save", "#dismiss-staged-save",
+    "#never-save-origin", "#gen-regenerate", "#gen-fill", "#gen-copy",
+    "#watchtower-refresh", "#watchtower-run-hibp", "#watchtower-hibp-optin",
+    "#toast",
+  ];
+  function openRouteLifecycle() {
+    if (typeof api.runtime.connect !== "function") {
+      failRoute();
+      return;
+    }
+    let port = null;
+    try {
+      port = api.runtime.connect({ name: ROUTE_LIFECYCLE_PORT_NAME });
+    } catch {
+      failRoute();
+      return;
+    }
+    routeLifecyclePort = port;
+    port.onMessage.addListener((message) => {
+      if (
+        routeClosed ||
+        !message ||
+        typeof message !== "object" ||
+        message.token !== routeToken
+      )
+        return;
+      if (message.type === "route-ready") {
+        // Exactly one claim, and only for this route's matching ready. A ready
+        // that arrives after the armed deadline is a late grant, so the page
+        // fails closed instead of claiming again.
+        if (routeLifecycleReady) return;
+        routeLifecycleReady = true;
+        if (routeDeadlinePassed()) {
+          revokeRouteView();
+          return;
+        }
+        void claimRoute();
+        return;
+      }
+      if (message.type === "route-revoked") revokeRouteView();
+    });
+    port.onDisconnect.addListener(() => {
+      void api.runtime.lastError;
+      // Losing the channel before an explicit close fails the page closed.
+      if (!routeClosed) revokeRouteView();
+    });
+  }
+  function initRoutePage() {
+    for (const selector of ROUTE_HIDDEN_SELECTORS) {
+      const node = document.querySelector?.(selector);
+      if (node) node.hidden = true;
+    }
+    els.detailBack?.addEventListener?.("click", () => closeRouteView());
+    document.addEventListener?.("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault?.();
+      closeRouteView();
+    });
+    // pagehide reports the close once (idempotent with Back/Escape) and the
+    // browser tab itself is never closed.
+    globalThis.addEventListener?.("pagehide", () => closeRouteView());
+    if (!routeMode) {
+      // A malformed #route fragment fails closed and never becomes the
+      // action popup.
+      failRoute();
+      return;
+    }
+    openRouteLifecycle();
   }
   function initVault() {
     els = {
@@ -3792,7 +4311,12 @@
       checkoutChoices: q("#checkout-choices"),
       checkoutCancel: q("#checkout-cancel"),
       checkoutStatus: q("#checkout-status"),
+      status: q("#status"),
     };
+    if (routeRequested) {
+      initRoutePage();
+      return;
+    }
     els.vaultList?.addEventListener("focusin", (event) => {
       const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
       for (const row of rows) row.tabIndex = row === event.target ? 0 : -1;
@@ -3993,16 +4517,26 @@
       if (lastDetail) openEditor("edit", lastDetail);
     });
     els.detailFill.addEventListener("click", (event) => {
-      if (!lastDetail) return;
-      // A card whose form may live in a frame is chosen explicitly first.
-      if (checkoutChoicesSupported(lastDetail)) {
-        void startCheckoutPicker(lastDetail, event);
+      const detailFillDiagnostic = beginDetailFillDiagnostic(event);
+      if (!lastDetail) {
+        markDetailFillDiagnostic(detailFillDiagnostic, "early-guard");
         return;
       }
+      // A card whose form may live in a frame is chosen explicitly first.
+      if (checkoutChoicesSupported(lastDetail)) {
+        void startCheckoutPicker(lastDetail, event, detailFillDiagnostic);
+        return;
+      }
+      markDetailFillDiagnostic(detailFillDiagnostic, "early-guard");
+      const userGesture = checkoutIsCard(lastDetail)
+        ? cardGesture(event)
+        : null;
+      if (checkoutIsCard(lastDetail) && !userGesture) return;
       void classifyDetailAction({
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       }).catch(() => toast("请先刷新当前网站匹配"));
     });
     els.checkoutCancel.addEventListener("click", (event) =>
@@ -4021,7 +4555,9 @@
         void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
     els.detailHistoryLoad?.addEventListener("click", () => void loadHistoryVersions());
-    els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
+    els.detailAddSite?.addEventListener("click", (event) =>
+      void detailAddSiteAndFill(event),
+    );
     els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
     els.passkeySelect?.addEventListener("change", (event) =>
@@ -4102,6 +4638,7 @@
     globalThis.addEventListener?.("pagehide", wipeSensitiveViews);
   }
 
+  if (!routeRequested) {
   document
     .querySelector("#save-new")
     .addEventListener("click", () => void act({ type: "save-new" }));
@@ -4238,7 +4775,9 @@
   document
     .querySelector("#gen-copy")
     .addEventListener("click", () => void copyGenerated());
+  }
   if (vaultEnabled) initVault();
+  if (!routeRequested) {
   document.querySelector("#watchtower-site-action").addEventListener(
     "click",
     () => {
@@ -4282,4 +4821,5 @@
       });
   void send({ type: "state" });
   setInterval(() => void send({ type: "state" }), 500);
+  }
 })();

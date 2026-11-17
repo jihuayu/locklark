@@ -57,6 +57,19 @@ type Item struct {
 	UpdatedAt   int64              `json:"updated_at,omitempty"`
 }
 
+// clearSensitiveItemBuffers zeroes decrypted attachment bodies and import
+// provenance in place. Slice lengths are preserved so callers that retain the
+// item can still tell that the persisted record carried those bytes. This is a
+// best-effort overwrite of these slices, not a guarantee of physical erasure
+// for Go strings or for unrelated copies.
+func clearSensitiveItemBuffers(it *Item) {
+	clear(it.Attachment)
+	for n := range it.Attachments {
+		clear(it.Attachments[n].Content)
+	}
+	clear(it.ImportSource)
+}
+
 const MaxNotes = 64 << 10
 
 // ValidNotes accepts only lossless KDBX/XML plain text. It does not trim or
@@ -84,7 +97,30 @@ func xmlText(s string) bool {
 // MaxItems bounds one encrypted item snapshot.
 const MaxItems = 1024
 
-func validItems(items []Item, size int) bool {
+// validItems is the strict write path: KDBX/XML plain text only.
+func validItems(items []Item, size int) bool { return validItemsMode(items, size, legacyStrict) }
+
+// legacyCheckMode selects the read validation applied to an already decrypted
+// item snapshot.
+type legacyCheckMode int
+
+const (
+	legacyStrict legacyCheckMode = iota
+	legacyRead
+)
+
+// validLegacyItems accepts older snapshots whose JSON-only values (custom
+// fields, credit card and identity fields) carry valid UTF-8 control
+// characters that were never round-tripped through KDBX XML text. Direct XML
+// slots stay strict.
+func validLegacyItems(items []Item, size int) bool { return validItemsMode(items, size, legacyRead) }
+
+// legacyValue accepts any valid UTF-8 for read-only JSON-carried values that a
+// strict write would reject, such as legacy credit card/identity text. It
+// exists only for the read path; writes still go through xmlText.
+func legacyValue(s string) bool { return utf8.ValidString(s) }
+
+func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 	if items == nil || len(items) > MaxItems {
 		return false
 	}
@@ -191,14 +227,24 @@ func validItems(items []Item, size int) bool {
 				}
 			}
 		}
-		if !validCreditCard(it.CreditCard) || !validIdentity(it.Identity) {
+		if !validCreditCard(it.CreditCard, mode) || !validIdentity(it.Identity, mode) {
 			return false
+		}
+		for _, s := range creditCardFieldValues(it.CreditCard) {
+			if !charge(len(s)) {
+				return false
+			}
+		}
+		for _, s := range identityFieldValues(it.Identity) {
+			if !charge(len(s)) {
+				return false
+			}
 		}
 		if len(it.History) > 100 {
 			return false
 		}
 		for _, h := range it.History {
-			if h.Timestamp < 0 || !xmlText(h.Action) || len(h.Action) > 64 || !utf8.ValidString(h.Password) || !utf8.ValidString(h.Title) || !utf8.ValidString(h.Username) || !utf8.ValidString(h.Notes) {
+			if h.Timestamp < 0 || len(h.Action) > 64 || !historyText(h, mode) {
 				return false
 			}
 			if len(h.Sections) > 0 && !validSections(h.Sections) {
@@ -208,8 +254,11 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			for _, s := range h.Sections {
+				if !charge(len(s.ID) + len(s.Title)) {
+					return false
+				}
 				for _, f := range s.Fields {
-					if !charge(len(f.Value)) {
+					if !charge(len(f.ID) + len(f.Label) + len(f.Value) + len(f.Purpose)) {
 						return false
 					}
 				}
@@ -224,7 +273,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			atts[strings.ToLower(att.ID)] = true
-			if !charge(int(att.Size)) {
+			if !charge(int(att.Size) + len(att.ID) + len(att.FileName) + len(att.MIMEType) + len(att.SHA256)) {
 				return false
 			}
 		}
@@ -274,6 +323,22 @@ func validItems(items []Item, size int) bool {
 	}
 	return true
 }
+
+// historyText validates persisted history text. #95 tightened every field with
+// xmlText for new writes; older JSON-only snapshots may still carry valid
+// UTF-8 control characters in the value fields, while the Action metadata key
+// stays strictly XML text.
+func historyText(h ItemHistoryEntry, mode legacyCheckMode) bool {
+	if !xmlText(h.Action) {
+		return false
+	}
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
+	return check(h.Password) && check(h.Title) && check(h.Username) && check(h.Notes)
+}
+
 func SealItems(metadata []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
 	if err := ValidateItems(metadata, items); err != nil {
 		return Snapshot{}, err
@@ -432,11 +497,11 @@ func supportedTimes(t kdbx.TimeData) bool {
 	return !t.Expires.Bool && t.ExpiryTime == nil && t.UsageCount == 0
 }
 func supportedGroup(g kdbx.Group) bool {
-	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true)
+	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true) && g.LastTopVisibleEntry == kdbx.ZeroUUIDText
 }
 func supportedEntry(e kdbx.Entry) bool {
 	a := e.AutoType
-	return supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
+	return e.UUID != kdbx.UUID{} && supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
 }
 
 func decodeItemV2Envelope(content string) (itemV2Envelope, error) {
@@ -490,9 +555,9 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 	var metadata []byte
 	items := make([]Item, 0, len(g.Entries)-1)
 	// A decoded-but-unappended item (pending) and every already accumulated item
-	// own private passkey bytes. Zeroization is best effort and runs only on
-	// failure exits: the success return transfers ownership of the records to
-	// the caller and must never clear them.
+	// own private passkey, attachment and provenance buffers. Zeroization is
+	// best effort and runs only on failure exits: the success return transfers
+	// ownership of the records to the caller and must never clear them.
 	success := false
 	var pending *Item
 	defer func() {
@@ -500,9 +565,11 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return
 		}
 		for i := range items {
+			clearSensitiveItemBuffers(&items[i])
 			items[i].ClearPasskeys()
 		}
 		if pending != nil {
+			clearSensitiveItemBuffers(pending)
 			pending.ClearPasskeys()
 		}
 		clear(metadata)
@@ -643,7 +710,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				// KDBX 4 inner-header binaries are raw octets, even when their
 				// content happens to be valid base64 text.
 				it.AttachmentProtected = b.MemoryProtection == 1
-				it.Attachment = b.Content
+				// Decoded items own their binary bodies: never alias db.
+				it.Attachment = append([]byte(nil), b.Content...)
 				it.Filename = ref.Name
 				used[ref.Value.ID] = true
 			default:
@@ -749,7 +817,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				return nil, nil, ErrSnapshot
 			}
 			it.AttachmentProtected = b.MemoryProtection == 1
-			it.Attachment = b.Content
+			// Decoded items own their binary bodies: never alias db.
+			it.Attachment = append([]byte(nil), b.Content...)
 			it.Filename = ref.Name
 			used[ref.Value.ID] = true
 			delete(refsByName, ref.Name)
@@ -776,7 +845,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		items = append(items, it)
 		pending = nil
 	}
-	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validItems(items, len(metadata)) {
+	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validLegacyItems(items, len(metadata)) {
 		return nil, nil, ErrSnapshot
 	}
 	success = true

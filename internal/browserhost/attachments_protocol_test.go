@@ -62,6 +62,16 @@ func (d *attachmentDriver) call(value map[string]any) Response {
 	return v2Handle(d.t, d.c, d.out, value)
 }
 
+// destructive sends a removal and approves its own native review. Even a
+// quick-fill connection may not delete an attachment without that review.
+func (d *attachmentDriver) destructive(value map[string]any) Response {
+	d.t.Helper()
+	value["v"] = 1
+	value["capability"] = d.cap
+	value["id"] = d.nextID()
+	return destructiveCall(d.t, d.c, d.out, value)
+}
+
 // protocolReject asserts the strict request reader refuses a frame.
 func (d *attachmentDriver) protocolReject(value map[string]any) {
 	d.t.Helper()
@@ -198,7 +208,7 @@ func TestAttachmentTransferRoundTrip2MiB(t *testing.T) {
 	if got.Len() != len(content) || hexSum(got.Bytes()) != wantHash {
 		t.Fatalf("downloaded %d bytes with the wrong digest", got.Len())
 	}
-	removed := d.call(map[string]any{"type": "attachment-remove", "item_id": itemID, "revision": newRev, "attachment_id": att.ID})
+	removed := d.destructive(map[string]any{"type": "attachment-remove", "item_id": itemID, "revision": newRev, "attachment_id": att.ID})
 	if removed.Type != "attachment-removed" || removed.ItemID != itemID || removed.AttachmentID != att.ID || removed.Revision == newRev {
 		t.Fatalf("remove: %#v", removed)
 	}

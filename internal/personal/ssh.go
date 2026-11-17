@@ -363,7 +363,7 @@ func (s *Session) ConsumeSSHSignature(o *SSHSignatureOutput) ([]byte, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	s.saveMu.Lock()
-	valid := !s.lockRequested.Load() && len(s.material) > 0 && time.Since(s.last) < s.idle && time.Now().Before(x.until) && len(x.signature) > 0
+	valid := !s.lockRequested.Load() && len(s.material) > 0 && !s.idleExpired(time.Now()) && time.Now().Before(x.until) && len(x.signature) > 0
 	if !valid || !x.status.CompareAndSwap(0, 1) {
 		s.saveMu.Unlock()
 		return nil, ErrSSHSign

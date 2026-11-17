@@ -7,6 +7,7 @@
 - 不同站点 checkout.other.test：拒绝字段交付，表单保持空白。
 - opaque sandbox：不提供可填目标，表单保持空白。
 - 原生审批等待期间替换 child document：旧批准无法填入新文档，无额外自动批准。
+- 页内 picker：打开与取消各一次物理点击；期间对真实 `#detail-fill` 的 DOM `.click()` 被接收为 `isTrusted === false`，picker 不出现，两处表单保持空白，无原生或资料审批。
 
 403 项整合 Node 检查通过（397 扩展检查与 6 项驱动检查）；此前整合后的 host / desktop / personal race 检查通过。CI 新增同一真实浏览器旅程。以上是增量证据，不代表重跑所有 E2E，也不声明所有浏览器或平台均已验证。
 

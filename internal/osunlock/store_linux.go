@@ -10,7 +10,7 @@ func Biometry() string {
 	return "Secret Service"
 }
 func Description() string {
-	return "由 Secret Service 保护；已解锁的系统钥匙串可能不再次提示，同一系统用户的其他程序可能有权读取。24 小时后需完整解锁。"
+	return "由 Secret Service 保护；已解锁的系统钥匙串可能不再次提示，同一系统用户的其他程序可能有权读取。到期后需使用主密码完整解锁。"
 }
 func Requirement() string {
 	return "需要当前桌面会话提供 Secret Service；已解锁的钥匙串可能不会逐次要求用户验证。"

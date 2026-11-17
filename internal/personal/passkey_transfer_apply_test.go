@@ -132,8 +132,8 @@ func TestPasskeyTransferApplyNewLoginNativeAssertionAndReplayRefused(t *testing.
 	}
 	stored := transferApplyItem(t, receiver, item.ID)
 	defer stored.ClearPasskeys()
-	if stored.Title != "Imported Parent" || stored.Username != "explicit-import-user" {
-		t.Fatalf("new parent metadata: title=%q username=%q", stored.Title, stored.Username)
+	if stored.Title != "Imported Parent" || stored.URL != "https://example.test" || stored.Username != "explicit-import-user" {
+		t.Fatalf("new parent metadata: title=%q url=%q username=%q", stored.Title, stored.URL, stored.Username)
 	}
 	if len(stored.Passkeys) != len(targets) || len(stored.Passkey) != 0 {
 		t.Fatalf("collection form: collection=%d legacy=%d records=%d", len(stored.Passkeys), len(stored.Passkey), len(stored.PasskeyRecords()))

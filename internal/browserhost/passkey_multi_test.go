@@ -304,7 +304,7 @@ func TestPasskeyRemoveOneSiblingKeepsRemainder(t *testing.T) {
 	defer c.Close()
 	second, _ := attachPasskey(t, s, itemID, "dXNlcjE", "second-account", "Second Account")
 	revision := revisionOf(t, s, itemID)
-	removed := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(250), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": first})
+	removed := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(250), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": first})
 	if removed.Type != "passkey-removed" || removed.CredentialID != first || removed.Revision == "" {
 		t.Fatalf("remove: %#v", removed)
 	}
@@ -312,7 +312,7 @@ func TestPasskeyRemoveOneSiblingKeepsRemainder(t *testing.T) {
 	if detail.Item == nil || !detail.Item.HasPasskey || len(detail.Item.Passkeys) != 1 || detail.Item.Passkeys[0].CredentialID != second || detail.Item.Passkey == nil || detail.Item.Passkey.CredentialID != second {
 		t.Fatalf("sibling after removal: %#v", detail.Item)
 	}
-	removed = v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(252), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": removed.Revision, "credential_id": second})
+	removed = destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(252), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": removed.Revision, "credential_id": second})
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("second remove: %#v", removed)
 	}

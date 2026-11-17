@@ -227,3 +227,41 @@ func TestCatalogTransactionAndCloseFailure(t *testing.T) {
 		t.Fatal("lost receipt recovery", e)
 	}
 }
+
+// TestMutationReplaysCatalogOnce pins the #102 accept criterion: a mutation
+// replays the catalog events and re-verifies package signatures once, and its
+// receipt equals a fresh Read of the committed head.
+func TestMutationReplaysCatalogOnce(t *testing.T) {
+	path, first := fixture(t)
+	raw := release(t, 1)
+	var loads int
+	loadObserver = func() { loads++ }
+	defer func() { loadObserver = nil }()
+	installed, e := Install(path, first.Checkpoint, "example.tools/pull-reader", pub(1), Digest(raw), raw, pinset())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if loads != 1 {
+		t.Fatalf("install replayed the catalog %d times", loads)
+	}
+	loads = 0
+	upgraded, e := Install(path, installed.Checkpoint, "example.tools/pull-reader", pub(1), Digest(release(t, 2)), release(t, 2), pinset())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if loads != 1 {
+		t.Fatalf("upgrade replayed the catalog %d times", loads)
+	}
+	loads = 0
+	revoked, e := Revoke(path, upgraded.Checkpoint, "example.tools/pull-reader", pinset())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if loads != 1 {
+		t.Fatalf("revoke replayed the catalog %d times", loads)
+	}
+	read, e := Read(path, revoked.Checkpoint, pinset())
+	if e != nil || !reflect.DeepEqual(read, revoked) {
+		t.Fatal("mutation receipt diverged from a fresh replay", e)
+	}
+}

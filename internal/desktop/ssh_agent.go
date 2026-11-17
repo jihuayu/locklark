@@ -14,6 +14,8 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -355,18 +357,92 @@ func (a *App) stopSSHAgent() {
 		})
 	}
 }
+func (a *App) applySSHScopeFilter() {
+	scope := a.sshScope
+	if scope == "" {
+		scope = "active"
+	}
+	var filtered []personal.SSHKeyRow
+	for _, r := range a.sshAllRows {
+		state := r.State
+		if state == "" {
+			state = "active"
+		}
+		if scope == "all" || state == scope {
+			filtered = append(filtered, r)
+		}
+	}
+	a.sshRows = filtered
+	if a.sshSelected != nil {
+		found := false
+		for i := range filtered {
+			if filtered[i].ID == a.sshSelected.ID {
+				row := filtered[i]
+				a.sshSelected = &row
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.sshSelected = nil
+		}
+	}
+}
+
+func (a *App) ensureSSHKeysLoaded() {
+	if a.sshLoaded {
+		a.applySSHScopeFilter()
+		return
+	}
+	if a.sshLoading || a.session == nil {
+		return
+	}
+	s := a.session
+	if a.win == nil {
+		rows, e := s.ListSSHKeysState("all")
+		if e != nil {
+			return
+		}
+		a.sshAllRows = rows
+		a.sshLoaded = true
+		a.applySSHScopeFilter()
+		return
+	}
+	gen := a.generation
+	a.sshLoading = true
+	a.launch(func() {
+		rows, e := s.ListSSHKeysState("all")
+		a.dispatch(func() {
+			if a.session != s || a.generation != gen {
+				return
+			}
+			a.sshLoading = false
+			if e != nil {
+				a.status = message(e)
+				return
+			}
+			a.sshAllRows = rows
+			a.sshLoaded = true
+			a.applySSHScopeFilter()
+		})
+	})
+}
+
 func (a *App) refreshSSHKeys() {
 	if a.session == nil || a.busy {
 		return
 	}
 	s := a.session
-	scope := a.sshScope
-	if scope == "" {
-		scope = "active"
-	}
 	a.run(func() outcome {
-		rows, e := s.ListSSHKeysState(scope)
-		return outcome{err: e, apply: func() { a.sshRows = rows; a.sshSelected = nil; a.status = "SSH 公钥列表已刷新" }}
+		rows, e := s.ListSSHKeysState("all")
+		return outcome{err: e, apply: func() {
+			a.sshAllRows = rows
+			a.sshLoaded = true
+			a.sshLoading = false
+			a.applySSHScopeFilter()
+			a.sshSelected = nil
+			a.status = "SSH 公钥列表已刷新"
+		}}
 	})
 }
 func (a *App) saveSSHKey(imported bool) {
@@ -393,11 +469,14 @@ func (a *App) saveSSHKey(imported bool) {
 		if e != nil {
 			return nativeResult{err: e}
 		}
-		rows, e = s.ListSSHKeys()
+		rows, e = s.ListSSHKeysState("all")
 		return nativeResult{err: e}
 	}, func(nativeResult) {
 		a.sshScope = "active"
-		a.sshRows = rows
+		a.sshAllRows = rows
+		a.sshLoaded = true
+		a.sshLoading = false
+		a.applySSHScopeFilter()
 		a.sshSelected = &row
 		a.sshTitle = ""
 		a.sshImportPath = ""
@@ -408,10 +487,7 @@ func (a *App) sshKeyState(action string) {
 	if a.session == nil || a.sshSelected == nil || a.busy {
 		return
 	}
-	s, row, scope := a.session, *a.sshSelected, a.sshScope
-	if scope == "" {
-		scope = "active"
-	}
+	s, row := a.session, *a.sshSelected
 	var rows []personal.SSHKeyRow
 	a.runNative(func(g *personal.MutationGate) nativeResult {
 		defer g.Cancel()
@@ -420,10 +496,13 @@ func (a *App) sshKeyState(action string) {
 			return nativeResult{err: e}
 		}
 		var e error
-		rows, e = s.ListSSHKeysState(scope)
+		rows, e = s.ListSSHKeysState("all")
 		return nativeResult{err: e}
 	}, func(nativeResult) {
-		a.sshRows = rows
+		a.sshAllRows = rows
+		a.sshLoaded = true
+		a.sshLoading = false
+		a.applySSHScopeFilter()
 		a.sshSelected = nil
 		a.status = "SSH 密钥状态已更新；旧签名请求已撤销"
 	})
@@ -476,130 +555,207 @@ func (a *App) copySSHPublic() {
 	a.status = "公钥已复制；不包含私钥、选项或自定义注释"
 }
 func (a *App) sshKeysView(c *ui.Context) {
-	t := c.Theme()
 	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).FillWidth().Gap(12).Children(func() {
-			ui.Column(c).FillWidth().Gap(4).Children(func() {
-				ui.Text(c, "SSH 密钥 · Ed25519").FontSize(22).Bold().TextColor(t.Text)
-				ui.Text(c, "SSH agent 只交付公钥和本机逐次批准的签名；不会向客户端提供私钥。").FontSize(13).TextColor(t.TextMuted)
-				ui.Text(c, "目的地未验证：普通 SSH agent 消息不含可信主机名；此服务不能识别或阻止所有 ssh -A 转发。").FontSize(12).Bold().TextColor(t.Warning)
-			})
+		a.sshKeysContentView(c)
+	})
+}
 
-			// Card 1: Generate / Import Ed25519 SSH Key
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
-				ui.Text(c, "新建或导入密钥").FontSize(15).Bold().TextColor(t.Text)
-				ui.TextInput(c, &a.sshTitle).Label("SSH 密钥标题").Placeholder("例如：GitHub 生产密钥").Disabled(a.busy)
-				ui.Row(c).Gap(8).Wrap().Children(func() {
-					ui.Button(c, "生成 Ed25519 密钥").Disabled(a.busy || strings.TrimSpace(a.sshTitle) == "").OnClick(func() { a.saveSSHKey(false) })
-					ui.Button(c, "选择未加密 OpenSSH 私钥…").Disabled(a.busy).OnClick(a.chooseSSHImport)
-					ui.Button(c, "确认导入未加密 Ed25519 私钥").Disabled(a.busy || a.sshImportPath == "" || strings.TrimSpace(a.sshTitle) == "").OnClick(func() { a.saveSSHKey(true) })
+func (a *App) sshKeysContentView(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
+		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+			oneui.Text(c, "SSH 密钥 · Ed25519：SSH agent 只交付公钥和本机逐次批准的签名；不会向客户端提供私钥。").
+				FontSize(t.Rem(.80)).TextColor(t.TextMuted).Wrap()
+			onevraBanner(c, lucide.ShieldAlert(), "目的地未验证：普通 SSH agent 消息不含可信主机名；此服务不能识别或阻止所有 ssh -A 转发。", t.Warning, nil)
+		})
+
+		onevraGroup(c, "新建或导入密钥 · Ed25519", func(row func(func())) {
+			row(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+					oneui.TextBox(c, &a.sshTitle, oneui.TextBoxOptions{}).
+						Label("SSH 密钥标题").Placeholder("例如：GitHub 生产密钥").Disabled(a.uiBusy(c)).FillWidth()
+					ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+						oneui.Button(c, "生成 Ed25519 密钥", oneui.ButtonPrimary).
+							Disabled(a.uiBusy(c) || strings.TrimSpace(a.sshTitle) == "").
+							OnClick(func() { a.saveSSHKey(false) })
+						oneui.Button(c, "选择未加密 OpenSSH 私钥…", oneui.ButtonOutline).
+							Disabled(a.uiBusy(c)).
+							OnClick(a.chooseSSHImport)
+						oneui.Button(c, "确认导入未加密 Ed25519 私钥", oneui.ButtonSecondary).
+							Disabled(a.uiBusy(c) || a.sshImportPath == "" || strings.TrimSpace(a.sshTitle) == "").
+							OnClick(func() { a.saveSSHKey(true) })
+					})
+					if a.sshImportPath != "" {
+						oneui.Text(c, "所选文件："+visible(a.sshImportPath)).FontSize(t.Rem(.76)).TextColor(t.Accent).Wrap()
+					}
+					oneui.Text(c, "仅接受有界的未加密 OpenSSH Ed25519 私钥；加密私钥与其他算法明确拒绝。").
+						FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
 				})
-				if a.sshImportPath != "" {
-					ui.Text(c, "所选文件："+visible(a.sshImportPath)).FontSize(12).TextColor(t.Accent)
+			})
+		})
+
+		onevraGroup(c, "已保存密钥", func(row func(func())) {
+			row(func() {
+				scopeVal := a.sshScope
+				if scopeVal == "" {
+					scopeVal = "active"
 				}
-				ui.Text(c, "仅接受有界的未加密 OpenSSH Ed25519 私钥；加密私钥与其他算法明确拒绝。").FontSize(12).TextColor(t.TextMuted)
-			})
-
-			// Card 2: Key List & Selected Key Detail
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
-				ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Wrap().Children(func() {
-					ui.Text(c, "已保存密钥").FontSize(15).Bold().TextColor(t.Text).Grow(1)
-					ui.Button(c, "刷新 SSH 密钥").Disabled(a.busy).OnClick(a.refreshSSHKeys)
+				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+					if next, changed := onevraSegmented(c, scopeVal, [][2]string{
+						{"active", "活动 SSH 密钥"},
+						{"archived", "已归档 SSH 密钥"},
+						{"trashed", "SSH 回收站"},
+						{"all", "全部 SSH 密钥"},
+					}); changed {
+						a.sshScope = next
+						if a.sshLoaded {
+							a.applySSHScopeFilter()
+						} else {
+							a.ensureSSHKeysLoaded()
+						}
+					}
+					ui.Box(c).Grow(1)
+					oneui.Button(c, "刷新 SSH 密钥", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(a.refreshSSHKeys)
 				})
-				ui.Row(c).Gap(8).Wrap().Children(func() {
-					for _, scope := range []struct{ id, label string }{{"active", "活动 SSH 密钥"}, {"archived", "已归档 SSH 密钥"}, {"trashed", "SSH 回收站"}, {"all", "全部 SSH 密钥"}} {
-						scope := scope
-						ui.Button(c, scope.label).Disabled(a.busy).OnClick(func() { a.sshScope = scope.id; a.refreshSSHKeys() })
+			})
+			if len(a.sshRows) == 0 {
+				row(func() {
+					if a.sshLoading {
+						oneui.Text(c, "正在加载 SSH 密钥…").FontSize(t.Rem(.78)).TextColor(t.TextMuted)
+					} else {
+						oneui.Text(c, "当前范围没有 SSH 密钥。").FontSize(t.Rem(.78)).TextColor(t.TextMuted)
 					}
 				})
-				for _, row := range a.sshRows {
-					row := row
-					ui.Button(c.Key("ssh-key-"+row.ID), "选择 SSH 密钥："+browserTitle(row.Title)).Disabled(a.busy).OnClick(func() { a.sshSelected = &row })
-				}
-				if row := a.sshSelected; row != nil {
-					ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(6).Children(func() {
-						ui.Text(c, "标题："+browserTitle(row.Title)).Bold().TextColor(t.Text)
-						ui.Text(c, "指纹："+row.Fingerprint).FontSize(13).TextColor(t.Accent)
-						ui.Text(c, "ID："+row.ID).FontSize(12).TextColor(t.TextMuted)
-						ui.Text(c, "修订："+row.Revision).FontSize(12).TextColor(t.TextMuted)
-						ui.Text(c, "状态："+row.State).FontSize(12).TextColor(t.TextMuted)
-						ui.Text(c, strings.TrimSpace(row.PublicKey)).FontSize(12).TextColor(t.Text)
-						ui.Row(c).Gap(8).Wrap().Children(func() {
-							if row.State == "trashed" {
-								ui.Button(c, "恢复 SSH 密钥").Disabled(a.busy).OnClick(func() { a.sshKeyState("item.untrash") })
-							} else {
-								ui.Button(c, "复制 SSH 公钥").Disabled(a.busy).OnClick(a.copySSHPublic)
-								if row.State == "archived" {
-									ui.Button(c, "取消归档 SSH 密钥").Disabled(a.busy).OnClick(func() { a.sshKeyState("item.unarchive") })
-								} else {
-									ui.Button(c, "归档 SSH 密钥").Disabled(a.busy).OnClick(func() { a.sshKeyState("item.archive") })
-								}
-								ui.Button(c, "将 SSH 密钥移入回收站").Disabled(a.busy).OnClick(func() { a.sshKeyState("item.trash") })
-							}
+			} else {
+				for _, r := range a.sshRows {
+					r := r
+					selected := a.sshSelected != nil && a.sshSelected.ID == r.ID
+					row(func() {
+						bg := ui.Transparent
+						if selected {
+							bg = t.Accent.Alpha(.08)
+						}
+						btn := ui.ButtonBase(c.Key("ssh-key-"+r.ID)).FillWidth().Radius(t.Radius).Background(bg).
+							Padding(t.Space(1), t.Space(1.5)).
+							Label("选择 SSH 密钥：" + browserTitle(r.Title)).
+							Disabled(a.uiBusy(c)).
+							OnClick(func() { a.sshSelected = &r })
+						btn.Children(func() {
+							ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+								oneui.Icon(c, lucide.KeyRound()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.Accent)
+								ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.2)).Children(func() {
+									oneui.Text(c, browserTitle(r.Title)).FontSize(t.Rem(.84)).Bold().SingleLine().Ellipsis("…")
+									if r.Fingerprint != "" {
+										oneui.Text(c, r.Fingerprint).FontSize(t.Rem(.72)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+									}
+								})
+								onevraPill(c, r.State, t.TextMuted)
+							})
 						})
 					})
 				}
-			})
+			}
+		})
 
-			// Card 3: Local SSH Agent Service
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
-				ui.Text(c, "本地 SSH agent").FontSize(16).Bold().TextColor(t.Text)
-				if a.sshService == nil {
-					ui.Button(c, "开启本地 SSH agent").Disabled(a.busy || a.sshStarting || a.sshStopping).OnClick(a.startSSHAgent)
-				} else {
-					endpoint := a.sshService.Endpoint()
-					ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(2)).Gap(4).Children(func() {
-						ui.Text(c, "SSH_AUTH_SOCK："+endpoint).FontSize(12).TextColor(t.Text)
-						ui.Text(c, "IdentityAgent："+endpoint).FontSize(12).TextColor(t.TextMuted)
+		if sel := a.sshSelected; sel != nil {
+			onevraGroup(c, "密钥详情", func(row func(func())) {
+				row(func() {
+					ui.Column(c).FillWidth().Gap(t.Space(1)).Children(func() {
+						oneui.Text(c, "标题："+browserTitle(sel.Title)).FontSize(t.Rem(.92)).Bold()
+						oneui.Text(c, "指纹："+sel.Fingerprint).FontSize(t.Rem(.78)).TextColor(t.Accent).Selectable().Wrap()
+						oneui.Text(c, "ID："+sel.ID+" · 修订："+sel.Revision+" · 状态："+sel.State).FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
+						oneui.Text(c, strings.TrimSpace(sel.PublicKey)).FontSize(t.Rem(.74)).TextColor(t.Text).Selectable().Wrap()
 					})
-					ui.Row(c).Gap(8).Wrap().Children(func() {
-						ui.Button(c, "复制 SSH_AUTH_SOCK 端点").Disabled(a.busy).OnClick(func() {
-							if mygo.Clipboard.Write(transfer.TextData(endpoint)) != nil {
-								a.status = "端点复制未确认"
+				})
+				row(func() {
+					ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+						if sel.State == "trashed" {
+							oneui.Button(c, "恢复 SSH 密钥", oneui.ButtonPrimary).Disabled(a.uiBusy(c)).OnClick(func() { a.sshKeyState("item.untrash") })
+						} else {
+							oneui.Button(c, "复制 SSH 公钥", oneui.ButtonPrimary).Disabled(a.uiBusy(c)).OnClick(a.copySSHPublic)
+							if sel.State == "archived" {
+								oneui.Button(c, "取消归档 SSH 密钥", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() { a.sshKeyState("item.unarchive") })
 							} else {
-								a.status = "已复制非秘密端点；请自行为本次命令或 SSH 配置设置，不会改动系统 agent"
+								oneui.Button(c, "归档 SSH 密钥", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() { a.sshKeyState("item.archive") })
 							}
-						})
-						ui.Button(c, "停止本地 SSH agent").OnClick(func() { a.stopSSHAgent(); a.status = "SSH agent 已撤销，正在关闭本地端点" })
+							oneui.Button(c, "将 SSH 密钥移入回收站", oneui.ButtonOutline).TextColor(t.Danger).Disabled(a.uiBusy(c)).OnClick(func() { a.sshKeyState("item.trash") })
+						}
 					})
-				}
-				ui.Text(c, "服务不会接管系统 ssh-agent 或修改 shell 配置。锁库会停止本服务；解锁后需手动重新开启。").FontSize(12).TextColor(t.TextMuted)
+				})
+			})
+		}
+
+		onevraGroup(c, "本地 SSH agent", func(row func(func())) {
+			row(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+					if a.sshService == nil {
+						ui.Row(c).FillWidth().Children(func() {
+							oneui.Button(c, "开启本地 SSH agent", oneui.ButtonPrimary).
+								Disabled(a.uiBusy(c) || a.sshStarting || a.sshStopping).
+								OnClick(a.startSSHAgent)
+						})
+					} else {
+						endpoint := a.sshService.Endpoint()
+						oneui.Text(c, "SSH_AUTH_SOCK："+endpoint).FontSize(t.Rem(.76)).Selectable().Wrap()
+						oneui.Text(c, "IdentityAgent："+endpoint).FontSize(t.Rem(.74)).TextColor(t.TextMuted).Selectable().Wrap()
+						ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+							oneui.Button(c, "复制 SSH_AUTH_SOCK 端点", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() {
+								if mygo.Clipboard.Write(transfer.TextData(endpoint)) != nil {
+									a.status = "端点复制未确认"
+								} else {
+									a.status = "已复制非秘密端点；请自行为本次命令或 SSH 配置设置，不会改动系统 agent"
+								}
+							})
+							oneui.Button(c, "停止本地 SSH agent", oneui.ButtonOutline).TextColor(t.Danger).OnClick(func() {
+								a.stopSSHAgent()
+								a.status = "SSH agent 已撤销，正在关闭本地端点"
+							})
+						})
+					}
+					oneui.Text(c, "服务不会接管系统 ssh-agent 或修改 shell 配置。锁库会停止本服务；解锁后需手动重新开启。").
+						FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
+				})
 			})
 		})
 	})
 }
+
 func (a *App) sshApprovalView(c *ui.Context) {
 	t := c.Theme()
 	r := a.sshApproval
 	v := r.view
-	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).Width(640).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(10).Children(func() {
-			ui.Text(c, "批准本次 SSH 签名？").FontSize(24).Bold().TextColor(t.Text)
-			ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
-				ui.Text(c, "目的地未验证").FontSize(18).Bold().TextColor(t.Warning)
-				ui.Text(c, "以下为系统取得的本机来源；PID/进程路径不构成程序可信证明，也不能证明远端 SSH 主机。").FontSize(12).TextColor(t.TextMuted)
+	approvalCentered(c, func() {
+		approvalCard(c, lucide.KeyRound(), t.Warning, "批准本次 SSH 签名？", func() {
+			approvalNotice(c, "目的地未验证：以下为系统取得的本机来源；PID/进程路径不构成程序可信证明，也不能证明远端 SSH 主机。", t.Warning)
+			approvalOrigin(c, "本机来源："+visible(v.Peer))
+			approvalFacts(c, func() {
+				approvalFact(c, "密钥："+browserTitle(v.Key.Title))
+				approvalFact(c, "公钥指纹："+v.Key.Fingerprint)
+				approvalFact(c, "算法："+v.Algorithm+" · flags="+strconv.FormatUint(uint64(v.Flags), 10))
+				approvalFact(c, "签名数据："+strconv.Itoa(v.DataBytes)+" 字节")
+				approvalFact(c, "载荷 SHA256："+v.PayloadDigest)
+				approvalFact(c, "密钥 ID："+v.Key.ID)
+				approvalFact(c, "精确修订："+v.Key.Revision)
+				approvalFact(c, "请求 ID："+v.RequestID)
+				approvalFact(c, "连接 ID："+v.ConnectionID)
+				approvalFact(c, "批准期限："+v.Deadline.Local().Format("15:04:05"))
 			})
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
-				ui.Text(c, "本机来源："+visible(v.Peer)).TextColor(t.Text)
-				ui.Text(c, "密钥："+browserTitle(v.Key.Title)).Bold().TextColor(t.Text)
-				ui.Text(c, "公钥指纹："+v.Key.Fingerprint).TextColor(t.Accent)
-				ui.Text(c, "算法："+v.Algorithm+" · flags="+strconv.FormatUint(uint64(v.Flags), 10)).FontSize(13).TextColor(t.Text)
-				ui.Text(c, "签名数据："+strconv.Itoa(v.DataBytes)+" 字节").FontSize(13).TextColor(t.Text)
-				ui.Text(c, "载荷 SHA256："+v.PayloadDigest).FontSize(12).TextColor(t.TextMuted)
-				ui.Text(c, "密钥 ID："+v.Key.ID).FontSize(12).TextColor(t.TextMuted)
-				ui.Text(c, "精确修订："+v.Key.Revision).FontSize(12).TextColor(t.TextMuted)
-				ui.Text(c, "请求 ID："+v.RequestID).FontSize(12).TextColor(t.TextMuted)
-				ui.Text(c, "连接 ID："+v.ConnectionID).FontSize(12).TextColor(t.TextMuted)
-				ui.Text(c, "批准期限："+v.Deadline.Local().Format("15:04:05")).FontSize(13).Bold().TextColor(t.Warning)
-			})
-			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.PrimaryButton(c, "仅批准本次 SSH 签名").Disabled(r.decided || !time.Now().Before(v.Deadline)).OnClick(func() {
+			approvalActions(c, func() {
+				oneui.Button(c, "仅批准本次 SSH 签名", oneui.ButtonPrimary).
+					Disabled(r.decided || !time.Now().Before(v.Deadline)).
+					OnClick(func() {
+						r.decided = true
+						r.choose(true)
+						a.status = "本次签名正在重新验证；不会记住批准"
+					})
+				oneui.Button(c, "拒绝本次 SSH 签名", oneui.ButtonOutline).OnClick(func() {
 					r.decided = true
-					r.choose(true)
-					a.status = "本次签名正在重新验证；不会记住批准"
+					r.choose(false)
 				})
-				ui.Button(c, "拒绝本次 SSH 签名").OnClick(func() { r.decided = true; r.choose(false) })
-				ui.Button(c, "停止 agent 并拒绝本次").OnClick(func() { a.stopSSHAgent(); a.status = "本次 SSH 请求与服务已撤销" })
+				oneui.Button(c, "停止 agent 并拒绝本次", oneui.ButtonGhost).TextColor(t.Danger).OnClick(func() {
+					a.stopSSHAgent()
+					a.status = "本次 SSH 请求与服务已撤销"
+				})
 			})
 		})
 	})

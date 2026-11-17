@@ -51,13 +51,13 @@ func decodeSystemPasskeyCapsule(raw []byte) (systemCapsule, error) {
 	return capsule, nil
 }
 
-// validSystemPasskeyCapsuleTime enforces the unchanged enrollment window: the
+// validSystemPasskeyCapsuleTime enforces the configured enrollment window: the
 // capsule must have been created in the past, must still be unexpired, and must
-// span exactly 24 hours. It is evaluated again after authentication so a
-// capsule that expires while the OS prompt or the vault authentication is
-// blocked can never become fresh user verification.
+// span one of the allowed quick-unlock presets. It is evaluated again after
+// authentication so a capsule that expires while the OS prompt or the vault
+// authentication is blocked can never become fresh user verification.
 func validSystemPasskeyCapsuleTime(capsule systemCapsule, now time.Time) bool {
-	return !now.Before(capsule.Created) && now.Before(capsule.Expires) && capsule.Expires.Sub(capsule.Created) == 24*time.Hour
+	return !now.Before(capsule.Created) && now.Before(capsule.Expires) && validSystemUnlockSpan(capsule.Expires.Sub(capsule.Created))
 }
 
 // VerifyPasskeyUserWithSystem performs a fresh OS user verification for exactly
