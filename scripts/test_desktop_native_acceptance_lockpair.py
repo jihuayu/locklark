@@ -80,6 +80,56 @@ class ProfileAndLabelTests(unittest.TestCase):
         with self.assertRaises(desktop.AcceptanceFailure):
             desktop.read_local_vault_manifests(self.profile)
 
+    def test_b_filename_sort_first_routes_actual_ab_transport_labels(self):
+        a_id = "01234567000000000000000000000000"
+        b_id = "01234567111111111111111111111111"
+        a_path = self.manifest("alpha.llv", a_id, "b")
+        b_path = self.manifest("beta.llv", b_id, "a")
+        manifests = desktop.read_local_vault_manifests(self.profile)
+        self.assertEqual([manifest["path"] for manifest in manifests],
+                         [str(b_path), str(a_path)])
+        helper = desktop.local_vault_display_labels(manifests)
+        subject = desktop.Acceptance.__new__(desktop.Acceptance)
+        subject.values = set()
+        subject.local_a_manifest = {"path": str(a_path), "name": "alpha.llv", "vault_id": a_id}
+        subject.read_local_vault_manifests = lambda: manifests
+        subject.record_local_vault_b()
+        self.assertEqual((subject.local_a_index, subject.local_b_index), (0, 1))
+        self.assertEqual(subject.local_labels, [helper[1], helper[0]])
+        self.assertEqual(subject.local_a_label, helper[1])
+        self.assertEqual(subject.local_b_label, helper[0])
+        self.assertEqual(subject.local_a_manifest["path"], str(a_path))
+        self.assertEqual(subject.local_b_manifest["path"], str(b_path))
+
+        subject.host = pathlib.Path(os.path.realpath(sys.executable))
+        subject.app = Mock(pid=4321)
+        subject.command = Mock(side_effect=[
+            json.dumps({"action": "select-sidebar", "target_index": 0, "clicks": [{}]}).encode(),
+            json.dumps({"action": "select-sidebar", "target_index": 1, "clicks": [{}]}).encode(),
+        ])
+        subject.local_vault_target("select-sidebar", subject.local_labels, subject.local_a_index)
+        subject.local_vault_target("select-sidebar", subject.local_labels, subject.local_b_index)
+        first = json.loads(subject.command.call_args_list[0].args[1])
+        second = json.loads(subject.command.call_args_list[1].args[1])
+        for request, expected in ((first, helper[1]), (second, helper[0])):
+            target = request["local_vault_target"]
+            self.assertEqual(target["known_labels"][target["target_index"]], expected)
+
+    def test_a_path_id_drift_refuses_without_transport(self):
+        a_id = "01234567000000000000000000000000"
+        b_id = "01234567111111111111111111111111"
+        a_path = self.manifest("alpha.llv", a_id, "b")
+        self.manifest("beta.llv", b_id, "a")
+        subject = desktop.Acceptance.__new__(desktop.Acceptance)
+        subject.values = set()
+        subject.local_a_manifest = {"path": str(a_path), "name": "alpha.llv",
+                                    "vault_id": "ffffffffffffffffffffffffffffffff"}
+        subject.read_local_vault_manifests = lambda: desktop.read_local_vault_manifests(self.profile)
+        subject.command = Mock()
+        with self.assertRaises(desktop.AcceptanceFailure):
+            subject.record_local_vault_b()
+        self.assertFalse(subject.command.called)
+
     def test_entry_bound_duplicate_ids_and_invalid_names_refuse(self):
         for index in range(desktop.LOCAL_PROFILE_ENTRY_LIMIT + 1):
             (self.profile / ("entry-%03d" % index)).write_text("", encoding="utf-8")

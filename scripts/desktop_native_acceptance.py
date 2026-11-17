@@ -796,17 +796,25 @@ class Acceptance:
         manifests = self.read_local_vault_manifests()
         require(len(manifests) == 2)
         a_path = self.local_a_manifest.get("path")
+        a_frozen_id = self.local_a_manifest.get("vault_id")
         a_index = next((index for index, manifest in enumerate(manifests)
                         if manifest.get("path") == a_path), None)
         require(a_index is not None)
+        # A's original path and frozen ID are both immutable. An unchanged path
+        # with a changed ID is a closed refusal, never a silent new A.
+        require(manifests[a_index]["vault_id"] == a_frozen_id)
         b_index = 1 - a_index
-        require(manifests[a_index]["vault_id"] != manifests[b_index]["vault_id"])
+        require(manifests[b_index]["path"] != a_path)
+        require(manifests[b_index]["vault_id"] != a_frozen_id)
         labels = self.local_vault_labels(manifests)
         require(len(set(labels)) == 2)
         self.local_manifests = manifests
-        self.local_a_index, self.local_b_index = a_index, b_index
+        # local_labels is explicitly [actual A, actual B]; indices are in the
+        # same coordinate frame regardless of manifest filename sort order.
+        self.local_a_index, self.local_b_index = 0, 1
         self.local_a_label, self.local_b_label = labels[a_index], labels[b_index]
         self.local_labels = [self.local_a_label, self.local_b_label]
+        self.local_a_manifest, self.local_b_manifest = manifests[a_index], manifests[b_index]
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
