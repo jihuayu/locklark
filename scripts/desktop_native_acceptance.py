@@ -42,6 +42,11 @@ UNAVAILABLE = "unavailable"
 RECOVERY_KIT_PATTERN = re.compile(rb"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 RECOVERY_KIT_TEXT = re.compile(r"LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}")
 LOCAL_SCENARIO = "local-vault-file-create"
+NATIVE_INITIAL_SCENARIO = "native-initial-account-fanout"
+LOCAL_SCENARIOS = (LOCAL_SCENARIO, NATIVE_INITIAL_SCENARIO)
+
+def local_scenario(scenario):
+    return scenario in LOCAL_SCENARIOS
 WRONG_RECOVERY_CONFIRMATION = "not-the-issued-recovery-code"
 LOCAL_SETTINGS_DEFAULTS = {
     "security.autolock.minutes": 5,
@@ -488,6 +493,13 @@ class Acceptance:
         self.started = time.time()
         self.app, self.probe = None, None
         self.reason = "acceptance"
+        self.account_factor_submissions = 0
+        self.target_factor_submissions = 0
+        self.target_refreshes = 0
+        self.actual_refresh_provenance = False
+        self.a_locked = False
+        self.a_locked_observed = False
+        self.late_result_coverage = None
         self.native_action = "none"
         self.last_native_click = {}
         self.native_failed_index = None
@@ -517,7 +529,7 @@ class Acceptance:
     def scenario_env(scenario, environ):
         """Only the local-vault scenario releases classic for its child app."""
         env = {**environ, "GOTOOLCHAIN": "go1.27.3"}
-        if scenario == LOCAL_SCENARIO:
+        if local_scenario(scenario):
             env.pop("LOCKLARK_DESKTOP_LAYOUT", None)
         return env
 
@@ -527,22 +539,29 @@ class Acceptance:
         return {**LOCAL_SETTINGS_DEFAULTS, "app.vaultPath": str(vault_path)}
 
     def app_command(self):
-        if (getattr(self, "scenario", None) == LOCAL_SCENARIO
+        if (getattr(self, "scenario", None) in LOCAL_SCENARIOS
                 and getattr(self, "settings_path", None) is not None):
             return [str(self.host), "--settings", str(self.settings_path)]
         return [str(self.host)]
 
-    def write_private_settings(self):
+    def prepare_settings_dir(self):
         self.settings_dir = self.state / "settings"
         self.settings_dir.mkdir(mode=0o700)
         os.chmod(self.settings_dir, 0o700)
         self.settings_path = self.settings_dir / "settings.json"
+
+    def write_private_settings_file(self):
         raw = json.dumps(self.local_settings_document(self.fixture["Path"]),
                          ensure_ascii=False).encode("utf-8")
         with os.fdopen(os.open(self.settings_path,
                                os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
             os.fchmod(output.fileno(), 0o600)
             output.write(raw)
+
+
+    def write_private_settings(self):
+        self.prepare_settings_dir()
+        self.write_private_settings_file()
 
     def phase(self, value):
         self.stage = value
@@ -878,6 +897,7 @@ class Acceptance:
             self.wait("显示密码")
 
     def unlock(self):
+        self.account_factor_submissions = getattr(self, "account_factor_submissions", 0) + 1
         self.phase("unlock")
         self.input([{"click_label":"金库文件"}, {"key":"Control_L+a"}, {"text":self.fixture["Path"]},
                     {"click_label":"主密码"}, {"text":self.fixture["Password"]},
@@ -886,6 +906,7 @@ class Acceptance:
                     {"wait_label":"新建登录"}])
 
     def unlock_onevra(self):
+        self.account_factor_submissions = getattr(self, "account_factor_submissions", 0) + 1
         self.phase("unlock-onevra")
         self.input([{"click_label":"使用应急资料…"},
                     {"click_label":"主密码"}, {"text":self.fixture["Password"]},
@@ -995,6 +1016,12 @@ class Acceptance:
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
+    def record_prebuilt_local_pair(self):
+        manifests = self.read_local_vault_manifests()
+        require(len(manifests) == 2)
+        self.local_a_manifest = manifests[0]
+        self.record_local_vault_b()
+
     def local_vault_target(self, action, labels, index):
         require(action in ("select-sidebar", "wait-title"))
         require(type(labels) in (list, tuple) and 1 <= len(labels) <= 2)
@@ -1039,6 +1066,8 @@ class Acceptance:
         self.wait("显示上次验证结果")
         self.click("刷新本地文件库")
         self.wait("本次刷新已验证")
+        self.target_refreshes = getattr(self, "target_refreshes", 0) + 1
+        self.actual_refresh_provenance = True
 
     def create_local_vault_b(self):
         """Second real Onevra create through the same UI and fresh recovery."""
@@ -1089,10 +1118,12 @@ class Acceptance:
         self.values.update((wrong_password, wrong_secret))
         self.fill("主密码", wrong_password)
         self.fill("Secret Key", wrong_secret)
+        self.target_factor_submissions = getattr(self, "target_factor_submissions", 0) + 1
         self.click("完整验证并解锁")
         self.wait("完整验证失败；请重新输入")
         self.fill("主密码", self.fixture["Password"])
         self.fill("Secret Key", self.fixture["Secret"])
+        self.target_factor_submissions = getattr(self, "target_factor_submissions", 0) + 1
         self.click("完整验证并解锁")
         self.eventually(lambda: self.controls().get("解锁独立文件库", {}).get("present") is False)
         self.local_vault_target("wait-title", labels, a_index)
@@ -1183,26 +1214,81 @@ class Acceptance:
         self.local_vault_pair_flow()
         self.final_local_vault_pair_validation(before_ids)
 
+    def native_initial_account_fanout_basic(self):
+        require(getattr(self, "account_factor_submissions", 0) == 1)
+        require(getattr(self, "target_factor_submissions", 0) == 0)
+        self.record_prebuilt_local_pair()
+        before = self.observe()
+        before_ids = sorted(item["id"] for item in before["items"])
+        labels = self.local_labels
+        a_index, b_index = self.local_a_index, self.local_b_index
+        self.refresh_local_vault(labels, a_index, "native-initial-refresh-a")
+        self.refresh_local_vault(labels, b_index, "native-initial-refresh-b")
+        require(getattr(self, "target_refreshes", 0) >= 2)
+        require(getattr(self, "actual_refresh_provenance", False) is True)
+        self.select_local_vault(labels, a_index, "native-initial-select-a-lock")
+        self.wait("显示上次验证结果")
+        self.click("锁定本地文件库")
+        self.wait("本地文件库已锁定")
+        self.a_locked = True
+        self.refresh_local_vault(labels, b_index, "native-initial-refresh-b-after-lock")
+        self.select_local_vault(labels, a_index, "native-initial-select-a-locked")
+        self.wait("解锁本地文件库")
+        self.a_locked_observed = True
+        self.final_local_vault_pair_validation(before_ids)
+        return {
+            "basic": True,
+            "accountSubmits": getattr(self, "account_factor_submissions", 0),
+            "targetSubmits": getattr(self, "target_factor_submissions", 0),
+            "actualRefreshes": getattr(self, "target_refreshes", 0),
+            "aLocked": self.a_locked,
+            "aLockedObserved": self.a_locked_observed,
+            "accountLocked": True,
+        }
+
+    def native_initial_account_fanout(self):
+        coverage = self.native_initial_account_fanout_basic()
+        self.phase("native-initial-counts account=%d target=%d refresh=%d" % (
+            coverage["accountSubmits"], coverage["targetSubmits"], coverage["actualRefreshes"]))
+        self.phase("native-initial-basic-flow-complete")
+        self.late_result_coverage = "NOT_RUN_UNPROVEN"
+        self.phase("native-initial-late-not-run")
+        self.reason = "LATE_RESULT_NOT_RUN"
+        raise AcceptanceFailure()
+
     def build_fixture(self):
         if self.fixture_prebuilt:
             require(self.fixture_binary.is_file() and os.access(self.fixture_binary, os.X_OK))
             return
         self.command([self.go, "build", "-o", str(self.fixture_binary), "./scripts/desktop_acceptance_fixture"])
 
+    def prepare_initial_pair_fixture(self):
+        self.prepare_settings_dir()
+        workspace = self.settings_dir / "vaultfile-workspace"
+        self.command([str(self.fixture_binary), "-prepare-initial-pair",
+                      str(self.fixture_path.parent), "-prepare-workspace", str(workspace)])
+        self.fixture = json.loads(self.fixture_path.read_bytes())
+        self.write_private_settings_file()
+        self.verify_local_vault_pair()
+
     def setup(self):
         self.build_fixture()
-        self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
-        self.fixture = json.loads(self.fixture_path.read_bytes())
+        scenario = getattr(self, "scenario", None)
+        if scenario == NATIVE_INITIAL_SCENARIO:
+            self.prepare_initial_pair_fixture()
+        else:
+            self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
+            self.fixture = json.loads(self.fixture_path.read_bytes())
+            if scenario == LOCAL_SCENARIO:
+                self.write_private_settings()
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "OTPSeed", "OTPConfig", "ProviderValue", "ProviderCanary"))
-        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
-            self.write_private_settings()
         self.app = subprocess.Popen(self.app_command(), env=self.env, stdout=self.log, stderr=self.log)
         self.probe = subprocess.Popen([sys.executable, str(ROOT / "scripts/desktop_native_probe.py")],
                                       env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=self.log, text=True, bufsize=1)
         require(bool(select.select([self.probe.stdout], [], [], 15)[0]))
         require(json.loads(self.probe.stdout.readline()).get("ready") is True)
-        if getattr(self, "scenario", None) == LOCAL_SCENARIO:
+        if local_scenario(scenario):
             self.unlock_onevra()
         else:
             self.unlock()
@@ -1579,9 +1665,11 @@ class Acceptance:
             elif failure_stage:
                 raise AcceptanceFailure()
             if scenario:
-                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO))
+                require(scenario in ("foreign-owner", "provider", LOCAL_SCENARIO, NATIVE_INITIAL_SCENARIO))
                 if scenario == LOCAL_SCENARIO:
                     self.local_vault_file_create()
+                elif scenario == NATIVE_INITIAL_SCENARIO:
+                    self.native_initial_account_fanout()
                 elif scenario == "provider":
                     self.provider_acceptance()
                 else:
@@ -1621,7 +1709,7 @@ class Acceptance:
                 failure["controls"] = self.controls()
             except Exception:
                 failure["controls_unavailable"] = True
-            if scenario != LOCAL_SCENARIO:
+            if not local_scenario(scenario):
                 # The local-vault scenario never reuses the broad display probe
                 # after a kit may have appeared. Its failure projection stays
                 # on the fixed control allowlist above.
@@ -1741,6 +1829,7 @@ class Acceptance:
                     "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
                     "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
                     LOCAL_SCENARIO:"PASS: real native Onevra independent local vault A/B create, wrong-kit refusal, fresh recovery, pair observer, lock/refresh/unlock and cached navigation",
+                    NATIVE_INITIAL_SCENARIO: "NATIVE_INITIAL_ACCOUNT_FANOUT_BASIC_ONLY LATE_RESULT=NOT_RUN_UNPROVEN",
                 }.get(scenario,"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
                 # Only now, after the scan passed, may the fixed success line
                 # enter the transcript. A rewrite failure also yields no PASS.
