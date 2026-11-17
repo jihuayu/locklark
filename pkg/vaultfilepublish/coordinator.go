@@ -109,6 +109,10 @@ type ConditionalBackend interface {
 // in ErrVerification.
 type ProposalVerifier func(ctx context.Context, base []byte, baseRevision vaultfilebackend.Revision, proposal vaultfilejournal.Proposal) error
 
+type durabilityProver interface {
+	ProveDurable(context.Context, string, vaultfilebackend.Revision) error
+}
+
 // Coordinator performs the prepare, CAS and reconcile sequence for one file
 // name. It is not safe for concurrent use: a caller must serialize calls to
 // PrepareAndPublish and ResumePrepared so that at most one operation is in
@@ -341,6 +345,9 @@ func (c *Coordinator) ResumePrepared(ctx context.Context, currentPulled Pulled, 
 		if err := c.verifyProposal(ctx, base, pp.Proposal); err != nil {
 			return err
 		}
+		if err := c.proveDurability(ctx, currentPulled.revision); err != nil {
+			return c.unknownWrite(nil, err)
+		}
 		return c.ack(pp, currentPulled.revision)
 	case equalBytes(currentPulled.data, base.BaseBytes) && currentPulled.revision == base.RemoteRevision:
 		// The remote is still exactly the original R. Retry the very same
@@ -405,6 +412,11 @@ func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State
 			if err := c.verifyProposal(ctx, base, pp.Proposal); err != nil {
 				return err
 			}
+			if writeErr != nil {
+				if err := c.proveDurability(ctx, current.revision); err != nil {
+					return c.unknownWrite(writeErr, err)
+				}
+			}
 			return c.ack(pp, current.revision)
 		}
 		return writeErr
@@ -419,6 +431,11 @@ func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State
 	if equalBytes(current.data, pp.Proposal.Bytes) {
 		if err := c.verifyProposal(ctx, base, pp.Proposal); err != nil {
 			return c.unknownWrite(writeErr, err)
+		}
+		if writeErr != nil {
+			if err := c.proveDurability(ctx, current.revision); err != nil {
+				return c.unknownWrite(writeErr, err)
+			}
 		}
 		return c.unknownWrite(writeErr, c.ack(pp, current.revision))
 	}
@@ -475,4 +492,16 @@ func (c *Coordinator) ack(pp vaultfilejournal.PreparedProposal, revision vaultfi
 		return fmt.Errorf("vault file publish: ack: %w", err)
 	}
 	return nil
+}
+
+func (c *Coordinator) proveDurability(ctx context.Context, revision vaultfilebackend.Revision) error {
+	prover, ok := c.backend.(durabilityProver)
+	if !ok {
+		return fmt.Errorf("%w: %w", vaultfilebackend.ErrUnknown, vaultfilebackend.ErrDurabilityUnproven)
+	}
+	err := prover.ProveDurable(ctx, c.name, revision)
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w: %w", vaultfilebackend.ErrUnknown, vaultfilebackend.ErrDurabilityUnproven, err)
 }
