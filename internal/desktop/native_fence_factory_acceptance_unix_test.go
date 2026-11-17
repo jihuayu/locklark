@@ -260,6 +260,13 @@ func TestNativeFenceFactoryClassificationRejection(t *testing.T) {
 }
 
 func TestNativeFenceFactorySingletonFreezesSelection(t *testing.T) {
+	nativeFenceRunIsolatedChild(t, "factory-singleton", "TestNativeFenceFactorySingletonFreezesSelectionChild")
+}
+
+func TestNativeFenceFactorySingletonFreezesSelectionChild(t *testing.T) {
+	if os.Getenv(nativeFenceChildCaseEnv) != "factory-singleton" {
+		t.Skip("native fence isolated child case only")
+	}
 	setEnv := nativeFenceFactoryEnvScope(t)
 
 	firstPipes := nativeFenceFactoryNewPipes(t)

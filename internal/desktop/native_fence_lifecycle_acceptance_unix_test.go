@@ -4,6 +4,7 @@ package desktop
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -137,6 +138,13 @@ func nativeLifecycleAssertAbortCleanup(t *testing.T, harness *nativeFenceTestHar
 }
 
 func TestNativeInitialUnlockLifecycleAppOnceCancel(t *testing.T) {
+	nativeFenceRunIsolatedChild(t, "app-once", "TestNativeInitialUnlockLifecycleAppOnceCancelChild")
+}
+
+func TestNativeInitialUnlockLifecycleAppOnceCancelChild(t *testing.T) {
+	if os.Getenv(nativeFenceChildCaseEnv) != "app-once" {
+		t.Skip("native fence isolated child case only")
+	}
 	f := newLocalVaultSessionFixture(t)
 	f.createVault(t)
 	f.createVault(t)
