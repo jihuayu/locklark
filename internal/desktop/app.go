@@ -203,6 +203,7 @@ func (a *App) runContextKind(work func(context.Context) outcome, accountUnlock b
 	a.cancel = cancel
 	a.launch(func() {
 		r := work(ctx)
+		nativeInitialUnlockFenceAfterWork(ctx, accountUnlock, attempt, &r)
 		cancel()
 		a.dispatch(func() {
 			if generation != a.generation {
@@ -659,7 +660,8 @@ func (a *App) unlock() {
 			fanoutIncomplete = true
 		}
 		batch.fanoutIncomplete = fanoutIncomplete
-		return outcome{initialAccount: newInitialAccountUnlockOutcome(batch, results), drop: func() { batch.drop(launch) }, apply: func() {
+		initial := newInitialAccountUnlockOutcome(batch, results)
+		return outcome{initialAccount: initial, drop: func() { batch.drop(launch) }, apply: func() {
 			adoptedParent, adoptedRows, ok := a.adoptLocalVaultFileInitialBatch(batch)
 			if !ok {
 				return
@@ -668,6 +670,7 @@ func (a *App) unlock() {
 			a.armIdleTimer()
 			a.rows = loginProjection(adoptedRows)
 			clearLocalVaultFileInitialRows(adoptedRows)
+			initial.fence.signalAdopted()
 			a.scope = "active"
 			a.page = "vault"
 			a.v2Mode = !classicLayoutRequested()

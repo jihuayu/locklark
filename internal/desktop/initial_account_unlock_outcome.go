@@ -12,6 +12,7 @@ type initialAccountUnlockMetadata struct {
 type initialAccountUnlockOutcome struct {
 	batch    *localVaultFileInitialBatch
 	metadata initialAccountUnlockMetadata
+	fence    nativeInitialUnlockFenceLifecycle
 }
 
 func newInitialAccountUnlockOutcome(batch *localVaultFileInitialBatch,
