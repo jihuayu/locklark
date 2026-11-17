@@ -4,8 +4,6 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +16,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vaultfileclient"
 )
 
@@ -101,14 +98,10 @@ func newPublishedLocalFixture(t *testing.T) *publishedLocalFixture {
 		t.Fatal("OBSERVER_FIXTURE_SETTINGS_FAILED")
 	}
 	workspace := filepath.Join(settingsDir, "vaultfile-workspace")
-	profileDir := localProfileDir(workspace, f.Path)
-	backendRoot := localBackendRoot(workspace)
-	for _, dir := range []string{workspace, filepath.Join(workspace, "profiles"), profileDir, backendRoot} {
-		if err := os.Mkdir(dir, 0700); err != nil {
-			t.Fatal("OBSERVER_FIXTURE_WORKSPACE_FAILED")
-		}
+	if _, _, err := prepareLocalWorkspaceDirs(workspace, f.Path); err != nil {
+		t.Fatal("FIXTURE_WORKSPACE_FAILED")
 	}
-	return createPublishedVault(t, f, root, workspace, backendRoot)
+	return createPublishedVault(t, f, root, workspace, localBackendRoot(workspace))
 }
 
 // createPublishedVault runs the real product creation flow for one new selector
@@ -116,80 +109,19 @@ func newPublishedLocalFixture(t *testing.T) *publishedLocalFixture {
 // ciphertext or fabricates a manifest/companion pair.
 func createPublishedVault(t *testing.T, f fixture, root, workspace, backendRoot string) *publishedLocalFixture {
 	t.Helper()
-	profileDir := localProfileDir(workspace, f.Path)
-	var selectorRaw [16]byte
-	if _, err := rand.Read(selectorRaw[:]); err != nil {
-		t.Fatal("OBSERVER_FIXTURE_SELECTOR_FAILED")
-	}
-	selector := hex.EncodeToString(selectorRaw[:])
-	p := &publishedLocalFixture{
-		fixture: f, root: root, workspace: workspace, profileDir: profileDir,
-		backendRoot: backendRoot, personalPath: f.Path,
-		config:    filepath.Join(profileDir, selector+".json"),
-		companion: filepath.Join(profileDir, selector+".json.baseline"),
-		journal:   filepath.Join(profileDir, selector+".journal"),
-		archive:   filepath.Join(profileDir, selector+".llb"),
-	}
-	proposal := vaultfileclient.Manifest{
-		Version: 1, Kind: vaultfileclient.CreateKind,
-		PersonalFile: f.Path, BackendRoot: backendRoot, Name: selector + ".llv",
-		Journal: p.journal, Archive: p.archive,
-	}
-	key, err := personal.ParseSecret(f.Secret)
+	created, _, err := createPublishedLocalVault(f, workspace, backendRoot)
 	if err != nil {
-		t.Fatal("OBSERVER_FIXTURE_KEY_FAILED")
-	}
-	t.Cleanup(func() { clear(key) })
-	password, secret := []byte(f.Password), []byte(f.Secret)
-	defer clear(password)
-	defer clear(secret)
-
-	creation, err := vaultfileclient.OpenCreation(p.config, &proposal, password, secret)
-	if err != nil {
-		t.Fatal("OBSERVER_FIXTURE_CREATE_OPEN_FAILED")
-	}
-	backupRequired, err := creation.Prepare(context.Background())
-	creation.Close()
-	if err != nil || !backupRequired {
-		t.Fatal("OBSERVER_FIXTURE_CREATE_PREPARE_FAILED")
-	}
-	backup, err := personal.PrepareBackup(f.Path, p.archive, f.Password, key)
-	if err != nil {
-		t.Fatal("OBSERVER_FIXTURE_BACKUP_PREPARE_FAILED")
-	}
-	if err := backup.Publish(); err != nil {
-		backup.Close()
-		t.Fatal("OBSERVER_FIXTURE_BACKUP_PUBLISH_FAILED")
-	}
-	p.kit = []byte(backup.Material())
-	backup.Close()
-	t.Cleanup(func() { clear(p.kit) })
-	if len(p.kit) == 0 {
-		t.Fatal("OBSERVER_FIXTURE_KIT_CONFIRM_FAILED")
-	}
-
-	creation, err = vaultfileclient.OpenCreation(p.config, nil, password, secret)
-	if err != nil {
-		t.Fatal("OBSERVER_FIXTURE_RESUME_OPEN_FAILED")
-	}
-	defer creation.Close()
-	backupRequired, err = creation.Prepare(context.Background())
-	if err != nil || backupRequired {
-		t.Fatal("OBSERVER_FIXTURE_RESUME_PREPARE_FAILED")
-	}
-	if err := creation.Complete(context.Background(), password, secret, p.kit); err != nil {
 		t.Fatal(fixtureCompleteFailureMessage(err))
 	}
-	if err := creation.Verify(context.Background(), password, secret, p.kit); err != nil {
-		t.Fatal("OBSERVER_FIXTURE_VERIFY_FAILED")
+	p := &publishedLocalFixture{
+		fixture: f, root: root, workspace: workspace, profileDir: created.profileDir,
+		backendRoot: created.backendRoot, config: created.config, companion: created.companion,
+		journal: created.journal, archive: created.archive, kit: created.kit, personalPath: f.Path,
 	}
+	t.Cleanup(func() { clear(p.kit) })
 	return p
 }
 
-// newPublishedLocalPair creates a second complete vault in the same personal
-// file, workspace and backend through the product flow. The fresh backup has
-// its own recovery material and ciphertext; only the source fixture and storage
-// locations are shared.
 func newPublishedLocalPair(t *testing.T) (*publishedLocalFixture, *publishedLocalFixture) {
 	t.Helper()
 	first := newPublishedLocalFixture(t)
@@ -259,9 +191,7 @@ func assertLimitedReport(t *testing.T, report localProjection, p *publishedLocal
 }
 
 func allPairProjectionTrue(report localProjection) bool {
-	return report.ManifestCount == 2 && report.ManifestPersonal && report.ManifestBackend &&
-		report.CompanionPresent && report.ManifestDigest && report.JournalPresent &&
-		report.ArchivePresent && report.PrivateModes && report.BackendHashMatches && report.FactorsAbsent
+	return localPairProjectionComplete(report)
 }
 
 func assertPairLimitedReport(t *testing.T, report localProjection, fixtures ...*publishedLocalFixture) {
@@ -349,6 +279,80 @@ func TestLocalVaultPairReadObserverPositive(t *testing.T) {
 		t.Fatal("OBSERVER_PAIR_CLI_NOT_ALL_TRUE")
 	}
 	assertPairLimitedBytes(t, cliRaw, first, second)
+}
+
+func TestPrepareInitialPairProducer(t *testing.T) {
+	root := t.TempDir()
+	fixtureDir := filepath.Join(root, "vault")
+	settingsDir := filepath.Join(root, "settings")
+	if err := os.Mkdir(settingsDir, 0700); err != nil {
+		t.Fatal("PAIR_FIXTURE_SETTINGS_FAILED")
+	}
+	workspace := filepath.Join(settingsDir, "vaultfile-workspace")
+	f, err := createInitialPairFixture(fixtureDir, workspace)
+	if err != nil {
+		stage := "untyped"
+		substage := "none"
+		class := "OTHER"
+		target := 0
+		evidence := pairObserverEvidence{}
+		var pairErr *initialPairError
+		if errors.As(err, &pairErr) {
+			stage = string(pairErr.stage)
+			substage = string(pairErr.substage)
+			class = string(pairErr.class)
+			target = pairErr.target
+			evidence = pairErr.observer
+		}
+		t.Fatalf("PAIR_FIXTURE_PREPARE_FAILED stage=%s target=%d substage=%s class=%s manifest_count=%d personal=%t backend=%t companion=%t digest=%t journal=%t archive=%t modes=%t hash=%t factors=%t",
+			stage, target, substage, class, evidence.ManifestCount, evidence.ManifestPersonal,
+			evidence.ManifestBackend, evidence.CompanionPresent, evidence.ManifestDigest,
+			evidence.JournalPresent, evidence.ArchivePresent, evidence.PrivateModes,
+			evidence.BackendHashMatches, evidence.FactorsAbsent)
+	}
+	defer clearFixture(&f)
+	report, err := verifyLocalPairWorkspace(f, workspace)
+	if err != nil || !localPairProjectionComplete(report) {
+		t.Fatalf("PAIR_FIXTURE_OBSERVER_FAILED error=%t manifest_count=%d personal=%t backend=%t companion=%t digest=%t journal=%t archive=%t modes=%t hash=%t factors=%t",
+			err != nil, report.ManifestCount, report.ManifestPersonal, report.ManifestBackend,
+			report.CompanionPresent, report.ManifestDigest, report.JournalPresent, report.ArchivePresent,
+			report.PrivateModes, report.BackendHashMatches, report.FactorsAbsent)
+	}
+	fixtureInfo, err := os.Stat(filepath.Join(fixtureDir, "fixture.json"))
+	if err != nil || !fixtureInfo.Mode().IsRegular() || fixtureInfo.Mode().Perm() != 0600 ||
+		fixtureInfo.Size() <= 64<<10 || len(f.ProviderValue) < 48<<10 {
+		t.Fatal("PAIR_FIXTURE_METADATA_RETENTION_FAILED")
+	}
+	singleOnPair, err := verifyLocalWorkspace(f, workspace)
+	if err != nil || singleOnPair.ManifestCount != 2 || allProjectionTrue(singleOnPair) {
+		t.Fatal("PAIR_FIXTURE_OBSERVER_STRICT_COUNT_FAILED")
+	}
+
+	profileDir := localProfileDir(workspace, f.Path)
+	entries, err := readBoundedDir(profileDir, 128)
+	if err != nil {
+		t.Fatal("PAIR_FIXTURE_PROFILE_FAILED")
+	}
+	ids := map[string]bool{}
+	journals := map[string]bool{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") ||
+			strings.HasSuffix(entry.Name(), ".json.baseline") {
+			continue
+		}
+		manifest, exists, err := vaultfileclient.ReadManifest(filepath.Join(profileDir, entry.Name()))
+		if err != nil || !exists {
+			t.Fatal("PAIR_FIXTURE_MANIFEST_FAILED")
+		}
+		if manifest.PersonalFile != f.Path || manifest.BackendRoot != localBackendRoot(workspace) {
+			t.Fatal("PAIR_FIXTURE_BINDING_FAILED")
+		}
+		ids[manifest.VaultID] = true
+		journals[manifest.Journal] = true
+	}
+	if len(ids) != 2 || len(journals) != 2 {
+		t.Fatal("PAIR_FIXTURE_IDENTITIES_FAILED")
+	}
 }
 
 func TestLocalVaultObserverModesRequireExactCount(t *testing.T) {
@@ -952,6 +956,12 @@ func TestRunHelpUsesFixedUsageAndSucceeds(t *testing.T) {
 				t.Fatal("OBSERVER_HELP_MISSING_OPTION")
 			}
 		}
+		for _, option := range []string{"-prepare-initial-pair", "-prepare-workspace"} {
+			if !bytes.Contains(stdout, []byte(option)) {
+				t.Fatal("HELP_OPTIONS_MISSING")
+			}
+		}
+
 		entries, err := os.ReadDir(dir)
 		if err != nil || len(entries) != 0 {
 			t.Fatal("OBSERVER_HELP_PERFORMED_IO")
