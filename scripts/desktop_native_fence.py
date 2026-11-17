@@ -5,7 +5,7 @@ import os
 import select
 import time
 from dataclasses import dataclass
-from typing import Mapping, Optional, Tuple
+from typing import Mapping, Optional, Tuple, Union
 
 
 CONTROL_FD_ENV = "LOCKLARK_NATIVE_FENCE_CONTROL_FD"
@@ -41,6 +41,7 @@ class NativeFenceErrorCode(enum.Enum):
     CONTROL_WRITE_FAILED = "CONTROL_WRITE_FAILED"
     CONTROL_WRITE_TIMEOUT = "CONTROL_WRITE_TIMEOUT"
     SPAWN_CLOSED = "SPAWN_CLOSED"
+    RELEASE_DROPPED = "RELEASE_DROPPED"
 
 
 class NativeFenceError(Exception):
@@ -68,6 +69,12 @@ class CancelObservation:
 @dataclass(frozen=True)
 class AdoptObservation:
     child_count: int
+
+
+@dataclass(frozen=True)
+class ReleaseDropObservation:
+    closed_count: int
+    parent_locked: bool
 
 
 @dataclass(frozen=True)
@@ -248,12 +255,46 @@ class NativeFenceClient:
         self.close()
         return observation
 
+    def wait_release_result(
+        self, timeout: Optional[float] = None
+    ) -> Union[AdoptObservation, ReleaseDropObservation]:
+        self._ensure_open()
+        if not self._released or self._terminal or self._child_count is None:
+            self._fail(NativeFenceErrorCode.INVALID_STATE)
+        deadline = time.monotonic() + self._timeout(timeout, self._event_timeout)
+        frame = self._read_frame(deadline)
+        if frame.kind == "ADOPTED":
+            if frame.count is None or frame.count != self._child_count:
+                self._fail(NativeFenceErrorCode.EVENT_COUNT)
+            self._confirm_terminal_eof(deadline)
+            self._require_before(deadline)
+            self._terminal = True
+            observation = AdoptObservation(frame.count)
+            self.close()
+            return observation
+        if frame.kind == "DRAINED":
+            if frame.count is None or frame.parent_locked is None:
+                self._fail(NativeFenceErrorCode.EVENT_UNEXPECTED)
+            if frame.count != self._child_count:
+                self._fail(NativeFenceErrorCode.EVENT_COUNT)
+            if not frame.parent_locked:
+                self._fail(NativeFenceErrorCode.EVENT_LOCKED)
+            self._confirm_terminal_eof(deadline)
+            self._require_before(deadline)
+            self._terminal = True
+            observation = ReleaseDropObservation(frame.count, True)
+            self.close()
+            return observation
+        self._fail(NativeFenceErrorCode.EVENT_UNEXPECTED)
+
     def wait_adopted(self, timeout: Optional[float] = None) -> AdoptObservation:
         self._ensure_open()
         if not self._released or self._terminal or self._child_count is None:
             raise NativeFenceError(NativeFenceErrorCode.INVALID_STATE)
         deadline = time.monotonic() + self._timeout(timeout, self._event_timeout)
         frame = self._read_frame(deadline)
+        if frame.kind == "DRAINED":
+            self._fail(NativeFenceErrorCode.RELEASE_DROPPED)
         if frame.kind != "ADOPTED" or frame.count is None:
             self._fail(NativeFenceErrorCode.EVENT_UNEXPECTED)
         if frame.count != self._child_count:

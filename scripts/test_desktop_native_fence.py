@@ -466,6 +466,67 @@ class NativeFenceClientTests(unittest.TestCase):
         self._assert_code(fence.NativeFenceErrorCode.EVENT_UNKNOWN, client.ready)
         self._assert_closed(child_fds[0], child_fds[1], parent_fds[0], parent_fds[1])
 
+    def test_release_dropped_observation(self):
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        client.release()
+        self.assertEqual(peer.read_control_line(), b"RELEASE\n")
+        peer.write_event(b"DRAINED 2 1\n")
+        peer.close_event()
+        observation = client.wait_release_result()
+        self.assertIsInstance(observation, fence.ReleaseDropObservation)
+        self.assertEqual(observation.closed_count, 2)
+        self.assertTrue(observation.parent_locked)
+        self.assertEqual(
+            set(observation.__dataclass_fields__), {"closed_count", "parent_locked"}
+        )
+        self.assertFalse(hasattr(observation, "passed"))
+        self.assertEqual(peer.control_available(), b"")
+        self._assert_code(fence.NativeFenceErrorCode.CLOSED, client.wait_release_result)
+
+    def test_wait_adopted_rejects_release_drop(self):
+        client, peer = self._pair()
+        peer.write_event(b"READY_HELD 2\n")
+        client.ready()
+        client.release()
+        self.assertEqual(peer.read_control_line(), b"RELEASE\n")
+        peer.write_event(b"DRAINED 2 1\n")
+        peer.close_event()
+        self._assert_code(
+            fence.NativeFenceErrorCode.RELEASE_DROPPED, client.wait_adopted
+        )
+        self.assertTrue(client._closed)
+
+    def test_release_dropped_validation(self):
+        def run_case(payload, code, release=True):
+            client, peer = self._pair()
+            peer.write_event(b"READY_HELD 2\n")
+            client.ready()
+            if release:
+                client.release()
+                self.assertEqual(peer.read_control_line(), b"RELEASE\n")
+            peer.write_event(payload)
+            peer.close_event()
+            self._assert_code(code, client.wait_release_result)
+
+        cases = [
+            (b"DRAINED 1 1\n", fence.NativeFenceErrorCode.EVENT_COUNT, True),
+            (b"DRAINED 2 0\n", fence.NativeFenceErrorCode.EVENT_LOCKED, True),
+            (b"DRAINED 2 2\n", fence.NativeFenceErrorCode.EVENT_FIELDS, True),
+            (b"CANCELLED\n", fence.NativeFenceErrorCode.EVENT_UNEXPECTED, True),
+            (b"ADOPTED 1\n", fence.NativeFenceErrorCode.EVENT_COUNT, True),
+            (
+                b"DRAINED 2 1\nADOPTED 2\n",
+                fence.NativeFenceErrorCode.EVENT_EXTRA,
+                True,
+            ),
+            (b"DRAINED 2 1\n", fence.NativeFenceErrorCode.INVALID_STATE, False),
+        ]
+        for payload, code, release in cases:
+            with self.subTest(code=code.value, release=release):
+                run_case(payload, code, release)
+
     def test_pending_event_check(self):
         client, peer = self._pair()
         peer.write_event(b"READY_HELD 2\n")
