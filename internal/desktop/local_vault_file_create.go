@@ -578,6 +578,15 @@ func (a *App) presentUnopenedLocalVaultFile(scope localVaultFileSessionScope) {
 	state := &a.localVaultFiles
 	state.selected = scope.configPath
 	state.status = "已创建，尚未打开；请核查本地状态"
+	if a.session != nil && scope.configPath != "" && scope.vaultID != "" &&
+		scope.backendRoot != "" && scope.journalPath != "" {
+		state.unopenedNotice = &localVaultFileUnopenedNotice{
+			scope:        scope,
+			parent:       a.session,
+			generation:   a.generation,
+			viewSequence: state.viewSequence,
+		}
+	}
 	a.refreshLocalVaultFiles()
 }
 

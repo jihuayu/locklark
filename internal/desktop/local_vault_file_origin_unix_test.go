@@ -264,3 +264,110 @@ func TestDesktopLocalVaultCreationFirstListPreservesProjectionOrigin(t *testing.
 		t.Fatal("LOCAL_ORIGIN_NAME_ONLY_UPDATE_LOST_CHILD")
 	}
 }
+
+func TestDesktopLocalVaultUnopenedPresentationFirstListPreservesNotice(t *testing.T) {
+	f := newLocalVaultSessionFixture(t)
+	q := &localVaultSessionQueue{}
+	q.install(f.app)
+	aPath, aManifest := f.createVault(t)
+	scope := f.scope(aPath, aManifest)
+	f.app.presentUnopenedLocalVaultFile(scope)
+	state := &f.app.localVaultFiles
+	const createdUnopened = "已创建，尚未打开；请核查本地状态"
+	if state.selected != aPath || state.status != createdUnopened ||
+		state.unopenedNotice == nil || state.projectionOrigin != nil ||
+		state.items != nil {
+		t.Fatal("LOCAL_UNOPENED_PRESENTATION_PRECONDITION_FAILED")
+	}
+	if slot := state.sessionSlots[scope]; slot != nil {
+		t.Fatal("LOCAL_UNOPENED_PRESENTATION_CREATED_SLOT")
+	}
+	viewSequence := state.viewSequence
+	if len(q.launches) != 1 {
+		t.Fatal("LOCAL_UNOPENED_PRESENTATION_LIST_NOT_QUEUED")
+	}
+	q.runLaunch(t)
+	q.runDispatch(t)
+	if state.selected != aPath || state.status != createdUnopened ||
+		state.unopenedNotice != nil || state.projectionOrigin != nil ||
+		state.items != nil || state.viewSequence != viewSequence ||
+		len(state.refs) != 1 || state.refs[0].path != aPath ||
+		state.refs[0].vaultID != aManifest.VaultID ||
+		state.refs[0].journalPath != aManifest.Journal ||
+		state.refsBackendRoot != f.backendRoot {
+		t.Fatal("LOCAL_UNOPENED_PRESENTATION_FIRST_LIST_NOT_PRESERVED")
+	}
+	if slot := state.sessionSlots[scope]; slot != nil {
+		t.Fatal("LOCAL_UNOPENED_PRESENTATION_FIRST_LIST_CREATED_SLOT")
+	}
+}
+
+func TestDesktopLocalVaultUnopenedNoticeRejectsMismatchedFirstList(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+	}{
+		{name: "wrong-id"},
+		{name: "wrong-journal"},
+		{name: "wrong-root"},
+		{name: "missing-target"},
+		{name: "list-failure"},
+		{name: "stale-parent"},
+		{name: "stale-generation"},
+		{name: "stale-view-sequence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLocalVaultSessionFixture(t)
+			q := &localVaultSessionQueue{}
+			q.install(f.app)
+			aPath, aManifest := f.createVault(t)
+			scope := f.scope(aPath, aManifest)
+			f.app.presentUnopenedLocalVaultFile(scope)
+			q.launches = nil
+			state := &f.app.localVaultFiles
+			const createdUnopened = "已创建，尚未打开；请核查本地状态"
+			if state.status != createdUnopened || state.unopenedNotice == nil {
+				t.Fatal("LOCAL_UNOPENED_NOTICE_NEGATIVE_SETUP_FAILED")
+			}
+			ref := localVaultNavigationRef(aPath, aManifest)
+			refs := []localVaultFileRef{ref}
+			backendRoot := f.backendRoot
+			var listErr error
+			switch tc.name {
+			case "wrong-id":
+				if ref.vaultID == "ffffffffffffffffffffffffffffffff" {
+					ref.vaultID = "00000000000000000000000000000000"
+				} else {
+					ref.vaultID = "ffffffffffffffffffffffffffffffff"
+				}
+				refs = []localVaultFileRef{ref}
+			case "wrong-journal":
+				ref.journalPath = aManifest.Journal + ".other"
+				refs = []localVaultFileRef{ref}
+			case "wrong-root":
+				backendRoot = f.backendRoot + "-other"
+			case "missing-target":
+				refs = nil
+			case "list-failure":
+				refs = nil
+				listErr = vaultfileclient.ErrLocalReview
+			case "stale-parent":
+				state.unopenedNotice.parent = nil
+			case "stale-generation":
+				state.unopenedNotice.generation++
+			case "stale-view-sequence":
+				state.viewSequence++
+			}
+			f.app.applyLocalVaultFileRefs(refs, backendRoot, listErr)
+			if state.unopenedNotice != nil || state.projectionOrigin != nil ||
+				state.items != nil {
+				t.Fatal("LOCAL_UNOPENED_NOTICE_NEGATIVE_RETAINED_PROJECTION")
+			}
+			if state.status == createdUnopened {
+				t.Fatal("LOCAL_UNOPENED_NOTICE_NEGATIVE_PRESERVED_STATUS")
+			}
+			if slot := state.sessionSlots[scope]; slot != nil {
+				t.Fatal("LOCAL_UNOPENED_NOTICE_NEGATIVE_CREATED_SLOT")
+			}
+		})
+	}
+}

@@ -90,6 +90,7 @@ func (a *App) setLocalVaultFileProjectionOrigin(scope localVaultFileSessionScope
 		slotSequence: slot.sequence,
 		viewSequence: state.viewSequence,
 	}
+	state.unopenedNotice = nil
 	return true
 }
 
@@ -102,6 +103,7 @@ func (a *App) invalidateLocalVaultFileProjectionView(status string) {
 	state.viewSequence++
 	state.items = nil
 	state.projectionOrigin = nil
+	state.unopenedNotice = nil
 	state.viewVerification = localVaultFileViewUnverified
 	state.status = status
 }
@@ -130,6 +132,7 @@ func (a *App) applyLocalVaultFileRefs(refs []localVaultFileRef, backendRoot stri
 		return
 	}
 	if origin := state.projectionOrigin; origin != nil {
+		state.unopenedNotice = nil
 		ref, ok := localVaultFileRefByPath(refs, origin.scope.configPath)
 		if ok && ref.vaultID == origin.scope.vaultID &&
 			ref.journalPath == origin.scope.journalPath &&
@@ -142,6 +145,23 @@ func (a *App) applyLocalVaultFileRefs(refs []localVaultFileRef, backendRoot stri
 		state.refs = refs
 		state.refsBackendRoot = backendRoot
 		return
+	}
+	if notice := state.unopenedNotice; notice != nil {
+		valid := notice.parent == a.session && notice.generation == a.generation &&
+			notice.viewSequence == state.viewSequence &&
+			state.selected == notice.scope.configPath
+		if valid {
+			ref, ok := localVaultFileRefByPath(refs, notice.scope.configPath)
+			if ok && ref.vaultID == notice.scope.vaultID &&
+				ref.journalPath == notice.scope.journalPath &&
+				backendRoot == notice.scope.backendRoot {
+				state.refs = refs
+				state.refsBackendRoot = backendRoot
+				state.unopenedNotice = nil
+				return
+			}
+		}
+		state.unopenedNotice = nil
 	}
 	if state.selected != "" {
 		oldRef, oldOK := localVaultFileRefByPath(state.refs, state.selected)

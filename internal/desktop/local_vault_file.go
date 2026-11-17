@@ -40,6 +40,16 @@ type localVaultFileProjectionOrigin struct {
 	viewSequence uint64
 }
 
+// localVaultFileUnopenedNotice is a short-lived, notice-only binding for a
+// finite created-but-unopened presentation. It is never projection origin,
+// slot authority, rendering input, refresh/unlock input or a grant.
+type localVaultFileUnopenedNotice struct {
+	scope        localVaultFileSessionScope
+	parent       *personal.Session
+	generation   uint64
+	viewSequence uint64
+}
+
 type localVaultFileState struct {
 	refs         []localVaultFileRef
 	selected     string
@@ -52,6 +62,9 @@ type localVaultFileState struct {
 	// projectionOrigin is the exact accepted UI projection binding. It is
 	// never a wrapper, token, factor, material or capability and never grants.
 	projectionOrigin *localVaultFileProjectionOrigin
+	// unopenedNotice preserves only a finite created-but-unopened status across
+	// the first exact refs list. It is not a projection or authority binding.
+	unopenedNotice *localVaultFileUnopenedNotice
 	// displayLabelRefs and displayLabels are a private display-only snapshot.
 	// They are recomputed from the exact current refs whenever list metadata
 	// differs, including when tests assign refs directly. The snapshot is never
@@ -237,6 +250,7 @@ func (a *App) closeLocalVaultFileView() {
 	state := &a.localVaultFiles
 	state.selected, state.items, state.status = "", nil, ""
 	state.projectionOrigin = nil
+	state.unopenedNotice = nil
 }
 
 // localVaultFileNavigationScope resolves one navigation ref through the
