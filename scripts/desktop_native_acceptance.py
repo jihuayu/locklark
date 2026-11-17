@@ -347,6 +347,10 @@ class Acceptance:
         self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
         self.fixture_path = self.state / "vault" / "fixture.json"
         self.values, self.codes = set(), set()
+        # Exact validated local-vault manifests are private product state, not
+        # ordinary diagnostics. Permit only each file's own name/ID while still
+        # scanning it for every other registered value and every recovery kit.
+        self.local_manifest_private_values = {}
         self.started = time.time()
         self.app, self.probe = None, None
         self.reason = "acceptance"
@@ -820,6 +824,10 @@ class Acceptance:
         labels = self.local_vault_labels(manifests)
         self.local_a_manifest = manifests[0]
         self.local_a_label = labels[0]
+        self.local_manifest_private_values = {
+            pathlib.Path(manifest["path"]): {manifest["vault_id"], manifest["name"]}
+            for manifest in manifests
+        }
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
@@ -846,6 +854,10 @@ class Acceptance:
         self.local_a_label, self.local_b_label = labels[a_index], labels[b_index]
         self.local_labels = [self.local_a_label, self.local_b_label]
         self.local_a_manifest, self.local_b_manifest = manifests[a_index], manifests[b_index]
+        self.local_manifest_private_values = {
+            pathlib.Path(manifest["path"]): {manifest["vault_id"], manifest["name"]}
+            for manifest in manifests
+        }
         for manifest, label in zip(manifests, labels):
             self.values.update((manifest["vault_id"], manifest["name"], label))
 
@@ -1350,13 +1362,18 @@ class Acceptance:
         if hasattr(self, "fixture"):
             for window in range(int(self.started) // 20, int(time.time()) // 20 + 1):
                 self.otp(window * 20)
-        patterns = set()
-        for value in self.values:
-            patterns.update((value.encode(), json.dumps(value, ensure_ascii=True)[1:-1].encode(), urllib.parse.quote(value, safe="").encode()))
+        manifest_private_values = getattr(self, "local_manifest_private_values", {})
         count = 0
         for path in self.state.rglob("*"):
-            if not path.is_file() or path == self.fixture_path or path.suffix not in (".log", ".txt", ".json", ".jsonl"):
+            if not path.is_file() or path == self.fixture_path or \
+                    path.suffix not in (".log", ".txt", ".json", ".jsonl"):
                 continue
+            allowed = manifest_private_values.get(path, ())
+            patterns = set()
+            for value in self.values:
+                if value and value in allowed:
+                    continue
+                patterns.update((value.encode(), json.dumps(value, ensure_ascii=True)[1:-1].encode(), urllib.parse.quote(value, safe="").encode()))
             data = path.read_bytes()
             # Syntax-level barrier for a dynamically issued recovery kit that
             # was never registered in self.values (for example when the

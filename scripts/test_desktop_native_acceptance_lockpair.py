@@ -369,8 +369,12 @@ class PrivacyRegistrationTests(unittest.TestCase):
                 self.assertIn(manifest["vault_id"], subject.values)
                 self.assertIn(manifest["name"], subject.values)
                 self.assertNotIn(manifest["path"], subject.values)
+                pathlib.Path(manifest["path"]).write_text(
+                    json.dumps({"vault_id": manifest["vault_id"], "name": manifest["name"]}),
+                    encoding="utf-8")
             self.assertIn(subject.local_a_label, subject.values)
             self.assertIn(subject.local_b_label, subject.values)
+            self.assertEqual(subject.scan(), 2)
             (root / "leak.log").write_text(subject.local_b_label, encoding="utf-8")
             with self.assertRaises(desktop.AcceptanceFailure):
                 subject.scan()
