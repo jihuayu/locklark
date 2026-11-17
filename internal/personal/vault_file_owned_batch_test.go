@@ -5,7 +5,6 @@ package personal
 import (
 	"context"
 	"errors"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,11 +59,18 @@ func TestUnlockSessionWithOwnedVaultFileChildrenBuildsIndependentRealChildren(t 
 	if aChild.idleDeadline.IsZero() || !aChild.idleDeadline.Equal(bChild.idleDeadline) {
 		t.Fatal("OWNED_BATCH_COMMON_IDLE_BUDGET_MISMATCH")
 	}
+	if len(results[0].Items) != 1 || results[0].Items[0] == (VaultFileBaselineItem{}) ||
+		len(results[1].Items) != 1 || results[1].Items[0] == (VaultFileBaselineItem{}) {
+		t.Fatal("OWNED_BATCH_REAL_SUMMARIES_MISSING")
+	}
 	if err := parent.LockVaultFileChild(results[0].Token); err != nil {
 		t.Fatal("OWNED_BATCH_CLOSE_A_FAILED")
 	}
 	if ownedChildAt(parent, fx.a.journal) != nil {
 		t.Fatal("OWNED_BATCH_CLOSED_A_RETAINED")
+	}
+	if len(results[1].Items) != 1 || results[1].Items[0] == (VaultFileBaselineItem{}) {
+		t.Fatal("OWNED_BATCH_DELIVERED_B_SUMMARY_CLEARED")
 	}
 	assertOwnedChildRead(t, parent, results[1].Token)
 	if ownedChildAt(parent, b.journal) == nil {
@@ -225,6 +231,15 @@ func TestUnlockSessionWithOwnedVaultFileChildrenIsolatesAndRejects(t *testing.T)
 		if ownedChildAllCount(parent) != 1 {
 			t.Fatal("OWNED_BATCH_DUPLICATE_REGISTERED_TWICE")
 		}
+		if len(results[0].Items) != 1 || len(results[1].Items) != 1 ||
+			results[0].Items[0] == (VaultFileBaselineItem{}) ||
+			results[1].Items[0] == (VaultFileBaselineItem{}) {
+			t.Fatal("OWNED_BATCH_DUPLICATE_SUMMARIES_MISSING")
+		}
+		results[0].Items[0].Title = "mutated-delivered-copy"
+		if results[1].Items[0].Title == "mutated-delivered-copy" {
+			t.Fatal("OWNED_BATCH_DUPLICATE_SUMMARIES_ALIASED")
+		}
 		assertOwnedChildRead(t, parent, results[0].Token)
 	})
 }
@@ -241,19 +256,61 @@ func TestUnlockSessionWithOwnedVaultFileChildrenCancellationDrainsOnlyBatch(t *t
 	t.Cleanup(func() { vaultFileChildBeforeHandleClose = nil })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var once sync.Once
+	var opens atomic.Int32
 	vaultFileChildCandidateReady = func(*vaultfile.ScopedUnlock) {
-		once.Do(cancel)
+		if opens.Add(1) == 2 {
+			cancel()
+		}
 	}
 	t.Cleanup(func() { vaultFileChildCandidateReady = nil })
+
+	var observed bool
+	var observedCurrent []VaultFileBaselineItem
+	var observedResults []OwnedVaultFileChildResult
+	var observedResultItems [][]VaultFileBaselineItem
+	var currentNonEmpty, resultNonEmpty bool
+	vaultFileOwnedBatchUndeliveredForTest = func(current []VaultFileBaselineItem, results []OwnedVaultFileChildResult) {
+		observed = true
+		observedCurrent = current
+		observedResults = results
+		observedResultItems = make([][]VaultFileBaselineItem, len(results))
+		currentNonEmpty = len(current) > 0
+		for i := range results {
+			observedResultItems[i] = results[i].Items
+			if len(results[i].Items) > 0 {
+				resultNonEmpty = true
+			}
+		}
+	}
+	t.Cleanup(func() { vaultFileOwnedBatchUndeliveredForTest = nil })
 
 	parent, results, err := UnlockSessionWithOwnedVaultFileChildren(
 		ctx, fx.session.path, fx.password, fx.key, time.Minute, ownedBatchTargets(fx.a, b))
 	if !errors.Is(err, context.Canceled) || parent != nil || results != nil {
 		t.Fatal("OWNED_BATCH_CANCELLED_DELIVERED")
 	}
-	if batchCloses.Load() == 0 {
-		t.Fatal("OWNED_BATCH_CANCEL_DID_NOT_CLOSE_BATCH_CHILD")
+	if !observed || !currentNonEmpty || !resultNonEmpty {
+		t.Fatal("OWNED_BATCH_CANCEL_UNDELIVERED_SUMMARIES_NOT_OBSERVED")
+	}
+	if batchCloses.Load() != 2 {
+		t.Fatal("OWNED_BATCH_CANCEL_DID_NOT_JOIN_BOTH_CLOSES")
+	}
+	for _, item := range observedCurrent {
+		if item != (VaultFileBaselineItem{}) {
+			t.Fatal("OWNED_BATCH_CANCEL_CURRENT_SUMMARY_NOT_CLEARED")
+		}
+	}
+	for _, items := range observedResultItems {
+		for _, item := range items {
+			if item != (VaultFileBaselineItem{}) {
+				t.Fatal("OWNED_BATCH_CANCEL_RESULT_SUMMARY_NOT_CLEARED")
+			}
+		}
+	}
+	for _, result := range observedResults {
+		if result.Token != (VaultFileChildToken{}) || result.Items != nil {
+			t.Fatal("OWNED_BATCH_CANCEL_RESULT_OWNERSHIP_NOT_CLEARED")
+		}
 	}
 	assertOwnedChildRead(t, fx.session, siblingToken)
 	if ownedChildAt(fx.session, sibling.journal) == nil {
