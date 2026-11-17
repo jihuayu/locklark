@@ -50,9 +50,6 @@ type localVaultFileState struct {
 	// adopted child and its bounded cache summary stay alive.
 	viewSequence     uint64
 	viewVerification localVaultFileViewVerification
-	// lockWaiter is the one UI completion waiter already launched for the
-	// current lock marker. It is display-only bookkeeping, never authority.
-	lockWaiter *localVaultFileLockOperation
 
 	// Owned-session lifecycle state. It is reset on lock and never survives a
 	// parent or App generation boundary. The wrapper itself is opaque here.

@@ -170,10 +170,9 @@ func (a *App) clickLocalVaultFileLockAction() {
 		return
 	}
 	a.localVaultFiles.status = localVaultFileLockStatusLocking
-	if a.localVaultFiles.lockWaiter == op {
+	if !op.claimUIWaiter() {
 		return
 	}
-	a.localVaultFiles.lockWaiter = op
 	done := op.doneSignal()
 	dispatcher := a.dispatch
 	a.launch(func() {
@@ -184,6 +183,17 @@ func (a *App) clickLocalVaultFileLockAction() {
 	})
 }
 
+// claimUIWaiter is UI-goroutine-only scheduling. The first click for one
+// existing lock marker owns the single notify waiter; later clicks, navigation
+// or completion never reset it and never launch another waiter.
+func (op *localVaultFileLockOperation) claimUIWaiter() bool {
+	if op == nil || op.uiWaiterClaimed {
+		return false
+	}
+	op.uiWaiterClaimed = true
+	return true
+}
+
 // finishLocalVaultFileLockUI is the one late repaint guard. It never Closes,
 // grants authority or infers success from an empty cache. It publishes only the
 // controller's finite getter result for the exact still-current parent,
@@ -191,9 +201,6 @@ func (a *App) clickLocalVaultFileLockAction() {
 func (a *App) finishLocalVaultFileLockUI(op *localVaultFileLockOperation, scope localVaultFileSessionScope) {
 	if op == nil {
 		return
-	}
-	if a.localVaultFiles.lockWaiter == op {
-		a.localVaultFiles.lockWaiter = nil
 	}
 	if a.session != op.parent || a.generation != op.generation {
 		return

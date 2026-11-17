@@ -31,6 +31,10 @@ type localVaultFileLockOperation struct {
 	journalPath string
 	anchor      *localVaultFileSessionSlot
 	prepared    bool
+	// uiWaiterClaimed is UI-only scheduling bookkeeping. It is claimed once on
+	// the UI goroutine before launching at most one completion-notify waiter
+	// for this marker. It never controls the worker, finite outcome or gate.
+	uiWaiterClaimed bool
 
 	mu      sync.Mutex
 	done    bool
