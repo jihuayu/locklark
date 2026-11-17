@@ -576,7 +576,18 @@ class RecoveryReaderTests(unittest.TestCase):
 class NativeSnapshotLabelRoleTests(unittest.TestCase):
     """Pinned MyGo RoleText is ATK "label"; only fixed statuses accept it."""
 
-    STATUS_LABELS = ("恢复码未逐字匹配", "已验证本地初始版本 · 远端状态未核实")
+    STATUS_LABELS = (
+        "恢复码未逐字匹配",
+        "已验证本地初始版本 · 远端状态未核实",
+        "解锁独立文件库",
+        "显示上次验证结果",
+        "本次刷新已验证",
+        "正在锁定本地文件库",
+        "本地文件库已锁定",
+        "锁定未完成，请核查本地状态",
+        "本地文件库暂不可用，请稍后重试",
+        "完整验证失败；请重新输入",
+    )
 
     def controls(self, nodes):
         controls = native.NativeControls.__new__(native.NativeControls)
@@ -623,7 +634,7 @@ class NativeSnapshotLabelRoleTests(unittest.TestCase):
             self.assertTrue(snapshot[label][0]["enabled"])
             self.assertTrue(snapshot[label][0]["showing"])
 
-    def test_label_role_allowlist_is_exactly_the_two_statuses(self):
+    def test_label_role_allowlist_is_exactly_the_reviewed_status_set(self):
         self.assertEqual(native.LABEL_ROLE_STATUS_LABELS, frozenset(self.STATUS_LABELS))
         self.assertNotIn("Secret Key", native.LABEL_ROLE_STATUS_LABELS)
         self.assertIn("Secret Key", native.CONTROL_LABELS)
