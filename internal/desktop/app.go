@@ -59,6 +59,8 @@ type App struct {
 	quickShortcut                                          string
 	operationSequence                                      uint64
 	operation                                              *nativeOperation
+	accountUnlock                                          *accountUnlockAttempt
+	accountUnlockSequence                                  uint64
 	mutationUnknown                                        bool
 	website, generationLength                              string
 	regenerate                                             *personal.NativeLoginView
@@ -181,8 +183,10 @@ func New() *App {
 	a.importFull = true
 	return a
 }
-func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
-func (a *App) runContext(work func(context.Context) outcome) {
+func (a *App) run(work func() outcome)                             { a.runContext(func(context.Context) outcome { return work() }) }
+func (a *App) runContext(work func(context.Context) outcome)       { a.runContextKind(work, false) }
+func (a *App) runAccountUnlock(work func(context.Context) outcome) { a.runContextKind(work, true) }
+func (a *App) runContextKind(work func(context.Context) outcome, accountUnlock bool) {
 	if a.busy {
 		return
 	}
@@ -190,6 +194,10 @@ func (a *App) runContext(work func(context.Context) outcome) {
 	a.busy = true
 	a.status = "处理中…"
 	generation := a.generation
+	var attempt accountUnlockAttempt
+	if accountUnlock {
+		attempt = a.beginAccountUnlock(generation, a.operationSequence)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 	a.launch(func() {
@@ -197,10 +205,16 @@ func (a *App) runContext(work func(context.Context) outcome) {
 		cancel()
 		a.dispatch(func() {
 			if generation != a.generation {
+				if accountUnlock {
+					a.retireAccountUnlock(attempt)
+				}
 				if r.drop != nil {
 					r.drop()
 				}
 				return
+			}
+			if accountUnlock {
+				a.retireAccountUnlock(attempt)
 			}
 			a.busy = false
 			if r.err != nil {
@@ -487,6 +501,7 @@ func (a *App) Lock() {
 		}
 	}
 	a.operation = nil
+	a.accountUnlock = nil
 	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
@@ -584,7 +599,7 @@ func (a *App) unlock() {
 	profileDir, backendRoot := localVaultFilePaths(settingsPath, path)
 	launch := a.launch
 	storeSecret := func() error { return a.storeDeviceSecret(path, secret) }
-	a.runContext(func(ctx context.Context) outcome {
+	a.runAccountUnlock(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
 		refs, listErr := listLocalVaultFileRefs(profileDir, backendRoot, path)
@@ -1064,6 +1079,11 @@ func (a *App) lockView(c *ui.Context) {
 				OnSubmit(a.unlock)
 		}
 
+		if attempt, ok := a.accountUnlockCancelToken(); ok {
+			oneui.Button(c, "取消解锁", oneui.ButtonSecondary).FillWidth().OnClick(func() {
+				a.cancelAccountUnlock(attempt)
+			})
+		}
 		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "解锁", oneui.ButtonPrimary).FillWidth().Disabled(a.busy).OnClick(a.unlock)
 			oneui.Button(c, "使用"+osunlock.Label()+"解锁", oneui.ButtonSecondary).FillWidth().Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)

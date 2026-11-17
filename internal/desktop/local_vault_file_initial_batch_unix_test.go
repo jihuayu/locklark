@@ -82,6 +82,10 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 		if len(q.launches) != 1 {
 			t.Fatal("LOCAL_INITIAL_FANOUT_WORKER_NOT_LAUNCHED")
 		}
+		cancelToken, cancelPending := a.accountUnlockCancelToken()
+		if !cancelPending {
+			t.Fatal("LOCAL_INITIAL_FANOUT_CANCEL_TOKEN_MISSING")
+		}
 		q.runLaunch(t)
 		if a.session != nil || len(a.localVaultFiles.sessionSlots) != 0 {
 			t.Fatal("LOCAL_INITIAL_FANOUT_PUBLISHED_BEFORE_DISPATCH")
@@ -95,6 +99,20 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 		}
 		if len(a.localVaultFiles.refs) != 2 || len(a.localVaultFiles.sessionSlots) != 2 {
 			t.Fatal("LOCAL_INITIAL_FANOUT_AB_NOT_ADOPTED")
+		}
+		adoptedSession, adoptedGeneration := a.session, a.generation
+		adoptedOperation, adoptedBusy := a.operationSequence, a.busy
+		a.cancelAccountUnlock(cancelToken)
+		if a.session != adoptedSession || a.generation != adoptedGeneration ||
+			a.operationSequence != adoptedOperation || a.busy != adoptedBusy ||
+			len(a.localVaultFiles.sessionSlots) != 2 {
+			t.Fatal("LOCAL_INITIAL_FANOUT_ADOPTED_SESSION_CANCELED")
+		}
+		if a.accountUnlock != nil {
+			t.Fatal("LOCAL_INITIAL_FANOUT_ADOPTED_MARKER_NOT_RETIRED")
+		}
+		if _, ok := a.accountUnlockCancelToken(); ok {
+			t.Fatal("LOCAL_INITIAL_FANOUT_ADOPTED_CANCEL_STILL_AVAILABLE")
 		}
 		if a.localVaultFiles.viewVerification == localVaultFileViewFresh {
 			t.Fatal("LOCAL_INITIAL_FANOUT_CLAIMED_FRESH")
