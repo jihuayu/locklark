@@ -104,6 +104,8 @@ type localVaultFileInitialBatch struct {
 	adopted, dropRequested, draining bool
 	done                             chan struct{}
 	summary                          localVaultFileInitialDrainSummary
+	notice                           chan localVaultFileInitialDrainSummary
+	noticeOpen                       bool
 }
 
 func clearLocalVaultFileInitialRows(rows []personal.Row) {
@@ -156,6 +158,7 @@ func (b *localVaultFileInitialBatch) takeForAdoption() bool {
 	if b.adopted || b.dropRequested || b.draining {
 		return false
 	}
+	b.retireDrainNoticeLocked()
 	b.adopted = true
 	b.parent = nil
 	b.results = nil
@@ -188,6 +191,49 @@ func (b *localVaultFileInitialBatch) drop(launch func(func())) {
 // drain closes only the exact wrappers/parent owned by this unpublished batch.
 // Wrapper Close is synchronous and waits for the real child close barrier;
 // parent Lock follows. It never touches an older or newer independent parent.
+func (b *localVaultFileInitialBatch) drainNotice() (<-chan localVaultFileInitialDrainSummary, bool) {
+	if b == nil {
+		return nil, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.adopted || b.notice != nil {
+		return nil, false
+	}
+	if b.summary.state == localVaultFileInitialDrainComplete ||
+		b.summary.state == localVaultFileInitialDrainInvalid {
+		notice := make(chan localVaultFileInitialDrainSummary, 1)
+		notice <- b.summary
+		close(notice)
+		b.notice = notice
+		return notice, true
+	}
+	notice := make(chan localVaultFileInitialDrainSummary, 1)
+	b.notice = notice
+	b.noticeOpen = true
+	return notice, true
+}
+
+func (b *localVaultFileInitialBatch) publishDrainNoticeLocked() {
+	if b.notice == nil || !b.noticeOpen {
+		return
+	}
+	select {
+	case b.notice <- b.summary:
+	default:
+	}
+	close(b.notice)
+	b.noticeOpen = false
+}
+
+func (b *localVaultFileInitialBatch) retireDrainNoticeLocked() {
+	if b.notice == nil || !b.noticeOpen {
+		return
+	}
+	close(b.notice)
+	b.noticeOpen = false
+}
+
 func (b *localVaultFileInitialBatch) drainSummary() localVaultFileInitialDrainSummary {
 	if b == nil {
 		return localVaultFileInitialDrainSummary{state: localVaultFileInitialDrainInvalid}
@@ -259,6 +305,7 @@ func (b *localVaultFileInitialBatch) drain() {
 	b.candidateRefs = nil
 	b.rows = nil
 	b.summary = localVaultFileInitialDrainResult(closedWrappers, parentLocked, refsCleared, rowsCleared)
+	b.publishDrainNoticeLocked()
 	close(b.done)
 	b.mu.Unlock()
 
