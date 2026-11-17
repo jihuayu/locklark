@@ -413,6 +413,7 @@ _SCHEMA_KEYS = {
     "privacy.checkHibp",
     "appearance.theme",
     "appearance.interfaceDensity",
+    "appearance.accent",
     "app.keepInTray",
     "app.defaultVaultForSaving",
 }

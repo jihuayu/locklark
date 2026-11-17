@@ -108,6 +108,10 @@ func newV2State() v2State {
 // resetV2 drops every draft, revealed value and selection. Settings are
 // deliberately not part of v2State and therefore survive a lock.
 func (a *App) resetV2() {
+	if a.v2.draft != nil {
+		clear(a.v2.draft.SSHSeed)
+		clear(a.v2.draft.SSHPublicKey)
+	}
 	a.v2 = newV2State()
 }
 

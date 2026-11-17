@@ -41,6 +41,8 @@ func (a *App) runNative(work func(*personal.MutationGate) nativeResult, apply fu
 	op := &nativeOperation{g, a.generation}
 	a.operation = op
 	a.busy = true
+	a.busyImmediate = true
+	a.busySince = time.Now()
 	a.status = "处理中…"
 	a.launch(func() {
 		r := work(g)
@@ -52,6 +54,8 @@ func (a *App) runNative(work func(*personal.MutationGate) nativeResult, apply fu
 				return
 			}
 			a.busy = false
+			a.busyImmediate = false
+			a.busySince = time.Time{}
 			if r.err != nil && r.delivery != nil {
 				a.launch(func() { s.DiscardOTPDelivery(r.delivery) })
 			}

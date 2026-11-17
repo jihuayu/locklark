@@ -314,12 +314,12 @@ func TestFirstLaunchShowsOnboardingGuideWithoutCreatingVault(t *testing.T) {
 	}
 }
 
-func TestForgetDeviceRequiresMasterPasswordAndKeepsVaultFile(t *testing.T) {
+func TestForgetDeviceUsesTwoStepConfirmationAndKeepsVaultFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOME", home)
 
-	a, password, secret := createDeviceSecretTestVault(t)
+	a, _, secret := createDeviceSecretTestVault(t)
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
 	a.deviceSecrets = newFakeDeviceSecretStore()
 	system := newFakeSystemUnlockStore()
@@ -332,25 +332,32 @@ func TestForgetDeviceRequiresMasterPasswordAndKeepsVaultFile(t *testing.T) {
 	}
 	vaultPath := a.path
 
-	a.forgetPassword = "wrong-password"
-	a.forgetDeviceWithPassword()
-	if a.onboarding {
-		t.Fatal("forgetDeviceWithPassword proceeded with wrong master password")
+	tester := ui.NewTester(a.lockView, 640, 720)
+	if err := tester.Click("退出当前设备…"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.confirmForgetDevice || a.onboarding {
+		t.Fatalf("step 1 did not open confirmation cleanly: confirm=%v onboarding=%v", a.confirmForgetDevice, a.onboarding)
 	}
 	if _, err := a.loadDeviceSecret(vaultPath); err != nil {
-		t.Fatalf("device secret deleted despite wrong password: %v", err)
+		t.Fatalf("device secret deleted before step 2 confirmation: %v", err)
 	}
-	if a.settingsSnapshot().VaultPath != vaultPath {
-		t.Fatalf("VaultPath cleared despite wrong password: %q", a.settingsSnapshot().VaultPath)
+	if a.settingsSnapshot().VaultPath != vaultPath || system.deleteCalls != 0 {
+		t.Fatal("step 1 prematurely cleared binding or quick unlock")
 	}
-	if system.deleteCalls != 0 {
-		t.Fatalf("system unlock deleted despite wrong password: %d", system.deleteCalls)
+	tester.Frame()
+	if !tester.HasText("确认退出当前设备") || !tester.HasText("取消退出") {
+		t.Fatal("two-step confirmation actions missing")
+	}
+	if tester.HasText("验证主密码") || tester.HasText("应急 Secret Key") {
+		t.Fatal("two-step confirmation unexpectedly rendered password or Secret Key fields")
 	}
 
-	a.forgetPassword = password
-	a.forgetDeviceWithPassword()
-	if !a.onboarding {
-		t.Fatalf("forgetDeviceWithPassword did not return to onboarding: %s", a.status)
+	if err := tester.Click("确认退出当前设备"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.onboarding || a.confirmForgetDevice {
+		t.Fatalf("step 2 did not finish forget-device cleanly: status=%q onboarding=%v confirm=%v", a.status, a.onboarding, a.confirmForgetDevice)
 	}
 	if a.settingsSnapshot().VaultPath != "" {
 		t.Fatalf("VaultPath was not cleared after forget device: %q", a.settingsSnapshot().VaultPath)

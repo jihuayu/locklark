@@ -69,9 +69,9 @@ func Label() string {
 func Description() string {
 	switch Biometry() {
 	case "Touch ID":
-		return "系统钥匙串要求 Touch ID 或系统密码验证，仅存于本设备。24 小时后需完整解锁。"
+		return "系统钥匙串要求 Touch ID 或系统密码验证，仅存于本设备。到期后需使用主密码完整解锁。"
 	case "系统密码":
-		return "此 Mac 当前未检测到可用的 Touch ID；系统钥匙串使用系统密码验证，仅存于本设备。24 小时后需完整解锁。"
+		return "此 Mac 当前未检测到可用的 Touch ID；系统钥匙串使用系统密码验证，仅存于本设备。到期后需使用主密码完整解锁。"
 	default:
 		return "此 Mac 当前没有可用的系统用户验证；系统快捷解锁不可用，请使用完整解锁。"
 	}

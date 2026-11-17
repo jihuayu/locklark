@@ -3,12 +3,13 @@ package desktop
 import (
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -73,6 +74,38 @@ func stringHex(value []byte) string {
 	return string(out)
 }
 
+func (a *App) invalidateDeviceSecretCache() {
+	a.deviceSecretMu.Lock()
+	a.deviceSecretCachePath = ""
+	a.deviceSecretCached = false
+	a.deviceSecretPresent = false
+	a.deviceSecretMu.Unlock()
+}
+
+func (a *App) hasDeviceSecretCached(path string) bool {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || a.deviceSecrets == nil {
+		return false
+	}
+	a.deviceSecretMu.Lock()
+	if a.deviceSecretCached && a.deviceSecretCachePath == trimmed {
+		present := a.deviceSecretPresent
+		a.deviceSecretMu.Unlock()
+		return present
+	}
+	a.deviceSecretMu.Unlock()
+
+	_, err := a.loadDeviceSecret(trimmed)
+	present := err == nil
+
+	a.deviceSecretMu.Lock()
+	a.deviceSecretCachePath = trimmed
+	a.deviceSecretCached = true
+	a.deviceSecretPresent = present
+	a.deviceSecretMu.Unlock()
+	return present
+}
+
 func (a *App) loadDeviceSecret(path string) (string, error) {
 	if a.deviceSecrets == nil || strings.TrimSpace(path) == "" {
 		return "", errors.New("device Secret Key is unavailable")
@@ -96,39 +129,47 @@ func (a *App) storeDeviceSecret(path, secret string) error {
 	if _, err := personal.ParseSecret(secret); err != nil {
 		return err
 	}
-	return a.deviceSecrets.Set(deviceSecretKey(path), []byte(secret))
+	err := a.deviceSecrets.Set(deviceSecretKey(path), []byte(secret))
+	a.invalidateDeviceSecretCache()
+	return err
 }
 
 func (a *App) deleteDeviceSecret(path string) error {
 	if a.deviceSecrets == nil || strings.TrimSpace(path) == "" {
 		return errors.New("device Secret Key store is unavailable")
 	}
-	return a.deviceSecrets.Delete(deviceSecretKey(path))
+	err := a.deviceSecrets.Delete(deviceSecretKey(path))
+	a.invalidateDeviceSecretCache()
+	return err
 }
 
-func (a *App) forgetDeviceNeedsSecret() bool {
-	path := strings.TrimSpace(a.path)
-	if path == "" {
-		return false
+func nextAvailableVaultPath(defaultPath string) string {
+	trimmed := strings.TrimSpace(defaultPath)
+	if trimmed == "" {
+		return ""
 	}
-	exists, err := vaultFileExists(path)
-	if err != nil {
-		// A stat error is not evidence that the vault is absent. Keep the
-		// emergency Secret Key field available; submission will abort before
-		// any credential or binding change.
-		return true
+	if _, err := os.Stat(trimmed); errors.Is(err, os.ErrNotExist) {
+		return trimmed
 	}
-	if !exists {
-		return false
+	dir := filepath.Dir(trimmed)
+	ext := filepath.Ext(trimmed)
+	if ext == "" {
+		ext = ".ll"
 	}
-	_, err = a.loadDeviceSecret(path)
-	return err != nil
+	stem := strings.TrimSuffix(filepath.Base(trimmed), ext)
+	for i := 2; i <= 100; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
+		if _, err := os.Stat(candidate); errors.Is(err, os.ErrNotExist) {
+			return candidate
+		}
+	}
+	return trimmed
 }
 
-// forgetDeviceWithPassword verifies the vault master password before removing
-// this device's saved Secret Key, system quick unlock, and VaultPath binding.
-// The .ll vault file on disk is never deleted.
-func (a *App) forgetDeviceWithPassword() {
+// forgetCurrentDevice unbinds this device after a two-step confirmation by
+// removing quick unlock, the device Secret Key (if present), and VaultPath
+// binding. The .ll vault file on disk is never deleted.
+func (a *App) forgetCurrentDevice() {
 	if a.busy {
 		return
 	}
@@ -137,60 +178,25 @@ func (a *App) forgetDeviceWithPassword() {
 		a.status = "当前没有绑定的金库文件"
 		return
 	}
-	vaultExists, statErr := vaultFileExists(path)
-	if statErr != nil {
-		a.forgetPassword = ""
+	a.forgetPassword = ""
+	if _, statErr := vaultFileExists(path); statErr != nil {
 		a.status = forgetDeviceStatError
 		return
 	}
-	if vaultExists && a.forgetPassword == "" {
-		a.status = "请输入当前金库主密码以确认退出当前设备"
-		return
-	}
-	pw := []byte(a.forgetPassword)
-	typedSecret := strings.TrimSpace(a.secret)
-	a.forgetPassword = ""
 	sysStore := a.systemStore
 
 	a.run(func() outcome {
-		defer clear(pw)
-		if vaultExists {
-			secret, loadErr := a.loadDeviceSecret(path)
-			if loadErr != nil {
-				secret = typedSecret
-			}
-			if secret == "" {
-				return outcome{err: errors.New("当前设备未保存 Secret Key；请输入应急文件中的 Secret Key 与主密码以确认")}
-			}
-			key, err := personal.ParseSecret(secret)
-			if err != nil {
-				return outcome{err: err}
-			}
-			defer clear(key)
-			s, err := personal.UnlockSession(path, pw, key, time.Minute)
-			if err != nil {
-				return outcome{err: err}
-			}
-			s.Lock()
-		}
-
 		// Cleanup is ordered and intentionally not transactional. Remove quick
 		// unlock first, then the device Secret Key, then the persisted binding.
 		// This keeps the UI bound on every failure and preserves the local
-		// Secret Key when quick-unlock removal fails. A later failure can leave
-		// earlier cleanup applied: after a device-key failure quick unlock is
-		// gone but the Secret Key and binding remain; after a binding-save
-		// failure both credentials may be gone while the UI restores the old
-		// in-memory binding and reports incomplete cleanup rather than success.
-		// A late settings-file error can already have replaced the file, so a
-		// retry or relaunch may still be required. The .ll file is never touched.
+		// Secret Key when quick-unlock removal fails. The .ll file is never touched.
 		if sysStore != nil {
 			// An already-absent quick-unlock item is a successful removal.
 			if err := personal.DisableSystemUnlock(path, sysStore); err != nil && !errors.Is(err, osunlock.ErrNotFound) {
 				return outcome{err: errForgetDeviceCleanup}
 			}
 		}
-		if err := a.deleteDeviceSecret(path); err != nil {
+		if err := a.deleteDeviceSecret(path); err != nil && !errors.Is(err, mygo.ErrSecretNotFound) && !errors.Is(err, os.ErrNotExist) {
 			return outcome{err: errForgetDeviceCleanup}
 		}
 		return outcome{apply: func() {
@@ -198,13 +204,19 @@ func (a *App) forgetDeviceWithPassword() {
 			// the old binding if the owned settings file cannot be saved so the
 			// UI remains truthfully bound and the operation can be retried.
 			previousSettings := a.settings
+			prevExpired := a.systemUnlockExpired
+			a.settings.SystemUnlockEnabled = false
+			a.settings.SystemUnlockExpiresAt = 0
+			a.systemUnlockExpired = false
 			if err := a.SetVaultPath(""); err != nil {
 				a.settings = previousSettings
+				a.systemUnlockExpired = prevExpired
 				a.status = forgetDeviceCleanupError
 				return
 			}
 			a.Lock()
-			a.path = DefaultVaultPath()
+			a.invalidateDeviceSecretCache()
+			a.path = nextAvailableVaultPath(DefaultVaultPath())
 			a.confirmForgetDevice = false
 			a.showSecretFallback = false
 			a.onboarding = true
@@ -216,32 +228,21 @@ func (a *App) forgetDeviceWithPassword() {
 
 func (a *App) forgetDeviceConfirmView(c *ui.Context) {
 	t := c.Theme()
-	needsSecret := a.forgetDeviceNeedsSecret()
-	ui.Column(c).FillWidth().Border(1, t.Danger).Radius(t.Radius).Background(t.Danger.Alpha(.06)).
-		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+	ui.Column(c).FillWidth().Border(1, t.Danger.Alpha(.45)).Radius(t.Radius*1.25).Background(t.Danger.Alpha(.06)).
+		Padding(t.Space(3.5)).Gap(t.Space(2.5)).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
 			oneui.Text(c, "退出当前设备？").Bold().TextColor(t.Danger).Grow(1)
-			oneui.Badge(c, "保留 .ll 文件", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+			onevraPill(c, "保留 .ll 文件", t.Warning)
 		})
-		oneui.Text(c, "退出后会删除此设备保存的 Secret Key、停用系统快捷解锁，并解除当前设备与该金库路径的绑定；磁盘上的 .ll 金库文件不会被删除。重新绑定此设备时需要使用应急文件中的 Secret Key。").
+		oneui.Text(c, "确认后会移除此设备保存的 Secret Key、停用系统快捷解锁，并解除当前设备与该金库路径的绑定；磁盘上的 .ll 金库文件不会被删除。重新绑定此金库时需使用主密码与应急文件中的 Secret Key。").
 			FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
-		pwBox := oneui.TextBox(c, &a.forgetPassword, oneui.TextBoxOptions{}).
-			Label("验证主密码").Placeholder("输入当前金库主密码以确认").Password().Disabled(a.busy)
-		if needsSecret {
-			oneui.TextBox(c, &a.secret, oneui.TextBoxOptions{}).
-				Label("应急 Secret Key").Placeholder("LL1-…（此设备缺少本机 Secret Key）").Password().Disabled(a.busy).
-				OnSubmit(a.forgetDeviceWithPassword)
-		} else {
-			pwBox.OnSubmit(a.forgetDeviceWithPassword)
-		}
-		confirmDisabled := a.busy || a.forgetPassword == "" || (needsSecret && strings.TrimSpace(a.secret) == "")
 		ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "确认退出当前设备", oneui.ButtonOutline).
 				TextColor(t.Danger).
-				Disabled(confirmDisabled).
-				OnClick(a.forgetDeviceWithPassword)
-			oneui.Button(c, "取消退出", oneui.ButtonOutline).
-				Disabled(a.busy).
+				Disabled(a.uiBusy(c)).
+				OnClick(a.forgetCurrentDevice)
+			oneui.Button(c, "取消退出", oneui.ButtonGhost).
+				Disabled(a.uiBusy(c)).
 				OnClick(func() {
 					a.confirmForgetDevice = false
 					a.forgetPassword = ""

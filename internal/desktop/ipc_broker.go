@@ -855,30 +855,28 @@ func (a *App) renderCLIApprovalPopup(c *ui.Context, p *cliRunPending) {
 		}
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
 			iconBox := ui.Box(c).Size(t.Space(9), t.Space(9)).Shrink(0).Radius(t.Space(2.25)).
-				Background(t.Accent.Alpha(.14)).AlignItems(ui.Center).Justify(ui.Center)
+				Background(t.Warning.Alpha(.14)).AlignItems(ui.Center).Justify(ui.Center)
 			iconBox.Children(func() {
-				oneui.Icon(c, lucide.SquareTerminal()).Size(t.Space(4.5), t.Space(4.5)).TextColor(t.Accent)
+				oneui.Icon(c, lucide.SquareTerminal()).Size(t.Space(4.5), t.Space(4.5)).TextColor(t.Warning)
 			})
 			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
-				oneui.Text(c, "批准本地 CLI 凭据请求").FontSize(t.Rem(1.18)).Bold().TextColor(t.Text)
+				oneui.Text(c, "批准本地 CLI 凭据请求").FontSize(t.Rem(1.12)).Bold().TextColor(t.Text)
 				oneui.Text(c, "调用进程：PID "+uintString(p.peer.PID)+" · "+p.peer.Process).FontSize(t.Rem(.78)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
 			})
-			oneui.Badge(c, "单次授权", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+			onevraPill(c, "单次授权", t.Warning)
 		})
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(2.5)).Gap(t.Space(1)).Children(func() {
-			vaultName := vaultDisplayBaseName(p.request.VaultPath)
-			if vaultName == "" {
-				vaultName = p.request.VaultPath
-			}
-			oneui.Text(c, "绑定金库："+vaultName+" · 请求用户："+p.peer.User).FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-			oneui.Text(c, "请求字段槽位 ("+intString(len(p.request.Targets))+")：").FontSize(t.Rem(.78)).Bold().TextColor(t.Text)
+		vaultName := vaultDisplayBaseName(p.request.VaultPath)
+		if vaultName == "" {
+			vaultName = p.request.VaultPath
+		}
+		approvalFacts(c, func() {
+			approvalFact(c, "绑定金库："+vaultName+" · 请求用户："+p.peer.User)
+			approvalMeta(c, "请求字段槽位 ("+intString(len(p.request.Targets))+")：")
 			for _, target := range p.request.Targets {
-				oneui.Text(c, "• "+target.Slot+" ← "+target.Field+" · "+shortDigest(target.ID)).FontSize(t.Rem(.76)).TextColor(t.Text)
+				approvalFact(c, "• "+target.Slot+" ← "+target.Field+" · "+shortDigest(target.ID))
 			}
 		})
-		oneui.Text(c, "批准后，以上固定字段将一次性交给本机 CLI 进程；主密码与 Secret Key 永不交付。").
-			FontSize(t.Rem(.76)).Bold().TextColor(t.Warning).Wrap()
+		approvalNotice(c, "批准后，以上固定字段将一次性交给本机 CLI 进程；主密码与 Secret Key 永不交付。", t.Warning)
 		ui.Spacer(c)
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "打开主窗口", oneui.ButtonGhost).OnClick(func() {
@@ -921,28 +919,33 @@ func (a *App) cliApprovalView(c *ui.Context) {
 		return
 	}
 	t := c.Theme()
-	ui.Column(c).Width(640).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
-		ui.Text(c, cliRunApprovalTitle).FontSize(24).Bold().TextColor(t.Text)
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
-			for _, line := range summary.Peer {
-				ui.Text(c, line).FontSize(12).TextColor(t.TextMuted)
-			}
-		})
-		for _, section := range summary.Sections {
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(2)).Gap(4).Children(func() {
-				ui.Text(c, section.Heading).FontSize(13).Bold().TextColor(t.Text)
-				for _, line := range section.Lines {
-					ui.Text(c, line).FontSize(12).TextColor(t.Text).Selectable()
+	approvalCentered(c, func() {
+		approvalCard(c, lucide.SquareTerminal(), t.Warning, cliRunApprovalTitle, func() {
+			approvalFacts(c, func() {
+				for _, line := range summary.Peer {
+					approvalFact(c, line)
 				}
 			})
-		}
-		for _, warning := range summary.Warnings {
-			ui.Text(c, warning).FontSize(13).Bold().TextColor(t.Warning)
-		}
-		ui.Row(c).Gap(8).Wrap().Children(func() {
-			approve, refuse := (*App)(a).cliRunHandlers(pending, snapshot)
-			ui.PrimaryButton(c, cliRunApproveLabel).OnClick(approve)
-			ui.Button(c, cliRunRefuseLabel).OnClick(refuse)
+			for _, section := range summary.Sections {
+				section := section
+				onevraGroup(c, section.Heading, func(row func(func())) {
+					row(func() {
+						ui.Column(c).FillWidth().Gap(t.Space(.5)).Children(func() {
+							for _, line := range section.Lines {
+								oneui.Text(c, line).FontSize(t.Rem(.78)).TextColor(t.Text).Selectable().Wrap()
+							}
+						})
+					})
+				})
+			}
+			for _, warning := range summary.Warnings {
+				approvalNotice(c, warning, t.Warning)
+			}
+			approvalActions(c, func() {
+				approve, refuse := (*App)(a).cliRunHandlers(pending, snapshot)
+				oneui.Button(c, cliRunApproveLabel, oneui.ButtonPrimary).OnClick(approve)
+				oneui.Button(c, cliRunRefuseLabel, oneui.ButtonOutline).OnClick(refuse)
+			})
 		})
 	})
 }
@@ -1388,26 +1391,27 @@ func (a *App) browserPairView(c *ui.Context) {
 	if label == "" || label == "auto" {
 		label = "Chromium / Firefox"
 	}
-	ui.Column(c).Width(680).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
-		ui.Text(c, "批准浏览器连接桌面金库").FontSize(24).Bold().TextColor(t.Text)
-		ui.Text(c, "此请求来自本机同一用户的进程。请核对系统认证的调用进程与浏览器扩展身份；浏览器声明不能替代本次授权。").FontSize(13).TextColor(t.TextMuted)
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
-			ui.Text(c, "本机用户："+p.request.Peer.User).FontSize(12).TextColor(t.TextMuted)
-			ui.Text(c, "调用进程：PID "+uintString(p.request.Peer.PID)+" · "+p.request.Peer.Process).FontSize(12).TextColor(t.TextMuted)
-			ui.Text(c, "声明的浏览器："+label).FontSize(13).TextColor(t.Text)
-			ui.Text(c, "声明的扩展来源："+p.request.Origin).FontSize(12).TextColor(t.TextMuted)
-		})
-		ui.Text(c, "启用快捷填充：你显式授权本连接在 15 分钟内执行 V2 列表/详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目新建/编辑/状态/恢复、暂存保存、附件写入，以及验证码填充和保存登录，不再逐次弹窗。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 登录/创建/信号和跨源或资料字段填充同样仍会逐次确认。").FontSize(13).TextColor(t.Text)
-		ui.Text(c, "逐次确认：V2 列表仍可直接显示标题和公开元数据用于选择；条目详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目/附件写入、验证码填充和保存登录都会逐个回到此窗口批准。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 其他操作和资料填充同样逐次确认。锁库、断连或到期后两种模式都失效。").FontSize(13).TextColor(t.TextMuted)
-		ui.Row(c).Gap(8).Wrap().Children(func() {
-			ui.PrimaryButton(c, "连接并启用快捷填充").OnClick(func() {
-				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true, QuickFill: true})
+	approvalCentered(c, func() {
+		approvalCard(c, lucide.Globe(), t.Accent, "批准浏览器连接桌面金库", func() {
+			approvalNote(c, "此请求来自本机同一用户的进程。请核对系统认证的调用进程与浏览器扩展身份；浏览器声明不能替代本次授权。")
+			approvalOrigin(c, "声明的浏览器："+label)
+			approvalFacts(c, func() {
+				approvalFact(c, "本机用户："+p.request.Peer.User)
+				approvalFact(c, "调用进程：PID "+uintString(p.request.Peer.PID)+" · "+p.request.Peer.Process)
+				approvalFact(c, "声明的扩展来源："+p.request.Origin)
 			})
-			ui.PrimaryButton(c, "确认连接（每次敏感操作需批准）").OnClick(func() {
-				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true})
-			})
-			ui.Button(c, "拒绝连接").OnClick(func() {
-				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{})
+			approvalNote(c, "启用快捷填充：你显式授权本连接在 15 分钟内执行 V2 列表/详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目新建/编辑/状态/恢复、暂存保存、附件写入，以及验证码填充和保存登录，不再逐次弹窗。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 登录/创建/信号和跨源或资料字段填充同样仍会逐次确认。")
+			approvalMeta(c, "逐次确认：V2 列表仍可直接显示标题和公开元数据用于选择；条目详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目/附件写入、验证码填充和保存登录都会逐个回到此窗口批准。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 其他操作和资料填充同样逐次确认。锁库、断连或到期后两种模式都失效。")
+			approvalActions(c, func() {
+				oneui.Button(c, "连接并启用快捷填充", oneui.ButtonPrimary).OnClick(func() {
+					a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true, QuickFill: true})
+				})
+				oneui.Button(c, "确认连接（每次敏感操作需批准）", oneui.ButtonSecondary).OnClick(func() {
+					a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true})
+				})
+				oneui.Button(c, "拒绝连接", oneui.ButtonOutline).OnClick(func() {
+					a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{})
+				})
 			})
 		})
 	})

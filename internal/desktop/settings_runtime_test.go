@@ -1,7 +1,9 @@
 package desktop
 
 import (
+	"encoding/json"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -507,5 +509,187 @@ func TestRevealPasswordsDoesNotFetchSecretsOnListing(t *testing.T) {
 	}
 	if a.v2.rows[0].ID != id || strings.Contains(a.status, "secret-value") {
 		t.Fatal("listing changed or disclosed the item")
+	}
+}
+
+func TestSystemUnlockExpiryPresetsAndAutoRenewOnMasterPasswordUnlock(t *testing.T) {
+	defaults := DefaultSettings()
+	if defaults.SystemUnlockExpiry != "14d" || !defaults.SystemUnlockAutoRenew {
+		t.Fatalf("DefaultSettings systemUnlock = expiry:%q autoRenew:%v, want 14d / true", defaults.SystemUnlockExpiry, defaults.SystemUnlockAutoRenew)
+	}
+
+	// Legacy JSON missing systemUnlock fields inherits defaults, while explicit false is preserved.
+	legacyPath := filepath.Join(t.TempDir(), "legacy-settings.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"security.autolock.minutes":5,"security.clipboard.clearAfterSeconds":30}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadSettings(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SystemUnlockExpiry != "14d" || !loaded.SystemUnlockAutoRenew {
+		t.Fatalf("legacy LoadSettings = expiry:%q autoRenew:%v, want 14d / true", loaded.SystemUnlockExpiry, loaded.SystemUnlockAutoRenew)
+	}
+	explicitOffPath := filepath.Join(t.TempDir(), "off-settings.json")
+	if err := os.WriteFile(explicitOffPath, []byte(`{"security.autolock.minutes":5,"security.clipboard.clearAfterSeconds":30,"security.systemUnlock.autoRenew":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loadedOff, err := LoadSettings(explicitOffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedOff.SystemUnlockAutoRenew {
+		t.Fatal("explicit false autoRenew was overwritten by default")
+	}
+
+	// Non-default persisted durations (including explicit 0) must survive SaveSettings + LoadSettings.
+	roundTripPath := filepath.Join(t.TempDir(), "roundtrip-settings.json")
+	custom := DefaultSettings()
+	custom.AutoLockMinutes = 0
+	custom.IdleTimeout = 0
+	custom.ClipboardClearSeconds = 90
+	custom.ClipboardClearTimeout = 90 * time.Second
+	if err := SaveSettings(roundTripPath, custom); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadSettings(roundTripPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.AutoLockMinutes != 0 || reloaded.IdleTimeout != 0 {
+		t.Fatalf("round-trip AutoLockMinutes = %d (%v), want 0", reloaded.AutoLockMinutes, reloaded.IdleTimeout)
+	}
+	if reloaded.ClipboardClearSeconds != 90 || reloaded.ClipboardClearTimeout != 90*time.Second {
+		t.Fatalf("round-trip ClipboardClearSeconds = %d (%v), want 90 (90s)", reloaded.ClipboardClearSeconds, reloaded.ClipboardClearTimeout)
+	}
+
+	customZero := custom
+	customZero.AutoLockMinutes = 15
+	customZero.IdleTimeout = 15 * time.Minute
+	customZero.ClipboardClearSeconds = 0
+	customZero.ClipboardClearTimeout = 0
+	if err := SaveSettings(roundTripPath, customZero); err != nil {
+		t.Fatal(err)
+	}
+	reloadedZero, err := LoadSettings(roundTripPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedZero.AutoLockMinutes != 15 || reloadedZero.IdleTimeout != 15*time.Minute {
+		t.Fatalf("round-trip AutoLockMinutes = %d (%v), want 15 (15m)", reloadedZero.AutoLockMinutes, reloadedZero.IdleTimeout)
+	}
+	if reloadedZero.ClipboardClearSeconds != 0 || reloadedZero.ClipboardClearTimeout != 0 {
+		t.Fatalf("round-trip ClipboardClearSeconds = %d (%v), want 0", reloadedZero.ClipboardClearSeconds, reloadedZero.ClipboardClearTimeout)
+	}
+
+	vaultPath := filepath.Join(t.TempDir(), "quick.ll")
+	key := make([]byte, 16)
+	for i := range key {
+		key[i] = 9
+	}
+	if err := personal.Create(vaultPath, "fixture", key); err != nil {
+		t.Fatal(err)
+	}
+	secret := personal.FormatSecret(key)
+
+	a := New()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	a.path = vaultPath
+	a.systemStore = &desktopKnowledgeStore{}
+	a.launch = func(f func()) { f() }
+	a.dispatch = func(f func()) { f() }
+
+	if err := a.SetSystemUnlockExpiry("30d"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetSystemUnlockExpiry("never"); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{"", " ", "25h", "forever"} {
+		if err := a.SetSystemUnlockExpiry(invalid); err == nil {
+			t.Fatalf("SetSystemUnlockExpiry(%q) succeeded unexpectedly", invalid)
+		}
+	}
+	if got := a.settingsSnapshot().SystemUnlockExpiry; got != "never" {
+		t.Fatalf("invalid SetSystemUnlockExpiry mutated setting to %q", got)
+	}
+
+	if err := a.SetSystemUnlockExpiry("7d"); err != nil {
+		t.Fatal(err)
+	}
+	a.password = "fixture"
+	a.secret = secret
+	a.unlock()
+	if a.session == nil {
+		t.Fatal("initial master unlock failed")
+	}
+	if err := a.session.EnableSystemUnlockFor(a.systemStore, 7*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an expired enrollment while keeping Enabled + AutoRenew = true.
+	past := time.Now().Add(-time.Hour)
+	a.markSystemUnlockEnrolled(7*24*time.Hour, past)
+	a.systemUnlockExpired = true
+	a.Lock()
+
+	a.password = "fixture"
+	a.secret = secret
+	a.unlock()
+	if a.session == nil {
+		t.Fatal("master unlock during auto-renew failed")
+	}
+	if a.systemUnlockExpired {
+		t.Fatal("systemUnlockExpired remained true after auto-renew")
+	}
+	if !strings.Contains(a.status, "系统快捷解锁已自动续期") {
+		t.Fatalf("unlock status %q missing auto-renew confirmation", a.status)
+	}
+	snap := a.settingsSnapshot()
+	if snap.SystemUnlockExpiresAt <= time.Now().Add(6*24*time.Hour).Unix() {
+		t.Fatalf("SystemUnlockExpiresAt = %d, expected ~7 days in future", snap.SystemUnlockExpiresAt)
+	}
+
+	// Quick unlock works with the renewed capsule, and cannot itself renew/enroll.
+	a.Lock()
+	a.systemUnlock()
+	if a.session == nil {
+		t.Fatal("systemUnlock with renewed capsule failed")
+	}
+	if a.session.CanEnableSystemUnlock() {
+		t.Fatal("quick-unlocked session must not report CanEnableSystemUnlock()")
+	}
+
+	// Disabling auto-renew suppresses renewal on subsequent master-password unlock.
+	if err := a.SetSystemUnlockAutoRenew(false); err != nil {
+		t.Fatal(err)
+	}
+	a.settings.SystemUnlockExpiresAt = past.Unix()
+	_ = a.SaveSettings()
+	a.systemUnlockExpired = true
+	a.Lock()
+	a.password = "fixture"
+	a.secret = secret
+	a.unlock()
+	if a.session == nil {
+		t.Fatal("master unlock with auto-renew disabled failed")
+	}
+	if strings.Contains(a.status, "系统快捷解锁已自动续期") {
+		t.Fatalf("auto-renew ran even when disabled: %q", a.status)
+	}
+	if a.settingsSnapshot().SystemUnlockExpiresAt != past.Unix() {
+		t.Fatal("SystemUnlockExpiresAt changed when auto-renew was disabled")
+	}
+	a.Lock()
+
+	rawSaved, err := os.ReadFile(a.settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk map[string]any
+	if err := json.Unmarshal(rawSaved, &disk); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := disk["security.systemUnlock.autoRenew"].(bool); !ok || v {
+		t.Fatalf("persisted security.systemUnlock.autoRenew = %v (present=%v), want false", disk["security.systemUnlock.autoRenew"], ok)
 	}
 }

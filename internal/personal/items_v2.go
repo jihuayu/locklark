@@ -59,6 +59,7 @@ type ItemSummary struct {
 	Attachments  int                `json:"attachments,omitempty"`
 	TrashedAt    *time.Time         `json:"trashed_at,omitempty"`
 	UpdatedAt    int64              `json:"updated_at,omitempty"`
+	CustomIcon   string             `json:"-"`
 }
 
 // ItemDetail is the native-session view of a single item.
@@ -695,11 +696,42 @@ func itemSubtitle(it vault.Item) string {
 	return ""
 }
 
+const (
+	internalMetaSectionID = "_locklark_meta"
+	internalIconFieldID   = "_locklark_icon"
+	maxCustomIconBytes    = 32768
+)
+
+func extractItemCustomIcon(sections []vault.ItemSection) string {
+	for _, s := range sections {
+		if !strings.EqualFold(s.ID, internalMetaSectionID) {
+			continue
+		}
+		for _, f := range s.Fields {
+			if !strings.EqualFold(f.ID, internalIconFieldID) {
+				continue
+			}
+			if f.Protected || f.Type == vault.FieldTypeConcealed || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP {
+				continue
+			}
+			v := strings.TrimSpace(f.Value)
+			if len(v) > maxCustomIconBytes {
+				return ""
+			}
+			return v
+		}
+	}
+	return ""
+}
+
 func hasOTPField(it vault.Item) bool {
 	if it.OTP != "" {
 		return true
 	}
 	for _, s := range it.Sections {
+		if strings.EqualFold(s.ID, internalMetaSectionID) {
+			continue
+		}
 		for _, f := range s.Fields {
 			if f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP {
 				return true
@@ -742,6 +774,7 @@ func itemSummary(it vault.Item, revision string) ItemSummary {
 		Attachments:  attachments,
 		TrashedAt:    it.TrashedAt,
 		UpdatedAt:    it.UpdatedAt,
+		CustomIcon:   extractItemCustomIcon(it.Sections),
 	}
 }
 
@@ -858,6 +891,9 @@ func itemMatchesQuery(it vault.Item, query string) bool {
 		}
 	}
 	for _, s := range it.Sections {
+		if strings.EqualFold(s.ID, internalMetaSectionID) {
+			continue
+		}
 		if has(s.Title) {
 			return true
 		}

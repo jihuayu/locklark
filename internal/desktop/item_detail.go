@@ -142,14 +142,34 @@ func fieldValue(detail *personal.ItemDetail, key string) (string, bool) {
 			return detail.Identity.BirthDate, true
 		case "company":
 			return detail.Identity.Company, true
+		case "department":
+			return detail.Identity.Department, true
 		case "job_title":
 			return detail.Identity.JobTitle, true
+		case "ssn":
+			return detail.Identity.SSN, true
+		case "passport_number":
+			return detail.Identity.PassportNumber, true
+		case "license_number":
+			return detail.Identity.LicenseNumber, true
 		case "email":
 			return detail.Identity.Email, true
 		case "phone":
 			return detail.Identity.Phone, true
 		case "address":
 			return joinNonEmpty(" ", detail.Identity.AddressLine1, detail.Identity.AddressLine2, detail.Identity.City, detail.Identity.State, detail.Identity.PostalCode, detail.Identity.Country), true
+		case "address_line1":
+			return detail.Identity.AddressLine1, true
+		case "address_line2":
+			return detail.Identity.AddressLine2, true
+		case "city":
+			return detail.Identity.City, true
+		case "state":
+			return detail.Identity.State, true
+		case "postal_code":
+			return detail.Identity.PostalCode, true
+		case "country":
+			return detail.Identity.Country, true
 		case "website":
 			return detail.Identity.Website, true
 		}
@@ -226,7 +246,8 @@ func isConcealedKey(detail *personal.ItemDetail, key string) bool {
 		}
 	}
 	switch key {
-	case "credit_card.number", "credit_card.verification", "credit_card.pin":
+	case "credit_card.number", "credit_card.verification", "credit_card.pin",
+		"identity.ssn", "identity.passport_number", "identity.license_number":
 		return true
 	}
 	return false
@@ -251,9 +272,69 @@ func fieldLabel(key string) string {
 		return "网站 " + strings.TrimPrefix(key, "url:")
 	}
 	if strings.HasPrefix(key, "credit_card.") {
+		switch strings.TrimPrefix(key, "credit_card.") {
+		case "name":
+			return "持卡人姓名"
+		case "type":
+			return "卡组织 / 类型"
+		case "number":
+			return "卡号"
+		case "verification":
+			return "安全码 (CVV/CVC)"
+		case "expiry":
+			return "有效期"
+		case "valid_from":
+			return "生效日期"
+		case "pin":
+			return "取现 / 交易 PIN"
+		case "issuing_bank":
+			return "发卡银行"
+		}
 		return "信用卡 " + strings.TrimPrefix(key, "credit_card.")
 	}
 	if strings.HasPrefix(key, "identity.") {
+		switch strings.TrimPrefix(key, "identity.") {
+		case "last_name":
+			return "姓"
+		case "first_name":
+			return "名"
+		case "middle_name":
+			return "中间名"
+		case "birth_date":
+			return "出生日期"
+		case "company":
+			return "公司 / 单位"
+		case "department":
+			return "部门"
+		case "job_title":
+			return "职位"
+		case "ssn":
+			return "身份证 / 证件号"
+		case "passport_number":
+			return "护照号"
+		case "license_number":
+			return "驾驶证号"
+		case "email":
+			return "电子邮箱"
+		case "phone":
+			return "手机 / 电话"
+		case "country":
+			return "国家 / 地区"
+		case "state":
+			return "省 / 直辖市 / 州"
+		case "city":
+			return "城市"
+		case "address":
+			return "地址"
+		case "address_line1":
+			return "街道地址"
+		case "address_line2":
+			return "详细地址（楼栋/门牌）"
+		case "postal_code":
+			return "邮政编码"
+		case "website":
+			return "个人网站"
+		}
 		return "身份 " + strings.TrimPrefix(key, "identity.")
 	}
 	if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
@@ -439,6 +520,7 @@ func (a *App) copyField(key string) {
 	if a.v2.detail == nil {
 		return
 	}
+	a.onevra.copyIntent = key
 	if key == "otp" {
 		// A one-time code copied through the field action must honour the
 		// same OTP-validity cap as the dedicated "copy code" action.
@@ -477,6 +559,10 @@ func (a *App) copyValue(value string, ok bool) {
 		return
 	}
 	a.status = clipboardStatus(timeout)
+	if key := a.onevra.copyIntent; key != "" && a.v2.detail != nil {
+		a.markCopied(a.v2.detail.ID, key, timeout)
+	}
+	a.onevra.copyIntent = ""
 }
 
 func (a *App) CopyField(key string) { a.copyField(key) }

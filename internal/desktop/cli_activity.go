@@ -13,7 +13,6 @@ import (
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
-	"github.com/oneo-me/onevra/source/icons/lucide"
 )
 
 const (
@@ -50,8 +49,10 @@ type cliActivityState struct {
 	mu      sync.Mutex
 	path    string
 	loaded  bool
+	loadErr string
 	entries []cliActivityEntry
 	filter  string
+	showAll bool
 }
 
 func cliActivityPathForSettings(path string) string {
@@ -131,17 +132,22 @@ func writeCLIActivity(path string, entries []cliActivityEntry) error {
 
 func (a *App) ensureCLIActivityLoadedLocked(path string) error {
 	if a.cliActivity.loaded && a.cliActivity.path == path {
+		if a.cliActivity.loadErr != "" {
+			return errors.New(a.cliActivity.loadErr)
+		}
 		return nil
 	}
 	entries, err := readCLIActivity(path)
 	if err != nil {
 		a.cliActivity.path = path
-		a.cliActivity.loaded = false
+		a.cliActivity.loaded = true
+		a.cliActivity.loadErr = "CLI 请求活动无法读取；不会显示未经校验的记录"
 		a.cliActivity.entries = nil
 		return err
 	}
 	a.cliActivity.path = path
 	a.cliActivity.loaded = true
+	a.cliActivity.loadErr = ""
 	a.cliActivity.entries = entries
 	return nil
 }
@@ -197,12 +203,8 @@ func (a *App) loadCLIActivity() ([]cliActivityEntry, string) {
 	path := cliActivityPathForSettings(a.settingsPath)
 	a.cliActivity.mu.Lock()
 	defer a.cliActivity.mu.Unlock()
-	err := a.ensureCLIActivityLoadedLocked(path)
-	entries := append([]cliActivityEntry(nil), a.cliActivity.entries...)
-	if err != nil {
-		return entries, "CLI 请求活动无法读取；不会显示未经校验的记录"
-	}
-	return entries, ""
+	_ = a.ensureCLIActivityLoadedLocked(path)
+	return a.cliActivity.entries, a.cliActivity.loadErr
 }
 
 func cliOutcomeLabel(outcome string) string {
@@ -237,109 +239,127 @@ func (a *App) cliRequestActivityView(c *ui.Context) {
 	t := c.Theme()
 	entries, loadErr := a.loadCLIActivity()
 
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-		oneui.Icon(c, lucide.ScrollText()).Size(t.Space(4), t.Space(4)).TextColor(t.Accent)
-		oneui.Text(c, "CLI 请求活动").FontSize(t.Rem(1.15)).Bold().Grow(1)
-		oneui.Button(c, "返回开发者设置", oneui.ButtonOutline).OnClick(func() {
-			a.v2.settingsSection = settingsSectionDeveloper
-			a.touchActivity()
-		})
-	})
-	oneui.Text(c, "每次本机 CLI 凭据请求都会记录时间、调用进程、金库文件名和字段槽位。记录不含主密码、Secret Key、凭据值、命令参数或完整金库路径；本机请求记录不是签名账本，签名执行事件在下方单独显示。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-
 	filter := a.cliActivity.filter
 	if filter == "" {
 		filter = "all"
 	}
-	var allCount, approvedCount, refusedCount, failedCount int
 	var filtered []cliActivityEntry
-	for _, entry := range entries {
-		allCount++
-		switch entry.Outcome {
-		case "approved":
-			approvedCount++
-		case "refused":
-			refusedCount++
-		default:
-			failedCount++
-		}
-		if cliActivityMatchesFilter(entry, filter) {
-			filtered = append(filtered, entry)
+	if filter == "all" {
+		filtered = entries
+	} else {
+		for _, entry := range entries {
+			if cliActivityMatchesFilter(entry, filter) {
+				filtered = append(filtered, entry)
+			}
 		}
 	}
 
-	ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-		chips := []struct {
-			id, label string
-			count     int
-		}{
-			{"all", "全部", allCount},
-			{"approved", "已批准", approvedCount},
-			{"refused", "已拒绝", refusedCount},
-			{"failed", "失败", failedCount},
-		}
-		for _, chip := range chips {
-			chip := chip
-			variant := oneui.ButtonOutline
-			if filter == chip.id {
-				variant = oneui.ButtonSecondary
+	ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
+		ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+			if next, changed := onevraSegmented(c, filter, [][2]string{
+				{"all", "全部"},
+				{"approved", "已批准"},
+				{"refused", "已拒绝"},
+				{"failed", "失败"},
+			}); changed {
+				a.cliActivity.filter = next
 			}
-			oneui.Button(c, chip.label, variant).OnClick(func() {
-				a.cliActivity.filter = chip.id
+			onevraPill(c, "显示 "+intString(len(filtered))+" / "+intString(len(entries)), t.TextMuted)
+			ui.Box(c).Grow(1)
+			oneui.Button(c, "刷新记录", oneui.ButtonOutline).OnClick(func() {
+				a.cliActivity.mu.Lock()
+				a.cliActivity.loaded = false
+				a.cliActivity.loadErr = ""
+				a.cliActivity.mu.Unlock()
+				a.touchActivity()
 			})
-		}
-		oneui.Badge(c, "显示 "+intString(len(filtered))+" / "+intString(len(entries)), oneui.BadgeOptions{Tone: oneui.BadgeNeutral})
+			oneui.Button(c, "返回开发者设置", oneui.ButtonGhost).OnClick(func() {
+				a.v2.settingsSection = settingsSectionDeveloper
+				a.touchActivity()
+			})
+		})
+		oneui.Text(c, "每次本机 CLI 凭据请求都会记录时间、调用进程、金库文件名和字段槽位。记录不含主密码、Secret Key、凭据值、命令参数或完整金库路径；本机请求记录不是签名账本，签名执行事件在下方单独显示。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
 	})
 
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(1.5)).Children(func() {
+	onevraGroup(c, "本机请求记录", func(row func(func())) {
 		if loadErr != "" {
-			oneui.Text(c, loadErr).TextColor(t.Warning).Wrap()
+			row(func() {
+				oneui.Text(c, loadErr).TextColor(t.Warning).Wrap()
+			})
 			return
 		}
 		if len(entries) == 0 {
-			oneui.Text(c, "暂无 CLI 请求。通过 locklark cli run 或已连接工具请求字段后会显示在这里；也可在「CLI 集成」中完成工具绑定后测试运行。").TextColor(t.TextMuted).Wrap()
+			row(func() {
+				oneui.Text(c, "暂无 CLI 请求。通过 locklark cli run 或已连接工具请求字段后会显示在这里；也可在「CLI 集成」中完成工具绑定后测试运行。").TextColor(t.TextMuted).Wrap()
+			})
 			return
 		}
 		if len(filtered) == 0 {
-			oneui.Text(c, "当前筛选状态下没有 CLI 请求记录；切换回「全部」即可查看全部请求历史。").TextColor(t.TextMuted).Wrap()
+			row(func() {
+				oneui.Text(c, "当前筛选状态下没有 CLI 请求记录；切换回「全部」即可查看全部请求历史。").TextColor(t.TextMuted).Wrap()
+			})
 			return
 		}
-		for i := len(filtered) - 1; i >= 0; i-- {
-			entry := filtered[i]
-			if i != len(filtered)-1 {
-				ui.Box(c).FillWidth().Height(1).Background(t.Border)
-			}
-			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-				outcomeColor := t.TextMuted
-				switch entry.Outcome {
-				case "approved":
-					outcomeColor = t.Success
-				case "refused", "unavailable", "failed":
-					outcomeColor = t.Warning
-				}
-				oneui.Text(c, cliOutcomeLabel(entry.Outcome)).Bold().TextColor(outcomeColor)
-				oneui.Text(c, entry.Process).FontSize(t.Rem(.84)).Bold()
-				oneui.Text(c, "PID "+uintString(entry.PID)).FontSize(t.Rem(.74)).TextColor(t.TextMuted)
-				oneui.Text(c, entry.UTC).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
+		limit := len(filtered)
+		if !a.cliActivity.showAll && limit > 50 {
+			limit = 50
+		}
+		for idx := 0; idx < limit; idx++ {
+			entry := filtered[len(filtered)-1-idx]
+			row(func() {
+				ui.Column(c).FillWidth().Gap(t.Space(.75)).Children(func() {
+					ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+						outcomeColor := t.TextMuted
+						switch entry.Outcome {
+						case "approved":
+							outcomeColor = t.Success
+						case "refused", "unavailable", "failed":
+							outcomeColor = t.Warning
+						}
+						onevraPill(c, cliOutcomeLabel(entry.Outcome), outcomeColor)
+						oneui.Text(c, entry.Process).FontSize(t.Rem(.84)).Bold()
+						oneui.Text(c, "PID "+uintString(entry.PID)).FontSize(t.Rem(.74)).TextColor(t.TextMuted)
+						ui.Box(c).Grow(1)
+						oneui.Text(c, entry.UTC).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
+					})
+					detail := "金库 " + entry.Vault + " · " + intString(len(entry.Targets)) + " 个字段"
+					oneui.Text(c, detail).FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+					for _, target := range entry.Targets {
+						shortID := target.ID
+						if len(shortID) > 8 {
+							shortID = shortID[:8]
+						}
+						oneui.Text(c, target.Slot+" ← "+target.Field+" · "+shortID).FontSize(t.Rem(.74)).TextColor(t.TextMuted)
+					}
+				})
 			})
-			detail := "金库 " + entry.Vault + " · " + intString(len(entry.Targets)) + " 个字段"
-			oneui.Text(c, detail).FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
-			for _, target := range entry.Targets {
-				shortID := target.ID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
-				}
-				oneui.Text(c, target.Slot+" ← "+target.Field+" · "+shortID).FontSize(t.Rem(.74)).TextColor(t.TextMuted)
-			}
+		}
+		if len(filtered) > 50 {
+			row(func() {
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.SpaceBetween).Gap(t.Space(1.5)).Children(func() {
+					if a.cliActivity.showAll {
+						oneui.Text(c, "已显示全部 "+intString(len(filtered))+" 条记录").FontSize(t.Rem(.76)).TextColor(t.TextMuted)
+						oneui.Button(c, "收起到最近 50 条", oneui.ButtonGhost).OnClick(func() {
+							a.cliActivity.showAll = false
+						})
+					} else {
+						oneui.Text(c, "仅显示最近 50 条（共 "+intString(len(filtered))+" 条）").FontSize(t.Rem(.76)).TextColor(t.TextMuted)
+						oneui.Button(c, "显示全部", oneui.ButtonOutline).OnClick(func() {
+							a.cliActivity.showAll = true
+						})
+					}
+				})
+			})
 		}
 	})
 
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(1.5)).Children(func() {
+	ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-			oneui.Text(c, "当前金库的 CLI 执行").Bold().Grow(1)
-			oneui.Button(c, "刷新 CLI 审计", oneui.ButtonOutline).Disabled(a.busy || a.session == nil).OnClick(func() {
+			ui.Column(c).Grow(1).Gap(t.Space(.25)).Children(func() {
+				oneui.Text(c, "当前金库的 CLI 执行").FontSize(t.Rem(.92)).Bold()
+				oneui.Text(c, "来自金库签名审计账本；这里只筛选受控 CLI 执行意图，不显示凭据、程序路径或命令参数。").FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			})
+			oneui.Button(c, "刷新 CLI 审计", oneui.ButtonOutline).Disabled(a.uiBusy(c) || a.session == nil).OnClick(func() {
 				session := a.session
 				if session == nil {
 					return
@@ -353,34 +373,42 @@ func (a *App) cliRequestActivityView(c *ui.Context) {
 				})
 			})
 		})
-		oneui.Text(c, "来自金库签名审计账本；这里只筛选受控 CLI 执行意图，不显示凭据、程序路径或命令参数。").FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
-		count := 0
-		for i := len(a.audit) - 1; i >= 0; i-- {
-			event := a.audit[i]
-			if !cliRunAuditAction(event.Action) {
-				continue
+		onevraGroup(c, "", func(row func(func())) {
+			count := 0
+			for i := len(a.audit) - 1; i >= 0; i-- {
+				event := a.audit[i]
+				if !cliRunAuditAction(event.Action) {
+					continue
+				}
+				count++
+				row(func() {
+					ui.Column(c).FillWidth().Gap(t.Space(.5)).Children(func() {
+						ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+							onevraPill(c, "CLI 执行", t.Accent)
+							oneui.Text(c, event.Action).FontSize(t.Rem(.80)).Bold()
+							oneui.Text(c, event.Result).FontSize(t.Rem(.76)).TextColor(t.TextMuted)
+							ui.Box(c).Grow(1)
+							oneui.Text(c, event.UTC).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
+						})
+						item := event.Item
+						if len(item) > 8 {
+							item = item[:8]
+						}
+						if item != "" {
+							oneui.Text(c, "条目 "+item).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
+						}
+					})
+				})
+				if count == 50 {
+					break
+				}
 			}
-			count++
-			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-				oneui.Text(c, "CLI 执行").Bold().TextColor(t.Accent)
-				oneui.Text(c, event.Action).FontSize(t.Rem(.78))
-				oneui.Text(c, event.Result).FontSize(t.Rem(.76)).TextColor(t.TextMuted)
-				oneui.Text(c, event.UTC).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
-			})
-			item := event.Item
-			if len(item) > 8 {
-				item = item[:8]
+			if count == 0 {
+				row(func() {
+					oneui.Text(c, "暂无已加载的 CLI 执行事件；运行 locklark cli run 后刷新这里。").TextColor(t.TextMuted).Wrap()
+				})
 			}
-			if item != "" {
-				oneui.Text(c, "条目 "+item).FontSize(t.Rem(.72)).TextColor(t.TextMuted)
-			}
-			if count == 50 {
-				break
-			}
-		}
-		if count == 0 {
-			oneui.Text(c, "暂无已加载的 CLI 执行事件；运行 locklark cli run 后刷新这里。").TextColor(t.TextMuted).Wrap()
-		}
+		})
 	})
 }
 

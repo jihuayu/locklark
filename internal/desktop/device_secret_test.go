@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -17,6 +18,7 @@ type fakeDeviceSecretStore struct {
 	values             map[string][]byte
 	setCalls, getCalls int
 	deleteCalls        int
+	deleteErr          error
 }
 
 type fakeSystemUnlockStore struct {
@@ -65,6 +67,9 @@ func (s *fakeDeviceSecretStore) Get(key string) ([]byte, error) {
 
 func (s *fakeDeviceSecretStore) Delete(key string) error {
 	s.deleteCalls++
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	delete(s.values, key)
 	return nil
 }
@@ -160,15 +165,14 @@ func TestForgetDeviceStatFailureAbortsBeforeDestructiveCalls(t *testing.T) {
 			if errors.Is(tc.err, os.ErrNotExist) {
 				t.Skip("this platform classifies the stat error as not-exist")
 			}
-			a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+			a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 			previousStat := statVaultFile
 			statVaultFile = func(string) (os.FileInfo, error) { return nil, tc.err }
 			t.Cleanup(func() { statVaultFile = previousStat })
 
 			a.confirmForgetDevice = true
 			a.showSecretFallback = true
-			a.forgetPassword = password
-			a.forgetDeviceWithPassword()
+			a.forgetCurrentDevice()
 
 			if a.status != forgetDeviceStatError {
 				t.Fatalf("status = %q, want fixed stat error", a.status)
@@ -191,12 +195,6 @@ func TestForgetDeviceStatFailureAbortsBeforeDestructiveCalls(t *testing.T) {
 			if !a.confirmForgetDevice || !a.showSecretFallback || a.onboarding || a.busy {
 				t.Fatalf("stat error changed UI state: confirm=%v fallback=%v onboarding=%v busy=%v", a.confirmForgetDevice, a.showSecretFallback, a.onboarding, a.busy)
 			}
-			if !a.forgetDeviceNeedsSecret() {
-				t.Fatal("stat error was treated as an absent vault")
-			}
-			if secrets.getCalls != 0 {
-				t.Fatal("forgetDeviceNeedsSecret read credentials after a stat error")
-			}
 		})
 	}
 }
@@ -214,8 +212,7 @@ func TestForgetDeviceSystemUnlockDeleteFailureKeepsDeviceKeyAndBinding(t *testin
 
 	system.deleteErr = errors.New("system store delete denied")
 	a.confirmForgetDevice = true
-	a.forgetPassword = password
-	a.forgetDeviceWithPassword()
+	a.forgetCurrentDevice()
 
 	if a.status != forgetDeviceCleanupError {
 		t.Fatalf("status = %q, want fixed cleanup failure", a.status)
@@ -244,10 +241,9 @@ func TestForgetDeviceSystemUnlockDeleteFailureKeepsDeviceKeyAndBinding(t *testin
 }
 
 func TestForgetDeviceAbsentQuickUnlockStillCompletes(t *testing.T) {
-	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 	system.deleteErr = osunlock.ErrNotFound
-	a.forgetPassword = password
-	a.forgetDeviceWithPassword()
+	a.forgetCurrentDevice()
 
 	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
 		t.Fatalf("already-absent quick unlock blocked logout: %q", a.status)
@@ -267,7 +263,7 @@ func TestForgetDeviceAbsentQuickUnlockStillCompletes(t *testing.T) {
 }
 
 func TestForgetDeviceSettingsSaveFailureKeepsBoundUI(t *testing.T) {
-	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 	boundSettings := a.settingsPath
 	blocker := filepath.Join(t.TempDir(), "settings-parent-is-a-file")
 	if err := os.WriteFile(blocker, []byte("owned test blocker"), 0o600); err != nil {
@@ -275,8 +271,7 @@ func TestForgetDeviceSettingsSaveFailureKeepsBoundUI(t *testing.T) {
 	}
 	a.settingsPath = filepath.Join(blocker, "settings.json")
 	a.confirmForgetDevice = true
-	a.forgetPassword = password
-	a.forgetDeviceWithPassword()
+	a.forgetCurrentDevice()
 
 	if a.status != forgetDeviceCleanupError {
 		t.Fatalf("status = %q, want fixed cleanup failure", a.status)
@@ -305,83 +300,81 @@ func TestForgetDeviceSettingsSaveFailureKeepsBoundUI(t *testing.T) {
 	}
 }
 
-func TestClassicForgetDeviceUsesSharedVerifiedConfirmation(t *testing.T) {
+func TestClassicForgetDeviceUsesSharedTwoStepConfirmation(t *testing.T) {
 	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "classic")
-	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
-	// Exercise the emergency-key branch for an existing owned vault.
-	secret := string(secrets.values[deviceSecretKey(vaultPath)])
+	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+	// Simulate a device where the stored Secret Key is already missing.
 	delete(secrets.values, deviceSecretKey(vaultPath))
+	secrets.deleteErr = mygo.ErrSecretNotFound
 	boundSettings := a.settingsPath
 
 	tester := ui.NewTester(a.lockView, 1600, 900)
 	if err := tester.Click("退出当前设备…"); err != nil {
 		t.Fatal(err)
 	}
-	if !a.confirmForgetDevice || a.forgetPassword != "" {
-		t.Fatalf("classic exit did not open an empty confirmation: confirm=%v password=%q", a.confirmForgetDevice, a.forgetPassword)
+	if !a.confirmForgetDevice {
+		t.Fatal("classic exit did not open two-step confirmation")
 	}
 	if system.deleteCalls != 0 || secrets.deleteCalls != 0 {
-		t.Fatalf("classic route deleted credentials before confirmation: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+		t.Fatalf("classic route deleted credentials before second-step confirmation: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
 	}
 	if a.settingsSnapshot().VaultPath != vaultPath || a.onboarding {
 		t.Fatalf("classic route changed binding before confirmation: path=%q onboarding=%v", a.settingsSnapshot().VaultPath, a.onboarding)
 	}
 
 	tester.Frame()
-	for _, want := range []string{"验证主密码", "应急 Secret Key", "确认退出当前设备", "取消退出", "保留 .ll 文件"} {
+	for _, want := range []string{"确认退出当前设备", "取消退出", "保留 .ll 文件"} {
 		if !tester.HasText(want) {
 			t.Fatalf("classic confirmation missing %q", want)
 		}
 	}
+	for _, unwanted := range []string{"验证主密码", "应急 Secret Key"} {
+		if tester.HasText(unwanted) {
+			t.Fatalf("two-step confirmation unexpectedly required %q", unwanted)
+		}
+	}
 
-	a.forgetPassword = "wrong-password"
-	a.secret = secret
-	tester.Frame()
-	if err := tester.Click("确认退出当前设备"); err != nil {
+	if err := tester.Click("取消退出"); err != nil {
 		t.Fatal(err)
 	}
-	if a.status == "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" || a.onboarding {
-		t.Fatalf("classic route succeeded with a wrong password: status=%q onboarding=%v", a.status, a.onboarding)
+	if a.confirmForgetDevice || a.onboarding {
+		t.Fatal("cancel did not dismiss two-step confirmation")
 	}
 	if system.deleteCalls != 0 || secrets.deleteCalls != 0 {
-		t.Fatalf("wrong password deleted credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
-	}
-	if got := a.settingsSnapshot().VaultPath; got != vaultPath {
-		t.Fatalf("wrong password changed VaultPath binding: %q", got)
-	}
-	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("wrong password altered the .ll vault file: %v", err)
+		t.Fatal("cancel deleted credentials")
 	}
 
-	a.forgetPassword = password
+	if err := tester.Click("退出当前设备…"); err != nil {
+		t.Fatal(err)
+	}
 	tester.Frame()
 	if err := tester.Click("确认退出当前设备"); err != nil {
 		t.Fatal(err)
 	}
 	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
-		t.Fatalf("classic verified route did not finish forget-device: %q", a.status)
+		t.Fatalf("classic two-step route did not finish forget-device: %q", a.status)
 	}
 	if system.deleteCalls != 1 || secrets.deleteCalls != 1 {
-		t.Fatalf("classic verified route did not complete cleanup: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+		t.Fatalf("classic two-step route did not complete cleanup: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
 	}
 	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; ok {
-		t.Fatal("classic verified route retained the device Secret Key")
+		t.Fatal("classic two-step route retained the device Secret Key")
 	}
 	if got := a.settingsSnapshot().VaultPath; got != "" {
-		t.Fatalf("classic verified route retained VaultPath binding: %q", got)
+		t.Fatalf("classic two-step route retained VaultPath binding: %q", got)
 	}
 	persisted, err := LoadSettings(boundSettings)
 	if err != nil {
 		t.Fatalf("load settings after classic forget: %v", err)
 	}
 	if persisted.VaultPath != "" {
-		t.Fatalf("classic verified route retained persisted VaultPath binding: %q", persisted.VaultPath)
+		t.Fatalf("classic two-step route retained persisted VaultPath binding: %q", persisted.VaultPath)
 	}
 	if !a.onboarding {
-		t.Fatal("classic verified route did not return to onboarding")
+		t.Fatal("classic two-step route did not return to onboarding")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("classic verified route altered the .ll vault file: %v", err)
+		t.Fatalf("classic two-step route altered the .ll vault file: %v", err)
 	}
 }
 
@@ -390,11 +383,7 @@ func TestForgetDeviceExplicitMissingVaultTakesAbsentPath(t *testing.T) {
 	if err := os.Remove(vaultPath); err != nil {
 		t.Fatal(err)
 	}
-	if a.forgetDeviceNeedsSecret() {
-		t.Fatal("explicitly missing vault still required a Secret Key")
-	}
-	a.forgetPassword = ""
-	a.forgetDeviceWithPassword()
+	a.forgetCurrentDevice()
 
 	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
 		t.Fatalf("unexpected missing-vault status: %q", a.status)
@@ -416,50 +405,34 @@ func TestForgetDeviceExplicitMissingVaultTakesAbsentPath(t *testing.T) {
 	}
 }
 
-func TestForgetDeviceVerifiedPasswordDeletesCredentialsAndBinding(t *testing.T) {
-	a, password, vaultPath, secrets, system := prepareForgetDeviceTest(t)
+func TestForgetDeviceTwoStepDeletesCredentialsAndBinding(t *testing.T) {
+	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 
-	a.forgetPassword = "wrong-password"
-	a.forgetDeviceWithPassword()
-	if secrets.deleteCalls != 0 || system.deleteCalls != 0 {
-		t.Fatalf("wrong password deleted credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
-	}
-	if got := a.settingsSnapshot().VaultPath; got != vaultPath {
-		t.Fatalf("wrong password changed VaultPath binding: %q", got)
-	}
-	if a.onboarding {
-		t.Fatal("wrong password returned to onboarding")
-	}
-	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("wrong password altered the vault file: %v", err)
-	}
-
-	a.forgetPassword = password
-	a.forgetDeviceWithPassword()
+	a.forgetCurrentDevice()
 	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
-		t.Fatalf("verified password did not finish forget-device: %q", a.status)
+		t.Fatalf("two-step forget-device failed: %q", a.status)
 	}
 	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
-		t.Fatalf("verified password did not delete credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
+		t.Fatalf("two-step forget-device did not delete credentials: device=%d system=%d", secrets.deleteCalls, system.deleteCalls)
 	}
 	if _, ok := secrets.values[deviceSecretKey(vaultPath)]; ok {
-		t.Fatal("verified password retained the device Secret Key")
+		t.Fatal("two-step forget-device retained the device Secret Key")
 	}
 	if got := a.settingsSnapshot().VaultPath; got != "" {
-		t.Fatalf("verified password retained VaultPath binding: %q", got)
+		t.Fatalf("two-step forget-device retained VaultPath binding: %q", got)
 	}
 	persisted, err := LoadSettings(a.settingsPath)
 	if err != nil {
-		t.Fatalf("load settings after verified forget: %v", err)
+		t.Fatalf("load settings after forget: %v", err)
 	}
 	if persisted.VaultPath != "" {
-		t.Fatalf("verified password retained persisted VaultPath binding: %q", persisted.VaultPath)
+		t.Fatalf("two-step forget-device retained persisted VaultPath binding: %q", persisted.VaultPath)
 	}
 	if !a.onboarding {
-		t.Fatal("verified password did not return to onboarding")
+		t.Fatal("two-step forget-device did not return to onboarding")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("verified password deleted the .ll vault file: %v", err)
+		t.Fatalf("two-step forget-device deleted the .ll vault file: %v", err)
 	}
 }
 

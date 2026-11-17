@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/egoist/mygo"
@@ -26,7 +28,7 @@ func Biometry() string {
 	return "Windows Hello"
 }
 func Description() string {
-	return "使用 Windows Hello 保护的密钥解锁；人脸、指纹或系统 PIN 由 Windows 验证。24 小时后需完整解锁。"
+	return "使用 Windows Hello 保护的密钥解锁；人脸、指纹或系统 PIN 由 Windows 验证。到期后需使用主密码完整解锁。"
 }
 func Requirement() string {
 	return "需要 Windows Hello 与 Passport KSP；系统未配置 Hello 时只能使用完整解锁。"
@@ -43,6 +45,92 @@ var nFree = ncrypt.NewProc("NCryptFreeObject")
 var nDelete = ncrypt.NewProc("NCryptDeleteKey")
 var nEncrypt = ncrypt.NewProc("NCryptEncrypt")
 var nDecrypt = ncrypt.NewProc("NCryptDecrypt")
+
+var user32 = windows.NewLazySystemDLL("user32.dll")
+var uGetForegroundWindow = user32.NewProc("GetForegroundWindow")
+var uGetWindowThreadProcessId = user32.NewProc("GetWindowThreadProcessId")
+var uIsWindowVisible = user32.NewProc("IsWindowVisible")
+var uEnumWindows = user32.NewProc("EnumWindows")
+
+var (
+	enumWindowMu   sync.Mutex
+	enumWindowOnce sync.Once
+	enumWindowCB   uintptr
+	enumWindowPID  uint32
+	enumWindowHWND uintptr
+)
+
+func processWindowHandle() uintptr {
+	currentPID := windows.GetCurrentProcessId()
+	fg, _, _ := uGetForegroundWindow.Call()
+	if fg != 0 {
+		if vis, _, _ := uIsWindowVisible.Call(fg); vis != 0 {
+			var pid uint32
+			_, _, _ = uGetWindowThreadProcessId.Call(fg, uintptr(unsafe.Pointer(&pid)))
+			if pid == currentPID {
+				return fg
+			}
+		}
+	}
+	enumWindowMu.Lock()
+	defer enumWindowMu.Unlock()
+	enumWindowOnce.Do(func() {
+		enumWindowCB = syscall.NewCallback(func(hwnd, _ uintptr) uintptr {
+			if vis, _, _ := uIsWindowVisible.Call(hwnd); vis == 0 {
+				return 1
+			}
+			var pid uint32
+			_, _, _ = uGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+			if pid == enumWindowPID {
+				enumWindowHWND = hwnd
+				return 0
+			}
+			return 1
+		})
+	})
+	enumWindowPID = currentPID
+	enumWindowHWND = 0
+	_, _, _ = uEnumWindows.Call(enumWindowCB, 0)
+	return enumWindowHWND
+}
+
+func attachUIContext(h uintptr, message string) {
+	if hwnd := processWindowHandle(); hwnd != 0 {
+		prop := wide("HWND Handle")
+		_, _, _ = nSet.Call(h, uintptr(unsafe.Pointer(prop)), uintptr(unsafe.Pointer(&hwnd)), unsafe.Sizeof(hwnd), 0)
+		runtime.KeepAlive(prop)
+		runtime.KeepAlive(&hwnd)
+	}
+	if message != "" {
+		if utf16, err := windows.UTF16FromString(message); err == nil && len(utf16) > 0 {
+			ctxProp := wide("Use Context")
+			_, _, _ = nSet.Call(h, uintptr(unsafe.Pointer(ctxProp)), uintptr(unsafe.Pointer(&utf16[0])), uintptr(len(utf16)*2), 0)
+			runtime.KeepAlive(ctxProp)
+			runtime.KeepAlive(utf16)
+		}
+	}
+}
+
+func classifyHelloStatus(status uintptr) error {
+	if status == 0 {
+		return nil
+	}
+	switch uint32(status) {
+	case 0x80090036, // NTE_USER_CANCELLED
+		0x800704C7, // HRESULT_FROM_WIN32(ERROR_CANCELLED)
+		0x8010006E, // SCARD_W_CANCELLED_BY_USER
+		0x000004C7: // ERROR_CANCELLED
+		return ErrCancelled
+	case 0x80090022: // NTE_SILENT_CONTEXT
+		return ErrInteractionNotAllowed
+	case 0x8010006B, // SCARD_W_WRONG_CHV
+		0x8007052E, // HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)
+		0x80098046: // WINBIO_E_DATA_PROTECTION_FAILURE
+		return ErrAuthFailed
+	default:
+		return ErrUnavailable
+	}
+}
 
 func wide(s string) *uint16 { p, _ := windows.UTF16PtrFromString(s); return p }
 func release(h uintptr) {
@@ -107,12 +195,26 @@ func (p helloPolicy) valid() bool {
 	return p.usage == helloKeyUsageDecrypt && p.cache == helloNgcCacheTypeAuthenticated && p.export == helloExportPolicyNone
 }
 
+func setCacheType(h uintptr, val uint32) error {
+	if setNumber(h, "NgcCacheType", val) == nil {
+		return nil
+	}
+	return setNumber(h, "NgcCacheTypeProperty", val)
+}
+
+func getCacheType(h uintptr) (uint32, error) {
+	if v, e := number(h, "NgcCacheType"); e == nil {
+		return v, nil
+	}
+	return number(h, "NgcCacheTypeProperty")
+}
+
 func verify(h uintptr) error {
 	usage, e := number(h, "Key Usage")
 	if e != nil {
 		return ErrUnavailable
 	}
-	cache, e := number(h, "NgcCacheType")
+	cache, e := getCacheType(h)
 	if e != nil {
 		return ErrUnavailable
 	}
@@ -187,26 +289,32 @@ func createKey(id, token string) (uintptr, error) {
 	for _, prop := range []struct {
 		name  string
 		value uint32
-	}{{"Length", 2048}, {"Key Usage", 1}, {"Export Policy", 0}, {"NgcCacheType", 1}} {
+	}{{"Length", 2048}, {"Key Usage", 1}, {"Export Policy", 0}} {
 		if setNumber(h, prop.name, prop.value) != nil {
 			return 0, ErrUnavailable
 		}
 	}
+	if setCacheType(h, 1) != nil {
+		return 0, ErrUnavailable
+	}
+	attachUIContext(h, "Locklark：第 1/2 步 — 创建 Windows Hello 保护密钥")
 	r, _, _ = nFinalize.Call(h, 0)
-	if r != 0 || verify(h) != nil {
+	if r != 0 {
+		return 0, classifyHelloStatus(r)
+	}
+	if verify(h) != nil {
 		return 0, ErrUnavailable
 	}
 	ok = true
 	return h, nil
 }
 
-type oaep struct {
-	algorithm *uint16
-	label     *byte
-	labelLen  uint32
-}
+// helloPadPKCS1 is NCRYPT_PAD_PKCS1_FLAG. Microsoft Passport KSP rejects
+// NCRYPT_PAD_OAEP_FLAG (0x80090027 / NTE_INVALID_PARAMETER) and accepts PKCS#1
+// v1.5 for wrapping uniform random 256-bit AES-GCM keys.
+const helloPadPKCS1 = 2
 
-func crypt(h uintptr, input []byte, decrypt bool) ([]byte, error) {
+func crypt(h uintptr, input []byte, decrypt bool, contextMsg string) ([]byte, error) {
 	if len(input) == 0 {
 		return nil, ErrUnavailable
 	}
@@ -215,15 +323,18 @@ func crypt(h uintptr, input []byte, decrypt bool) ([]byte, error) {
 		if verify(h) != nil || setNumber(h, "PinCacheIsGestureRequired", 1) != nil {
 			return nil, ErrUnavailable
 		}
+		attachUIContext(h, contextMsg)
 		proc = nDecrypt
 	}
-	padding := oaep{algorithm: wide("SHA256")}
 	output := make([]byte, 512)
 	var n uint32
-	status, _, _ := proc.Call(h, uintptr(unsafe.Pointer(&input[0])), uintptr(len(input)), uintptr(unsafe.Pointer(&padding)), uintptr(unsafe.Pointer(&output[0])), uintptr(len(output)), uintptr(unsafe.Pointer(&n)), 4)
-	runtime.KeepAlive(padding)
+	status, _, _ := proc.Call(h, uintptr(unsafe.Pointer(&input[0])), uintptr(len(input)), 0, uintptr(unsafe.Pointer(&output[0])), uintptr(len(output)), uintptr(unsafe.Pointer(&n)), helloPadPKCS1)
 	runtime.KeepAlive(input)
-	if status != 0 || n > uint32(len(output)) {
+	if status != 0 {
+		clear(output)
+		return nil, classifyHelloStatus(status)
+	}
+	if n > uint32(len(output)) {
 		clear(output)
 		return nil, ErrUnavailable
 	}
@@ -260,13 +371,9 @@ func (hello) Store(id string, raw []byte) error {
 	}
 	committed := false
 	defer func() {
-		if committed {
-			release(h)
-		} else {
-			status, _, _ := nDelete.Call(h, 0)
-			if status != 0 {
-				release(h)
-			}
+		release(h)
+		if !committed {
+			_ = deleteKey(id, token)
 		}
 	}()
 	key := make([]byte, 32)
@@ -274,14 +381,25 @@ func (hello) Store(id string, raw []byte) error {
 	if _, e = rand.Read(key); e != nil {
 		return ErrUnavailable
 	}
-	wrapped, e := crypt(h, key, false)
+	wrapped, e := crypt(h, key, false, "")
 	if e != nil {
 		return e
 	}
-	// Enrollment must exercise actual user-authenticated decryption before storing.
-	check, e := crypt(h, wrapped, true)
+	// Close the creation handle and re-open the persisted key so enrollment
+	// verifies the exact openKey + verify + gesture-decrypt path used by Load().
+	release(h)
+	h = 0
+	verifyHandle, e := openKey(id, token)
+	if e != nil {
+		return e
+	}
+	check, e := crypt(verifyHandle, wrapped, true, "Locklark：第 2/2 步 — 验证 Windows Hello 解密授权")
+	release(verifyHandle)
 	defer clear(check)
-	if e != nil || !bytes.Equal(key, check) {
+	if e != nil {
+		return e
+	}
+	if !bytes.Equal(key, check) {
 		return ErrUnavailable
 	}
 	block, _ := aes.NewCipher(key)
@@ -310,9 +428,15 @@ func (hello) Load(id string) ([]byte, error) {
 	if !validID(id) {
 		return nil, ErrUnavailable
 	}
-	raw, e := store().Get(id)
+	raw, e := helloSecretGet(id)
 	defer clear(raw)
-	if e != nil || len(raw) > mygo.MaxSecretSize {
+	if e != nil {
+		if errors.Is(e, mygo.ErrSecretNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, ErrUnavailable
+	}
+	if len(raw) > mygo.MaxSecretSize {
 		return nil, ErrUnavailable
 	}
 	var blob sealed
@@ -324,9 +448,12 @@ func (hello) Load(id string) ([]byte, error) {
 		return nil, e
 	}
 	defer release(h)
-	key, e := crypt(h, blob.Wrapped, true)
+	key, e := crypt(h, blob.Wrapped, true, "Locklark：使用 Windows Hello 解锁金库")
 	defer clear(key)
-	if e != nil || len(key) != 32 {
+	if e != nil {
+		return nil, e
+	}
+	if len(key) != 32 {
 		return nil, ErrUnavailable
 	}
 	block, _ := aes.NewCipher(key)

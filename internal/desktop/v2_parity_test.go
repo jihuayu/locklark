@@ -447,9 +447,9 @@ func TestV2DetailAndEditorViewsRenderRichItem(t *testing.T) {
 
 	view := ui.NewTester(a.View, 1200, 1800)
 	for _, label := range []string{
-		"用户名", "密码", "一次性验证码",
+		"用户名",
 		"Bank（主）", "持卡人", "卡号",
-		"Extra · Recovery", "Extra · Card PIN",
+		"Extra", "Recovery", "Card PIN",
 		"显示", "复制",
 	} {
 		if !view.HasText(label) {
@@ -470,7 +470,7 @@ func TestV2DetailAndEditorViewsRenderRichItem(t *testing.T) {
 	a.v2.draft.URLs = []vault.ItemURL{{URL: "https://example.com", Label: "Example", Primary: true}}
 	editor := ui.NewTester(a.View, 1200, 2400)
 	for _, label := range []string{
-		"编辑条目", "分区与自定义字段", "添加字段", "添加分区", "添加网址", "添加标签",
+		"编辑条目", "添加更多", "添加网址", "添加分区",
 		"自动填充匹配", "默认", "标签", "网址",
 	} {
 		if !editor.HasText(label) {

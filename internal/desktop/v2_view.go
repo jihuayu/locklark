@@ -2,7 +2,6 @@ package desktop
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -119,27 +118,42 @@ func v2DetailFields(detail *personal.ItemDetail) []v2DetailField {
 	}
 	if detail.Identity != nil {
 		for _, f := range []struct{ key, label string }{
+			{"identity.last_name", "姓"},
 			{"identity.first_name", "名"},
 			{"identity.middle_name", "中间名"},
-			{"identity.last_name", "姓"},
 			{"identity.birth_date", "出生日期"},
-			{"identity.company", "公司"},
+			{"identity.company", "公司 / 单位"},
+			{"identity.department", "部门"},
 			{"identity.job_title", "职位"},
-			{"identity.email", "邮箱"},
-			{"identity.phone", "电话"},
+			{"identity.ssn", "身份证 / 证件号"},
+			{"identity.passport_number", "护照号"},
+			{"identity.license_number", "驾驶证号"},
+			{"identity.email", "电子邮箱"},
+			{"identity.phone", "手机 / 电话"},
+			{"identity.country", "国家 / 地区"},
+			{"identity.state", "省 / 直辖市 / 州"},
+			{"identity.city", "城市"},
 			{"identity.address", "地址"},
-			{"identity.website", "网站"},
+			{"identity.address_line1", "街道地址"},
+			{"identity.address_line2", "详细地址（楼栋/门牌）"},
+			{"identity.postal_code", "邮政编码"},
+			{"identity.website", "个人网站"},
 		} {
 			out = append(out, v2DetailField{Key: f.key, Label: f.label, Concealed: isConcealedKey(detail, f.key)})
 		}
 	}
 	for _, s := range detail.Sections {
+		if IsInternalMetaSection(s) {
+			continue
+		}
+		secTitle := localizedSectionTitle(s.Title)
 		for _, f := range s.Fields {
-			key := s.ID + "/" + f.ID
-			label := s.Title + " · " + f.Label
-			if f.Label == "" {
-				label = s.Title + " · " + f.ID
+			if isCanonicalDetailDuplicate(detail, s.ID, f) {
+				continue
 			}
+			key := s.ID + "/" + f.ID
+			fieldName := localizedFieldLabel(s.ID, f.ID, f.Label)
+			label := secTitle + " · " + fieldName
 			out = append(out, v2DetailField{Key: key, Label: label, Concealed: isConcealedKey(detail, key)})
 		}
 	}
@@ -150,597 +164,6 @@ func v2DetailFields(detail *personal.ItemDetail) []v2DetailField {
 // live in v2_state.go, item_detail.go and item_editor.go; this file remains the
 // editor and report view layer while onevra_view.go owns the vault shell.
 func (a *App) v2View(c *ui.Context) { a.onevraVaultView(c) }
-
-func (a *App) v2EditorViewLegacy(c *ui.Context) {
-	draft := a.v2.draft
-	if draft == nil {
-		return
-	}
-	t := c.Theme()
-
-	// Editor header
-	ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
-		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
-			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
-		iconBox.Children(func() {
-			oneui.Icon(c, onevraCategoryIcon(draft.Category)).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
-		})
-		ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
-			oneui.Text(c, "编辑条目").FontSize(t.Rem(1.35)).Bold().SingleLine()
-			oneui.Text(c, "保存后将生成新修订版本，原有字段值自动加密归入历史版本。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-		})
-		if oneui.IconButton(c, lucide.X(), "关闭编辑", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
-			a.cancelEdit()
-		}
-	})
-
-	// 1. Basic Info Card
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(2.5)).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-			oneui.Text(c, "基本信息").Bold().Grow(1)
-			oneui.Badge(c, CategoryDisplayName(draft.Category), oneui.BadgeOptions{Tone: oneui.BadgeAccent})
-		})
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-			oneui.Text(c, "条目类别").FontSize(t.Rem(.82)).TextColor(t.TextMuted)
-			category := string(draft.Category)
-			sel := ui.Select(c, &category, v2CategoryOptions()).Disabled(a.busy)
-			if sel.Changed() {
-				a.setDraftCategory(vault.ItemCategory(category))
-			}
-		})
-		oneui.TextBox(c, &draft.Title, oneui.TextBoxOptions{}).Label("标题").Placeholder("例如：GitHub、公司邮箱、主力信用卡").Disabled(a.busy)
-		oneui.TextBox(c, &draft.Username, oneui.TextBoxOptions{}).Label("用户名").Placeholder("用户名、邮箱或账号标识").Disabled(a.busy)
-		oneui.TextBox(c, &draft.Password, oneui.TextBoxOptions{}).Label("密码").Placeholder("输入或使用下方生成器创建高强度密码").Password().Disabled(a.busy)
-		oneui.TextBox(c, &draft.OTP, oneui.TextBoxOptions{}).Label("一次性验证码配置").Placeholder("otpauth://totp/... 或 Base32 密钥").Disabled(a.busy)
-		oneui.TextBox(c, &draft.URL, oneui.TextBoxOptions{}).Label("网站").Placeholder("https://example.com").Disabled(a.busy)
-		oneui.TextBox(c, &draft.Notes, oneui.TextBoxOptions{}).Label("备注").Placeholder("加密安全备注、恢复码或补充说明").Password().Disabled(a.busy)
-		oneui.Checkbox(c, &draft.Favorite, "收藏").Disabled(a.busy)
-
-		ui.Box(c).FillWidth().Height(1).Background(t.Border)
-
-		// Tags: the add/remove helpers keep drafts de-duplicated and trimmed.
-		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
-			oneui.Text(c, "标签").FontSize(t.Rem(.88)).Bold()
-			if len(draft.Tags) == 0 {
-				oneui.Text(c, "尚无标签").FontSize(t.Rem(.78)).TextColor(t.TextMuted)
-			} else {
-				ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
-					for _, tag := range draft.Tags {
-						tag := tag
-						oneui.Button(c, visible(tag)+" ✕", oneui.ButtonSecondary).Disabled(a.busy).OnClick(func() { a.removeTag(tag) })
-					}
-				})
-			}
-			ui.Row(c).FillWidth().Wrap().AlignItems(ui.End).Gap(t.Space(1.5)).Children(func() {
-				oneui.TextBox(c, &draft.NewTag, oneui.TextBoxOptions{}).Label("新标签").Placeholder("输入标签名称").Grow(1).Disabled(a.busy)
-				oneui.Button(c, "添加标签", oneui.ButtonOutline).Disabled(a.busy || strings.TrimSpace(draft.NewTag) == "").OnClick(func() { a.addTag(draft.NewTag) })
-			})
-		})
-	})
-
-	// 2. URLs Card: Multiple URLs with the stored autofill match mode.
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			oneui.Text(c, "网址").Bold().Grow(1)
-			oneui.Icon(c, lucide.Globe()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
-		})
-		if len(draft.URLs) == 0 {
-			oneui.Text(c, "尚无网址").FontSize(t.Rem(.78)).TextColor(t.TextMuted)
-		}
-		for i := range draft.URLs {
-			i := i
-			url := draft.URLs[i]
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).
-				Padding(t.Space(2)).Gap(t.Space(1.5)).Children(func() {
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-					oneui.Text(c, visible(url.URL)).FontSize(t.Rem(.85)).Bold().Grow(1).MinWidth(0).Wrap()
-					primary := "设为主网址"
-					primaryVariant := oneui.ButtonOutline
-					if url.Primary {
-						primary = "主网址"
-						primaryVariant = oneui.ButtonSecondary
-					}
-					oneui.Button(c, primary, primaryVariant).Disabled(a.busy || url.Primary).OnClick(func() { a.setPrimaryURL(i) })
-					oneui.Button(c, "匹配："+v2MatchModeLabel(url.MatchMode), oneui.ButtonOutline).Disabled(a.busy).OnClick(func() { a.cycleURLMatchMode(i) })
-					oneui.Button(c, "移除", oneui.ButtonGhost).Disabled(a.busy).OnClick(func() { a.removeURL(i) })
-				})
-				oneui.TextBox(c, &draft.URLs[i].Label, oneui.TextBoxOptions{}).Label("标签").Placeholder("例如：登录页、控制台").Disabled(a.busy)
-			})
-		}
-		ui.Row(c).FillWidth().Wrap().AlignItems(ui.End).Gap(t.Space(1.5)).Children(func() {
-			oneui.TextBox(c, &draft.NewURL, oneui.TextBoxOptions{}).Label("新网址").Placeholder("https://example.com").Grow(1).Disabled(a.busy)
-			oneui.TextBox(c, &draft.NewURLLabel, oneui.TextBoxOptions{}).Label("网址标签").Placeholder("例如：官网").Width(140).Disabled(a.busy)
-			oneui.Button(c, "匹配："+v2MatchModeLabel(draft.NewURLMatch), oneui.ButtonOutline).Disabled(a.busy).OnClick(func() { a.cycleNewURLMatchMode() })
-			oneui.Button(c, "添加网址", oneui.ButtonSecondary).Disabled(a.busy || strings.TrimSpace(draft.NewURL) == "").OnClick(func() {
-				a.addURL(draft.NewURL, draft.NewURLLabel, draft.NewURLMatch)
-			})
-		})
-	})
-
-	// 3. Typed Card / Identity Card: canonical inputs write the typed draft
-	// structs, which normalization, detail and autofill prefer. The equivalent
-	// template section fields are hidden below so there is one input per value.
-	if bindings := v2DraftCanonicalFields(draft.Category); len(bindings) > 0 {
-		title := "卡片信息"
-		cardIcon := lucide.CreditCard()
-		if draft.Category == vault.CategoryIdentity {
-			title = "身份信息"
-			cardIcon = lucide.User()
-		}
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-				oneui.Text(c, title).Bold().Grow(1)
-				oneui.Icon(c, cardIcon).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
-			})
-			for _, b := range bindings {
-				b := b
-				input := oneui.TextBox(c, v2DraftFieldValue(draft, b.SectionID, b.FieldID), oneui.TextBoxOptions{}).Label(b.Label).Grow(1).Disabled(a.busy)
-				if b.Concealed {
-					input.Password()
-				}
-			}
-			oneui.Text(c, "以上结构化字段与下面的默认分区字段同步保存。").FontSize(t.Rem(.75)).TextColor(t.TextMuted).Wrap()
-		})
-	}
-
-	// 4. Custom Sections Card: sections and custom fields, including
-	// concealed/OTP field types which render through Password() inputs.
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			oneui.Text(c, "分区与自定义字段").Bold().Grow(1)
-			oneui.Icon(c, lucide.Layers()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
-		})
-		if len(draft.Sections) == 0 {
-			oneui.Text(c, "当前条目尚无自定义分区，可在下方新建分区并添加字段。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-		}
-		for i := range draft.Sections {
-			i := i
-			sec := draft.Sections[i]
-			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).
-				Padding(t.Space(2.5)).Gap(t.Space(2)).Children(func() {
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.End).Gap(t.Space(1)).Children(func() {
-					oneui.TextBox(c, &draft.Sections[i].Title, oneui.TextBoxOptions{}).Label("分区标题").Grow(1).Disabled(a.busy)
-					oneui.Button(c, "上移", oneui.ButtonGhost).Disabled(a.busy || i == 0).OnClick(func() { a.moveSection(i, -1) })
-					oneui.Button(c, "下移", oneui.ButtonGhost).Disabled(a.busy || i == len(draft.Sections)-1).OnClick(func() { a.moveSection(i, 1) })
-					oneui.Button(c, "删除分区", oneui.ButtonGhost).Disabled(a.busy).OnClick(func() { a.removeSection(i) })
-				})
-				for j := range sec.Fields {
-					j := j
-					f := sec.Fields[j]
-					if _, canonical := v2DraftCanonicalField(draft, sec.ID, f); canonical {
-						continue
-					}
-					ui.Row(c).FillWidth().Wrap().AlignItems(ui.End).Gap(t.Space(1)).Children(func() {
-						oneui.TextBox(c, &draft.Sections[i].Fields[j].Label, oneui.TextBoxOptions{}).Label("字段名").Width(130).Disabled(a.busy)
-						input := oneui.TextBox(c, &draft.Sections[i].Fields[j].Value, oneui.TextBoxOptions{}).Label(v2FieldTypeLabel(f.Type)).Grow(1).Disabled(a.busy)
-						if v2FieldTypeConcealed(f) {
-							input.Password()
-						}
-						oneui.Button(c, "上移", oneui.ButtonGhost).Disabled(a.busy || j == 0).OnClick(func() { a.moveField(i, j, -1) })
-						oneui.Button(c, "下移", oneui.ButtonGhost).Disabled(a.busy || j == len(sec.Fields)-1).OnClick(func() { a.moveField(i, j, 1) })
-						oneui.Button(c, "删除字段", oneui.ButtonGhost).Disabled(a.busy).OnClick(func() { a.removeField(i, j) })
-					})
-				}
-			})
-		}
-	})
-
-	// 5. New Field & Section Composer Card
-	sectionLabel := "未选择分区"
-	if draft.NewFieldSection >= 0 && draft.NewFieldSection < len(draft.Sections) {
-		sectionLabel = draft.Sections[draft.NewFieldSection].Title
-	}
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
-			oneui.Text(c, "添加字段").Bold().Grow(1)
-			oneui.Icon(c, lucide.Plus()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
-		})
-		ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
-			oneui.TextBox(c, &draft.NewFieldLabel, oneui.TextBoxOptions{}).Label("字段名").Placeholder("例如：安全问题、恢复码").Grow(1).Disabled(a.busy)
-			newValue := oneui.TextBox(c, &draft.NewFieldValue, oneui.TextBoxOptions{}).Label("字段值").Placeholder("输入字段内容").Grow(1).Disabled(a.busy)
-			if draft.NewFieldType == vault.FieldTypeConcealed || draft.NewFieldType == vault.FieldTypeOTP || draft.NewFieldType == vault.FieldTypeTOTP {
-				newValue.Password()
-			}
-		})
-		ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
-			oneui.Button(c, "分区："+sectionLabel, oneui.ButtonOutline).Disabled(a.busy).OnClick(a.cycleDraftFieldSection)
-			oneui.Button(c, "类型："+v2FieldTypeLabel(draft.NewFieldType), oneui.ButtonOutline).Disabled(a.busy).OnClick(a.cycleDraftFieldType)
-			oneui.Button(c, "添加字段", oneui.ButtonSecondary).Disabled(a.busy || len(draft.Sections) == 0).OnClick(func() {
-				a.addField(draft.NewFieldSection, draft.NewFieldLabel, string(draft.NewFieldType), draft.NewFieldValue)
-			})
-		})
-		ui.Box(c).FillWidth().Height(1).Background(t.Border)
-		ui.Row(c).FillWidth().Wrap().AlignItems(ui.End).Gap(t.Space(1.5)).Children(func() {
-			oneui.TextBox(c, &draft.NewSectionTitle, oneui.TextBoxOptions{}).Label("新分区标题").Placeholder("例如：恢复信息、备用凭据").Grow(1).Disabled(a.busy)
-			oneui.Button(c, "添加分区", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() { a.addSection(draft.NewSectionTitle) })
-		})
-	})
-
-	if a.v2.editorError != "" {
-		a.onevraNoticeCard(c, "保存提示", a.v2.editorError, t.Danger)
-	}
-
-	// 6. Sticky / Bottom Action Bar
-	ui.Row(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(2.5), t.Space(3)).Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-		oneui.Button(c, "保存", oneui.ButtonPrimary).Disabled(a.busy || strings.TrimSpace(draft.Title) == "").OnClick(func() {
-			if err := a.saveDraft(); err != nil {
-				a.status = message(err)
-			}
-		})
-		oneui.Button(c, "取消", oneui.ButtonOutline).Disabled(a.busy).OnClick(a.cancelEdit)
-		ui.Spacer(c)
-		oneui.Button(c, "生成密码", oneui.ButtonSecondary).Disabled(a.busy).OnClick(func() { a.openGenerator("password") })
-	})
-}
-
-// v2EditorView is the item editor page. The page is assembled from the same
-// compact field-row component and field-group surface used by other native
-// dialogs, so every editable value has a stable label and one menu location.
-func (a *App) v2EditorView(c *ui.Context) {
-	draft := a.v2.draft
-	if draft == nil {
-		return
-	}
-	t := c.Theme()
-
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
-		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
-			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
-		iconBox.Children(func() {
-			oneui.Icon(c, onevraCategoryIcon(draft.Category)).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
-		})
-		ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
-			oneui.Text(c, "编辑条目").FontSize(t.Rem(1.35)).Bold().SingleLine()
-			oneui.Text(c, "保存后将生成新修订版本，原有字段值自动加密归入历史版本。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-		})
-		oneui.Button(c, "生成密码", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
-			a.openGenerator("password")
-		})
-		oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).OnClick(a.cancelEdit)
-		oneui.Button(c, "保存", oneui.ButtonPrimary).Disabled(a.busy || strings.TrimSpace(draft.Title) == "").OnClick(func() {
-			if err := a.saveDraft(); err != nil {
-				a.status = message(err)
-			}
-		})
-		if oneui.IconButton(c, lucide.X(), "关闭编辑", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
-			a.cancelEdit()
-		}
-	})
-
-	ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-		oneui.Text(c, "条目类别").FontSize(t.Rem(.82)).TextColor(t.TextMuted)
-		category := string(draft.Category)
-		sel := ui.Select(c, &category, v2CategoryOptions()).Label("条目类别").Disabled(a.busy)
-		sel.Width(180)
-		if sel.Changed() {
-			a.setDraftCategory(vault.ItemCategory(category))
-		}
-	})
-
-	a.editorPrimaryGroup(c, draft)
-	a.editorURLGroups(c, draft)
-	a.editorStructuredSectionGroups(c, draft)
-	a.editorTagGroup(c, draft)
-	a.editorNewSectionGroup(c, draft)
-
-	if a.v2.editorError != "" {
-		a.onevraNoticeCard(c, "保存提示", a.v2.editorError, t.Danger)
-	}
-
-	ui.Column(c.Key("dialog-add-custom-field")).Children(func() {
-		oneui.Dialog(c, &draft.FieldDialogOpen, oneui.DialogOptions{Label: "添加自定义字段"}, func(panel ui.Element) {
-			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius).Padding(t.Space(4))
-			panel.Children(func() {
-				ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
-					oneui.Text(c, "添加自定义字段").FontSize(t.Rem(1.12)).Bold()
-					oneui.Text(c, "明确选择该字段是随条目明文直显（如环境名、Region），还是默认遮蔽保护（如备用 Token、API Secret）。").
-						FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
-					oneui.TextBox(c, &draft.NewFieldLabel, oneui.TextBoxOptions{}).
-						Label("字段名称").Placeholder("例如：Environment、Region、Secondary Token").Disabled(a.busy)
-					ui.Row(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
-						plainVariant := oneui.ButtonOutline
-						encVariant := oneui.ButtonOutline
-						if !draft.NewFieldProtected {
-							plainVariant = oneui.ButtonSecondary
-						} else {
-							encVariant = oneui.ButtonSecondary
-						}
-						if oneui.Button(c, "明文 · 详情直接显示", plainVariant).Grow(1).Clicked() {
-							draft.NewFieldProtected = false
-						}
-						if oneui.Button(c, "加密 · 默认遮蔽", encVariant).Grow(1).Clicked() {
-							draft.NewFieldProtected = true
-						}
-					})
-					valBox := oneui.TextBox(c, &draft.NewFieldValue, oneui.TextBoxOptions{}).
-						Label("字段值").Placeholder("输入字段内容").Disabled(a.busy)
-					if draft.NewFieldProtected {
-						valBox.Password()
-					}
-					ui.Row(c).FillWidth().Justify(ui.End).Gap(t.Space(1.5)).Children(func() {
-						if oneui.Button(c, "取消", oneui.ButtonGhost).Disabled(a.busy).Clicked() {
-							draft.FieldDialogOpen = false
-						}
-						if oneui.Button(c, "确认添加", oneui.ButtonPrimary).Disabled(a.busy).Clicked() {
-							a.confirmAddCustomField()
-						}
-					})
-				})
-			})
-		})
-	})
-}
-
-func (a *App) editorPrimaryGroup(c *ui.Context, draft *ItemDraft) {
-	title := "登录信息"
-	switch draft.Category {
-	case vault.CategorySecureNote:
-		title = "安全笔记"
-	case vault.CategoryAPICredential:
-		title = "API 凭据"
-	}
-
-	fields := []editorFieldSpec{
-		a.editorTextSpec("title", "标题", "例如：GitHub、公司邮箱、主力信用卡", &draft.Title, false, false),
-	}
-	switch draft.Category {
-	case vault.CategoryLogin, vault.CategoryPassword:
-		fields = append(fields,
-			a.editorTextSpec("username", "用户名", "用户名、邮箱或账号标识", &draft.Username, false, false),
-			a.editorTextSpec("password", "密码", "输入或使用生成器创建高强度密码", &draft.Password, true, false),
-			a.editorTextSpec("otp", "一次性验证码", "otpauth://totp/… 或 Base32 密钥", &draft.OTP, true, false),
-			a.editorTextSpec("url", "网站", "https://example.com", &draft.URL, false, false),
-			a.editorTextSpec("notes", "备注", "加密安全备注、恢复码或补充说明", &draft.Notes, true, true),
-		)
-	case vault.CategorySecureNote:
-		fields = append(fields, a.editorTextSpec("notes", "备注", "输入安全笔记", &draft.Notes, true, true))
-	default:
-		fields = append(fields, a.editorTextSpec("notes", "备注", "补充说明", &draft.Notes, true, true))
-	}
-
-	editorFieldGroup(c, editorFieldGroupSpec{
-		Key:      "item-primary",
-		Title:    title,
-		Badge:    CategoryDisplayName(draft.Category),
-		Fields:   fields,
-		AddLabel: "添加更多",
-		BuildAddMenu: func(menu *oneui.Menu) {
-			if menu.Item("安全问题").Chosen() {
-				a.addEditorCustomField("安全问题", vault.FieldTypeConcealed)
-			}
-			if menu.Item("恢复码").Chosen() {
-				a.addEditorCustomField("恢复码", vault.FieldTypeConcealed)
-			}
-			if menu.Item("自定义字段").Chosen() {
-				a.addEditorCustomField("自定义字段", vault.FieldTypeString)
-			}
-			if menu.Item("网址").Chosen() {
-				a.appendEditorURL()
-			}
-		},
-	})
-}
-
-func (a *App) editorTextSpec(key, label, placeholder string, value *string, concealed, multiline bool) editorFieldSpec {
-	return editorFieldSpec{
-		Key:         key,
-		Label:       label,
-		Placeholder: placeholder,
-		Value:       value,
-		Concealed:   concealed,
-		Multiline:   multiline,
-		Busy:        a.busy,
-		MenuLabel:   "字段选项：" + label,
-		BuildMenu: func(menu *oneui.Menu) {
-			if key == "password" {
-				if menu.Item("生成密码").Chosen() {
-					a.openGenerator("password")
-				}
-			}
-			clear := menu.Item("清空字段").Disabled(value == nil || strings.TrimSpace(*value) == "")
-			if clear.Chosen() && value != nil {
-				*value = ""
-			}
-		},
-	}
-}
-
-func (a *App) editorURLGroups(c *ui.Context, draft *ItemDraft) {
-	var fields []editorFieldSpec
-	for i := range draft.URLs {
-		i := i
-		url := &draft.URLs[i]
-		fields = append(fields,
-			editorFieldSpec{
-				Key:         fmt.Sprintf("url-%d-address", i),
-				Label:       "网站",
-				Placeholder: "https://example.com",
-				Value:       &url.URL,
-				Busy:        a.busy,
-				MenuLabel:   fmt.Sprintf("网址选项：%d", i+1),
-				BuildMenu: func(menu *oneui.Menu) {
-					if menu.Item("设为主网址").Disabled(url.Primary).Chosen() {
-						a.setPrimaryURL(i)
-					}
-					if menu.Item("移除网址").Chosen() {
-						a.removeURL(i)
-					}
-				},
-			},
-			editorFieldSpec{
-				Key:         fmt.Sprintf("url-%d-label", i),
-				Label:       "标签",
-				Placeholder: "例如：登录页、控制台",
-				Value:       &url.Label,
-				Busy:        a.busy,
-				MenuLabel:   fmt.Sprintf("网址标签选项：%d", i+1),
-				BuildMenu: func(menu *oneui.Menu) {
-					clear := menu.Item("清空标签").Disabled(strings.TrimSpace(url.Label) == "")
-					if clear.Chosen() {
-						url.Label = ""
-					}
-				},
-			},
-		)
-	}
-
-	var rows []func(*ui.Context)
-	for i := range draft.URLs {
-		i := i
-		rows = append(rows, func(c *ui.Context) {
-			t := c.Theme()
-			selected := v2MatchModeLabel(draft.URLs[i].MatchMode)
-			options := []string{"默认", "同源", "同主机", "同域名", "精确", "不填充"}
-			ui.Row(c).FillWidth().MinWidth(0).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).
-				Padding(t.Space(1.5), t.Space(7)).Children(func() {
-				oneui.Text(c, "自动填充匹配").FontSize(t.Rem(.74)).Bold().TextColor(t.Accent).Width(110)
-				matchSelect := ui.Select(c, &selected, options).Label("自动填充匹配")
-				matchSelect.Width(180)
-				if matchSelect.Changed() {
-					a.setURLMatchMode(i, v2MatchModeFromLabel(selected))
-				}
-				ui.Spacer(c)
-				if draft.URLs[i].Primary {
-					oneui.Badge(c, "主网址", oneui.BadgeOptions{Tone: oneui.BadgeSuccess})
-				}
-			})
-		})
-	}
-
-	editorFieldGroup(c, editorFieldGroupSpec{
-		Key:       "item-urls",
-		Title:     "网址",
-		Badge:     fmt.Sprintf("%d", len(draft.URLs)),
-		Fields:    fields,
-		ExtraRows: rows,
-		AddLabel:  "添加网址",
-		BuildAddMenu: func(menu *oneui.Menu) {
-			if menu.Item("新网址").Chosen() {
-				a.appendEditorURL()
-			}
-		},
-	})
-}
-
-func (a *App) editorStructuredSectionGroups(c *ui.Context, draft *ItemDraft) {
-	t := c.Theme()
-	oneui.Text(c, "分区与自定义字段").FontSize(t.Rem(.94)).Bold()
-	if len(draft.Sections) == 0 {
-		editorFieldGroup(c, editorFieldGroupSpec{
-			Key:               "item-section-empty",
-			Title:             "自定义字段",
-			SecondaryAddLabel: "+ 添加自定义字段…",
-			OnSecondaryAdd: func() {
-				a.openAddCustomFieldDialog(-1)
-			},
-			AddLabel: "添加字段",
-			BuildAddMenu: func(menu *oneui.Menu) {
-				a.editorAddFieldMenu(menu, -1)
-			},
-		})
-	}
-	for i := range draft.Sections {
-		i := i
-		section := &draft.Sections[i]
-		var fields []editorFieldSpec
-		for j := range section.Fields {
-			j := j
-			f := section.Fields[j]
-			label := f.Label
-			if label == "" {
-				label = v2FieldTypeLabel(f.Type)
-			}
-			if binding, canonical := v2DraftCanonicalField(draft, section.ID, f); canonical {
-				fields = append(fields, a.editorTextSpec(
-					fmt.Sprintf("%s/%s", section.ID, f.ID),
-					binding.Label,
-					"",
-					binding.resolve(draft),
-					binding.Concealed,
-					f.Type == vault.FieldTypeText,
-				))
-				continue
-			}
-			encrypted := v2FieldTypeConcealed(f)
-			protSuffix := "plain"
-			if encrypted {
-				protSuffix = "enc"
-			}
-			fields = append(fields, editorFieldSpec{
-				Key:         section.ID + "/" + f.ID + "/" + protSuffix,
-				Label:       v2FieldTypeLabel(f.Type),
-				LabelValue:  &section.Fields[j].Label,
-				Placeholder: "字段值",
-				Value:       &section.Fields[j].Value,
-				Concealed:   encrypted,
-				Multiline:   f.Type == vault.FieldTypeText,
-				Busy:        a.busy,
-				MenuLabel:   "字段选项：" + label,
-				Trailing: func(c *ui.Context) {
-					ui.Row(c).Gap(t.Space(.5)).AlignItems(ui.Center).Children(func() {
-						plainVariant := oneui.ButtonGhost
-						encVariant := oneui.ButtonGhost
-						if !encrypted {
-							plainVariant = oneui.ButtonSecondary
-						} else {
-							encVariant = oneui.ButtonSecondary
-						}
-						if oneui.Button(c, "明文", plainVariant).Disabled(a.busy || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP).Clicked() {
-							draft.SetFieldProtection(i, j, false)
-						}
-						if oneui.Button(c, "加密", encVariant).Disabled(a.busy).Clicked() {
-							draft.SetFieldProtection(i, j, true)
-						}
-					})
-				},
-				BuildMenu: func(menu *oneui.Menu) {
-					if menu.Item("上移字段").Disabled(j == 0).Chosen() {
-						a.moveField(i, j, -1)
-					}
-					if menu.Item("下移字段").Disabled(j == len(section.Fields)-1).Chosen() {
-						a.moveField(i, j, 1)
-					}
-					menu.Separator()
-					if menu.Item("删除字段").Chosen() {
-						a.removeField(i, j)
-					}
-				},
-			})
-		}
-
-		editorFieldGroup(c, editorFieldGroupSpec{
-			Key:               fmt.Sprintf("item-section-%s", section.ID),
-			Title:             section.Title,
-			Badge:             fmt.Sprintf("%d 个字段", len(fields)),
-			Fields:            fields,
-			SecondaryAddLabel: "+ 添加自定义字段…",
-			OnSecondaryAdd: func() {
-				a.openAddCustomFieldDialog(i)
-			},
-			AddLabel: "添加字段",
-			BuildAddMenu: func(menu *oneui.Menu) {
-				a.editorAddFieldMenu(menu, i)
-			},
-			HeaderAction: func() {
-				if oneui.IconButton(c, lucide.ChevronUp(), "上移分区", oneui.IconButtonPlain).Disabled(a.busy || i == 0).Clicked() {
-					a.moveSection(i, -1)
-				}
-				if oneui.IconButton(c, lucide.ChevronDown(), "下移分区", oneui.IconButtonPlain).Disabled(a.busy || i == len(draft.Sections)-1).Clicked() {
-					a.moveSection(i, 1)
-				}
-				if oneui.IconButton(c, lucide.Trash(), "删除分区", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
-					a.removeSection(i)
-				}
-			},
-		})
-	}
-}
 
 func (a *App) editorAddFieldMenu(menu *oneui.Menu, sectionIndex int) {
 	options := []struct {
@@ -765,71 +188,6 @@ func (a *App) editorAddFieldMenu(menu *oneui.Menu, sectionIndex int) {
 			}
 		}
 	}
-}
-
-func (a *App) editorTagGroup(c *ui.Context, draft *ItemDraft) {
-	editorFieldGroup(c, editorFieldGroupSpec{
-		Key:   "item-tags",
-		Title: "标签",
-		Fields: []editorFieldSpec{
-			{
-				Key:         "new-tag",
-				Label:       "新标签",
-				Placeholder: "输入标签名称",
-				Value:       &draft.NewTag,
-				Busy:        a.busy,
-			},
-		},
-		ExtraRows: []func(*ui.Context){
-			func(c *ui.Context) {
-				t := c.Theme()
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).
-					Padding(t.Space(1.5), t.Space(7)).Children(func() {
-					if len(draft.Tags) == 0 {
-						oneui.Text(c, "尚无标签").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Grow(1)
-					} else {
-						for _, tag := range draft.Tags {
-							tag := tag
-							if oneui.Button(c, visible(tag)+" ✕", oneui.ButtonSecondary).Disabled(a.busy).Clicked() {
-								a.removeTag(tag)
-							}
-						}
-					}
-					oneui.Button(c, "添加标签", oneui.ButtonOutline).
-						Disabled(a.busy || strings.TrimSpace(draft.NewTag) == "").
-						OnClick(func() { a.addTag(draft.NewTag) })
-				})
-				oneui.Checkbox(c, &draft.Favorite, "收藏").Disabled(a.busy).
-					Padding(t.Space(1), t.Space(7))
-			},
-		},
-	})
-}
-
-func (a *App) editorNewSectionGroup(c *ui.Context, draft *ItemDraft) {
-	editorFieldGroup(c, editorFieldGroupSpec{
-		Key:   "item-new-section",
-		Title: "添加分区",
-		Fields: []editorFieldSpec{
-			{
-				Key:         "new-section-title",
-				Label:       "分区标题",
-				Placeholder: "例如：恢复信息、备用凭据",
-				Value:       &draft.NewSectionTitle,
-				Busy:        a.busy,
-			},
-		},
-		ExtraRows: []func(*ui.Context){
-			func(c *ui.Context) {
-				t := c.Theme()
-				ui.Row(c).FillWidth().Padding(t.Space(1.5), t.Space(7)).Children(func() {
-					oneui.Button(c, "添加分区", oneui.ButtonSecondary).
-						Disabled(a.busy || strings.TrimSpace(draft.NewSectionTitle) == "").
-						OnClick(func() { a.addSection(draft.NewSectionTitle) })
-				})
-			},
-		},
-	})
 }
 
 func (a *App) addEditorCustomField(label string, kind vault.FieldType) {
@@ -898,6 +256,11 @@ func (a *App) setDraftCategory(category vault.ItemCategory) {
 	}
 	draft.Category = category
 	if draft.ID == "" {
+		clear(draft.SSHSeed)
+		clear(draft.SSHPublicKey)
+		draft.SSHSeed = nil
+		draft.SSHPublicKey = nil
+		draft.SSHKeyGenType = "Ed25519"
 		draft.Sections = CategoryTemplate(category)
 		draft.NewFieldSection = 0
 	}
@@ -1023,55 +386,48 @@ func (a *App) cycleNewURLMatchMode() {
 	a.v2.draft.NewURLMatch = nextMatchMode(a.v2.draft.NewURLMatch)
 }
 
-func watchtowerFlagBadge(flag string, reuseCount int) (string, oneui.BadgeTone) {
+func watchtowerFlagStyle(t *ui.Theme, flag string, reuseCount int) (string, ui.Color) {
 	switch flag {
 	case "vulnerable":
-		return "已泄露", oneui.BadgeDanger
+		return "已泄露", t.Danger
 	case "expired":
-		return "已过期", oneui.BadgeDanger
+		return "已过期", t.Danger
 	case "empty":
-		return "空密码", oneui.BadgeDanger
+		return "空密码", t.Danger
 	case "weak":
-		return "弱密码", oneui.BadgeDanger
+		return "弱密码", t.Danger
 	case "common-pattern":
-		return "常见模式", oneui.BadgeWarning
+		return "常见模式", t.Warning
 	case "short":
-		return "长度过短", oneui.BadgeWarning
+		return "长度过短", t.Warning
 	case "low-variety":
-		return "字符单一", oneui.BadgeWarning
+		return "字符单一", t.Warning
 	case "reused":
 		if reuseCount > 1 {
-			return fmt.Sprintf("重复密码 (%d 处)", reuseCount), oneui.BadgeWarning
+			return fmt.Sprintf("重复密码 (%d 处)", reuseCount), t.Warning
 		}
-		return "重复密码", oneui.BadgeWarning
+		return "重复密码", t.Warning
 	case "unsecured-http":
-		return "非加密 HTTP", oneui.BadgeWarning
+		return "非加密 HTTP", t.Warning
 	case "expiring-soon":
-		return "即将过期", oneui.BadgeWarning
+		return "即将过期", t.Warning
 	case "totp-not-stored":
-		return "未设 2FA", oneui.BadgeNeutral
+		return "未设 2FA", t.TextMuted
 	case "passkey-not-stored":
-		return "未存通行密钥", oneui.BadgeNeutral
+		return "未存通行密钥", t.TextMuted
 	default:
-		return flag, oneui.BadgeNeutral
+		return flag, t.TextMuted
 	}
 }
 
 func (a *App) v2WatchtowerView(c *ui.Context) {
 	t := c.Theme()
 
-	// Header
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
-		iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
-			Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
-		iconBox.Children(func() {
-			oneui.Icon(c, lucide.Shield()).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(3)).Children(func() {
+		ui.Column(c).Grow(1).MinWidth(0).Children(func() {
+			onevraPageHeader(c, "Watchtower 安全体检", "本地检查全程离线运行；HIBP 泄露前缀核验需在浏览器扩展或 CLI 中显式启用。")
 		})
-		ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
-			oneui.Text(c, "Watchtower 安全体检").FontSize(t.Rem(1.35)).Bold().SingleLine()
-			oneui.Text(c, "本地检查全程离线运行；HIBP 泄露前缀核验需在浏览器扩展或 CLI 中显式启用。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-		})
-		oneui.Button(c, "运行本地检查", oneui.ButtonPrimary).Disabled(a.busy || a.session == nil).OnClick(func() {
+		oneui.Button(c, "运行本地检查", oneui.ButtonPrimary).Disabled(a.uiBusy(c) || a.session == nil).OnClick(func() {
 			s := a.session
 			if s == nil {
 				return
@@ -1085,123 +441,104 @@ func (a *App) v2WatchtowerView(c *ui.Context) {
 
 	report := a.v2.watchtower
 	if report == nil {
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(5)).AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(2)).Children(func() {
-			badgeBox := ui.Box(c).Size(t.Space(12), t.Space(12)).Radius(t.Space(3)).
-				Background(t.Accent.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center)
-			badgeBox.Children(func() {
-				oneui.Icon(c, lucide.ShieldCheck()).Size(t.Space(6), t.Space(6)).TextColor(t.Accent)
-			})
-			oneui.Text(c, "尚未运行安全扫描").FontSize(t.Rem(1.05)).Bold()
-			oneui.Text(c, "点击右上角「运行本地检查」开始扫描弱密码、重复密码及 2FA 配置缺失。").FontSize(t.Rem(.85)).TextColor(t.TextMuted).Wrap()
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).Children(func() {
+			onevraEmpty(c, lucide.ShieldCheck(), "尚未运行安全扫描", "点击右上角「运行本地检查」开始扫描弱密码、重复密码及 2FA 配置缺失。", nil)
 		})
 		return
 	}
 
-	// Security Score Hero Card
 	scoreColor := t.Success
 	scoreStatus := "安全状态良好"
-	scoreTone := oneui.BadgeSuccess
 	switch {
 	case report.OverallScore < 50:
 		scoreColor = t.Danger
 		scoreStatus = "存在高危风险"
-		scoreTone = oneui.BadgeDanger
 	case report.OverallScore < 80:
 		scoreColor = t.Warning
 		scoreStatus = "建议尽快加固"
-		scoreTone = oneui.BadgeWarning
 	}
 
-	ui.Row(c).FillWidth().Border(1, scoreColor.Alpha(.45)).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3.5)).Wrap().AlignItems(ui.Center).Gap(t.Space(3)).Children(func() {
-		scoreBadge := ui.Column(c).MinWidth(110).Padding(t.Space(2), t.Space(3)).Radius(t.Radius).
-			Background(scoreColor.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(.25))
-		scoreBadge.Children(func() {
-			oneui.Text(c, fmt.Sprintf("%d", report.OverallScore)).FontSize(t.Rem(2.1)).Bold().TextColor(scoreColor)
-			oneui.Text(c, "满分 100").FontSize(t.Rem(.72)).TextColor(t.TextMuted)
-		})
-		ui.Column(c).Grow(1).MinWidth(180).Gap(t.Space(1)).Children(func() {
-			ui.Row(c).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-				oneui.Text(c, fmt.Sprintf("安全评分 %d / 100", report.OverallScore)).FontSize(t.Rem(1.15)).Bold()
-				oneui.Badge(c, scoreStatus, oneui.BadgeOptions{Tone: scoreTone})
+	onevraGroup(c, "总体评估", func(row func(func())) {
+		row(func() {
+			scoreBadge := ui.Column(c).MinWidth(96).Padding(t.Space(2), t.Space(3)).Radius(t.Radius).
+				Background(scoreColor.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(.25))
+			scoreBadge.Children(func() {
+				oneui.Text(c, fmt.Sprintf("%d", report.OverallScore)).FontSize(t.Rem(2.0)).Bold().TextColor(scoreColor)
+				oneui.Text(c, "满分 100").FontSize(t.Rem(.72)).TextColor(t.TextMuted)
 			})
-			oneui.Text(c, fmt.Sprintf("已检查 %d 项 · 跳过 %d 项", report.Checked, report.Skipped)).FontSize(t.Rem(.84)).TextColor(t.TextMuted)
+			ui.Column(c).Grow(1).MinWidth(180).Gap(t.Space(1)).Children(func() {
+				ui.Row(c).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+					oneui.Text(c, fmt.Sprintf("安全评分 %d / 100", report.OverallScore)).FontSize(t.Rem(1.1)).Bold()
+					onevraPill(c, scoreStatus, scoreColor)
+				})
+				oneui.Text(c, fmt.Sprintf("已检查 %d 项 · 跳过 %d 项", report.Checked, report.Skipped)).FontSize(t.Rem(.82)).TextColor(t.TextMuted)
+			})
 		})
-	})
-
-	// Summary Stat Pills / Boxes
-	stats := []struct {
-		label string
-		count int
-		color ui.Color
-	}{
-		{"已泄露", report.Counts.Vulnerable, t.Danger},
-		{"重复密码", report.Counts.Reused, t.Warning},
-		{"弱密码", report.Counts.Weak, t.Danger},
-		{"非加密 HTTP", report.Counts.UnsecuredHTTP, t.Warning},
-		{"未设 2FA", report.Counts.TOTPNotStored, t.Warning},
-		{"即将过期", report.Counts.Expiring, t.Warning},
-	}
-	ui.Row(c).FillWidth().Wrap().Gap(t.Space(2)).Children(func() {
-		for _, stat := range stats {
-			stat := stat
-			borderColor := t.Border
-			numColor := t.Text
-			bgColor := t.Surface
-			if stat.count > 0 {
-				borderColor = stat.color.Alpha(.5)
-				numColor = stat.color
-				bgColor = stat.color.Alpha(.06)
+		row(func() {
+			stats := []struct {
+				label string
+				count int
+				color ui.Color
+			}{
+				{"已泄露", report.Counts.Vulnerable, t.Danger},
+				{"重复密码", report.Counts.Reused, t.Warning},
+				{"弱密码", report.Counts.Weak, t.Danger},
+				{"非加密 HTTP", report.Counts.UnsecuredHTTP, t.Warning},
+				{"未设 2FA", report.Counts.TOTPNotStored, t.Warning},
+				{"即将过期", report.Counts.Expiring, t.Warning},
 			}
-			ui.Column(c).Grow(1).MinWidth(120).Border(1, borderColor).Radius(t.Radius).Background(bgColor).
-				Padding(t.Space(2), t.Space(2.5)).Gap(t.Space(.5)).Children(func() {
-				oneui.Text(c, stat.label).FontSize(t.Rem(.76)).TextColor(t.TextMuted).SingleLine()
-				oneui.Text(c, fmt.Sprintf("%d", stat.count)).FontSize(t.Rem(1.25)).Bold().TextColor(numColor)
+			ui.Row(c).FillWidth().Wrap().Gap(t.Space(2)).Children(func() {
+				for _, stat := range stats {
+					numColor := t.TextMuted
+					if stat.count > 0 {
+						numColor = stat.color
+					}
+					ui.Column(c).Grow(1).MinWidth(96).Padding(t.Space(1.5), t.Space(2)).Radius(t.Radius).
+						Background(t.Background).Gap(t.Space(.25)).Children(func() {
+						oneui.Text(c, stat.label).FontSize(t.Rem(.72)).TextColor(t.TextMuted).SingleLine()
+						oneui.Text(c, fmt.Sprintf("%d", stat.count)).FontSize(t.Rem(1.2)).Bold().TextColor(numColor)
+					})
+				}
 			})
-		}
+		})
 	})
 
 	if len(report.Findings) == 0 {
-		a.onevraNoticeCard(c, "全部检查通过", "未发现已知安全隐患，当前保险库状态良好。", t.Success)
+		onevraBanner(c, lucide.ShieldCheck(), "全部检查通过：未发现已知安全隐患，当前保险库状态良好。", t.Success, nil)
 		return
 	}
 
-	// Findings Cards
-	oneui.Text(c, fmt.Sprintf("待处理风险条目 (%d)", len(report.Findings))).FontSize(t.Rem(.92)).Bold().TextColor(t.TextMuted)
-	for _, finding := range report.Findings {
-		finding := finding
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
-			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
-					oneui.Text(c, visible(finding.Title)).FontSize(t.Rem(1.0)).Bold().SingleLine().Ellipsis("…")
-					meta := fmt.Sprintf("密码强度 %d / 100", finding.StrengthScore)
-					if finding.Origin != "" {
-						meta = visible(finding.Origin) + " · " + meta
+	onevraGroup(c, fmt.Sprintf("待处理风险条目 (%d)", len(report.Findings)), func(row func(func())) {
+		for _, finding := range report.Findings {
+			finding := finding
+			row(func() {
+				ui.Column(c).FillWidth().MinWidth(0).Gap(t.Space(1.5)).Children(func() {
+					ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+						ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+							oneui.Text(c, visible(finding.Title)).FontSize(t.Rem(.96)).Bold().SingleLine().Ellipsis("…")
+							meta := fmt.Sprintf("密码强度 %d / 100", finding.StrengthScore)
+							if finding.Origin != "" {
+								meta = visible(finding.Origin) + " · " + meta
+							}
+							oneui.Text(c, meta).FontSize(t.Rem(.76)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+						})
+						if len(finding.Flags) > 0 {
+							ui.Row(c).Wrap().Gap(t.Space(1)).Children(func() {
+								for _, flag := range finding.Flags {
+									label, color := watchtowerFlagStyle(t, flag, finding.ReuseCount)
+									onevraPill(c, label, color)
+								}
+							})
+						}
+						oneui.Button(c, "打开条目", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() {
+							a.selectItem(finding.ID, finding.Revision)
+						})
+					})
+					if finding.BreachCount > 0 {
+						onevraBanner(c, lucide.TriangleAlert(), fmt.Sprintf("该密码在公开泄露库中出现 %d 次，请立即更换。", finding.BreachCount), t.Danger, nil)
 					}
-					oneui.Text(c, meta).FontSize(t.Rem(.76)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
-				})
-				oneui.Button(c, "打开条目", oneui.ButtonSecondary).Disabled(a.busy).OnClick(func() {
-					a.selectItem(finding.ID, finding.Revision)
 				})
 			})
-			if len(finding.Flags) > 0 {
-				ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
-					for _, flag := range finding.Flags {
-						label, tone := watchtowerFlagBadge(flag, finding.ReuseCount)
-						oneui.Badge(c, label, oneui.BadgeOptions{Tone: tone})
-					}
-				})
-			}
-			if finding.BreachCount > 0 {
-				ui.Row(c).FillWidth().Border(1, t.Danger.Alpha(.45)).Radius(t.Radius).Background(t.Danger.Alpha(.08)).
-					Padding(t.Space(1.5), t.Space(2)).AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-					oneui.Icon(c, lucide.TriangleAlert()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.Danger)
-					oneui.Text(c, fmt.Sprintf("该密码在公开泄露库中出现 %d 次，请立即更换。", finding.BreachCount)).
-						FontSize(t.Rem(.8)).TextColor(t.Danger).Grow(1).Wrap()
-				})
-			}
-		})
-	}
+		}
+	})
 }

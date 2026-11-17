@@ -2239,6 +2239,7 @@ DESKTOP_SMOKE_SETTINGS: Mapping[str, Any] = {
     "privacy.checkHibp": False,
     "appearance.theme": "system",
     "appearance.interfaceDensity": "comfortable",
+    "appearance.accent": "terracotta",
     "app.keepInTray": True,
     "app.defaultVaultForSaving": "",
 }

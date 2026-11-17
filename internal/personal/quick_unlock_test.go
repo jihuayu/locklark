@@ -248,3 +248,49 @@ func TestCancelledSystemUnlockDoesNotCommit(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemUnlockConfigurablePresetsAndNeverExpire(t *testing.T) {
+	path, key, _ := revealFixture(t)
+	store := &testSystemStore{values: map[string][]byte{}}
+
+	full, err := UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer full.Lock()
+	if !full.CanEnableSystemUnlock() {
+		t.Fatal("full-factor session must report CanEnableSystemUnlock() == true")
+	}
+
+	// Non-preset duration must be refused.
+	if err := full.EnableSystemUnlockFor(store, 48*time.Hour); !errors.Is(err, ErrSystemUnlockExpired) {
+		t.Fatalf("EnableSystemUnlockFor(48h) error = %v, want ErrSystemUnlockExpired", err)
+	}
+
+	presets := []time.Duration{
+		24 * time.Hour,
+		7 * 24 * time.Hour,
+		14 * 24 * time.Hour,
+		30 * 24 * time.Hour,
+		90 * 24 * time.Hour,
+		SystemUnlockNeverExpire,
+	}
+	for _, ttl := range presets {
+		if err := full.EnableSystemUnlockFor(store, ttl); err != nil {
+			t.Fatalf("EnableSystemUnlockFor(%v): %v", ttl, err)
+		}
+		quick, err := UnlockWithSystem(path, store, time.Minute)
+		if err != nil {
+			t.Fatalf("UnlockWithSystem(ttl=%v): %v", ttl, err)
+		}
+		if quick.CanEnableSystemUnlock() {
+			quick.Lock()
+			t.Fatalf("quick-unlocked session(ttl=%v) allowed CanEnableSystemUnlock()", ttl)
+		}
+		if err := quick.EnableSystemUnlockFor(store, ttl); !errors.Is(err, ErrSystemUnlockExpired) {
+			quick.Lock()
+			t.Fatalf("quick-unlocked session(ttl=%v) allowed EnableSystemUnlockFor: %v", ttl, err)
+		}
+		quick.Lock()
+	}
+}

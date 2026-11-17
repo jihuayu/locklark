@@ -50,6 +50,8 @@ type App struct {
 	sshStopSequence                                        uint64
 	sshTitle, sshImportPath                                string
 	sshRows                                                []personal.SSHKeyRow
+	sshAllRows                                             []personal.SSHKeyRow
+	sshLoaded, sshLoading                                  bool
 	sshScope                                               string
 	sshSelected                                            *personal.SSHKeyRow
 	sshRetired                                             []*sshNativeHost
@@ -100,6 +102,10 @@ type App struct {
 	cancel                                         context.CancelFunc
 	quitting                                       bool
 	deviceSecrets                                  deviceSecretStore
+	deviceSecretMu                                 sync.Mutex
+	deviceSecretCachePath                          string
+	deviceSecretCached                             bool
+	deviceSecretPresent                            bool
 	showSecretFallback                             bool
 	confirmForgetDevice                            bool
 	systemStore                                    osunlock.Store
@@ -109,6 +115,9 @@ type App struct {
 	generation                                     uint64
 	session                                        *personal.Session
 	busy                                           bool
+	busyImmediate                                  bool
+	busySince                                      time.Time
+	steadyStatus                                   string
 	path, password, secret, confirmation, issued   string
 	create                                         bool
 	status, page, query, scope                     string
@@ -160,9 +169,17 @@ type App struct {
 	// narrowRevealPending is the revealPasswords read currently in flight;
 	// narrowRevealSeq identifies its request so a stale callback cannot clear
 	// a newer one.
-	narrowRevealPending bool
-	narrowRevealSeq     uint64
+	narrowRevealPending        bool
+	narrowRevealSeq            uint64
+	systemUnlockExpired        bool
+	systemUnlockNotEnrolled    bool
+	enrollSystemUnlockOnUnlock bool
+	systemUnlockEnrolling      bool
+	systemUnlockNotice         string
+	systemUnlockNoticeErr      bool
 }
+
+const uiBusyGrace = 180 * time.Millisecond
 
 func New() *App {
 	a := &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
@@ -177,13 +194,43 @@ func New() *App {
 	a.importFull = true
 	return a
 }
+func (a *App) uiBusy(c *ui.Context) bool {
+	if !a.busy {
+		return false
+	}
+	if a.busyImmediate || a.busySince.IsZero() {
+		return true
+	}
+	elapsed := time.Since(a.busySince)
+	if elapsed >= uiBusyGrace {
+		return true
+	}
+	if c != nil {
+		c.After(uiBusyGrace - elapsed)
+	}
+	return false
+}
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
+func (a *App) runInteractive(work func() outcome) {
+	a.runContextInteractive(func(context.Context) outcome { return work() })
+}
 func (a *App) runContext(work func(context.Context) outcome) {
+	a.runContextWithMode(false, work)
+}
+func (a *App) runContextInteractive(work func(context.Context) outcome) {
+	a.runContextWithMode(true, work)
+}
+func (a *App) runContextWithMode(immediate bool, work func(context.Context) outcome) {
 	if a.busy {
 		return
 	}
 	a.beginOperation()
 	a.busy = true
+	a.busyImmediate = immediate
+	a.busySince = time.Now()
+	if a.status != "处理中…" {
+		a.steadyStatus = a.status
+	}
 	a.status = "处理中…"
 	generation := a.generation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,7 +246,16 @@ func (a *App) runContext(work func(context.Context) outcome) {
 				return
 			}
 			a.busy = false
+			a.busyImmediate = false
+			a.busySince = time.Time{}
 			if r.err != nil {
+				if errors.Is(r.err, personal.ErrSystemUnlockExpired) {
+					a.systemUnlockExpired = true
+				}
+				if errors.Is(r.err, osunlock.ErrNotFound) && a.session == nil {
+					a.systemUnlockNotEnrolled = true
+					a.enrollSystemUnlockOnUnlock = true
+				}
 				a.status = message(r.err)
 				if a.session != nil && !a.session.Unlocked() {
 					a.Lock()
@@ -253,7 +309,7 @@ func message(e error) string {
 	case errors.Is(e, personal.ErrSystemUnlockExpired):
 		return "系统快捷解锁已过期；请重新完整解锁后主动启用"
 	case errors.Is(e, osunlock.ErrNotFound):
-		return "尚未启用系统快捷解锁；请先完整解锁并在安全设置启用"
+		return "尚未启用系统快捷解锁（" + osunlock.Label() + "）；请先输入主密码解锁，再前往「设置 → 安全与偏好」启用"
 	case errors.Is(e, osunlock.ErrMissingEntitlement):
 		return "系统钥匙串缺少签名权限；此构建无法使用 Touch ID，请使用主密码与 Secret Key"
 	case errors.Is(e, osunlock.ErrCancelled):
@@ -261,9 +317,9 @@ func message(e error) string {
 	case errors.Is(e, osunlock.ErrAuthFailed):
 		return "系统验证未通过；可重试，或使用主密码与 Secret Key"
 	case errors.Is(e, osunlock.ErrNotAvailable):
-		return "系统钥匙串暂不可用；请稍后重试，必要时重启 Mac，或使用主密码与 Secret Key"
+		return "系统凭据服务暂不可用；请稍后重试，必要时重启设备，或使用主密码与 Secret Key"
 	case errors.Is(e, osunlock.ErrInteractionNotAllowed):
-		return "当前无法显示系统验证（如屏幕已锁定）；解锁 Mac 后重试，或使用主密码与 Secret Key"
+		return "当前无法显示系统验证（如屏幕已锁定或窗口未在前台）；请解锁屏幕后重试，或使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSystemUnlockUnavailable):
 		return "系统快捷解锁不可用；需要系统密钥服务与正确权限，请使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSessionLocked):
@@ -465,9 +521,13 @@ func (a *App) Lock() {
 	a.lockStart()
 	a.stopSSHAgent()
 	a.sshRows = nil
+	a.sshAllRows = nil
+	a.sshLoaded = false
+	a.sshLoading = false
 	a.sshSelected = nil
 	a.sshTitle = ""
 	a.sshImportPath = ""
+	a.invalidateDeviceSecretCache()
 	if a.operation != nil {
 		a.operation.gate.Cancel()
 		if a.operation.gate.CommitWon() {
@@ -522,6 +582,14 @@ func (a *App) Lock() {
 	a.browserSaveID = ""
 	a.browserSaveTitle = ""
 	a.busy = false
+	a.busyImmediate = false
+	a.busySince = time.Time{}
+	a.steadyStatus = ""
+	a.systemUnlockNotEnrolled = false
+	a.enrollSystemUnlockOnUnlock = false
+	a.systemUnlockEnrolling = false
+	a.systemUnlockNotice = ""
+	a.systemUnlockNoticeErr = false
 	a.status = "金库已锁定"
 	if a.mutationUnknown {
 		a.status += " · " + mutationUnknownStatus
@@ -540,6 +608,7 @@ func (a *App) Lock() {
 }
 func (a *App) unlock() {
 	path := a.path
+	a.invalidateDeviceSecretCache()
 	pw := []byte(a.password)
 	secret := a.secret
 	if secret == "" && !a.showSecretFallback {
@@ -561,7 +630,10 @@ func (a *App) unlock() {
 		a.status = "Secret Key 格式不正确"
 		return
 	}
-	a.runContext(func(ctx context.Context) outcome {
+	prefs := a.settingsSnapshot()
+	wasExpired := a.systemUnlockExpired
+	enrollRequested := a.enrollSystemUnlockOnUnlock
+	a.runContextInteractive(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
 		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
@@ -573,6 +645,32 @@ func (a *App) unlock() {
 			s.Lock()
 			return outcome{err: personal.ErrSessionLocked}
 		}
+		enrolledNow := false
+		var enrollErr error
+		renewed := false
+		var renewedTTL time.Duration
+		var renewedAt time.Time
+		if enrollRequested && a.systemStore != nil {
+			renewedTTL = prefs.SystemUnlockDuration()
+			if enrollErr = s.EnableSystemUnlockFor(a.systemStore, renewedTTL); enrollErr == nil {
+				enrolledNow = true
+				if renewedTTL != personal.SystemUnlockNeverExpire {
+					renewedAt = time.Now().Add(renewedTTL)
+				}
+			}
+		} else if prefs.SystemUnlockEnabled && prefs.SystemUnlockAutoRenew && a.systemStore != nil && (wasExpired || prefs.SystemUnlockNeedsRenewal(time.Now())) {
+			renewedTTL = prefs.SystemUnlockDuration()
+			if err := s.EnableSystemUnlockFor(a.systemStore, renewedTTL); err == nil {
+				renewed = true
+				if renewedTTL != personal.SystemUnlockNeverExpire {
+					renewedAt = time.Now().Add(renewedTTL)
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			s.Lock()
+			return outcome{err: personal.ErrSessionLocked}
+		}
 		rows, e := s.List("active")
 		if e != nil {
 			s.Lock()
@@ -580,6 +678,9 @@ func (a *App) unlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.systemUnlockExpired = false
+			a.systemUnlockNotEnrolled = false
+			a.enrollSystemUnlockOnUnlock = false
 			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
@@ -589,11 +690,21 @@ func (a *App) unlock() {
 			a.onboarding = false
 			a.create = false
 			_ = a.SetVaultPath(path)
+			if enrolledNow || renewed {
+				a.markSystemUnlockEnrolled(renewedTTL, renewedAt)
+			}
 			a.touchActivity()
 			a.loadV2Metadata()
 			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
 			if rememberErr != nil {
 				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
+			}
+			if enrolledNow {
+				a.status += " · 已启用" + osunlock.Label() + "快捷解锁"
+			} else if enrollErr != nil {
+				a.status += " · " + message(enrollErr)
+			} else if renewed {
+				a.status += " · 系统快捷解锁已自动续期"
 			}
 			a.startBrowserBroker()
 			a.notifyBrowserBrokerUnlocked()
@@ -630,7 +741,7 @@ func (a *App) createVaultFile() {
 	}
 	a.password = ""
 	a.confirmation = ""
-	a.run(func() outcome {
+	a.runInteractive(func() outcome {
 		defer clear(pw)
 		defer clear(key)
 		var kitPath string
@@ -847,7 +958,9 @@ func (a *App) View(c *ui.Context) {
 	if a.session != nil && a.idleTimer == nil {
 		a.armIdleTimer()
 	}
-	c.After(time.Second)
+	if a.session != nil {
+		c.After(time.Second)
+	}
 	if !classicLayoutRequested() {
 		c.SetTheme(a.onevraTheme(c))
 	}
@@ -857,19 +970,45 @@ func (a *App) View(c *ui.Context) {
 	pairPending := len(a.browserPairs) != 0
 	a.brokerMu.Unlock()
 	if cliPending {
-		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
+		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Children(func() { a.cliApprovalView(c) })
 		return
 	}
 	if pairPending {
-		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.browserPairView(c) })
+		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Children(func() { a.browserPairView(c) })
 		return
 	}
 	browser := a.browser
 	if browser == nil {
 		browser = a.brokeredBrowserApproval()
 	}
-	if a.session != nil && a.sshApproval == nil && browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
+	if a.session != nil && a.sshApproval == nil && browser == nil && a.v2Mode && a.page == "vault" {
 		a.v2View(c)
+		return
+	}
+	if a.session == nil && !classicLayoutRequested() {
+		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Children(func() {
+			oneui.ScrollView(c, oneui.ScrollViewOptions{}).Grow(1).FillWidth().Children(func() {
+				ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(t.Space(6), t.Space(4)).Gap(t.Space(3)).Children(func() {
+					switch {
+					case a.onboarding:
+						a.onboardingView(c)
+					case a.create:
+						a.createVaultView(c)
+					default:
+						a.lockView(c)
+					}
+					if a.mutationUnknown {
+						onevraBanner(c, lucide.TriangleAlert(), mutationUnknownStatus, t.Warning, nil)
+					}
+					if a.clipboardWarning {
+						onevraBanner(c, lucide.TriangleAlert(), "系统剪贴板清理未确认；会仅对原所有权重试", t.Warning, nil)
+					}
+					if a.clipboardManual {
+						onevraBanner(c, lucide.TriangleAlert(), clipboardManualCleanupNotice(), t.Warning, nil)
+					}
+				})
+			})
+		})
 		return
 	}
 	ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(14).Children(func() {
@@ -888,18 +1027,7 @@ func (a *App) View(c *ui.Context) {
 		if a.session == nil {
 			ui.Scroll(c).Grow(1).FillWidth().Children(func() {
 				ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(24, 0).Children(func() {
-					if !classicLayoutRequested() {
-						switch {
-						case a.onboarding:
-							a.onboardingView(c)
-						case a.create:
-							a.createVaultView(c)
-						default:
-							a.lockView(c)
-						}
-					} else {
-						a.lockView(c)
-					}
+					a.lockView(c)
 				})
 			})
 		} else if a.sshApproval != nil {
@@ -937,78 +1065,85 @@ func (a *App) lockView(c *ui.Context) {
 	}
 
 	ui.Column(c.Key("unlock-card")).Role(ui.RoleGroup).Label("解锁当前设备金库").
-		FillWidth().MaxWidth(460).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(5)).Gap(t.Space(3)).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
-			mark := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).Background(t.Accent).
+		FillWidth().MaxWidth(440).Border(1, t.Border).Radius(t.Radius*1.75).Background(t.Surface).
+		Padding(t.Space(6)).Gap(t.Space(3.5)).Shadow(0, t.Space(1.5), t.Space(6), 0, ui.RGBA(0, 0, 0, .07)).Children(func() {
+		ui.Column(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+			mark := ui.Box(c).Size(t.Space(12), t.Space(12)).Shrink(0).Radius(t.Space(3)).Background(t.Accent).
 				AlignItems(ui.Center).Justify(ui.Center)
 			mark.Children(func() {
-				oneui.Icon(c, lucide.LockKeyhole()).Size(t.Space(5), t.Space(5)).TextColor(t.AccentText)
+				oneui.Icon(c, lucide.LockKeyhole()).Size(t.Space(6), t.Space(6)).TextColor(t.AccentText)
 			})
-			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
-				oneui.Text(c, heading).FontSize(t.Rem(1.3)).Bold().TextColor(t.Text).SingleLine()
-				oneui.Text(c, "解锁金库 · 本机已完成设备绑定，日常解锁只需主密码。"+osunlock.Requirement()).
-					FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
-			})
+			oneui.Text(c, heading).FontSize(t.Rem(1.35)).Bold().TextColor(t.Text).SingleLine()
+			oneui.Text(c, "解锁金库 · 日常解锁只需主密码。"+osunlock.Requirement()).
+				FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
 		})
 
-		// Bound vault pill (replaces raw path box & "选择金库位置…" / "创建新金库" in Onevra mode)
+		// Compact bound-vault indicator (no raw path edit box in default mode)
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).
-			Border(1, t.Border).Radius(t.Radius).Background(t.Background).
-			Padding(t.Space(1.5), t.Space(2.5)).Children(func() {
-			oneui.Icon(c, lucide.FileLock()).Size(t.Space(4), t.Space(4)).TextColor(t.Accent)
+			Border(1, t.Border.Alpha(.7)).Radius(t.Radius).Background(t.Background).
+			Padding(t.Space(1.75), t.Space(2.5)).Children(func() {
+			oneui.Icon(c, lucide.FileLock()).Size(t.Space(4), t.Space(4)).TextColor(t.TextMuted)
 			locText := displayVaultLocation(a.path)
 			if baseName != "" {
 				locText = baseName + " · " + locText
 			}
-			oneui.Text(c, locText).FontSize(t.Rem(.78)).Bold().TextColor(t.Text).Grow(1).SingleLine()
+			oneui.Text(c, locText).FontSize(t.Rem(.78)).TextColor(t.Text).Grow(1).SingleLine().Ellipsis("…")
 			if a.path != "" {
-				if _, err := a.loadDeviceSecret(a.path); err == nil {
-					oneui.Badge(c, "已记住密钥", oneui.BadgeOptions{Tone: oneui.BadgeSuccess})
+				if a.hasDeviceSecretCached(a.path) {
+					onevraPill(c, "已记住密钥", t.Success)
 				} else {
-					oneui.Badge(c, "需应急恢复", oneui.BadgeOptions{Tone: oneui.BadgeWarning})
+					onevraPill(c, "需应急恢复", t.Warning)
 				}
 			}
 		})
 
-		pwInput := oneui.TextBox(c, &a.password, oneui.TextBoxOptions{}).
-			Label("主密码").Placeholder("输入主密码解锁").Password().Disabled(a.busy)
+		pwInput := oneui.TextBox(c, &a.password, oneui.TextBoxOptions{LeadingIcon: lucide.KeyRound()}).
+			Label("主密码").Placeholder("输入主密码解锁").Password().Disabled(a.uiBusy(c))
 		pwInput.OnSubmit(a.unlock)
 
 		if a.showSecretFallback {
-			ui.Column(c).FillWidth().Border(1, t.Warning).Radius(t.Radius).Background(t.Warning.Alpha(.06)).
-				Padding(t.Space(2.5)).Gap(t.Space(1)).Children(func() {
-				oneui.Text(c, "此设备没有可用的已保存 Secret Key，请从应急文件粘贴一次。").FontSize(t.Rem(.76)).Bold().TextColor(t.Warning).Wrap()
-				oneui.Text(c, "成功解锁后会在本机系统凭据存储中重新保存，之后仍然只需主密码。").FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
-			})
-			oneui.TextBox(c, &a.secret, oneui.TextBoxOptions{}).
-				Label("Secret Key").Placeholder("LL1-…（从应急文件粘贴一次）").Password().Disabled(a.busy).
+			onevraBanner(c, lucide.TriangleAlert(), "此设备未保存 Secret Key，请从应急文件粘贴一次；解锁后会重新存入系统凭据库。", t.Warning, nil)
+			oneui.TextBox(c, &a.secret, oneui.TextBoxOptions{LeadingIcon: lucide.FingerprintPattern()}).
+				Label("Secret Key").Placeholder("LL1-…（从应急文件粘贴）").Password().Disabled(a.uiBusy(c)).
 				OnSubmit(a.unlock)
 		}
 
+		if a.systemUnlockNotEnrolled {
+			onevraBanner(c, lucide.FingerprintPattern(), "此金库尚未启用 "+osunlock.Label()+"。输入上方主密码解锁即可立即完成启用。", t.Accent, nil)
+			oneui.Checkbox(c, &a.enrollSystemUnlockOnUnlock, "主密码解锁后立即启用 "+osunlock.Label()).Disabled(a.uiBusy(c))
+		}
+
 		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
-			oneui.Button(c, "解锁", oneui.ButtonPrimary).FillWidth().Disabled(a.busy).OnClick(a.unlock)
-			oneui.Button(c, "使用"+osunlock.Label()+"解锁", oneui.ButtonSecondary).FillWidth().Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
+			oneui.Button(c, "解锁", oneui.ButtonPrimary).FillWidth().Disabled(a.uiBusy(c)).OnClick(a.unlock)
+			oneui.Button(c, "使用"+osunlock.Label()+"解锁", oneui.ButtonOutline).FillWidth().Disabled(a.uiBusy(c) || a.path == "").OnClick(a.systemUnlock)
 		})
 
 		ui.Row(c).FillWidth().Wrap().Justify(ui.SpaceBetween).Gap(t.Space(1)).Children(func() {
 			if !a.showSecretFallback {
-				oneui.Button(c, "使用应急资料…", oneui.ButtonGhost).Disabled(a.busy).OnClick(func() {
+				oneui.Button(c, "使用应急资料…", oneui.ButtonGhost).Disabled(a.uiBusy(c)).OnClick(func() {
 					a.showSecretFallback = true
 					a.secret = ""
 					a.status = "请输入应急文件中的 Secret Key"
 				})
 			}
-			oneui.Button(c, "打开其他金库…", oneui.ButtonGhost).Disabled(a.busy).OnClick(a.openExistingVault)
-			oneui.Button(c, "退出当前设备…", oneui.ButtonGhost).Disabled(a.busy || a.path == "").OnClick(func() {
+			oneui.Button(c, "打开其他金库…", oneui.ButtonGhost).Disabled(a.uiBusy(c)).OnClick(a.openExistingVault)
+			oneui.Button(c, "退出当前设备…", oneui.ButtonGhost).Disabled(a.uiBusy(c) || a.path == "").OnClick(func() {
 				a.confirmForgetDevice = true
 				a.forgetPassword = ""
-				a.status = "确认退出前需验证当前金库主密码；不会删除金库文件"
+				a.status = "请再次点击确认以退出当前设备；不会删除金库文件"
 			})
 		})
 
 		if a.confirmForgetDevice {
 			a.forgetDeviceConfirmView(c)
+		}
+		if a.status != "" && a.status != "金库已锁定" {
+			statusColor := t.TextMuted
+			if strings.Contains(a.status, "失败") || strings.Contains(a.status, "不正确") || strings.Contains(a.status, "不可用") ||
+				strings.Contains(a.status, "过期") || strings.Contains(a.status, "未通过") || strings.Contains(a.status, "尚未启用") {
+				statusColor = t.Warning
+			}
+			oneui.Text(c, a.status).FontSize(t.Rem(.78)).TextColor(statusColor).Wrap()
 		}
 	})
 }
@@ -1124,7 +1259,7 @@ func (a *App) lockFormView(c *ui.Context) {
 		ui.Button(c, "退出当前设备…").Disabled(a.busy || a.path == "").OnClick(func() {
 			a.confirmForgetDevice = true
 			a.forgetPassword = ""
-			a.status = "确认退出前需验证当前金库主密码；不会删除金库文件"
+			a.status = "请再次点击确认以退出当前设备；不会删除金库文件"
 		})
 	})
 	if a.confirmForgetDevice {
@@ -1150,7 +1285,7 @@ func (a *App) vaultView(c *ui.Context) {
 				a.page = tab.id
 				a.display = ""
 				if tab.id == "ssh" {
-					a.refreshSSHKeys()
+					a.ensureSSHKeysLoaded()
 				}
 			})
 		}
@@ -1351,22 +1486,14 @@ func (a *App) activityContentView(c *ui.Context) {
 		}
 	}
 
-	ui.Row(c).FillWidth().AlignItems(ui.Center).Wrap().Gap(t.Space(1.5)).Children(func() {
-		chips := []struct{ id, label string }{
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Wrap().Gap(t.Space(2)).Children(func() {
+		if next, changed := onevraSegmented(c, filter, [][2]string{
 			{"all", "全部"},
 			{"session", "会话与解锁"},
 			{"item", "条目变更"},
 			{"external", "密钥与外部请求"},
-		}
-		for _, chip := range chips {
-			chip := chip
-			variant := oneui.ButtonOutline
-			if filter == chip.id {
-				variant = oneui.ButtonSecondary
-			}
-			oneui.Button(c, chip.label, variant).OnClick(func() {
-				a.auditFilter = chip.id
-			})
+		}); changed {
+			a.auditFilter = next
 		}
 		ui.Box(c).Grow(1)
 		oneui.Button(c, "刷新活动", oneui.ButtonSecondary).Disabled(a.busy || a.session == nil).OnClick(func() {
@@ -1375,23 +1502,24 @@ func (a *App) activityContentView(c *ui.Context) {
 		})
 	})
 
-	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-		Padding(t.Space(3)).Gap(t.Space(1.5)).Children(func() {
+	onevraGroup(c, "", func(row func(func())) {
 		if len(a.audit) == 0 {
-			oneui.Text(c, "暂无已加载的审计事件，请点击「刷新活动」从当前金库读取离线签名账本。").
-				FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			row(func() {
+				oneui.Text(c, "暂无已加载的审计事件，请点击「刷新活动」从当前金库读取离线签名账本。").
+					FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			})
 			return
 		}
 		if len(filtered) == 0 {
-			oneui.Text(c, "当前筛选条件下暂无审计记录；可切换回「全部」查看完整事件。").
-				FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			row(func() {
+				oneui.Text(c, "当前筛选条件下暂无审计记录；可切换回「全部」查看完整事件。").
+					FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
+			})
 			return
 		}
-		for i, e := range filtered {
-			if i > 0 {
-				ui.Box(c).FillWidth().Height(1).Background(t.Border)
-			}
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+		for _, e := range filtered {
+			e := e
+			row(func() {
 				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
 					oneui.Text(c, e.Action).FontSize(t.Rem(.84)).Bold().TextColor(t.Text).SingleLine()
 					meta := e.UTC
@@ -1403,13 +1531,13 @@ func (a *App) activityContentView(c *ui.Context) {
 					}
 					oneui.Text(c, meta).FontSize(t.Rem(.72)).TextColor(t.TextMuted).Wrap()
 				})
-				tone := oneui.BadgeNeutral
+				color := t.TextMuted
 				if strings.EqualFold(e.Result, "ok") || strings.EqualFold(e.Result, "success") {
-					tone = oneui.BadgeSuccess
+					color = t.Success
 				} else if strings.Contains(strings.ToLower(e.Result), "deny") || strings.Contains(strings.ToLower(e.Result), "fail") || strings.Contains(strings.ToLower(e.Result), "err") {
-					tone = oneui.BadgeDanger
+					color = t.Danger
 				}
-				oneui.Badge(c, e.Result, oneui.BadgeOptions{Tone: tone})
+				onevraPill(c, e.Result, color)
 			})
 		}
 	})
@@ -1614,6 +1742,7 @@ func runDesktop(settingsPaths ...string) error {
 				MinHeight:     680,
 				StateKey:      "locklark.main",
 				Theme:         a.onevraTheme,
+				Toasts:        oneui.ToastOptions{Placement: oneui.ToastBottom},
 				HeaderLeading: a.onevraHeaderLeading,
 				HeaderActions: a.onevraHeaderActions,
 				Content:       a.View,
@@ -1648,7 +1777,7 @@ func runDesktop(settingsPaths ...string) error {
 		icon := image.NewNRGBA(image.Rect(0, 0, 32, 32))
 		for y := 4; y < 28; y++ {
 			for x := 6; x < 26; x++ {
-				icon.SetNRGBA(x, y, color.NRGBA{R: 33, G: 130, B: 110, A: 255})
+				icon.SetNRGBA(x, y, color.NRGBA{R: 189, G: 72, B: 27, A: 255})
 			}
 		}
 		var pngIcon bytes.Buffer
@@ -1701,7 +1830,7 @@ func (a *App) systemUnlock() {
 	path, store := a.path, a.systemStore
 	a.password = ""
 	a.secret = ""
-	a.runContext(func(ctx context.Context) outcome {
+	a.runContextInteractive(func(ctx context.Context) outcome {
 		s, e := personal.UnlockWithSystemContext(ctx, path, store, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
@@ -1713,6 +1842,9 @@ func (a *App) systemUnlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.systemUnlockExpired = false
+			a.systemUnlockNotEnrolled = false
+			a.enrollSystemUnlockOnUnlock = false
 			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
@@ -1745,21 +1877,46 @@ func (a *App) securityView(c *ui.Context) {
 			ui.Button(c, "检查更新…").Disabled(a.busy).OnClick(updater.CheckForUpdates)
 		})
 		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(12).Gap(6).Children(func() {
+			prefs := a.settingsSnapshot()
 			ui.Text(c, "快捷解锁："+osunlock.Label()).Bold().TextColor(t.Text)
 			ui.Text(c, osunlock.Description()).FontSize(13).TextColor(t.Text)
 			ui.Text(c, osunlock.Requirement()).FontSize(12).TextColor(t.TextMuted)
 			ui.Text(c, "首次或授权到期后需使用主密码与 Secret Key 完整解锁，再主动启用；系统验证失败时仍可通过完整凭据解锁。").FontSize(12).TextColor(t.TextMuted)
 			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.PrimaryButton(c, "启用系统快捷解锁（有效期 24 小时）").Disabled(a.busy).OnClick(func() {
+				ui.PrimaryButton(c, "启用系统快捷解锁").Disabled(a.uiBusy(c) || a.session == nil || !a.session.CanEnableSystemUnlock()).OnClick(func() {
 					s, store := a.session, a.systemStore
-					a.run(func() outcome {
-						return outcome{err: s.EnableSystemUnlock(store), apply: func() { a.status = "系统快捷解锁已启用；现在可锁定并试用" }}
+					if s == nil {
+						return
+					}
+					ttl := prefs.SystemUnlockDuration()
+					a.runInteractive(func() outcome {
+						if err := s.EnableSystemUnlockFor(store, ttl); err != nil {
+							return outcome{err: err}
+						}
+						var expiresAt time.Time
+						if ttl != personal.SystemUnlockNeverExpire {
+							expiresAt = time.Now().Add(ttl)
+						}
+						return outcome{apply: func() {
+							a.systemUnlockExpired = false
+							a.systemUnlockNotEnrolled = false
+							a.enrollSystemUnlockOnUnlock = false
+							a.markSystemUnlockEnrolled(ttl, expiresAt)
+							a.status = "系统快捷解锁已启用；现在可锁定并试用"
+						}}
 					})
 				})
-				ui.Button(c, "停用系统快捷解锁").Disabled(a.busy).OnClick(func() {
+				ui.Button(c, "停用系统快捷解锁").Disabled(a.uiBusy(c)).OnClick(func() {
 					path, store := a.path, a.systemStore
-					a.run(func() outcome {
-						return outcome{err: personal.DisableSystemUnlock(path, store), apply: func() { a.status = "系统快捷解锁已停用" }}
+					a.runInteractive(func() outcome {
+						err := personal.DisableSystemUnlock(path, store)
+						if errors.Is(err, osunlock.ErrNotFound) {
+							err = nil
+						}
+						return outcome{err: err, apply: func() {
+							a.markSystemUnlockDisabled()
+							a.status = "系统快捷解锁已停用"
+						}}
 					})
 				})
 			})
@@ -1772,7 +1929,7 @@ func (a *App) securityView(c *ui.Context) {
 
 func (a *App) chooseVault() {
 	win, create := a.win, a.create
-	a.run(func() outcome {
+	a.runInteractive(func() outcome {
 		var path string
 		var e error
 		if create {
