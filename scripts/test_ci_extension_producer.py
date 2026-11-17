@@ -157,10 +157,13 @@ class VaultFileProductCIContract(unittest.TestCase):
     SELECTOR = "^(" + "|".join(EARLY_PARENTS) + ")$"
     MINIMUM = f"go test -count=1 -run '{SELECTOR}' ./cmd/locklark"
     REMAINING = f"go test -count=1 -skip '{SELECTOR}' ./..."
+    OS_P_FLAG = "${{ runner.os == 'Linux' && ' -p 1' || '' }}"
+    REMAINING_WINDOWS = REMAINING
+    REMAINING = REMAINING_WINDOWS.replace("go test", "go test -p 1", 1)
     EXIT_CHECK = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
 
     @classmethod
-    def linux_commands(cls) -> list[str]:
+    def linux_commands(cls, os_name: str = "Linux") -> list[str]:
         commands = step_commands("go", cls.STEP)
         split = commands.index("} else {")
         if commands[-1] != "}" or commands[split - 3:split] != [
@@ -169,7 +172,19 @@ class VaultFileProductCIContract(unittest.TestCase):
             "  " + cls.EXIT_CHECK,
         ]:
             raise AssertionError("Windows partition or Linux branch changed")
-        return [line[2:] for line in commands[split + 1:-1]]
+        expanded = []
+        for line in commands[split + 1:-1]:
+            command = line[2:]
+            if cls.OS_P_FLAG in command:
+                command = command.replace(
+                    cls.OS_P_FLAG, " -p 1" if os_name == "Linux" else "", 1
+                )
+            expanded.append(command)
+        return expanded
+
+    @classmethod
+    def windows_commands(cls) -> list[str]:
+        return cls.linux_commands("Windows")
 
     def test_linux_reuses_one_product_and_partitions_minimum_before_remaining(self):
         commands = self.linux_commands()
@@ -181,6 +196,11 @@ class VaultFileProductCIContract(unittest.TestCase):
             "$env:LOCKLARK_TEST_VAULTFILE_PRODUCT = $vaultFileProduct",
             self.MINIMUM, self.EXIT_CHECK, self.REMAINING, self.EXIT_CHECK,
         ])
+        windows = self.windows_commands()
+        self.assertEqual(windows[3], self.MINIMUM)
+        self.assertEqual(windows[5], self.REMAINING_WINDOWS)
+        self.assertNotIn(" -p 1", windows[5])
+        self.assertIn(" -p 1", commands[5])
         self.assertEqual(text().count("LOCKLARK_TEST_VAULTFILE_PRODUCT"), 1)
         self.assertNotIn("go build", "\n".join(commands))
         self.assertEqual(block("linux-build").count(
@@ -195,7 +215,7 @@ class VaultFileProductCIContract(unittest.TestCase):
     def test_exact_go_parent_partition_runs_every_parent_once(self):
         commands = self.linux_commands()
         minimum = re.fullmatch(r"go test -count=1 -run '([^']+)' ./cmd/locklark", commands[3])
-        remaining = re.fullmatch(r"go test -count=1 -skip '([^']+)' ./\.\.\.", commands[5])
+        remaining = re.fullmatch("go test -p 1 -count=1 -skip '([^']+)' ./\\.\\.\\.", commands[5])
         self.assertIsNotNone(minimum)
         self.assertIsNotNone(remaining)
         run_pattern, skip_pattern = minimum[1], remaining[1]
