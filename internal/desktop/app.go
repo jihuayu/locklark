@@ -660,14 +660,19 @@ func (a *App) unlock() {
 			a.create = false
 			_ = a.SetVaultPath(path)
 			a.touchActivity()
-			a.loadV2Metadata()
-			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
+			initialStatus := "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
 			if batch.fanoutIncomplete {
-				a.status += localVaultFileInitialFanoutIncompleteSuffix
+				initialStatus += localVaultFileInitialFanoutIncompleteSuffix
 			}
 			if rememberErr != nil {
-				a.status += " · Secret Key 未能保存到此设备，下次请使用应急资料"
+				initialStatus += " · Secret Key 未能保存到此设备，下次请使用应急资料"
 			}
+			completionStatus := ""
+			if batch.fanoutIncomplete {
+				completionStatus = initialStatus
+			}
+			a.loadV2MetadataWithCompletion(completionStatus)
+			a.status = initialStatus
 			a.startBrowserBroker()
 			a.notifyBrowserBrokerUnlocked()
 		}}

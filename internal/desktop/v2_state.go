@@ -133,7 +133,14 @@ func (a *App) EnableV2() {
 func (a *App) enableV2() { a.EnableV2() }
 
 // loadV2Metadata performs the first authenticated list after unlock.
-func (a *App) loadV2Metadata() { a.reloadV2(false) }
+func (a *App) loadV2Metadata() { a.loadV2MetadataWithCompletion("") }
+
+// loadV2MetadataWithCompletion is the one-shot initial-unlock variant. The
+// completion status is applied only by reloadV2WithCompletion after the real
+// snapshot adoption gate succeeds; ordinary metadata reloads remain unchanged.
+func (a *App) loadV2MetadataWithCompletion(completionStatus string) {
+	a.reloadV2WithCompletion(false, completionStatus)
+}
 
 // currentFilter derives the personal.ItemFilter for the active sidebar view,
 // search query and sort order. It is safe to call before a session exists.
@@ -498,6 +505,10 @@ func (a *App) rebuildSidebarCounts() {
 // reloadV2 refreshes the list and sidebar metadata without resetting any
 // search or filter state.
 func (a *App) reloadV2(keepSelection bool) {
+	a.reloadV2WithCompletion(keepSelection, "")
+}
+
+func (a *App) reloadV2WithCompletion(keepSelection bool, completionStatus string) {
 	s := a.session
 	if s == nil {
 		return
@@ -511,10 +522,18 @@ func (a *App) reloadV2(keepSelection bool) {
 	}
 	a.v2.pendingReload, a.v2.pendingKeep = false, false
 	filter, query := a.currentFilter(), a.currentV2Query()
+	session, generation := s, a.generation
 	a.run(func() outcome {
 		snap := a.captureV2(s, filter)
 		snap.query = query
-		return outcome{err: snap.err, apply: func() { _ = a.applyV2Snapshot(snap, keepSelection) }}
+		return outcome{err: snap.err, apply: func() {
+			if !a.applyV2Snapshot(snap, keepSelection) {
+				return
+			}
+			if completionStatus != "" && a.session == session && a.generation == generation {
+				a.status = completionStatus
+			}
+		}}
 	})
 }
 

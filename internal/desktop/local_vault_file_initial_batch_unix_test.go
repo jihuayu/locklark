@@ -105,6 +105,12 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 		if len(q.launches) != 0 || len(q.dispatches) != 0 {
 			t.Fatal("LOCAL_INITIAL_FANOUT_POST_APPLY_WORK_UNSETTLED")
 		}
+		if !a.v2.loaded {
+			t.Fatal("LOCAL_INITIAL_FANOUT_METADATA_NOT_DISPATCHED")
+		}
+		if strings.Contains(a.status, localVaultFileInitialFanoutIncompleteSuffix) {
+			t.Fatal("LOCAL_INITIAL_FANOUT_FULL_SUCCESS_FALSE_WARNING")
+		}
 
 		var refA, refB localVaultFileRef
 		for _, ref := range a.localVaultFiles.refs {
@@ -251,6 +257,10 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 				a.unlock()
 				q.runLaunch(t)
 				q.runDispatch(t)
+				q.drain(t)
+				if !a.v2.loaded {
+					t.Fatal("LOCAL_INITIAL_FANOUT_LOCAL_CASE_METADATA_NOT_DISPATCHED")
+				}
 				if a.session == nil || !a.session.Unlocked() {
 					t.Fatal("LOCAL_INITIAL_FANOUT_LOCAL_CASE_PARENT_MISSING")
 				}
@@ -264,8 +274,28 @@ func TestDesktopInitialOwnedFanoutUnlock(t *testing.T) {
 					!strings.Contains(a.status, localVaultFileInitialFanoutIncompleteSuffix) {
 					t.Fatal("LOCAL_INITIAL_FANOUT_LOCAL_CASE_INCOMPLETE_NOT_FINITE")
 				}
-				a.Lock()
-				q.drain(t)
+				if !testCase.wantIncomplete &&
+					strings.Contains(a.status, localVaultFileInitialFanoutIncompleteSuffix) {
+					t.Fatal("LOCAL_INITIAL_FANOUT_LOCAL_CASE_FALSE_WARNING")
+				}
+				if testCase.name == "overflow" {
+					a.reloadV2WithCompletion(false, localVaultFileInitialFanoutIncompleteSuffix)
+					if len(q.launches) != 1 {
+						t.Fatal("LOCAL_INITIAL_FANOUT_LATE_METADATA_NOT_LAUNCHED")
+					}
+					q.runLaunch(t)
+					a.Lock()
+					newerStatus := a.status
+					q.runDispatch(t)
+					if a.status != newerStatus ||
+						strings.Contains(a.status, localVaultFileInitialFanoutIncompleteSuffix) {
+						t.Fatal("LOCAL_INITIAL_FANOUT_LATE_METADATA_RESTORED_NOTICE")
+					}
+					q.drain(t)
+				} else {
+					a.Lock()
+					q.drain(t)
+				}
 			})
 		}
 	})
