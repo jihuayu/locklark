@@ -233,6 +233,21 @@ func (s *Session) OpenOwnedVaultFileChild(journalPath string, checkpoint *vaultf
 
 type vaultFileChildOpenMode struct {
 	owned bool
+	// batch carries an already authenticated parent snapshot and public owner
+	// custody projections for one unpublished initial fan-out operation. It is
+	// nil for every existing single-target API.
+	batch *vaultFileOwnedBatchAuth
+}
+
+type vaultFileOwnedBatchAuth struct {
+	parentOwner        *vaultFileChildOwner
+	parentMaterial     []byte
+	parentSlot         [32]byte
+	parentPath         string
+	idleDeadline       time.Time
+	hasIdle            bool
+	fullFactorDeadline time.Time
+	snapshots          map[string]VaultFileOwnershipPublic
 }
 
 func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions, mode vaultFileChildOpenMode) (VaultFileChildToken, []VaultFileBaselineItem, error) {
@@ -245,88 +260,150 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 
 	// Snapshot the parent's authority, activity deadline and slot/material
 	// identity. The expensive slot unwrap and KDF run outside Session.mu.
-	s.mu.Lock()
-	if err := s.active(true); err != nil {
+	var (
+		parentOwner        *vaultFileChildOwner
+		parentMaterial     []byte
+		parentSlot         [32]byte
+		parentPath         string
+		idleDeadline       time.Time
+		hasIdle            bool
+		fullFactorDeadline time.Time
+		priorOwned         *vaultFileChild
+		priorOwnedToken    VaultFileChildToken
+		ownsMaterial       bool
+		batchAuth          *vaultFileOwnedBatchAuth
+	)
+	if mode.batch != nil {
+		batchAuth = mode.batch
+		if batchAuth.parentOwner == nil || len(batchAuth.parentMaterial) == 0 ||
+			batchAuth.parentPath == "" || batchAuth.snapshots == nil {
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		s.mu.Lock()
+		if err := s.active(false); err != nil {
+			s.mu.Unlock()
+			return VaultFileChildToken{}, nil, err
+		}
+		if s.vaultFileOwner != batchAuth.parentOwner || s.path != batchAuth.parentPath ||
+			s.slotDigest != batchAuth.parentSlot ||
+			subtle.ConstantTimeCompare(s.material, batchAuth.parentMaterial) != 1 {
+			s.mu.Unlock()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		parentOwner = batchAuth.parentOwner
+		parentMaterial = batchAuth.parentMaterial
+		parentSlot = batchAuth.parentSlot
+		parentPath = batchAuth.parentPath
+		idleDeadline, hasIdle = batchAuth.idleDeadline, batchAuth.hasIdle
+		fullFactorDeadline = batchAuth.fullFactorDeadline
+		if mode.owned {
+			priorOwned, priorOwnedToken = s.captureOwnedVaultFileChildAtSnapshotLocked(journalPath, checkpoint.VaultID)
+		}
 		s.mu.Unlock()
-		return VaultFileChildToken{}, nil, err
-	}
-	parentOwner := s.vaultFileOwner
-	if parentOwner == nil {
+	} else {
+		s.mu.Lock()
+		if err := s.active(true); err != nil {
+			s.mu.Unlock()
+			return VaultFileChildToken{}, nil, err
+		}
+		parentOwner = s.vaultFileOwner
+		if parentOwner == nil {
+			s.mu.Unlock()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		parentMaterial = bytes.Clone(s.material)
+		ownsMaterial = true
+		parentSlot = s.slotDigest
+		parentPath = s.path
+		idleDeadline, hasIdle = s.idleDeadline()
+		fullFactorDeadline = time.Now().Add(passkeyTransferFullFactorWindow)
+		if mode.owned {
+			// Bind the initial-auth cleanup to the generation that existed at
+			// the same parent snapshot used for factor and owner authentication.
+			// A later registration must never become the cleanup target.
+			priorOwned, priorOwnedToken = s.captureOwnedVaultFileChildAtSnapshotLocked(journalPath, checkpoint.VaultID)
+		}
 		s.mu.Unlock()
-		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
-	parentMaterial := bytes.Clone(s.material)
-	parentSlot := s.slotDigest
-	parentPath := s.path
-	idleDeadline, hasIdle := s.idleDeadline()
-	fullFactorDeadline := time.Now().Add(passkeyTransferFullFactorWindow)
-	var priorOwned *vaultFileChild
-	var priorOwnedToken VaultFileChildToken
-	if mode.owned {
-		// Bind the initial-auth cleanup to the generation that existed at the
-		// same parent snapshot used for factor and owner authentication. A
-		// later registration must never become the cleanup target.
-		priorOwned, priorOwnedToken = s.captureOwnedVaultFileChildAtSnapshotLocked(journalPath, checkpoint.VaultID)
+	if ownsMaterial {
+		defer clear(parentMaterial)
 	}
-	s.mu.Unlock()
-	defer clear(parentMaterial)
 	if len(parentMaterial) == 0 {
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
 
-	// Re-enter the complete full factors and prove they open this exact
-	// current account slot and material. A wrong pair is isolated to this
-	// attempt; a changed slot follows the existing Session.lock boundary.
-	factorErr := verifyVaultFileChildFactors(parentPath, parentSlot, parentMaterial, password, key)
-	switch {
-	case errors.Is(factorErr, errVaultFileChildWrongFactors):
-		return VaultFileChildToken{}, nil, ErrVaultFileScopedFactors
-	case errors.Is(factorErr, errVaultFileChildInvalidSlot):
-		s.lockVaultFileParent()
-		return VaultFileChildToken{}, nil, ErrSessionLocked
-	case factorErr != nil:
-		s.lockVaultFileParent()
-		return VaultFileChildToken{}, nil, ErrSessionLocked
-	}
-	if vaultFileChildBeforeRegister != nil {
-		vaultFileChildBeforeRegister()
+	if batchAuth == nil {
+		// Re-enter the complete full factors and prove they open this exact
+		// current account slot and material. A wrong pair is isolated to this
+		// attempt; a changed slot follows the existing Session.lock boundary.
+		factorErr := verifyVaultFileChildFactors(parentPath, parentSlot, parentMaterial, password, key)
+		switch {
+		case errors.Is(factorErr, errVaultFileChildWrongFactors):
+			return VaultFileChildToken{}, nil, ErrVaultFileScopedFactors
+		case errors.Is(factorErr, errVaultFileChildInvalidSlot):
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		case factorErr != nil:
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		if vaultFileChildBeforeRegister != nil {
+			vaultFileChildBeforeRegister()
+		}
 	}
 
 	var ownedSnapshot *vaultFileOwnedSnapshot
 	if mode.owned {
-		snapshot, ownedErr := s.authenticateVaultFileOwnedTarget(parentPath, parentMaterial, parentSlot, checkpoint.VaultID)
-		if vaultFileOwnedInitialAuthReady != nil {
-			vaultFileOwnedInitialAuthReady()
-		}
-		switch {
-		case errors.Is(ownedErr, errVaultFileChildInvalidSlot):
-			s.lockVaultFileParent()
-			return VaultFileChildToken{}, nil, ErrSessionLocked
-		case ownedErr != nil && !errors.Is(ownedErr, ErrVaultFileOwnership):
-			s.lockVaultFileParent()
-			return VaultFileChildToken{}, nil, ErrSessionLocked
-		case errors.Is(ownedErr, ErrVaultFileOwnership):
-			// The authenticated target is now missing. The candidate cannot be
-			// registered, but a same-parent, same-journal, same-VaultID owned
-			// child whose bound snapshot can no longer be the current owner
-			// must not keep its VUK alive.
+		if batchAuth != nil {
+			snapshot, ok := batchAuth.snapshots[checkpoint.VaultID]
+			if !ok {
+				s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
+					VaultFileOwnershipPublic{}, false, priorOwned, priorOwnedToken,
+					parentOwner, parentPath, parentSlot, parentMaterial)
+				return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+			}
 			s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
-				VaultFileOwnershipPublic{}, false, priorOwned, priorOwnedToken,
+				snapshot, true, priorOwned, priorOwnedToken,
 				parentOwner, parentPath, parentSlot, parentMaterial)
-			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+			if !vaultFileOwnedSnapshotMatchesCheckpoint(snapshot, checkpoint) {
+				return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+			}
+			ownedSnapshot = &vaultFileOwnedSnapshot{owner: snapshot}
+		} else {
+			snapshot, ownedErr := s.authenticateVaultFileOwnedTarget(parentPath, parentMaterial, parentSlot, checkpoint.VaultID)
+			if vaultFileOwnedInitialAuthReady != nil {
+				vaultFileOwnedInitialAuthReady()
+			}
+			switch {
+			case errors.Is(ownedErr, errVaultFileChildInvalidSlot):
+				s.lockVaultFileParent()
+				return VaultFileChildToken{}, nil, ErrSessionLocked
+			case ownedErr != nil && !errors.Is(ownedErr, ErrVaultFileOwnership):
+				s.lockVaultFileParent()
+				return VaultFileChildToken{}, nil, ErrSessionLocked
+			case errors.Is(ownedErr, ErrVaultFileOwnership):
+				// The authenticated target is now missing. The candidate cannot be
+				// registered, but a same-parent, same-journal, same-VaultID owned
+				// child whose bound snapshot can no longer be the current owner
+				// must not keep its VUK alive.
+				s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
+					VaultFileOwnershipPublic{}, false, priorOwned, priorOwnedToken,
+					parentOwner, parentPath, parentSlot, parentMaterial)
+				return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+			}
+			// A real current target was authenticated. If an existing owned child
+			// for this journal/VaultID carries a different custody snapshot, close
+			// that exact child now. The candidate checkpoint is not the owner truth,
+			// so a merely wrong caller pin with an unchanged owner leaves the old
+			// child alone.
+			s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
+				snapshot, true, priorOwned, priorOwnedToken,
+				parentOwner, parentPath, parentSlot, parentMaterial)
+			if !vaultFileOwnedSnapshotMatchesCheckpoint(snapshot, checkpoint) {
+				return VaultFileChildToken{}, nil, ErrVaultFileOwnership
+			}
+			ownedSnapshot = &vaultFileOwnedSnapshot{owner: snapshot}
 		}
-		// A real current target was authenticated. If an existing owned child
-		// for this journal/VaultID carries a different custody snapshot, close
-		// that exact child now. The candidate checkpoint is not the owner truth,
-		// so a merely wrong caller pin with an unchanged owner leaves the old
-		// child alone.
-		s.retireStaleOwnedVaultFileChildForOpen(journalPath, checkpoint.VaultID,
-			snapshot, true, priorOwned, priorOwnedToken,
-			parentOwner, parentPath, parentSlot, parentMaterial)
-		if !vaultFileOwnedSnapshotMatchesCheckpoint(snapshot, checkpoint) {
-			return VaultFileChildToken{}, nil, ErrVaultFileOwnership
-		}
-		ownedSnapshot = &vaultFileOwnedSnapshot{owner: snapshot}
 	}
 
 	// Parse the local account identity only after the factors are proven.
@@ -1035,41 +1112,16 @@ func verifyVaultFileChildFactors(path string, slotDigest [32]byte, material, pas
 	return nil
 }
 
-// authenticateVaultFileOwnedTarget authenticates the real account state and
-// audit after the caller has already proved the freshly supplied factors
-// against this exact captured parent slot/material, then returns the unique
-// public custody projection for vaultID. Reusing the captured verified
-// material avoids a second password KDF while the slot-digest check still binds
-// the read to the same authenticated parent. The temporary verifier session is
-// local only and is never registered or exposed. It never trusts the candidate
-// checkpoint for ownership and clears every private owner record before
-// returning.
+// authenticateVaultFileOwnedTarget authenticates one target from the same
+// captured verified parent material used by the batch owner projection.
 func (s *Session) authenticateVaultFileOwnedTarget(path string, material []byte, slotDigest [32]byte, vaultID string) (VaultFileOwnershipPublic, error) {
-	db, err := existingWithReadOnly(path, true)
+	snapshots, err := s.authenticateVaultFileOwnedTargets(path, material, slotDigest, []string{vaultID})
 	if err != nil {
-		return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
+		return VaultFileOwnershipPublic{}, err
 	}
-	verified := &Session{material: material, slotDigest: slotDigest}
-	var snapshot VaultFileOwnershipPublic
-	viewErr := db.View(func(tx *bolt.Tx) error {
-		auth, err := authenticateStateItems(tx, "", nil, vaultFileOwnerListAction, verified, false)
-		if err != nil {
-			return errVaultFileChildInvalidSlot
-		}
-		defer auth.clear()
-		records, err := loadVaultFileOwners(tx.Bucket(bucket), auth.identity, auth.rows)
-		if err != nil {
-			return errVaultFileChildInvalidSlot
-		}
-		defer clearVaultFileOwners(records)
-		snapshot, err = vaultFileOwnedProjection(records, vaultID)
-		return err
-	})
-	if closeErr := db.Close(); closeErr != nil {
-		return VaultFileOwnershipPublic{}, errVaultFileChildInvalidSlot
-	}
-	if viewErr != nil {
-		return VaultFileOwnershipPublic{}, viewErr
+	snapshot, ok := snapshots[vaultID]
+	if !ok {
+		return VaultFileOwnershipPublic{}, ErrVaultFileOwnership
 	}
 	return snapshot, nil
 }
