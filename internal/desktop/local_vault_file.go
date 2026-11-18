@@ -79,6 +79,14 @@ type localVaultFileState struct {
 	viewSequence     uint64
 	viewVerification localVaultFileViewVerification
 
+	// query is the exact-title local surface. It retains only the real client
+	// results and their frozen per-wrapper lifecycle binding. It is never a
+	// projection origin, selection authority or grant.
+	query localVaultFileQueryState
+	// activeItem is display-only evidence that the normal exact-query action
+	// activated this item on the current selected vault. It is not proof.
+	activeItem localVaultFileActiveItem
+
 	// Owned-session lifecycle state. It is reset on lock and never survives a
 	// parent or App generation boundary. The wrapper itself is opaque here.
 	sessionSlots map[localVaultFileSessionScope]*localVaultFileSessionSlot
@@ -247,10 +255,12 @@ func (a *App) closeLocalVaultFileView() {
 	// Navigation invalidates fresh view evidence and only this view's pending
 	// refresh delivery. The adopted child and its cache summary remain alive.
 	a.cancelLocalVaultFileRefreshView()
+	a.cancelLocalVaultFileQuery()
 	state := &a.localVaultFiles
 	state.selected, state.items, state.status = "", nil, ""
 	state.projectionOrigin = nil
 	state.unopenedNotice = nil
+	state.activeItem = localVaultFileActiveItem{}
 }
 
 // localVaultFileNavigationScope resolves one navigation ref through the
@@ -441,6 +451,7 @@ func (a *App) onevraLocalVaultFileView(c *ui.Context) {
 			oneui.Text(c, caption).TextColor(t.TextMuted)
 		}
 		a.onevraLocalVaultFileActions(c)
+		a.onevraLocalVaultFileQuery(c)
 		if oneui.Button(c, "关闭本地基线视图", oneui.ButtonOutline).Clicked() {
 			a.closeLocalVaultFileView()
 		}
@@ -448,6 +459,9 @@ func (a *App) onevraLocalVaultFileView(c *ui.Context) {
 			if oneui.Button(c, "核查或继续创建", oneui.ButtonOutline).Clicked() {
 				a.openLocalVaultFileCreate(a.localVaultFiles.selected)
 			}
+		}
+		if active, ok := a.localVaultFileActiveItemCurrent(); ok {
+			oneui.Text(c, "已激活条目："+active.title).TextColor(t.TextMuted).SingleLine()
 		}
 		for _, item := range a.localVaultFileCurrentItems() {
 			oneui.Text(c, item.Title).SingleLine()

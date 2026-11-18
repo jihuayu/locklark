@@ -770,6 +770,10 @@ func (a *App) backgroundTick(now time.Time) {
 		return
 	}
 	a.checkIdle(now)
+	// Recheck the current local exact-query result set on the existing timer.
+	// The sweep reuses launch/dispatch, is at most one in flight per query and
+	// shares the current query generation's minimum start interval.
+	a.scheduleLocalVaultFileQueryRevalidationAt(now)
 }
 
 // startBackgroundLoop starts the rendering-independent timer required by

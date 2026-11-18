@@ -561,6 +561,7 @@ func (a *App) syncLocalVaultFileSessions() personal.VaultFileCacheState {
 // detachLocalVaultFileSessionsForBoundary cancels and detaches every current
 // slot while retaining retiring ordering tails. It never waits.
 func (a *App) detachLocalVaultFileSessionsForBoundary() {
+	a.cancelLocalVaultFileQuery()
 	state := &a.localVaultFiles
 	for _, slot := range state.sessionSlots {
 		if slot == nil || slot.retiring {
@@ -578,6 +579,7 @@ func (a *App) detachLocalVaultFileSessionsForBoundary() {
 // lock and never touches a sibling wrapper or a single-vault navigation
 // decision.
 func (a *App) clearLocalVaultFileSessions() {
+	a.cancelLocalVaultFileQuery()
 	state := &a.localVaultFiles
 	for _, slot := range state.sessionSlots {
 		if slot == nil {
