@@ -34,10 +34,25 @@ import (
 // delegated. The second handle is a separate real Dir on the same store, so
 // the third write is a real directory CAS at exactly the expected revision.
 func TestPipelinePublishThirdWriterPreservesLocalWorking(t *testing.T) {
+	f, store := newThirdWriterFixture(t)
+	second, err := vaultfilebackend.OpenDir(store)
+	if err != nil {
+		t.Fatalf("OpenDir (second handle): %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	runThirdWriterScenario(t, f, second)
+}
+
+// runThirdWriterScenario is the shared end-to-end third-writer scenario. The
+// caller supplies the fixture's first real backend handle through f and one
+// independently constructed second real handle on the same store. The two
+// handles must address the same remote objects, but neither may be a mock or a
+// second view of in-memory state.
+func runThirdWriterScenario(t *testing.T, f *fixture, second vaultfilebackend.Backend) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), lateAckTimeout)
 	defer cancel()
 
-	f, store := newThirdWriterFixture(t)
 	j := f.openJournal(t)
 	if _, err := f.bootstrap(t, context.Background(), j); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
@@ -154,12 +169,8 @@ func TestPipelinePublishThirdWriterPreservesLocalWorking(t *testing.T) {
 		t.Fatalf("third writer proposal verification: %v", err)
 	}
 
-	// A second real handle on exactly the same directory store.
-	second, err := vaultfilebackend.OpenDir(store)
-	if err != nil {
-		t.Fatalf("OpenDir (second handle): %v", err)
-	}
-	t.Cleanup(func() { _ = second.Close() })
+	// The caller supplied a second, independently constructed real handle on
+	// exactly the same store.
 	third := &thirdWriterCAS{Backend: second}
 
 	// The active path pulls its merge source exactly once: the original B at
@@ -340,13 +351,11 @@ func thirdWriterPreparedEqual(a, b vaultfilejournal.PreparedProposal) bool {
 }
 
 // newThirdWriterFixture builds the same real written remote fixture as
-// newFixture, but returns the store path too so the test can open a second
-// real Dir handle on exactly that store. It reuses the package's fixture
-// helpers and tracking backend.
+// newFixture over the real directory backend, but returns the store path too so
+// the test can open a second real Dir handle on exactly that store. It reuses
+// the package's fixture helpers and tracking backend.
 func newThirdWriterFixture(t *testing.T) (*fixture, string) {
 	t.Helper()
-	p, id, _ := fixtureInputs(t)
-	remoteBytes := sealRemote(t)
 	store := filepath.Join(t.TempDir(), "store")
 	if err := os.Mkdir(store, 0o700); err != nil {
 		t.Fatalf("Mkdir store: %v", err)
@@ -356,11 +365,21 @@ func newThirdWriterFixture(t *testing.T) (*fixture, string) {
 		t.Fatalf("OpenDir: %v", err)
 	}
 	t.Cleanup(func() { _ = backend.Close() })
+	return newThirdWriterFixtureAt(t, backend), store
+}
+
+// newThirdWriterFixtureAt builds the written remote fixture over backend. The
+// caller owns backend's Close, so the same fixture can serve the local
+// directory regression and the opt-in real S3 provider scenario.
+func newThirdWriterFixtureAt(t *testing.T, backend vaultfilebackend.Backend) *fixture {
+	t.Helper()
+	p, id, _ := fixtureInputs(t)
+	remoteBytes := sealRemote(t)
 	remote := &trackingBackend{Backend: backend}
 	if err := remote.CreateIfAbsent(context.Background(), remoteName, remoteBytes); err != nil {
 		t.Fatalf("CreateIfAbsent: %v", err)
 	}
-	return &fixture{remote: remote, pin: fixturePin(t, p), id: id, bytes: remoteBytes}, store
+	return &fixture{remote: remote, pin: fixturePin(t, p), id: id, bytes: remoteBytes}
 }
 
 // thirdWriterCAS is a narrow test adapter over the real backend. It records
