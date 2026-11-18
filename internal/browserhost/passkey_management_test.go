@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,8 +17,47 @@ import (
 	"github.com/jihuayu/locklark/internal/vault"
 )
 
+// The one-shot E2E helper seeds the marker before launching the selected tests.
+const (
+	passkeyMetadataEntered        byte = '1'
+	passkeyFilterSetupEntered     byte = '2'
+	passkeyFilterMutationLoop     byte = '3'
+	passkeyFilterMutationLoopDone byte = '4'
+)
+
+var passkeyTimeoutPhase struct {
+	sync.Mutex
+	written byte
+}
+
+func markPasskeyTimeoutPhase(phase byte) {
+	marker := os.Getenv("LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE")
+	if marker == "" {
+		return
+	}
+	passkeyTimeoutPhase.Lock()
+	defer passkeyTimeoutPhase.Unlock()
+	if phase <= passkeyTimeoutPhase.written {
+		return
+	}
+
+	temp, err := os.CreateTemp(filepath.Dir(marker), ".phase-")
+	if err != nil {
+		return
+	}
+	defer os.Remove(temp.Name())
+	_, writeErr := temp.Write([]byte{phase})
+	closeErr := temp.Close()
+	if writeErr == nil && closeErr == nil && os.Rename(temp.Name(), marker) == nil {
+		passkeyTimeoutPhase.written = phase
+	}
+}
+
 func fixturePasskey(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string, string, string, string) {
 	t.Helper()
+	if t.Name() == "TestPasskeyFilterRunsBeforeFiveHundredCap" {
+		markPasskeyTimeoutPhase(passkeyFilterSetupEntered)
+	}
 	c, out, s, capability := v2Fixture(t)
 	create := Request{
 		V: 1, ID: reqID(30), Type: "passkey-create", Capability: capability,
@@ -67,6 +109,7 @@ func passkeyGetRequest(id, capability, credential string) Request {
 }
 
 func TestPasskeyManagementMetadataSearchAndStrictWire(t *testing.T) {
+	markPasskeyTimeoutPhase(passkeyMetadataEntered)
 	c, out, _, capability, itemID, revision, credential := fixturePasskey(t)
 	defer c.Close()
 	detail := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(40), "type": "item-get", "capability": capability, "item_id": itemID, "revision": revision})
@@ -403,6 +446,7 @@ func TestPasskeyFilterRunsBeforeFiveHundredCap(t *testing.T) {
 	searchResultLimit = 50
 	defer func() { searchResultLimit = previous }()
 	// The passkey item sorts after 51 filler items and must survive the cap.
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoop)
 	for i := 0; i < 51; i++ {
 		gate := personal.NewMutationGate(time.Now().Add(time.Minute))
 		if err := s.RegisterMutation(gate); err != nil {
@@ -412,6 +456,7 @@ func TestPasskeyFilterRunsBeforeFiveHundredCap(t *testing.T) {
 			t.Fatalf("filler %d: %v", i, err)
 		}
 	}
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoopDone)
 	filtered := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(84), "type": "search", "capability": capability, "passkeys_only": true})
 	if filtered.Type != "items" || len(filtered.Items) != 1 || filtered.Items[0].ID != itemID {
 		t.Fatalf("passkeys-only filter after cap: %d %#v", len(filtered.Items), filtered.Items)

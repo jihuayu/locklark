@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import hashlib
 import http.client
@@ -186,6 +188,106 @@ class F16DetectionTests(unittest.TestCase):
     def test_missing_shell_init_is_real_absence(self):
         ctx = FakeContext({("help",): (0, "  cli profiles\n", "")})
         self.assertFalse(support.f16_cli_shell_ready(ctx))
+
+
+class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.ctx = object.__new__(harness.E2EContext)
+        self.ctx.temp_dir = Path(temp.name)
+        self.ctx.repo_root = ROOT
+        self.go = self.ctx.temp_dir / "fake-go"
+
+    def run_go_helper(self, *, observe=True):
+        return support.go_package_test(
+            self.ctx, "./internal/browserhost", "TestOne|TestTwo",
+            min_passed=2, observe_browserhost_passkey_timeout=observe,
+        )
+
+    def test_timeout_reports_one_fixed_phase_and_reraises_original_exception(self):
+        fifo = object()
+        cases = (
+            (b"0", 0), (b"1", 1), (b"2", 2), (b"3", 3), (b"4", 4),
+            (None, -1), (b"", -1), (b"5", -1), (b"4\nuntrusted payload", -1), (fifo, -1),
+        )
+        for payload, phase in cases:
+            with self.subTest(phase=phase):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=b"untrusted output", stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    self.assertEqual(
+                        command,
+                        [str(self.go), "test", "./internal/browserhost", "-run",
+                         "TestOne|TestTwo", "-count=1", "-v"],
+                    )
+                    self.assertEqual(cwd, str(ROOT))
+                    self.assertEqual(timeout, 180)
+                    marker = Path(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"])
+                    self.assertEqual(marker.parent.parent, self.ctx.temp_dir)
+                    self.assertEqual(marker.parent.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(marker.read_bytes(), b"0")
+                    if payload is None:
+                        marker.unlink()
+                    elif payload is fifo:
+                        marker.unlink()
+                        os.mkfifo(marker)
+                    else:
+                        marker.write_bytes(payload)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(stderr.getvalue(), f"BrowserHost passkey timeout phase {phase}\n")
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_opted_out_timeout_keeps_original_behavior(self):
+        expired = subprocess.TimeoutExpired([str(self.go)], 180)
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(support, "go_tool", return_value=self.go),
+            mock.patch.object(harness.subprocess, "run", side_effect=expired) as run,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(subprocess.TimeoutExpired) as caught,
+        ):
+            self.run_go_helper(observe=False)
+
+        self.assertIs(caught.exception, expired)
+        self.assertNotIn("LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE", run.call_args.kwargs["env"])
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_completed_process_preserves_exit_and_pass_count_gates(self):
+        one_pass = "--- PASS: TestOne (0.00s)\n"
+        two_passes = one_pass + "--- PASS: TestTwo (0.00s)\n"
+        for returncode, output, passes in ((0, one_pass, False), (1, two_passes, False), (0, two_passes, True)):
+            with self.subTest(returncode=returncode, passes=passes):
+                stderr = io.StringIO()
+                completed = subprocess.CompletedProcess([str(self.go)], returncode, output, "")
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", return_value=completed),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    if passes:
+                        self.run_go_helper()
+                    else:
+                        with self.assertRaises(AssertionError):
+                            self.run_go_helper()
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
 
 
 class PasskeyManagementDetectionTests(unittest.TestCase):
