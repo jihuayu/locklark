@@ -375,6 +375,10 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	if e != nil {
 		return nil, e
 	}
+	return verifyRecoveryArchive(b, pw, key, kit, false)
+}
+
+func verifyRecoveryArchive(b []byte, pw string, key []byte, kit string, requireCanonicalBody bool) (*payload, error) {
 	if len(b) > maxArchive {
 		return nil, ErrArchiveLimit
 	}
@@ -420,6 +424,16 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	var body signedBackup
 	if json.Unmarshal(plain, &body) != nil {
 		return nil, invalid
+	}
+	if requireCanonicalBody {
+		// Recovery historically accepts equivalent JSON. Split reconciliation
+		// needs the complete body, including fields decoding would discard.
+		canonical, err := json.Marshal(body)
+		matches := err == nil && bytes.Equal(plain, canonical)
+		clear(canonical)
+		if !matches {
+			return nil, invalid
+		}
 	}
 	p := &body.Body
 
