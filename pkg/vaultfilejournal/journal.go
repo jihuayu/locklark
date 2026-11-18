@@ -192,8 +192,12 @@ func Open(path string) (*Journal, error) {
 		if genesisIntentPresent(tx) {
 			return ErrPendingGenesisIntent
 		}
-		if tx.Bucket([]byte(bucketName)) == nil {
+		b := tx.Bucket([]byte(bucketName))
+		if b == nil {
 			return ErrInvalid
+		}
+		if isOwnedFirstSuccessorRecord(b.Get([]byte(stateKey))) {
+			return ErrCorrupt
 		}
 		return nil
 	}); err != nil {
@@ -290,6 +294,10 @@ func (j *Journal) save(p Proposal, hook func() error) error {
 		b, err := tx.CreateBucketIfNotExists([]byte(bucketName))
 		if err != nil {
 			return err
+		}
+		// Save has its own legacy proposal record and does not decode State.
+		if isOwnedFirstSuccessorRecord(b.Get([]byte(stateKey))) {
+			return ErrCorrupt
 		}
 		if cur := b.Get([]byte(recordKey)); cur != nil {
 			old, err := decodeRecord(cur)

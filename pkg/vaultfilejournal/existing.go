@@ -24,22 +24,36 @@ var ErrUnsupported = errors.New("vault file journal: existing-only open unsuppor
 // cooperating writers; it does not isolate a journal from an owner or
 // administrator performing arbitrary writes outside the locking protocol.
 func OpenExisting(path string) (*Journal, error) {
+	return openExisting(path, validateExistingState)
+}
+
+func openExisting(path string, validateState func(*bolt.Tx) error) (*Journal, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, ErrInvalid
 	}
 	if err := checkPrivateDir(filepath.Dir(path)); err != nil {
 		return nil, ErrInvalid
 	}
-	return openExistingOnlyDatabase(path)
+	return openExistingOnlyDatabase(path, validateState)
 }
 
 // openExistingValidated never opens a name. The platform opener owns file until
 // the one permitted OpenFile handoff; bbolt owns and closes it from then on.
-func openExistingValidated(path string, file *os.File, validateLocked func() error) (*Journal, error) {
-	return openExistingValidatedKind(path, file, validateLocked, false)
+func validateExistingState(tx *bolt.Tx) error {
+	if genesisIntentPresent(tx) {
+		return ErrPendingGenesisIntent
+	}
+	_, found, err := readStateTx(tx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrEmpty
+	}
+	return nil
 }
 
-func openExistingValidatedKind(path string, file *os.File, validateLocked func() error, wantIntent bool) (*Journal, error) {
+func openExistingValidated(path string, file *os.File, validateLocked func() error, validateState func(*bolt.Tx) error) (*Journal, error) {
 	if file == nil {
 		return nil, ErrInvalid
 	}
@@ -81,24 +95,8 @@ func openExistingValidatedKind(path string, file *os.File, validateLocked func()
 	if err := validateLocked(); err != nil {
 		return refuse(ErrInvalid)
 	}
-	if err := db.View(func(tx *bolt.Tx) error {
-		if wantIntent {
-			_, err := readGenesisIntentOnly(tx)
-			return err
-		}
-		if genesisIntentPresent(tx) {
-			return ErrPendingGenesisIntent
-		}
-		_, found, err := readStateTx(tx)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return ErrEmpty
-		}
-		return nil
-	}); err != nil {
-		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrEmpty) || errors.Is(err, ErrPendingGenesisIntent) {
+	if err := db.View(validateState); err != nil {
+		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrEmpty) || errors.Is(err, ErrPendingGenesisIntent) || errors.Is(err, ErrPendingRecords) {
 			return refuse(err)
 		}
 		return refuse(ErrInvalid)

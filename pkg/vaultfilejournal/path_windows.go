@@ -553,7 +553,7 @@ func openExistingDatabase(path string) (*Journal, error) {
 // openExistingOnlyDatabase shares the existing validated-handle and identity
 // checks, but suppresses all open-time initialization/repair before state is
 // confirmed. Open's existing-file behavior above is intentionally unchanged.
-func openExistingOnlyDatabase(path string) (*Journal, error) {
+func openExistingOnlyDatabase(path string, validateState func(*bolt.Tx) error) (*Journal, error) {
 	file, info, missing, err := openValidatedDB(path)
 	if err != nil || missing {
 		return nil, ErrInvalid
@@ -564,7 +564,7 @@ func openExistingOnlyDatabase(path string) (*Journal, error) {
 			return ErrInvalid
 		}
 		return verifyDBPathIdentity(path, info)
-	})
+	}, validateState)
 }
 
 // publishNewDatabase initializes a new database as a collision-resistant

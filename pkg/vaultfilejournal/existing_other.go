@@ -2,4 +2,8 @@
 
 package vaultfilejournal
 
-func openExistingOnlyDatabase(string) (*Journal, error) { return nil, ErrUnsupported }
+import bolt "go.etcd.io/bbolt"
+
+func openExistingOnlyDatabase(string, func(*bolt.Tx) error) (*Journal, error) {
+	return nil, ErrUnsupported
+}

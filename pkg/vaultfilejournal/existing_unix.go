@@ -6,11 +6,12 @@ import (
 	"os"
 	"syscall"
 
+	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sys/unix"
 )
 
-func openExistingOnlyDatabase(path string) (*Journal, error) {
-	return openExistingOnlyDatabaseWith(path, nil)
+func openExistingOnlyDatabase(path string, validateState func(*bolt.Tx) error) (*Journal, error) {
+	return openExistingDescriptor(path, nil, validateState)
 }
 
 // beforeBolt is a private deterministic seam for name-replacement tests. It
@@ -24,6 +25,16 @@ func openExistingIntentOnlyDatabase(path string) (*Journal, error) {
 }
 
 func openExistingOnlyDatabaseKindWith(path string, beforeBolt func(), wantIntent bool) (*Journal, error) {
+	if !wantIntent {
+		return openExistingDescriptor(path, beforeBolt, validateExistingState)
+	}
+	return openExistingDescriptor(path, beforeBolt, func(tx *bolt.Tx) error {
+		_, err := readGenesisIntentOnly(tx)
+		return err
+	})
+}
+
+func openExistingDescriptor(path string, beforeBolt func(), validateState func(*bolt.Tx) error) (*Journal, error) {
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, ErrInvalid
@@ -40,7 +51,7 @@ func openExistingOnlyDatabaseKindWith(path string, beforeBolt func(), wantIntent
 	if beforeBolt != nil {
 		beforeBolt()
 	}
-	return openExistingValidatedKind(path, file, func() error {
+	return openExistingValidated(path, file, func() error {
 		// This runs only after bbolt's exclusive lock has been acquired.
 		// Rechecking just the pathname before Open would not bind that lock
 		// or the database reads to the configured journal's inode.
@@ -53,7 +64,7 @@ func openExistingOnlyDatabaseKindWith(path string, beforeBolt func(), wantIntent
 			return ErrInvalid
 		}
 		return nil
-	}, wantIntent)
+	}, validateState)
 }
 
 func existingFileInfo(file *os.File) (os.FileInfo, error) {
