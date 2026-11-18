@@ -284,6 +284,28 @@ func (s *Session) SealOwnedVaultFileFirstItem(journalPath string, target OwnedVa
 		return out, err
 	}
 	defer scope.clear()
+	return s.sealOwnedVaultFileFirstItemsWithScope(scope, journalPath, target, checkpoint, expectedGenesis,
+		[]vault.Item{{
+			ID: item.ID, Kind: "login", Title: item.Title,
+			Username: item.Username, Password: item.Password,
+		}})
+}
+
+// sealOwnedVaultFileFirstItemsWithScope performs the exact pristine
+// generation-zero checks and seals items as the one immediate signed first
+// successor. The caller must already hold the authenticated write scope and
+// clear it after this call. items is caller-owned and is never retained,
+// mutated or cleared; a nil slice is refused, while a non-nil empty slice is a
+// valid empty successor. The journal is read existing-only and never written.
+func (s *Session) sealOwnedVaultFileFirstItemsWithScope(scope *ownedVaultFileWriteScope, journalPath string, target OwnedVaultFileFirstSuccessorTarget, checkpoint *vaultfile.PolicyCheckpoint, expectedGenesis []byte, items []vault.Item) (out VaultFileSealedFirstItem, retErr error) {
+	if s == nil {
+		return out, ErrSessionLocked
+	}
+	if scope == nil || journalPath == "" || len(expectedGenesis) == 0 || items == nil ||
+		!validOwnedVaultFileFirstSuccessorTarget(target) ||
+		!ownedVaultFileFirstSuccessorMatchesCheckpoint(target, checkpoint) {
+		return out, ErrVaultFileEditVerification
+	}
 	defer func() {
 		if retErr != nil {
 			out.Clear()
@@ -363,13 +385,13 @@ func (s *Session) SealOwnedVaultFileFirstItem(journalPath string, target OwnedVa
 		return out, ErrVaultFileBaselineVerification
 	}
 	defer clear(vuk)
-	_, metadata, items, err := vault.OpenAuthenticatedItems(state.BaseBytes, checkpoint, deviceID, scope.ageIdentity)
+	_, metadata, current, err := vault.OpenAuthenticatedItems(state.BaseBytes, checkpoint, deviceID, scope.ageIdentity)
 	if err != nil {
 		return out, ErrVaultFileBaselineVerification
 	}
 	defer clear(metadata)
-	defer clearAuthenticatedItems(items)
-	if len(metadata) != 0 || len(items) != 0 {
+	defer clearAuthenticatedItems(current)
+	if len(metadata) != 0 || len(current) != 0 {
 		return out, ErrVaultFileEditReview
 	}
 
@@ -392,10 +414,7 @@ func (s *Session) SealOwnedVaultFileFirstItem(journalPath string, target OwnedVa
 	draft.Header.RevisionID = ""
 	draft.Header.OpID = hex.EncodeToString(nonce[:])
 	draft.Header.AuthorDeviceID = deviceID
-	out.Sealed, err = vault.SealAuthenticatedItems(draft, []byte{}, []vault.Item{{
-		ID: item.ID, Kind: "login", Title: item.Title,
-		Username: item.Username, Password: item.Password,
-	}}, checkpoint, vuk, scope.signing)
+	out.Sealed, err = vault.SealAuthenticatedItems(draft, []byte{}, items, checkpoint, vuk, scope.signing)
 	if err != nil || vaultfile.VerifyContentTransition(state.BaseBytes, out.Sealed, checkpoint) != nil {
 		return out, ErrVaultFileEditVerification
 	}
@@ -405,14 +424,14 @@ func (s *Session) SealOwnedVaultFileFirstItem(journalPath string, target OwnedVa
 		return out, ErrVaultFileEditVerification
 	}
 
-	current, err := j.LoadGenesisBaseline()
-	if err != nil || !sameOwnedVaultFileState(current, state) {
-		clear(current.BaseBytes)
-		clear(current.WorkingBytes)
+	currentState, err := j.LoadGenesisBaseline()
+	if err != nil || !sameOwnedVaultFileState(currentState, state) {
+		clear(currentState.BaseBytes)
+		clear(currentState.WorkingBytes)
 		return out, ErrVaultFileBaselineJournal
 	}
-	clear(current.BaseBytes)
-	clear(current.WorkingBytes)
+	clear(currentState.BaseBytes)
+	clear(currentState.WorkingBytes)
 	if err := s.revalidateOwnedVaultFileWriteScope(scope); err != nil {
 		return out, err
 	}
