@@ -30,6 +30,7 @@ const (
 
 type localFirstWriteFixture struct {
 	f                 *localGenesisTwoVaultFixture
+	config            string
 	manifest          Manifest
 	companion         Companion
 	pin               vaultfilejournal.OwnedGenesisPin
@@ -43,11 +44,19 @@ type localFirstWriteFixture struct {
 func newLocalFirstWriteFixture(t *testing.T) *localFirstWriteFixture {
 	t.Helper()
 	f := newLocalGenesisTwoVaultFixture(t)
-	manifest, exists, err := ReadManifest(f.firstConfig)
-	if err != nil || !exists {
+	return newLocalFirstWriteFixtureFor(t, f, f.firstConfig, f.firstVaultID)
+}
+
+// newLocalFirstWriteFixtureFor binds one write fixture to an already-created
+// two-vault account. Both vaults come from the same real temporary account and
+// retain independent manifest, companion, named backend and journal scopes.
+func newLocalFirstWriteFixtureFor(t *testing.T, f *localGenesisTwoVaultFixture, config, vaultID string) *localFirstWriteFixture {
+	t.Helper()
+	manifest, exists, err := ReadManifest(config)
+	if err != nil || !exists || manifest.VaultID != vaultID {
 		t.Fatal("LOCAL_FIRST_WRITE_MANIFEST_FAILED")
 	}
-	companion, exists, err := ReadCompanion(f.firstConfig, manifest)
+	companion, exists, err := ReadCompanion(config, manifest)
 	if err != nil || !exists || companion.Resume.Checkpoint == nil {
 		t.Fatal("LOCAL_FIRST_WRITE_COMPANION_FAILED")
 	}
@@ -82,7 +91,7 @@ func newLocalFirstWriteFixture(t *testing.T) *localFirstWriteFixture {
 		clear(pin.Root.OwnerRootPublicKey)
 	})
 	fx := &localFirstWriteFixture{
-		f: f, manifest: manifest, companion: companion, pin: pin,
+		f: f, config: config, manifest: manifest, companion: companion, pin: pin,
 		checkpoint: checkpoint, genesis: genesis,
 		bootstrapRevision: state.RemoteRevision,
 		item: LocalGenesisFirstItem{
@@ -98,7 +107,7 @@ func newLocalFirstWriteFixture(t *testing.T) *localFirstWriteFixture {
 }
 
 func (fx *localFirstWriteFixture) write(ctx context.Context) (LocalOwnedFirstWriteResult, error) {
-	return WriteLocalGenesisFirstItem(ctx, fx.f.session, fx.f.firstConfig,
+	return WriteLocalGenesisFirstItem(ctx, fx.f.session, fx.config,
 		fx.manifest.BackendRoot, fx.manifest.VaultID, fx.manifest.Journal,
 		[]byte(fx.f.f.password), fx.f.f.key, fx.item)
 }
