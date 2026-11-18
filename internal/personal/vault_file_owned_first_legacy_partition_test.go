@@ -437,6 +437,583 @@ func TestOwnedVaultFileFirstItemsFromLegacyPartitionMaterializesOneVerifiedGroup
 	clear(differentBytesNow)
 }
 
+func TestOwnedVaultFileLegacyPartitionsUseIndependentDataKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	// One genuine, independently authenticated recovery archive with two
+	// explicitly declared custom source partitions, each carrying items, plus
+	// an empty implicit default partition.
+	sourcePath := filepath.Join(dir, "source.ll")
+	sourcePassword := "synthetic-legacy-partition-isolation-source-factor"
+	sourceKey := bytes.Repeat([]byte{0x37}, 16)
+	if err := Create(sourcePath, sourcePassword, sourceKey); err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_CREATE_FAILED")
+	}
+	sourceSession, err := UnlockSession(sourcePath, []byte(sourcePassword), sourceKey, time.Hour)
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_UNLOCK_FAILED")
+	}
+	t.Cleanup(sourceSession.Lock)
+	partitionA, err := sourceSession.CreateVault("Partition A", "first isolated source partition", "folder", v2Gate(t, sourceSession))
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_A_FAILED")
+	}
+	partitionB, err := sourceSession.CreateVault("Partition B", "second isolated source partition", "folder", v2Gate(t, sourceSession))
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_B_FAILED")
+	}
+
+	stamp := time.Unix(1_700_001_234, 0).UTC()
+	trashedAt := stamp.Add(time.Hour)
+	auto := true
+	add := func(label string, item vault.Item) string {
+		t.Helper()
+		id, _, err := sourceSession.AddItem(item, v2Gate(t, sourceSession))
+		if err != nil {
+			t.Fatalf("LEGACY_PARTITION_ISOLATION_SOURCE_ADD_%s_FAILED: %v", label, err)
+		}
+		return id
+	}
+	aLoginID := add("A_LOGIN", vault.Item{
+		Kind: "login", Category: vault.CategoryLogin, VaultID: partitionA.ID,
+		Title: "Partition A active login", Username: "partition-a-user", Password: "partition-a-password",
+		URL: "https://partition-a.example.test/", Notes: "partition a notes",
+		URLs: []vault.ItemURL{
+			{Label: "primary", URL: "https://partition-a.example.test/", Primary: true, MatchMode: vault.URLMatchOrigin},
+			{Label: "secondary", URL: "https://secondary.partition-a.example.test/", MatchMode: vault.URLMatchHost},
+		},
+		Favorite: true, AutoSubmit: &auto, Tags: []string{"partition-a", "isolation"},
+		Sections: []vault.ItemSection{{ID: "partition-a-section", Title: "Partition A fields", Fields: []vault.CustomField{
+			{ID: "partition-a-concealed", Label: "Concealed", Type: vault.FieldTypeConcealed, Value: "partition-a-concealed-value", Protected: true},
+			{ID: "partition-a-email", Label: "Email", Type: vault.FieldTypeEmail, Value: "partition-a@example.test"},
+		}}},
+		History: []vault.ItemHistoryEntry{{
+			Timestamp: stamp.Unix(), Action: "edit", Password: "partition-a-prior-password", Title: "Partition A prior title",
+			Username: "partition-a-prior-user", Notes: "partition a prior notes",
+			Sections: []vault.ItemSection{{ID: "partition-a-prior-section", Title: "Prior", Fields: []vault.CustomField{{
+				ID: "partition-a-prior-field", Label: "Prior", Type: vault.FieldTypeText, Value: "partition-a-prior-value",
+			}}}},
+		}},
+		Attachments: []vault.AttachmentMeta{{
+			FileName: "partition-a.bin", MIMEType: "application/octet-stream", Protected: true,
+			Content: []byte{0x00, 0x01, 0x7f, 0xff, 0x10},
+		}},
+		ImportSource: []byte("partition-a-import-provenance"),
+	})
+	aDocumentID := add("A_DOCUMENT", vault.Item{
+		Kind: "document", Category: vault.CategoryDocument, VaultID: partitionA.ID,
+		Title: "Partition A document", Filename: "partition-a-document.bin",
+		Attachment: []byte{0x50, 0x4b, 0x03, 0x04}, AttachmentProtected: true,
+		ImportSource: []byte("partition-a-document-import-provenance"),
+	})
+	aCardID := add("A_CARD", vault.Item{
+		Kind: "credit_card", Category: vault.CategoryCreditCard, VaultID: partitionA.ID,
+		Title: "Partition A card",
+		CreditCard: &vault.CreditCardDetails{
+			CardholderName: "Synthetic Partition A Holder", Type: "visa", Number: "4111111111111111",
+			Verification: "123", ExpiryDate: "2030-01", ValidFrom: "2020-01",
+			PIN: "9999", IssuingBank: "Synthetic Partition A Bank",
+		},
+	})
+	bLoginID := add("B_LOGIN", vault.Item{
+		Kind: "login", Category: vault.CategoryLogin, VaultID: partitionB.ID,
+		Title: "Partition B active login", Username: "partition-b-user", Password: "partition-b-password",
+		URL: "https://partition-b.example.test/", Notes: "partition b notes",
+		Tags: []string{"partition-b", "isolation"},
+		History: []vault.ItemHistoryEntry{{
+			Timestamp: stamp.Unix(), Action: "edit", Title: "Partition B prior title", Password: "partition-b-prior-password",
+		}},
+		Attachments: []vault.AttachmentMeta{{
+			FileName: "partition-b.bin", MIMEType: "application/octet-stream", Protected: true,
+			Content: []byte{0xde, 0xad, 0xbe, 0xef},
+		}},
+		ImportSource: []byte("partition-b-import-provenance"),
+	})
+	bTrashedID := add("B_TRASHED", vault.Item{
+		Kind: "login", Category: vault.CategoryLogin, VaultID: partitionB.ID,
+		Title: "Partition B trashed login", Username: "partition-b-trashed-user", Password: "partition-b-trashed-password",
+		State: "trashed", PreviousState: "archived", TrashedAt: &trashedAt,
+		History:      []vault.ItemHistoryEntry{{Timestamp: stamp.Unix(), Action: "edit", Title: "Partition B trashed prior"}},
+		ImportSource: []byte("partition-b-trashed-import-provenance"),
+		Attachments: []vault.AttachmentMeta{{
+			FileName: "partition-b-trashed.bin", MIMEType: "application/octet-stream", Protected: true,
+			Content: []byte{0xca, 0xfe, 0xba, 0xbe},
+		}},
+	})
+
+	sourceArchivePath := filepath.Join(dir, "source.llb")
+	sourceKit, err := Backup(sourcePath, sourceArchivePath, sourcePassword, sourceKey)
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_BACKUP_FAILED")
+	}
+	sourceArchive := legacyPartitionReadFile(t, sourceArchivePath)
+	sourceArchiveBefore := bytes.Clone(sourceArchive)
+	sourceArchiveFileBefore := legacyPartitionReadFile(t, sourceArchivePath)
+
+	sourcePayload, err := verifyRecoveryArchive(sourceArchive, sourcePassword, sourceKey, sourceKit, true)
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_VERIFY_FAILED")
+	}
+	defer clearDecodedArchiveSensitive(sourcePayload)
+	if len(sourcePayload.Vaults) != 2 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_COUNT_MISMATCH")
+	}
+	partitionMeta := func(vaultID string) *vault.VaultMeta {
+		for i := range sourcePayload.Vaults {
+			if sourcePayload.Vaults[i].ID == vaultID {
+				metadata := sourcePayload.Vaults[i]
+				return &metadata
+			}
+		}
+		return nil
+	}
+	sourceMetaA := partitionMeta(partitionA.ID)
+	sourceMetaB := partitionMeta(partitionB.ID)
+	if sourceMetaA == nil || sourceMetaB == nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_METADATA_MISSING")
+	}
+	sourceItemsFor := func(vaultID string) []vault.Item {
+		var selected []vault.Item
+		for i := range sourcePayload.Items {
+			if sourcePayload.Items[i].EffectiveVaultID() == vaultID {
+				selected = append(selected, sourcePayload.Items[i])
+			}
+		}
+		return selected
+	}
+	sourceItemsA := sourceItemsFor(partitionA.ID)
+	sourceItemsB := sourceItemsFor(partitionB.ID)
+	if len(sourceItemsA) != 3 || len(sourceItemsB) != 2 ||
+		len(sourceItemsA)+len(sourceItemsB) != len(sourcePayload.Items) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_SHAPE_MISMATCH")
+	}
+	sourceIDsA := map[string]bool{}
+	for i := range sourceItemsA {
+		sourceIDsA[sourceItemsA[i].ID] = true
+	}
+	sourceIDsB := map[string]bool{}
+	for i := range sourceItemsB {
+		sourceIDsB[sourceItemsB[i].ID] = true
+	}
+	for _, id := range []string{aLoginID, aDocumentID, aCardID} {
+		if !sourceIDsA[id] {
+			t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_A_ITEM_MISSING")
+		}
+	}
+	for _, id := range []string{bLoginID, bTrashedID} {
+		if !sourceIDsB[id] {
+			t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITION_B_ITEM_MISSING")
+		}
+	}
+	if sourceIDsA[bLoginID] || sourceIDsA[bTrashedID] || sourceIDsB[aLoginID] ||
+		sourceIDsB[aDocumentID] || sourceIDsB[aCardID] {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PARTITIONS_NOT_DISJOINT")
+	}
+	byID := make(map[string]vault.Item, len(sourcePayload.Items))
+	for i := range sourcePayload.Items {
+		byID[sourcePayload.Items[i].ID] = sourcePayload.Items[i]
+	}
+	if item := byID[aLoginID]; len(item.History) == 0 || len(item.Sections) == 0 ||
+		len(item.URLs) != 2 || len(item.Attachments) != 1 || len(item.Attachments[0].Content) == 0 ||
+		!item.Attachments[0].Protected || len(item.ImportSource) == 0 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_A_ACTIVE_REPRESENTATION_MISSING")
+	}
+	if item := byID[aDocumentID]; len(item.Attachment) == 0 || !item.AttachmentProtected {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_A_DOCUMENT_REPRESENTATION_MISSING")
+	}
+	if item := byID[aCardID]; item.CreditCard == nil || item.CreditCard.Number == "" {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_A_TYPED_REPRESENTATION_MISSING")
+	}
+	if item := byID[bLoginID]; len(item.History) == 0 || len(item.Attachments) != 1 ||
+		len(item.Attachments[0].Content) == 0 || len(item.ImportSource) == 0 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_B_ACTIVE_REPRESENTATION_MISSING")
+	}
+	if item := byID[bTrashedID]; item.State != "trashed" || item.PreviousState != "archived" ||
+		item.TrashedAt == nil || len(item.History) == 0 || len(item.ImportSource) == 0 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_B_TRASH_REPRESENTATION_MISSING")
+	}
+
+	// Two independent owned destination scopes in the same real local
+	// personal vault, each with its own published genesis object and observed
+	// backend revision.
+	destPath := filepath.Join(dir, "destination.ll")
+	destPassword := "synthetic-legacy-partition-isolation-destination-factor"
+	destKey := bytes.Repeat([]byte{0x47}, 16)
+	if err := Create(destPath, destPassword, destKey); err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_CREATE_FAILED")
+	}
+	destSession, err := UnlockSession(destPath, []byte(destPassword), destKey, time.Hour)
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_UNLOCK_FAILED")
+	}
+	t.Cleanup(destSession.Lock)
+	prepareOwner := func(label string) VaultFileOwnershipPublic {
+		t.Helper()
+		selector, err := randomID()
+		if err != nil {
+			t.Fatalf("LEGACY_PARTITION_ISOLATION_USER_%s_FAILED", label)
+		}
+		public, err := destSession.PrepareVaultFileOwnership(selector)
+		if err != nil {
+			t.Fatalf("LEGACY_PARTITION_ISOLATION_CUSTODY_%s_FAILED", label)
+		}
+		return public
+	}
+	publicA := prepareOwner("A")
+	publicB := prepareOwner("B")
+	if publicA.VaultID == publicB.VaultID {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_VAULT_ID_NOT_DISTINCT")
+	}
+	destArchivePath := filepath.Join(dir, "destination.llb")
+	destKit, err := Backup(destPath, destArchivePath, destPassword, destKey)
+	if err != nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_BACKUP_FAILED")
+	}
+	publish := func(name string, public VaultFileOwnershipPublic) legacyPartitionGenesisScope {
+		t.Helper()
+		intentPath := filepath.Join(dir, "genesis-"+name+".journal")
+		if _, err := destSession.PrepareVaultFileGenesis(VaultFileGenesisRequest{
+			VaultID: public.VaultID, Name: "legacy-partition-" + name, IntentPath: intentPath, ArchivePath: destArchivePath,
+		}, []byte(destPassword), destKey, []byte(destKit)); err != nil {
+			t.Fatalf("LEGACY_PARTITION_ISOLATION_GENESIS_%s_FAILED: %v", name, err)
+		}
+		return legacyPartitionPublishGenesis(t, dir, name, public, intentPath)
+	}
+	scopeA := publish("a", publicA)
+	scopeB := publish("b", publicB)
+	t.Cleanup(func() {
+		clearVaultFilePolicyCheckpoint(scopeA.checkpoint)
+		clearVaultFilePolicyCheckpoint(scopeB.checkpoint)
+	})
+	localAge := legacyPartitionLocalAge(t, destSession)
+
+	journalABefore := legacyPartitionReadFile(t, scopeA.journalPath)
+	journalBBefore := legacyPartitionReadFile(t, scopeB.journalPath)
+	destBefore := legacyPartitionReadFile(t, destPath)
+
+	requestFor := func(scope legacyPartitionGenesisScope, vaultID string) OwnedVaultFileLegacyPartitionRequest {
+		return OwnedVaultFileLegacyPartitionRequest{
+			JournalPath: scope.journalPath, Target: scope.target, Checkpoint: scope.checkpoint,
+			ExpectedGenesis: scope.genesis,
+			Password:        []byte(destPassword), Key: destKey,
+			Source: LegacyVaultPartitionSource{
+				Archive: sourceArchive, Password: sourcePassword, Key: sourceKey,
+				RecoveryKit: sourceKit, VaultID: vaultID,
+			},
+		}
+	}
+	sealedA, err := destSession.SealOwnedVaultFileFirstItemsFromLegacyPartition(requestFor(scopeA, partitionA.ID))
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_SEAL_A_FAILED: %v", err)
+	}
+	defer sealedA.Clear()
+	sealedB, err := destSession.SealOwnedVaultFileFirstItemsFromLegacyPartition(requestFor(scopeB, partitionB.ID))
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_SEAL_B_FAILED: %v", err)
+	}
+	defer sealedB.Clear()
+
+	fileA, itemsA := legacyPartitionOpenSealed(t, sealedA, scopeA, sourceArchive, partitionA.ID, sourceMetaA, sourceItemsA, localAge)
+	defer clearAuthenticatedItems(itemsA)
+	fileB, itemsB := legacyPartitionOpenSealed(t, sealedB, scopeB, sourceArchive, partitionB.ID, sourceMetaB, sourceItemsB, localAge)
+	defer clearAuthenticatedItems(itemsB)
+	if sealedA.SourceArchiveSHA256 != sealedB.SourceArchiveSHA256 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_ARCHIVE_BINDING_MISMATCH")
+	}
+
+	// The two destination identities and their real owner-management Ed25519
+	// keys are distinct, and each authenticated file carries its own key.
+	if fileA.Header.VaultID != publicA.VaultID || fileB.Header.VaultID != publicB.VaultID ||
+		fileA.Header.VaultID == fileB.Header.VaultID {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_FILE_VAULT_ID_MISMATCH")
+	}
+	rootA := legacyPartitionOwnerRoot(t, publicA)
+	rootB := legacyPartitionOwnerRoot(t, publicB)
+	if bytes.Equal(rootA, rootB) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_OWNER_ROOT_NOT_DISTINCT")
+	}
+	if !bytes.Equal(rootA, scopeA.checkpoint.OwnerRootPublicKey) ||
+		!bytes.Equal(rootB, scopeB.checkpoint.OwnerRootPublicKey) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_OWNER_ROOT_CHECKPOINT_MISMATCH")
+	}
+	if len(fileA.SignedPolicyProofs) == 0 || len(fileB.SignedPolicyProofs) == 0 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_POLICY_MISSING")
+	}
+	policyA := fileA.SignedPolicyProofs[len(fileA.SignedPolicyProofs)-1].Policy
+	policyB := fileB.SignedPolicyProofs[len(fileB.SignedPolicyProofs)-1].Policy
+	if !bytes.Equal(policyA.OwnerRoot.PublicKey, rootA) ||
+		!bytes.Equal(policyB.OwnerRoot.PublicKey, rootB) ||
+		policyA.OwnerRoot.Alg != vaultfile.PolicySigAlgEd25519 ||
+		policyB.OwnerRoot.Alg != vaultfile.PolicySigAlgEd25519 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_OWNER_ROOT_POLICY_MISMATCH")
+	}
+
+	// The selected proof is the real genesis policy proof copied unchanged into
+	// the sealed successor by the product sealing path. Its SignerID is the
+	// candidate's owner-root key ID, its policy sequence and digest match the
+	// candidate's checkpoint and file header, and ParseFile validated its
+	// signed document as the canonical policy encoding. The successor's own
+	// content signature is device-signed, so it is not used as a root signature.
+	proofA, transcriptA := legacyPartitionRootSignedCandidateProof(t, fileA, scopeA.checkpoint, rootA)
+	proofB, transcriptB := legacyPartitionRootSignedCandidateProof(t, fileB, scopeB.checkpoint, rootB)
+	if bytes.Equal(proofA.Sig, proofB.Sig) || bytes.Equal(transcriptA, transcriptB) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_ROOT_SIGNATURE_NOT_CANDIDATE_BOUND")
+	}
+	if !ed25519.Verify(rootA, transcriptA, proofA.Sig) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_OWNER_A_SIGNATURE_REJECTED")
+	}
+	if ed25519.Verify(rootB, transcriptA, proofA.Sig) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_CROSS_OWNER_B_ACCEPTED_A")
+	}
+	if !ed25519.Verify(rootB, transcriptB, proofB.Sig) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_OWNER_B_SIGNATURE_REJECTED")
+	}
+	if ed25519.Verify(rootA, transcriptB, proofB.Sig) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_CROSS_OWNER_A_ACCEPTED_B")
+	}
+
+	// Every selected source record appears exactly once across the two sealed
+	// partitions, and only under the partition that was selected.
+	sourceIDs := map[string]bool{}
+	for i := range sourcePayload.Items {
+		sourceIDs[sourcePayload.Items[i].ID] = true
+	}
+	seen := map[string]bool{}
+	for i := range itemsA {
+		id := itemsA[i].ID
+		if !sourceIDsA[id] || sourceIDsB[id] || seen[id] {
+			t.Fatal("LEGACY_PARTITION_ISOLATION_PARTITION_A_COVERAGE_MISMATCH")
+		}
+		seen[id] = true
+	}
+	for i := range itemsB {
+		id := itemsB[i].ID
+		if !sourceIDsB[id] || sourceIDsA[id] || seen[id] {
+			t.Fatal("LEGACY_PARTITION_ISOLATION_PARTITION_B_COVERAGE_MISMATCH")
+		}
+		seen[id] = true
+	}
+	if len(seen) != len(sourceIDs) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_COVERAGE_INCOMPLETE")
+	}
+
+	// Both destinations have their own VUK and CEK. The actual item payload
+	// ciphertexts are distinct, and each side's real key material fails to
+	// decrypt the other side's real bytes with the expected typed
+	// authentication error.
+	vukA := legacyPartitionOpenVUK(t, fileA, scopeA.checkpoint, sealedA.AuthorDeviceID, localAge)
+	defer clear(vukA)
+	vukB := legacyPartitionOpenVUK(t, fileB, scopeB.checkpoint, sealedB.AuthorDeviceID, localAge)
+	defer clear(vukB)
+	if len(vukA) != vaultfile.CEKSize || len(vukB) != vaultfile.CEKSize || bytes.Equal(vukA, vukB) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_VUK_NOT_DISTINCT")
+	}
+	crossAtoB, err := vaultfile.OpenCEK(vukA, fileB.Header, fileB.CEKSlot)
+	if crossAtoB != nil || !legacyPartitionIsVaultFileError(err, vaultfile.CodeCEKEnvelopeFailed, "cek_slot") {
+		clear(crossAtoB)
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_CROSS_VUK_A_TO_B_NOT_AUTH_FAILURE: %v", err)
+	}
+	crossBtoA, err := vaultfile.OpenCEK(vukB, fileA.Header, fileA.CEKSlot)
+	if crossBtoA != nil || !legacyPartitionIsVaultFileError(err, vaultfile.CodeCEKEnvelopeFailed, "cek_slot") {
+		clear(crossBtoA)
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_CROSS_VUK_B_TO_A_NOT_AUTH_FAILURE: %v", err)
+	}
+	cekA, err := vaultfile.OpenCEK(vukA, fileA.Header, fileA.CEKSlot)
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_OWN_CEK_A_FAILED: %v", err)
+	}
+	defer clear(cekA)
+	cekB, err := vaultfile.OpenCEK(vukB, fileB.Header, fileB.CEKSlot)
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_OWN_CEK_B_FAILED: %v", err)
+	}
+	defer clear(cekB)
+	if len(cekA) != vaultfile.CEKSize || len(cekB) != vaultfile.CEKSize || bytes.Equal(cekA, cekB) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_CEK_NOT_DISTINCT")
+	}
+	if len(fileA.KDBXCiphertext) == 0 || len(fileB.KDBXCiphertext) == 0 ||
+		bytes.Equal(fileA.KDBXCiphertext, fileB.KDBXCiphertext) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_ITEM_CIPHERTEXT_NOT_DISTINCT")
+	}
+	if db, err := vaultfile.OpenKDBXPayload(fileB.KDBXCiphertext, cekA); err == nil || db != nil ||
+		!legacyPartitionIsVaultFileError(err, vaultfile.CodeKDBXPayloadInvalid, "") {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_CROSS_CEK_A_TO_B_NOT_AUTH_FAILURE: %v", err)
+	}
+	if db, err := vaultfile.OpenKDBXPayload(fileA.KDBXCiphertext, cekB); err == nil || db != nil ||
+		!legacyPartitionIsVaultFileError(err, vaultfile.CodeKDBXPayloadInvalid, "") {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_CROSS_CEK_B_TO_A_NOT_AUTH_FAILURE: %v", err)
+	}
+
+	// Sealing is observation-only: the source archive, the destination
+	// personal store and journals, and both published genesis bytes and
+	// backend revisions remain exactly as they were.
+	if !bytes.Equal(sourceArchive, sourceArchiveBefore) ||
+		!bytes.Equal(legacyPartitionReadFile(t, sourceArchivePath), sourceArchiveFileBefore) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_ARCHIVE_CHANGED")
+	}
+	if !bytes.Equal(legacyPartitionReadFile(t, destPath), destBefore) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_PERSONAL_CHANGED")
+	}
+	if !bytes.Equal(legacyPartitionReadFile(t, scopeA.journalPath), journalABefore) ||
+		!bytes.Equal(legacyPartitionReadFile(t, scopeB.journalPath), journalBBefore) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_JOURNAL_CHANGED")
+	}
+	assertBackend := func(scope legacyPartitionGenesisScope) {
+		t.Helper()
+		got, revision := legacyPartitionReadBackend(t, scope.backendRoot, scope.target.BackendName)
+		defer clear(got)
+		if !bytes.Equal(got, scope.genesis) || revision != scope.revision {
+			t.Fatalf("LEGACY_PARTITION_ISOLATION_BACKEND_%s_OVERWRITTEN", scope.target.BackendName)
+		}
+	}
+	assertBackend(scopeA)
+	assertBackend(scopeB)
+}
+
+func legacyPartitionOpenSealed(t *testing.T, sealed VaultFileSealedLegacyPartition, scope legacyPartitionGenesisScope, sourceArchive []byte, sourceVaultID string, sourceMeta *vault.VaultMeta, sourceItems []vault.Item, identity *age.X25519Identity) (*vaultfile.File, []vault.Item) {
+	t.Helper()
+	file, metadata, items, err := vault.OpenAuthenticatedItems(sealed.Sealed, scope.checkpoint, sealed.AuthorDeviceID, identity)
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_OWN_OPEN_FAILED: %v", err)
+	}
+	if len(metadata) != 0 {
+		clear(metadata)
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_METADATA_NOT_EMPTY")
+	}
+	clear(metadata)
+	if len(items) != len(sourceItems) {
+		clearAuthenticatedItems(items)
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_DEST_ITEM_COUNT_MISMATCH: got=%d want=%d", len(items), len(sourceItems))
+	}
+	for i := range items {
+		if items[i].ID != sourceItems[i].ID {
+			clearAuthenticatedItems(items)
+			t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_ITEM_ID_MISMATCH")
+		}
+	}
+	if !legacyPartitionItemsRepresented(sourceItems, items) {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_REPRESENTED_DATA_MISMATCH")
+	}
+
+	// Only after the sealed bytes were independently authenticated and
+	// reopened is the caller-visible output compared with real source and
+	// genesis observations.
+	if sealed.SourceVaultID != sourceVaultID {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_PROVENANCE_MISMATCH")
+	}
+	if sourceMeta == nil {
+		if sealed.SourceVault != nil {
+			clearAuthenticatedItems(items)
+			t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_METADATA_UNEXPECTED")
+		}
+	} else if sealed.SourceVault == nil || !reflect.DeepEqual(*sealed.SourceVault, *sourceMeta) {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_METADATA_MISMATCH")
+	}
+	if sealed.SourceArchiveSHA256 != sha256.Sum256(sourceArchive) {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SOURCE_ARCHIVE_DIGEST_MISMATCH")
+	}
+	if sealed.State.Generation != 0 || sealed.State.RemoteRevision != scope.revision ||
+		!bytes.Equal(sealed.State.BaseBytes, scope.genesis) ||
+		!bytes.Equal(sealed.State.WorkingBytes, scope.genesis) {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_SEALED_STATE_MISMATCH")
+	}
+	if file.Header.ContentSeq != 1 || file.Header.VaultID != scope.target.Pin.Root.VaultID {
+		clearAuthenticatedItems(items)
+		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_FILE_SHAPE_MISMATCH")
+	}
+	return file, items
+}
+
+func legacyPartitionOpenVUK(t *testing.T, file *vaultfile.File, checkpoint *vaultfile.PolicyCheckpoint, deviceID string, identity *age.X25519Identity) []byte {
+	t.Helper()
+	if file == nil || checkpoint == nil || identity == nil || deviceID == "" || len(file.SignedPolicyProofs) == 0 {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_VUK_CONTEXT_INVALID")
+	}
+	policy := &file.SignedPolicyProofs[len(file.SignedPolicyProofs)-1].Policy
+	recipient := ""
+	for i := range policy.Devices {
+		if policy.Devices[i].DeviceID == deviceID {
+			recipient = policy.Devices[i].AgeEncryptionKey
+			break
+		}
+	}
+	var slot *vaultfile.DeviceSlot
+	for i := range file.VUKDeviceSlots {
+		if file.VUKDeviceSlots[i].DeviceID == deviceID {
+			slot = &file.VUKDeviceSlots[i]
+			break
+		}
+	}
+	if recipient == "" || slot == nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_VUK_SLOT_MISSING")
+	}
+	vuk, err := vaultfile.OpenVUKForDevice(*slot, checkpoint.VaultID, file.Header.KeyEpoch, deviceID, recipient, identity)
+	if err != nil || len(vuk) != vaultfile.CEKSize {
+		clear(vuk)
+		t.Fatalf("LEGACY_PARTITION_ISOLATION_OWN_VUK_OPEN_FAILED: %v", err)
+	}
+	return vuk
+}
+
+func legacyPartitionOwnerRoot(t *testing.T, public VaultFileOwnershipPublic) ed25519.PublicKey {
+	t.Helper()
+	raw, err := hex.DecodeString(public.OwnerRootPublicKey)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_OWNER_ROOT_INVALID")
+	}
+	return ed25519.PublicKey(raw)
+}
+
+// legacyPartitionRootSignedCandidateProof returns the owner-root-signed policy
+// proof carried by candidate together with the exact v1 signing transcript.
+// ParseFile already established that proof.Document is the canonical encoding
+// of proof.Policy, so this returns the product-produced transcripts and
+// signatures verbatim rather than re-encoding a substitute before verification.
+func legacyPartitionRootSignedCandidateProof(t *testing.T, candidate *vaultfile.File, checkpoint *vaultfile.PolicyCheckpoint, ownerRoot ed25519.PublicKey) (*vaultfile.SignedPolicy, []byte) {
+	t.Helper()
+	if candidate == nil || checkpoint == nil || len(ownerRoot) != ed25519.PublicKeySize {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_CANDIDATE_PROOF_CONTEXT_INVALID")
+	}
+	if candidate.Header.VaultID != checkpoint.VaultID ||
+		candidate.Header.PolicySeq != checkpoint.PolicySeq ||
+		!bytes.Equal(candidate.Header.PolicyDigest, checkpoint.PolicyDigest) ||
+		!bytes.Equal(ownerRoot, checkpoint.OwnerRootPublicKey) {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_CANDIDATE_PROOF_CHECKPOINT_MISMATCH")
+	}
+	var proof *vaultfile.SignedPolicy
+	for i := range candidate.SignedPolicyProofs {
+		current := &candidate.SignedPolicyProofs[i]
+		if current.Policy.PolicySeq != checkpoint.PolicySeq ||
+			current.SignerID != checkpoint.OwnerRootKeyID ||
+			current.Alg != vaultfile.PolicySigAlgEd25519 ||
+			!bytes.Equal(current.Policy.OwnerRoot.PublicKey, ownerRoot) ||
+			!bytes.Equal(vaultfile.PolicyDigest(&current.Policy), checkpoint.PolicyDigest) {
+			continue
+		}
+		proof = current
+		break
+	}
+	if proof == nil {
+		t.Fatal("LEGACY_PARTITION_ISOLATION_CANDIDATE_ROOT_PROOF_MISSING")
+	}
+	transcript := make([]byte, 0, len(vaultfile.DomainPolicyDocumentSignature)+1+len(proof.Document))
+	transcript = append(transcript, vaultfile.DomainPolicyDocumentSignature...)
+	transcript = append(transcript, 0)
+	transcript = append(transcript, proof.Document...)
+	return proof, transcript
+}
+
+func legacyPartitionIsVaultFileError(err error, code, path string) bool {
+	var target *vaultfile.Error
+	return errors.As(err, &target) && target.Code == code && target.Path == path
+}
+
 type legacyPartitionGenesisScope struct {
 	target      OwnedVaultFileFirstSuccessorTarget
 	checkpoint  *vaultfile.PolicyCheckpoint
