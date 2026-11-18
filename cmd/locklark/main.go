@@ -25,6 +25,7 @@ COMMAND GROUPS
   cli           Bind and run pinned developer CLIs with ephemeral credentials
   team          Bootstrap and inspect owner team profiles and trust pins
   plugin        Manage signed local plugin catalogs (third-party execution disabled)
+  vaultfile     Inspect one sealed vault file without unlocking it
 
 PERSONAL VAULT (locklark personal <action> --file PATH ...)
   Vault & Lifecycle
@@ -80,6 +81,11 @@ TEAM BOOTSTRAP (locklark team <command> ...)
   team create|export-initial|fetch-initial|status|reconcile-protection --profile ABS_PATH [flags]
   Run "locklark team --help" for subcommand flags and exit codes.
 
+VAULTFILE INSPECTION (read-only)
+  vaultfile inspect --file PATH --checkpoint FILE
+    Verify a sealed file against an explicit caller-pinned checkpoint.
+    Reports policy/signature status only; does not decrypt the KDBX payload.
+
 PLUGIN CATALOG (locklark plugin <command> ...)
   plugin init        --file NEW_DB
   plugin inspect     --package FILE --id ID --publisher HEX_KEY
@@ -123,7 +129,8 @@ SYNTHETIC GATEWAY PREVIEW & MCP BRIDGE
 NOTES
   - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
   - onedrive login|status|logout store only a OneDrive refresh token, in the OS credential store, never a plaintext fallback.
-  - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
+  - Run "locklark <personal|cli|vaultfile|team|plugin> --help" for detailed group help.
+  - vaultfile inspect does not use a profile, session, account, TTY, or unlock path.
   - The metadata request command accepts only ` + preview.FixtureRef + `.
   - request records a pending request. It cannot release any credential.
 `
@@ -141,6 +148,8 @@ func run(args []string, out, errOut io.Writer) error {
 		return runPersonal(args[1:], out)
 	case "plugin":
 		return runPlugin(args[1:], out)
+	case "vaultfile":
+		return runVaultfile(args[1:], out)
 	case "cli":
 		return runCLICommand(args[1:], out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
