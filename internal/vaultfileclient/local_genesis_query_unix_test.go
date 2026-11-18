@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
@@ -82,13 +83,22 @@ func TestLocalGenesisExactQuerySyntheticSameNameDistinctAndBound(t *testing.T) {
 		t.Fatal("same-name per-vault identities merged")
 	}
 
-	oversized := make([]personal.VaultFileBaselineItem, LocalGenesisExactQueryScanItemsMax+1)
-	for i := range oversized {
-		oversized[i] = personal.VaultFileBaselineItem{ID: "oversized", Title: title}
+	// Use the projection seam to exercise the scanner's boundary.
+	atCap := make([]personal.VaultFileBaselineItem, vault.MaxItems)
+	atCap[len(atCap)-1] = gotA.Hits[0]
+	localGenesisExactQueryProjectionForTest = func() []personal.VaultFileBaselineItem { return atCap }
+	query := LocalGenesisExactQuery{Title: title, Limit: 1}
+	got, err := a.QueryExactTitle(query)
+	if err != nil || len(got.Hits) != 1 || got.Truncated || got.Hits[0] != gotA.Hits[0] {
+		t.Fatal("query at the scan cap must return the final matching item")
 	}
+
+	oversized := make([]personal.VaultFileBaselineItem, vault.MaxItems+1)
+	oversized[0] = gotA.Hits[0]
 	localGenesisExactQueryProjectionForTest = func() []personal.VaultFileBaselineItem { return oversized }
-	if _, err := a.QueryExactTitle(LocalGenesisExactQuery{Title: title, Limit: 1}); !errors.Is(err, ErrLocalGenesisExactQueryBound) {
-		t.Fatal("oversized projection did not return the bound error")
+	got, err = a.QueryExactTitle(query)
+	if !errors.Is(err, ErrLocalGenesisExactQueryBound) || len(got.Hits) != 0 || got.Truncated || got.activation != nil {
+		t.Fatal("query above the scan cap must fail without returning a partial result")
 	}
 
 	localGenesisExactQueryProjectionForTest = func() []personal.VaultFileBaselineItem {

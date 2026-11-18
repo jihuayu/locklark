@@ -6,6 +6,7 @@ import (
 	"weak"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 )
 
 const (
@@ -14,8 +15,8 @@ const (
 	LocalGenesisExactQueryTitleBytesMax = 512
 	// LocalGenesisExactQueryHitsMax bounds disclosed matching items.
 	LocalGenesisExactQueryHitsMax = 64
-	// LocalGenesisExactQueryScanItemsMax bounds the post-read projection work.
-	LocalGenesisExactQueryScanItemsMax = 4096
+	// LocalGenesisExactQueryScanItemsMax bounds the summaries scanned per query.
+	LocalGenesisExactQueryScanItemsMax = vault.MaxItems
 )
 
 // ErrLocalGenesisExactQueryBound rejects an oversized selector, limit or
@@ -88,13 +89,12 @@ type localGenesisExactQueryActivation struct {
 	truncated bool
 }
 
-// QueryExactTitle reads exact-title item summaries from an already opened
-// local-genesis child. It reuses personal.Session.ReadVaultFileChild and the
-// existing owned-child ownership revalidation. A locator, journal, parent,
-// child or ownership failure is terminal for only this wrapper and closes only
-// this child; siblings and the parent remain untouched. Oversized selectors,
-// limits or projections return ErrLocalGenesisExactQueryBound without closing
-// a healthy child.
+// QueryExactTitle returns exact-title matches from the receiver's verified
+// child. The item database enforces the item limit during the child read.
+// The query checks the returned summaries against the same limit before scanning.
+//
+// Invalid query bounds and oversized projections return
+// ErrLocalGenesisExactQueryBound without closing the child.
 func (l *LocalGenesisSession) QueryExactTitle(query LocalGenesisExactQuery) (LocalGenesisExactQueryResult, error) {
 	empty := LocalGenesisExactQueryResult{}
 	if l == nil || l.state == nil {
