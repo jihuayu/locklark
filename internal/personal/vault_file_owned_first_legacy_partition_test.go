@@ -225,9 +225,10 @@ func TestOwnedVaultFileFirstItemsFromLegacyPartitionMaterializesOneVerifiedGroup
 		t.Fatal("LEGACY_PARTITION_DEST_BACKUP_FAILED")
 	}
 	destArchive := legacyPartitionReadFile(t, destArchivePath)
+	journalDir := legacyPartitionPrivateDir(t, dir, "genesis-journals")
 	publish := func(name string, public VaultFileOwnershipPublic) legacyPartitionGenesisScope {
 		t.Helper()
-		intentPath := filepath.Join(dir, "genesis-"+name+".journal")
+		intentPath := filepath.Join(journalDir, "genesis-"+name+".journal")
 		if _, err := destSession.PrepareVaultFileGenesis(VaultFileGenesisRequest{
 			VaultID: public.VaultID, Name: "legacy-partition-" + name, IntentPath: intentPath, ArchivePath: destArchivePath,
 		}, []byte(destPassword), destKey, []byte(destKit)); err != nil {
@@ -669,9 +670,10 @@ func TestOwnedVaultFileLegacyPartitionsUseIndependentDataKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal("LEGACY_PARTITION_ISOLATION_DEST_BACKUP_FAILED")
 	}
+	journalDir := legacyPartitionPrivateDir(t, dir, "genesis-journals")
 	publish := func(name string, public VaultFileOwnershipPublic) legacyPartitionGenesisScope {
 		t.Helper()
-		intentPath := filepath.Join(dir, "genesis-"+name+".journal")
+		intentPath := filepath.Join(journalDir, "genesis-"+name+".journal")
 		if _, err := destSession.PrepareVaultFileGenesis(VaultFileGenesisRequest{
 			VaultID: public.VaultID, Name: "legacy-partition-" + name, IntentPath: intentPath, ArchivePath: destArchivePath,
 		}, []byte(destPassword), destKey, []byte(destKit)); err != nil {
@@ -1021,6 +1023,27 @@ type legacyPartitionGenesisScope struct {
 	revision    vaultfilebackend.Revision
 	journalPath string
 	backendRoot string
+}
+
+// legacyPartitionPrivateDir creates a real private directory under the test's
+// temporary root. t.TempDir's numbered leaf inherits the process umask, so a
+// 0755 leaf under umask 022 would not satisfy the journal's private-parent
+// check. The genesis-intent journals live below this explicitly created 0700
+// directory instead.
+func legacyPartitionPrivateDir(t *testing.T, parent, name string) string {
+	t.Helper()
+	dir := filepath.Join(parent, name)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("LEGACY_PARTITION_PRIVATE_DIR_FAILED: %v", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("LEGACY_PARTITION_PRIVATE_DIR_STAT_FAILED: %v", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		t.Fatalf("LEGACY_PARTITION_PRIVATE_DIR_MODE_MISMATCH: %v", info.Mode())
+	}
+	return dir
 }
 
 func legacyPartitionPublishGenesis(t *testing.T, dir, name string, ownership VaultFileOwnershipPublic, intentPath string) legacyPartitionGenesisScope {
