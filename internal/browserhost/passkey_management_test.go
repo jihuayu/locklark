@@ -25,21 +25,17 @@ const (
 	passkeyFilterMutationLoopDone byte = '4'
 )
 
-var passkeyTimeoutPhase struct {
-	sync.Mutex
-	written byte
-}
+const passkeyTimeoutPhaseFileEnv = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
+
+var passkeyTimeoutPhaseMu sync.Mutex
 
 func markPasskeyTimeoutPhase(phase byte) {
-	marker := os.Getenv("LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE")
+	marker := os.Getenv(passkeyTimeoutPhaseFileEnv)
 	if marker == "" {
 		return
 	}
-	passkeyTimeoutPhase.Lock()
-	defer passkeyTimeoutPhase.Unlock()
-	if phase <= passkeyTimeoutPhase.written {
-		return
-	}
+	passkeyTimeoutPhaseMu.Lock()
+	defer passkeyTimeoutPhaseMu.Unlock()
 
 	temp, err := os.CreateTemp(filepath.Dir(marker), ".phase-")
 	if err != nil {
@@ -48,9 +44,45 @@ func markPasskeyTimeoutPhase(phase byte) {
 	defer os.Remove(temp.Name())
 	_, writeErr := temp.Write([]byte{phase})
 	closeErr := temp.Close()
-	if writeErr == nil && closeErr == nil && os.Rename(temp.Name(), marker) == nil {
-		passkeyTimeoutPhase.written = phase
+	if writeErr == nil && closeErr == nil {
+		// A later selected test can publish an earlier phase.
+		_ = os.Rename(temp.Name(), marker)
 	}
+}
+
+func TestPasskeyTimeoutMarkerReportsLatestPhase(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "phase")
+	t.Setenv(passkeyTimeoutPhaseFileEnv, marker)
+
+	assertPhase := func(want byte) {
+		t.Helper()
+		got, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Fatal("phase marker did not contain exactly the expected byte")
+		}
+	}
+
+	for _, phase := range []byte{
+		passkeyMetadataEntered,
+		passkeyFilterSetupEntered,
+		passkeyFilterMutationLoop,
+		passkeyFilterMutationLoopDone,
+		passkeyMetadataEntered,
+		passkeyFilterSetupEntered,
+		passkeyFilterMutationLoop,
+		passkeyFilterMutationLoopDone,
+		passkeyFilterSetupEntered,
+	} {
+		markPasskeyTimeoutPhase(phase)
+		assertPhase(phase)
+	}
+
+	t.Setenv(passkeyTimeoutPhaseFileEnv, "")
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoop)
+	assertPhase(passkeyFilterSetupEntered)
 }
 
 func fixturePasskey(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string, string, string, string) {
