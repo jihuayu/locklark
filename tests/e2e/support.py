@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from contextlib import ExitStack, contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -1086,6 +1087,45 @@ def go_tool() -> str | None:
     return None
 
 
+def _read_browserhost_passkey_phase(marker: Path) -> int:
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb", buffering=0) as phase_file:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                value = phase_file.read(2)
+                if value in (b"0", b"1", b"2", b"3", b"4"):
+                    return int(value)
+    except OSError:
+        pass
+    return -1
+
+
+@contextmanager
+def _browserhost_passkey_timeout_marker(temp_dir: Path):
+    with ExitStack() as cleanup:
+        marker = None
+        env_key = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
+        env = {env_key: ""}
+        try:
+            directory = cleanup.enter_context(
+                tempfile.TemporaryDirectory(dir=temp_dir, ignore_cleanup_errors=True)
+            )
+            candidate = Path(directory) / "phase"
+            candidate.touch(mode=0o600, exist_ok=False)
+            candidate.write_bytes(b"0")
+            marker = candidate
+            env[env_key] = str(marker)
+        except OSError:
+            pass
+        try:
+            yield env
+        except subprocess.TimeoutExpired:
+            phase = _read_browserhost_passkey_phase(marker) if marker is not None else -1
+            with suppress(OSError, ValueError):
+                print(f"BrowserHost passkey timeout phase {phase}", file=sys.stderr)
+            raise
+
+
 def go_package_test(
     ctx: E2EContext,
     package: str,
@@ -1093,6 +1133,7 @@ def go_package_test(
     *,
     min_passed: int = 1,
     timeout: float = 180.0,
+    observe_browserhost_passkey_timeout: bool = False,
 ) -> dict[str, int]:
     """Execute existing Go package tests for a native service contract.
 
@@ -1107,7 +1148,11 @@ def go_package_test(
             "validation blocked: go toolchain unavailable; native component tests not executed"
         )
     args = ["test", package, "-run", run, "-count=1", "-v"]
-    result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)
+    if observe_browserhost_passkey_timeout:
+        with _browserhost_passkey_timeout_marker(ctx.temp_dir) as env:
+            result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root, env=env)
+    else:
+        result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)
     combined = (result.stdout or "") + (result.stderr or "")
     passed = len(re.findall(r"^--- PASS: ", combined, re.MULTILINE))
     if result.returncode != 0:

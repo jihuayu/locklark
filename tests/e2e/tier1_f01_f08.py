@@ -344,6 +344,7 @@ def t1_f2_07(ctx):
         ctx, "./internal/browserhost",
         r"^TestPasskey(ManagementMetadataSearchAndStrictWire|FilterRunsBeforeFiveHundredCap)$",
         min_passed=2,
+        observe_browserhost_passkey_timeout=True,
     )
     node_test_pattern(
         ctx, "browser-extension/test/background.test.js",
