@@ -19,10 +19,59 @@ parser = argparse.ArgumentParser()
 phase = parser.add_mutually_exclusive_group(required=True)
 phase.add_argument("--prepare", action="store_true")
 phase.add_argument("--after-build", action="store_true")
+phase.add_argument("--check-tool-paths", action="store_true")
+phase.add_argument("--check-tool-dir", action="store_true")
+parser.add_argument("--tools-dir", type=pathlib.Path, required=True)
 args = parser.parse_args()
 root = pathlib.Path(__file__).resolve().parents[3]
 output = root / "mobile/core/build"
+try:
+    if args.tools_dir.is_symlink():
+        raise OSError()
+    if not args.tools_dir.exists() and args.check_tool_dir:
+        print("Binding tool directory has no unexpected entries")
+        raise SystemExit(0)
+    tools_dir = args.tools_dir.resolve(strict=True)
+    if not tools_dir.is_dir():
+        raise OSError()
+    for entry in tools_dir.iterdir():
+        if (entry.name not in ("gobind", "gomobile") or entry.is_symlink()
+                or not entry.is_file() or not os.access(entry, os.X_OK)):
+            raise SystemExit("Binding tool directory contains an unexpected entry")
+except OSError:
+    raise SystemExit("Binding tool directory unavailable")
+if args.check_tool_dir:
+    print("Binding tool directory has no unexpected entries")
+    raise SystemExit(0)
 go_bin = os.environ.get("GO_BIN", os.environ.get("LOCKLARK_GO", "go"))
+selected_go = shutil.which("go")
+try:
+    explicit_go = shutil.which(go_bin)
+    if explicit_go is None:
+        raise OSError()
+    explicit_go = pathlib.Path(explicit_go).resolve(strict=True)
+    go_matches = (selected_go is not None and explicit_go.is_file()
+                  and os.access(explicit_go, os.X_OK) and explicit_go.samefile(selected_go))
+except OSError:
+    go_matches = False
+if not go_matches:
+    raise SystemExit("Binding Go PATH mismatch")
+go_bin = str(explicit_go)
+installed_tools = {}
+for name in ("gobind", "gomobile"):
+    selected = shutil.which(name)
+    try:
+        executable = (tools_dir / name).resolve(strict=True)
+        matches = (selected is not None and executable.is_file()
+                   and os.access(executable, os.X_OK) and executable.samefile(selected))
+    except OSError:
+        matches = False
+    if not matches:
+        raise SystemExit("Binding tool PATH mismatch: " + name)
+    installed_tools[name] = str(executable)
+if args.check_tool_paths:
+    print("Binding executable paths matched")
+    raise SystemExit(0)
 decoder = json.JSONDecoder()
 file_fields = ("GoFiles", "CgoFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
                "FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles", "EmbedFiles")
@@ -55,8 +104,7 @@ manifest_file = output / "source-manifest.json"
 prepared_file = output / "source-manifest-before.json"
 binding_tools = {"Version": MOBILE_VERSION, "Sum": MOBILE_SUM}
 for name in ("gobind", "gomobile"):
-    executable = shutil.which(name)
-    if executable is None: raise SystemExit("Binding tool missing from PATH: " + name)
+    executable = installed_tools[name]
     tool_version = tool_sum = None
     for line in subprocess.check_output([go_bin, "version", "-m", executable], cwd=root, text=True).splitlines():
         fields = line.replace("\t", " ").split()
