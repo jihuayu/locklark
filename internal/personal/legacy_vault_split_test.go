@@ -80,76 +80,150 @@ func TestLegacyVaultSplitPreflight(t *testing.T) {
 		}
 		return raw
 	}
-	want := []LegacyVaultSplitGroup{
+	mixedGroups := []LegacyVaultSplitGroup{
 		{ItemIndexes: []int{1, 3}},
 		{},
 		{ItemIndexes: []int{0, 2}, HistoryEntries: 1, IndexedAttachments: 1},
 	}
-
-	p := makePayload()
-	raw := encode(t, p)
-	original, originalKey := bytes.Clone(raw), bytes.Clone(key)
-	got, err := PreflightLegacyVaultSplit(raw, pw, key, pin(raw))
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatal("verified source partition differs")
-	}
-	if !bytes.Equal(raw, original) || !bytes.Equal(key, originalKey) {
-		t.Fatal("preflight modified caller input")
-	}
-	checked, err := verifyRecoveryArchive(raw, pw, key, pin(raw), true)
-	if err != nil {
-		t.Fatal("could not recheck the source")
-	}
-	defer clearAuthenticatedItems(checked.Items)
-	again, err := reconcileLegacyVaultSplit(checked)
-	if err != nil || !reflect.DeepEqual(again, want) || !reflect.DeepEqual(checked.Items, p.Items) {
-		t.Fatal("partition changed source records or their ordering")
-	}
-	if got, err := PreflightLegacyVaultSplit(append(bytes.Clone(raw), ' '), pw, key, pin(raw)); got != nil || !errors.Is(err, ErrRecoverySource) {
-		t.Fatal("archive outside the pinned checkpoint was accepted")
+	checkPartition := func(t *testing.T, raw []byte, want []LegacyVaultSplitGroup) {
+		t.Helper()
+		got, err := PreflightLegacyVaultSplit(raw, pw, key, pin(raw))
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatal("verified source partition differs")
+		}
 	}
 
-	for i, change := range []struct {
+	t.Run("mixed_vaults", func(t *testing.T) {
+		p := makePayload()
+		raw := encode(t, p)
+		original, originalKey := bytes.Clone(raw), bytes.Clone(key)
+		checkPartition(t, raw, mixedGroups)
+		if !bytes.Equal(raw, original) || !bytes.Equal(key, originalKey) {
+			t.Fatal("preflight modified caller input")
+		}
+		checked, err := verifyRecoveryArchive(raw, pw, key, pin(raw), true)
+		if err != nil {
+			t.Fatal("could not recheck the source")
+		}
+		defer clearAuthenticatedItems(checked.Items)
+		again, err := reconcileLegacyVaultSplit(checked)
+		if err != nil || !reflect.DeepEqual(again, mixedGroups) || !reflect.DeepEqual(checked, &p) {
+			t.Fatal("partition changed source records or their ordering")
+		}
+	})
+
+	t.Run("omitted_vault_id", func(t *testing.T) {
+		p := makePayload()
+		record, err := json.Marshal(p.Items[1])
+		var fields map[string]json.RawMessage
+		if err != nil || json.Unmarshal(record, &fields) != nil {
+			t.Fatal("could not inspect the encoded record")
+		}
+		defer clear(record)
+		if _, present := fields["vault_id"]; present {
+			t.Fatal("expected the archived record to omit its vault ID")
+		}
+		raw := encode(t, p)
+		checkPartition(t, raw, mixedGroups)
+		legacy, err := verifyRecoveryArchive(raw, pw, key, pin(raw), false)
+		if err != nil {
+			t.Fatal("legacy decoding refused an omitted vault ID")
+		}
+		defer clearAuthenticatedItems(legacy.Items)
+		if legacy.Items[1].VaultID != "" || legacy.Items[1].EffectiveVaultID() != vault.DefaultVaultID {
+			t.Fatal("legacy decoding changed the raw or effective vault ID")
+		}
+	})
+
+	t.Run("default_only", func(t *testing.T) {
+		p := makePayload()
+		p.Items = []vault.Item{p.Items[1], p.Items[3]}
+		p.Vaults = nil
+		p.Attachments = nil
+		checkPartition(t, encode(t, p), []LegacyVaultSplitGroup{{ItemIndexes: []int{0, 1}}})
+	})
+
+	t.Run("accumulate_counts", func(t *testing.T) {
+		p := makePayload()
+		history := p.Items[0].History[0]
+		p.Items[2].History = []vault.ItemHistoryEntry{history, history}
+		first := p.Items[0].Attachments[0]
+		second := first
+		first.ID, second.ID = id(21), id(22)
+		p.Items[2].Attachments = []vault.AttachmentMeta{first, second}
+		p.Attachments = collectBackupAttachments(p.Items)
+		checkPartition(t, encode(t, p), []LegacyVaultSplitGroup{
+			{ItemIndexes: []int{1, 3}}, {},
+			{ItemIndexes: []int{0, 2}, HistoryEntries: 3, IndexedAttachments: 3},
+		})
+	})
+
+	t.Run("wrong_checkpoint", func(t *testing.T) {
+		raw := encode(t, makePayload())
+		other := append(bytes.Clone(raw), ' ')
+		if got, err := PreflightLegacyVaultSplit(other, pw, key, pin(raw)); got != nil || !errors.Is(err, ErrRecoverySource) {
+			t.Fatal("archive outside the pinned checkpoint was accepted")
+		}
+	})
+
+	for _, change := range []struct {
+		name   string
 		mutate func(*payload)
 		want   error
 	}{
-		{func(p *payload) { p.Vaults = append(p.Vaults, p.Vaults[0]) }, invalid},
-		{func(p *payload) {
+		{"duplicate_declaration", func(p *payload) { p.Vaults = append(p.Vaults, p.Vaults[0]) }, invalid},
+		{"case_alias_declaration", func(p *payload) {
 			alias := p.Vaults[0]
 			alias.ID = strings.ToLower(alias.ID)
 			p.Vaults = append(p.Vaults, alias)
 		}, invalid},
-		{func(p *payload) { p.Vaults[0].ID = vault.DefaultVaultID }, invalid},
-		{func(p *payload) { p.Items[0].VaultID = strings.ToLower(assignedVault) }, ErrBackupMissingSubVault},
-		{func(p *payload) { p.Items[1].ID = p.Items[0].ID }, invalid},
-		{func(p *payload) { p.Items = nil }, invalid},
-		{func(p *payload) { p.Items[0].Kind = "unsupported" }, invalid},
-		{func(p *payload) { p.Attachments[0].ItemID = p.Items[1].ID }, invalid},
-		{func(p *payload) { p.Attachments[0].Content = []byte{3, 2, 1} }, invalid},
-		{func(p *payload) {
-			a := &p.Items[0].Attachments[0]
-			a.Content, a.Size, a.SHA256 = nil, 0, vault.AttachmentSHA256(nil)
-			p.Attachments = nil
-		}, invalid},
+		{"reserved_default_declaration", func(p *payload) { p.Vaults[0].ID = vault.DefaultVaultID }, invalid},
+		{"dangling_vault", func(p *payload) { p.Items[0].VaultID = strings.ToLower(assignedVault) }, ErrBackupMissingSubVault},
+		{"duplicate_item", func(p *payload) { p.Items[1].ID = p.Items[0].ID }, invalid},
+		{"omitted_items", func(p *payload) { p.Items = nil }, invalid},
+		{"unsupported_item", func(p *payload) { p.Items[0].Kind = "unsupported" }, invalid},
+		{"dangling_attachment", func(p *payload) { p.Attachments[0].ItemID = p.Items[1].ID }, invalid},
+		{"unverifiable_attachment", func(p *payload) { p.Attachments[0].Content = []byte{3, 2, 1} }, invalid},
 	} {
-		p := makePayload()
-		change.mutate(&p)
-		raw := encode(t, p)
-		got, err := PreflightLegacyVaultSplit(raw, pw, key, pin(raw))
-		if got != nil || !errors.Is(err, change.want) {
-			t.Fatalf("source refusal case %d differed", i)
-		}
+		t.Run(change.name, func(t *testing.T) {
+			p := makePayload()
+			change.mutate(&p)
+			raw := encode(t, p)
+			got, err := PreflightLegacyVaultSplit(raw, pw, key, pin(raw))
+			if got != nil || !errors.Is(err, change.want) {
+				t.Fatal("source refusal differed")
+			}
+		})
 	}
 
-	nonCanonical := legacySplitNonCanonicalArchive(t, raw, pw, key, kit)
-	legacy, err := verifyRecoveryArchive(nonCanonical, pw, key, pin(nonCanonical), false)
-	if err != nil {
-		t.Fatal("recovery compatibility changed")
-	}
-	defer clearAuthenticatedItems(legacy.Items)
-	if got, err := PreflightLegacyVaultSplit(nonCanonical, pw, key, pin(nonCanonical)); got != nil || !errors.Is(err, invalid) {
-		t.Fatal("a field discarded by the legacy decoder was accepted")
-	}
+	t.Run("omitted_empty_attachment", func(t *testing.T) {
+		p := makePayload()
+		a := &p.Items[0].Attachments[0]
+		a.Content, a.Size, a.SHA256 = nil, 0, vault.AttachmentSHA256(nil)
+		p.Attachments = nil
+		raw := encode(t, p)
+		legacy, err := verifyRecoveryArchive(raw, pw, key, pin(raw), false)
+		if err != nil {
+			t.Fatal("legacy decoding refused a reconstructible attachment")
+		}
+		defer clearAuthenticatedItems(legacy.Items)
+		if got, err := PreflightLegacyVaultSplit(raw, pw, key, pin(raw)); got != nil || !errors.Is(err, invalid) {
+			t.Fatal("preflight accepted an omitted attachment record")
+		}
+	})
+
+	t.Run("unsupported_encoding", func(t *testing.T) {
+		raw := encode(t, makePayload())
+		nonCanonical := legacySplitNonCanonicalArchive(t, raw, pw, key, kit)
+		legacy, err := verifyRecoveryArchive(nonCanonical, pw, key, pin(nonCanonical), false)
+		if err != nil {
+			t.Fatal("recovery compatibility changed")
+		}
+		defer clearAuthenticatedItems(legacy.Items)
+		if got, err := PreflightLegacyVaultSplit(nonCanonical, pw, key, pin(nonCanonical)); got != nil || !errors.Is(err, invalid) {
+			t.Fatal("a field discarded by the legacy decoder was accepted")
+		}
+	})
 }
 
 func legacySplitNonCanonicalArchive(t *testing.T, raw []byte, pw string, key []byte, kit string) []byte {
