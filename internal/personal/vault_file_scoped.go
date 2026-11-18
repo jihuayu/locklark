@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -63,6 +64,11 @@ var (
 	ErrVaultFileScopedChild = errors.New("vault-file scoped child is no longer available")
 )
 
+// errVaultFileChildFinalHandoff marks a settled-successor handoff that failed
+// after registration. A batch treats it as an account-delivery failure rather
+// than a target-local rejection so previous successes are cleaned, not returned.
+var errVaultFileChildFinalHandoff = errors.New("vault-file child final handoff rejected")
+
 // VaultFileChildOptions selects the only optional summary field. The ID is an
 // opaque item selector, not key material.
 type VaultFileChildOptions struct {
@@ -116,6 +122,12 @@ type vaultFileChild struct {
 	// revalidates scope through the ScopedUnlock built from the same pin; this
 	// copy is the per-library baseline the client layer will bind in B2.
 	checkpoint vaultfile.PolicyCheckpoint
+
+	// successor is non-nil only for a settled owned first-successor child. It
+	// carries exact hashes, opaque revisions and public device IDs, never the
+	// backend bytes. Read and revalidation re-read the typed journal and the
+	// named local object through this binding.
+	successor *vaultFileOwnedSuccessorBinding
 
 	// journal baseline: exact state identity, never the bytes themselves.
 	journalGeneration uint64
@@ -233,6 +245,9 @@ func (s *Session) OpenOwnedVaultFileChild(journalPath string, checkpoint *vaultf
 
 type vaultFileChildOpenMode struct {
 	owned bool
+	// successor selects the settled owned first-successor read path. Its pin,
+	// backend name and local path are immutable proof inputs, not authority.
+	successor *OwnedVaultFileFirstSuccessorTarget
 	// batch carries an already authenticated parent snapshot and public owner
 	// custody projections for one unpublished initial fan-out operation. It is
 	// nil for every existing single-target API.
@@ -428,61 +443,102 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	signer := ed25519.NewKeyFromSeed(accountIdentity.Signing)
 	defer clear(signer)
 
-	journal, err := vaultfilejournal.OpenExisting(journalPath)
-	if err != nil {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
-	}
-	defer func() { _ = journal.Close() }()
-	baseline, baseBytes, err := loadVaultFileJournalBaseline(journal)
-	if err != nil {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
-	}
-	defer clear(baseBytes)
-	if len(baseBytes) == 0 {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
-	}
+	var (
+		journal          *vaultfilejournal.Journal
+		baseline         vaultFileJournalBaseline
+		baseBytes        []byte
+		successorBinding *vaultFileOwnedSuccessorBinding
+		successorBytes   []byte
+		handle           *vaultfile.ScopedUnlock
+	)
+	if mode.successor != nil {
+		binding, genesisBytes, readBytes, loadErr := loadOwnedFirstSuccessor(
+			journalPath, *mode.successor, checkpoint, localAge.Recipient().String(),
+			signer.Public().(ed25519.PublicKey))
+		if loadErr != nil {
+			return VaultFileChildToken{}, nil, loadErr
+		}
+		successorBinding = binding
+		successorBytes = readBytes
+		defer clear(genesisBytes)
+		defer clear(successorBytes)
+		handle, err = vaultfile.NewScopedUnlock(genesisBytes, checkpoint, binding.readerDeviceID, localAge)
+		if err != nil {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		}
+	} else {
+		journal, err = vaultfilejournal.OpenExisting(journalPath)
+		if err != nil {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+		}
+		defer func() { _ = journal.Close() }()
+		baseline, baseBytes, err = loadVaultFileJournalBaseline(journal)
+		if err != nil {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+		}
+		defer clear(baseBytes)
+		if len(baseBytes) == 0 {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+		}
 
-	file, err := vaultfile.ParseFile(baseBytes)
-	if err != nil || vaultfile.VerifyPolicyCheckpoint(file, checkpoint) != nil ||
-		file.Header.VaultID != checkpoint.VaultID || len(file.SignedPolicyProofs) == 0 {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
-	}
-	policy := &file.SignedPolicyProofs[len(file.SignedPolicyProofs)-1].Policy
-	if policy.PolicySeq != file.Header.PolicySeq ||
-		!bytes.Equal(vaultfile.PolicyDigest(policy), file.Header.PolicyDigest) {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
-	}
-	deviceID, ok := localVaultFileReaderDevice(policy, localAge.Recipient().String(), signer.Public().(ed25519.PublicKey))
-	if !ok {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
-	}
+		file, parseErr := vaultfile.ParseFile(baseBytes)
+		if parseErr != nil || vaultfile.VerifyPolicyCheckpoint(file, checkpoint) != nil ||
+			file.Header.VaultID != checkpoint.VaultID || len(file.SignedPolicyProofs) == 0 {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		}
+		policy := &file.SignedPolicyProofs[len(file.SignedPolicyProofs)-1].Policy
+		if policy.PolicySeq != file.Header.PolicySeq ||
+			!bytes.Equal(vaultfile.PolicyDigest(policy), file.Header.PolicyDigest) {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		}
+		deviceID, ok := localVaultFileReaderDevice(policy, localAge.Recipient().String(), signer.Public().(ed25519.PublicKey))
+		if !ok {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		}
 
-	handle, err := vaultfile.NewScopedUnlock(baseBytes, checkpoint, deviceID, localAge)
-	if err != nil {
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		handle, err = vaultfile.NewScopedUnlock(baseBytes, checkpoint, deviceID, localAge)
+		if err != nil {
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+		}
 	}
 
 	// The real summary is the registration proof. It opens the actual KDBX
-	// through the handle's cached VUK and the shared item-database reader.
-	initial, err := vault.ReadScopedItemSummaries(handle, baseBytes, vault.ItemSummaryOptions{IncludeID: options.IncludeItemIDs})
+	// through the handle's cached VUK and the shared item-database reader. For
+	// a settled owned successor, the same handle reads the fresh successor
+	// bytes that already matched the exact journal and backend observation.
+	encoded := baseBytes
+	if successorBinding != nil {
+		encoded = successorBytes
+	}
+	initial, err := vault.ReadScopedItemSummaries(handle, encoded, vault.ItemSummaryOptions{IncludeID: options.IncludeItemIDs})
 	if err != nil {
 		_ = handle.Close()
 		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
 	}
 	initialItems := vaultFileChildItems(initial)
 
-	// Recheck the still-locked journal after decryption. A cooperating writer
-	// cannot change the state under this held lock, and a non-cooperating
-	// drift is refused rather than registered.
-	if err := journalMatchesExpected(journal, baseline); err != nil {
-		_ = handle.Close()
-		clearVaultFileChildItems(initialItems)
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
-	}
-	if err := journal.Close(); err != nil {
-		_ = handle.Close()
-		clearVaultFileChildItems(initialItems)
-		return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+	if successorBinding != nil {
+		// A second real journal + backend read after decryption refuses a state
+		// that moved while the candidate was being opened.
+		if _, verifyErr := verifyOwnedFirstSuccessorBinding(successorBinding, checkpoint); verifyErr != nil {
+			_ = handle.Close()
+			clearVaultFileChildItems(initialItems)
+			return VaultFileChildToken{}, nil, verifyErr
+		}
+	} else {
+		// Recheck the still-locked journal after decryption. A cooperating
+		// writer cannot change the state under this held lock, and a
+		// non-cooperating drift is refused rather than registered.
+		if err := journalMatchesExpected(journal, baseline); err != nil {
+			_ = handle.Close()
+			clearVaultFileChildItems(initialItems)
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+		}
+		if err := journal.Close(); err != nil {
+			_ = handle.Close()
+			clearVaultFileChildItems(initialItems)
+			return VaultFileChildToken{}, nil, ErrVaultFileBaselineJournal
+		}
 	}
 	if vaultFileChildCandidateReady != nil {
 		vaultFileChildCandidateReady(handle)
@@ -583,6 +639,7 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		owned:              ownedSnapshot,
 		closeDone:          make(chan struct{}),
 		checkpoint:         cloneVaultFileCheckpoint(checkpoint),
+		successor:          successorBinding,
 		journalGeneration:  baseline.generation,
 		remoteRevision:     baseline.remoteRevision,
 		baseHash:           baseline.baseHash,
@@ -616,7 +673,88 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 	if old != nil {
 		s.retireVaultFileChild(old)
 	}
+
+	// The earlier post-decryption successor recheck ran before the candidate
+	// hook and registration. Revalidate the exact journal/backend binding and
+	// the current account/owner authority once more at the final handoff, with
+	// no registration lock held, so an advance during that interval cannot
+	// deliver the stale initial summary or a live child.
+	if successorBinding != nil {
+		if handoffErr := s.finalizeOwnedSuccessorHandoff(journalPath, successorBinding, checkpoint, child,
+			parentOwner, parentPath, parentSlot, parentMaterial); handoffErr != nil {
+			clearVaultFileChildItems(initialItems)
+			s.invalidateVaultFileChild(child)
+			return VaultFileChildToken{}, nil, fmt.Errorf("%w: %w", errVaultFileChildFinalHandoff, handoffErr)
+		}
+	}
 	return token, initialItems, nil
+}
+
+// finalizeOwnedSuccessorHandoff revalidates one just-registered settled owned
+// successor before its token or initial summary may escape. The journal and
+// named backend are read once outside every registration lock; then the same
+// parent slot/material/owner checks and held read-only account transaction used
+// by every child read are repeated. The caller removes only this exact child on
+// failure, so a replacement or unrelated sibling is never revoked.
+func (s *Session) finalizeOwnedSuccessorHandoff(journalPath string, binding *vaultFileOwnedSuccessorBinding, checkpoint *vaultfile.PolicyCheckpoint, child *vaultFileChild, parentOwner *vaultFileChildOwner, parentPath string, parentSlot [32]byte, parentMaterial []byte) error {
+	fresh, err := verifyOwnedFirstSuccessorBinding(binding, checkpoint)
+	clear(fresh)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if err := s.active(false); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if s.path != parentPath || s.slotDigest != parentSlot ||
+		s.vaultFileOwner != parentOwner ||
+		subtle.ConstantTimeCompare(s.material, parentMaterial) != 1 {
+		s.lock()
+		s.mu.Unlock()
+		return ErrSessionLocked
+	}
+	parentCheck, err := s.openVaultFileParentCheckLocked()
+	if err != nil {
+		s.lock()
+		s.mu.Unlock()
+		return ErrSessionLocked
+	}
+	if child.owned != nil {
+		if ownedErr := s.verifyOwnedVaultFileTargetLocked(parentCheck, child.owned.owner); ownedErr != nil {
+			s.mu.Unlock()
+			closeErr := parentCheck.close()
+			if closeErr != nil || errors.Is(ownedErr, errVaultFileChildInvalidSlot) {
+				s.lockVaultFileParent()
+				return ErrSessionLocked
+			}
+			return ErrVaultFileOwnership
+		}
+	}
+	now := time.Now()
+	s.saveMu.Lock()
+	revoked := s.vaultFileRevoked.Load()
+	parentExpired := parentCheck.idleExpired(now)
+	s.vaultFileMu.Lock()
+	current := s.vaultFileChildren[journalPath]
+	s.vaultFileMu.Unlock()
+	s.saveMu.Unlock()
+	s.mu.Unlock()
+	if revoked || parentExpired {
+		_ = parentCheck.close()
+		s.lockVaultFileParent()
+		return ErrSessionLocked
+	}
+	if current != child || child.expired(now) {
+		_ = parentCheck.close()
+		return ErrVaultFileScopedChild
+	}
+	if err := parentCheck.close(); err != nil {
+		s.lockVaultFileParent()
+		return ErrSessionLocked
+	}
+	return nil
 }
 
 // ReadVaultFileChild returns bounded item summaries from the exact existing
@@ -675,28 +813,45 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 		return nil, err
 	}
 
-	journal, err := vaultfilejournal.OpenExisting(token.path)
-	if err != nil {
-		s.invalidateVaultFileChild(child)
-		return nil, ErrVaultFileBaselineJournal
+	var (
+		journal        *vaultfilejournal.Journal
+		readBytes      []byte
+		successorChild bool
+	)
+	if child.successor != nil {
+		successorChild = true
+		verified, verifyErr := verifyOwnedFirstSuccessorBinding(child.successor, &child.checkpoint)
+		if verifyErr != nil {
+			s.invalidateVaultFileChild(child)
+			return nil, verifyErr
+		}
+		readBytes = verified
+		defer clear(readBytes)
+	} else {
+		journal, err = vaultfilejournal.OpenExisting(token.path)
+		if err != nil {
+			s.invalidateVaultFileChild(child)
+			return nil, ErrVaultFileBaselineJournal
+		}
+		defer func() { _ = journal.Close() }()
+		if err := journalMatchesChild(journal, child); err != nil {
+			s.invalidateVaultFileChild(child)
+			return nil, ErrVaultFileBaselineJournal
+		}
+		_, baseBytes, loadErr := loadVaultFileJournalBaseline(journal)
+		if loadErr != nil {
+			s.invalidateVaultFileChild(child)
+			return nil, ErrVaultFileBaselineJournal
+		}
+		defer clear(baseBytes)
+		readBytes = baseBytes
 	}
-	defer func() { _ = journal.Close() }()
-	if err := journalMatchesChild(journal, child); err != nil {
-		s.invalidateVaultFileChild(child)
-		return nil, ErrVaultFileBaselineJournal
-	}
-	_, baseBytes, err := loadVaultFileJournalBaseline(journal)
-	if err != nil {
-		s.invalidateVaultFileChild(child)
-		return nil, ErrVaultFileBaselineJournal
-	}
-	defer clear(baseBytes)
 	if s.vaultFileRevoked.Load() {
 		s.invalidateVaultFileChild(child)
 		return nil, ErrSessionLocked
 	}
 
-	summaries, err := vault.ReadScopedItemSummaries(handle, baseBytes, vault.ItemSummaryOptions{IncludeID: options.IncludeItemIDs})
+	summaries, err := vault.ReadScopedItemSummaries(handle, readBytes, vault.ItemSummaryOptions{IncludeID: options.IncludeItemIDs})
 	if err != nil {
 		s.invalidateVaultFileChild(child)
 		return nil, ErrVaultFileBaselineVerification
@@ -705,16 +860,26 @@ func (s *Session) ReadVaultFileChild(token VaultFileChildToken, options VaultFil
 	if vaultFileChildReadHook != nil {
 		vaultFileChildReadHook()
 	}
-	if err := journalMatchesChild(journal, child); err != nil {
-		_ = journal.Close()
-		clearVaultFileChildItems(items)
-		s.invalidateVaultFileChild(child)
-		return nil, ErrVaultFileBaselineJournal
-	}
-	if err := journal.Close(); err != nil {
-		clearVaultFileChildItems(items)
-		s.invalidateVaultFileChild(child)
-		return nil, ErrVaultFileBaselineJournal
+	if successorChild {
+		fresh, verifyErr := verifyOwnedFirstSuccessorBinding(child.successor, &child.checkpoint)
+		clear(fresh)
+		if verifyErr != nil {
+			clearVaultFileChildItems(items)
+			s.invalidateVaultFileChild(child)
+			return nil, verifyErr
+		}
+	} else {
+		if err := journalMatchesChild(journal, child); err != nil {
+			_ = journal.Close()
+			clearVaultFileChildItems(items)
+			s.invalidateVaultFileChild(child)
+			return nil, ErrVaultFileBaselineJournal
+		}
+		if err := journal.Close(); err != nil {
+			clearVaultFileChildItems(items)
+			s.invalidateVaultFileChild(child)
+			return nil, ErrVaultFileBaselineJournal
+		}
 	}
 
 	// Final parent authority is checked again under Session.mu with a real
@@ -877,6 +1042,32 @@ func (s *Session) RevalidateVaultFileChildOwnership(token VaultFileChildToken) e
 	if err := parentCheck.close(); err != nil {
 		s.lockVaultFileParent()
 		return ErrSessionLocked
+	}
+	if child.successor != nil {
+		fresh, verifyErr := verifyOwnedFirstSuccessorBinding(child.successor, &child.checkpoint)
+		clear(fresh)
+		if verifyErr != nil {
+			s.invalidateVaultFileChild(child)
+			return verifyErr
+		}
+		// The typed journal/backend read runs without Session.mu. A short
+		// registry gate then refuses a child that was revoked, replaced or
+		// expired while the observation was in flight.
+		now = time.Now()
+		s.saveMu.Lock()
+		revoked = s.vaultFileRevoked.Load()
+		s.vaultFileMu.Lock()
+		current = s.vaultFileChildren[token.path]
+		s.vaultFileMu.Unlock()
+		s.saveMu.Unlock()
+		if revoked {
+			s.invalidateVaultFileChild(child)
+			return ErrSessionLocked
+		}
+		if current != child || child.expired(now) {
+			s.invalidateVaultFileChild(child)
+			return ErrVaultFileScopedChild
+		}
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/teamfiles"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
 // localGenesisSessionState is the narrow, opaque state behind one owned
@@ -37,6 +38,7 @@ type localGenesisSessionState struct {
 	manifestSHA256 string
 	companion      Companion
 	revision       string
+	successor      *localGenesisSuccessorLocator
 
 	token personal.VaultFileChildToken
 
@@ -68,11 +70,12 @@ var (
 )
 
 // OpenLocalGenesisSession re-reads the exact strict manifest and companion,
-// authenticates the real generation-zero journal and candidate checkpoint, and
-// asks the parent Session for one owned child with this call's explicit full
-// factors. Only after the owned child has been read, its locator re-read and
-// its target-only ownership revalidated does it release the initial bounded
-// summary. Any failure closes the candidate token before returning.
+// authenticates the real pristine journal or settled owned first successor and
+// candidate checkpoint, and asks the parent Session for one owned child with
+// this call's explicit full factors. Only after the owned child has been read,
+// its locator re-read and its target-only ownership revalidated does it release
+// the initial bounded summary. Any failure closes the candidate token before
+// returning.
 //
 // This legacy variant pins whatever journal the captured manifest names. New
 // scheduling callers must use OpenLocalGenesisSessionForJournal.
@@ -105,12 +108,25 @@ func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 	if expectedJournal != "" && manifest.Journal != expectedJournal {
 		return nil, empty, ErrLocalReview
 	}
-	checkpoint, revision, err := verifyLocalGenesisCompanion(manifest, companion)
+	verified, err := verifyLocalGenesisCompanion(manifest, companion)
 	if err != nil {
 		return nil, empty, err
 	}
-	token, initial, err := s.OpenOwnedVaultFileChild(manifest.Journal, checkpoint, password, key, personal.VaultFileChildOptions{})
-	clearLocalGenesisCheckpoint(checkpoint)
+	defer clearLocalGenesisVerified(&verified)
+	var token personal.VaultFileChildToken
+	var initial []personal.VaultFileBaselineItem
+	if verified.successor != nil {
+		target := personal.OwnedVaultFileFirstSuccessorTarget{
+			BackendRoot: verified.successor.backendRoot,
+			BackendName: verified.successor.backendName,
+			Pin:         cloneLocalGenesisGenesisPin(verified.successor.pin),
+		}
+		token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChild(
+			manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		clear(target.Pin.Root.OwnerRootPublicKey)
+	} else {
+		token, initial, err = s.OpenOwnedVaultFileChild(manifest.Journal, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+	}
 	if err != nil {
 		return nil, empty, err
 	}
@@ -121,7 +137,8 @@ func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 		manifest:       manifest,
 		manifestSHA256: digest,
 		companion:      cloneLocalGenesisCompanion(companion),
-		revision:       revision,
+		revision:       verified.revision,
+		successor:      cloneLocalGenesisSuccessor(verified.successor),
 		token:          token,
 		closeDone:      make(chan struct{}),
 	}}
@@ -137,9 +154,9 @@ func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 }
 
 // Summary returns one bounded item projection only when the frozen locator and
-// generation-zero journal still match, the owned child still reads the same
-// state, and the narrow target-only ownership revalidation succeeds. Every
-// failure is terminal for this wrapper and closes only this child.
+// journal still match, the owned child still reads the same state, and the
+// narrow target-only ownership revalidation succeeds. Every failure is terminal
+// for this wrapper and closes only this child.
 func (l *LocalGenesisSession) Summary() (LocalGenesisBaseline, error) {
 	if l == nil || l.state == nil {
 		return LocalGenesisBaseline{}, ErrLocalReview
@@ -278,12 +295,12 @@ func (s *localGenesisSessionState) revalidateLocator() error {
 		companion.Resume.PersonalFile != s.manifest.PersonalFile {
 		return ErrLocalReview
 	}
-	checkpoint, revision, err := verifyLocalGenesisCompanion(manifest, companion)
+	verified, err := verifyLocalGenesisCompanion(manifest, companion)
 	if err != nil {
 		return err
 	}
-	clearLocalGenesisCheckpoint(checkpoint)
-	if revision != s.revision {
+	defer clearLocalGenesisVerified(&verified)
+	if verified.revision != s.revision || !sameLocalGenesisSuccessor(verified.successor, s.successor) {
 		return ErrLocalReview
 	}
 	return nil
@@ -366,21 +383,53 @@ func readLocalGenesisLocatorForAccount(accountPath, configPath, workspaceRoot, v
 	return manifest, digest, companion, nil
 }
 
-func verifyLocalGenesisCompanion(manifest Manifest, companion Companion) (*vaultfile.PolicyCheckpoint, string, error) {
+func verifyLocalGenesisCompanion(manifest Manifest, companion Companion) (localGenesisVerifiedState, error) {
+	empty := localGenesisVerifiedState{}
 	if companion.Resume.Checkpoint == nil {
-		return nil, "", ErrLocalReview
+		return empty, ErrLocalReview
 	}
 	root, ok := DecodeHex(companion.Resume.Checkpoint.OwnerRootPublicKey)
 	if !ok {
-		return nil, "", ErrLocalReview
+		return empty, ErrLocalReview
 	}
 	defer clear(root)
+
+	pin, ok := localGenesisOwnedGenesisPin(manifest, companion, root)
+	if !ok {
+		return empty, ErrLocalReview
+	}
+	record, successorErr := vaultfilejournal.ReadOwnedFirstSuccessor(manifest.Journal, pin)
+	if successorErr == nil {
+		checkpoint, err := verifyLocalGenesisSuccessor(manifest, companion, pin, record)
+		successorRevision := string(record.SuccessorRevision)
+		clear(record.GenesisBytes)
+		clear(record.SuccessorBytes)
+		if err != nil {
+			return empty, ErrLocalReview
+		}
+		return localGenesisVerifiedState{
+			checkpoint: checkpoint,
+			revision:   successorRevision,
+			successor: &localGenesisSuccessorLocator{
+				pin:               cloneLocalGenesisGenesisPin(pin),
+				backendRoot:       manifest.BackendRoot,
+				backendName:       manifest.Name,
+				successorRevision: successorRevision,
+			},
+		}, nil
+	}
+	clear(record.GenesisBytes)
+	clear(record.SuccessorBytes)
+
+	// This fallback is the unchanged pristine generation-zero path. A rejected
+	// or malformed settled v2 record cannot be opened by the legacy
+	// OpenExisting/LoadGenesisBaseline path, so it still fails closed here.
 	checkpoint, revision, err := verifyLocalGenesisState(manifest.Journal, manifest.VaultID, companion, root)
 	if err != nil || checkpoint == nil || revision == "" {
 		clearLocalGenesisCheckpoint(checkpoint)
-		return nil, "", ErrLocalReview
+		return empty, ErrLocalReview
 	}
-	return checkpoint, revision, nil
+	return localGenesisVerifiedState{checkpoint: checkpoint, revision: revision}, nil
 }
 
 func clearLocalGenesisCheckpoint(checkpoint *vaultfile.PolicyCheckpoint) {

@@ -28,6 +28,10 @@ type OwnedVaultFileTarget struct {
 	JournalPath string
 	Checkpoint  vaultfile.PolicyCheckpoint
 	Options     VaultFileChildOptions
+	// Successor is nil for a legacy generation-zero child. When non-nil, the
+	// target adopts exactly one settled owned first successor from this local
+	// backend object; it never makes the target a write authority.
+	Successor *OwnedVaultFileFirstSuccessorTarget
 }
 
 // OwnedVaultFileChildResult reports one original target index. A nil Err means
@@ -44,6 +48,7 @@ type ownedVaultFileBatchRequest struct {
 	journalPath string
 	checkpoint  vaultfile.PolicyCheckpoint
 	options     VaultFileChildOptions
+	successor   *OwnedVaultFileFirstSuccessorTarget
 	indices     []int
 }
 
@@ -67,6 +72,13 @@ func clearOwnedVaultFileBatchResults(results []OwnedVaultFileChildResult) {
 
 func validOwnedVaultFileTarget(target OwnedVaultFileTarget) bool {
 	checkpoint := target.Checkpoint
+	if target.Successor != nil &&
+		(!validOwnedVaultFileFirstSuccessorTarget(*target.Successor) ||
+			target.Successor.Pin.Root.VaultID != checkpoint.VaultID ||
+			target.Successor.Pin.Root.OwnerRootKeyID != checkpoint.OwnerRootKeyID ||
+			!bytes.Equal(target.Successor.Pin.Root.OwnerRootPublicKey, checkpoint.OwnerRootPublicKey)) {
+		return false
+	}
 	return target.JournalPath != "" && len(target.JournalPath) <= maxOwnedVaultFileBatchPath &&
 		checkpoint.VaultID != "" && len(checkpoint.VaultID) <= maxOwnedVaultFileBatchVaultID &&
 		checkpoint.OwnerRootKeyID != "" && len(checkpoint.OwnerRootKeyID) <= maxOwnedVaultFileBatchRootID &&
@@ -75,6 +87,9 @@ func validOwnedVaultFileTarget(target OwnedVaultFileTarget) bool {
 }
 
 func sameOwnedVaultFileBatchRequest(a, b ownedVaultFileBatchRequest) bool {
+	if !sameOwnedVaultFileFirstSuccessorTarget(a.successor, b.successor) {
+		return false
+	}
 	return a.journalPath == b.journalPath && a.options == b.options &&
 		a.checkpoint.VaultID == b.checkpoint.VaultID &&
 		a.checkpoint.OwnerRootKeyID == b.checkpoint.OwnerRootKeyID &&
@@ -101,6 +116,10 @@ func prepareOwnedVaultFileBatch(targets []OwnedVaultFileTarget) ([]ownedVaultFil
 			checkpoint:  cp,
 			options:     target.Options,
 			indices:     []int{index},
+		}
+		if target.Successor != nil {
+			successor := cloneOwnedVaultFileFirstSuccessorTarget(*target.Successor)
+			request.successor = &successor
 		}
 		found := false
 		for i := range out {
@@ -299,7 +318,8 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 		if !time.Now().Before(fullFactorDeadline) {
 			return drain(context.DeadlineExceeded)
 		}
-		token, items, openErr := parent.openVaultFileChild(request.journalPath, &request.checkpoint, nil, nil, request.options, vaultFileChildOpenMode{owned: true, batch: batch})
+		token, items, openErr := parent.openVaultFileChild(request.journalPath, &request.checkpoint, nil, nil, request.options,
+			vaultFileChildOpenMode{owned: true, batch: batch, successor: request.successor})
 		if err := ctx.Err(); err != nil {
 			return drainWith(items, err)
 		}
@@ -308,7 +328,10 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 		}
 		if openErr != nil {
 			clearVaultFileChildItems(items)
-			if !ownedBatchTargetErrorLocal(openErr) {
+			// A post-registration successor handoff failure is account-level
+			// delivery failure, not a target-local rejection: drain this new
+			// parent and every earlier success in the same batch.
+			if !ownedBatchTargetErrorLocal(openErr) || errors.Is(openErr, errVaultFileChildFinalHandoff) {
 				return drain(openErr)
 			}
 			for _, index := range request.indices {

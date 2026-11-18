@@ -57,6 +57,7 @@ type localGenesisBatchGroup struct {
 	digest         string
 	companion      Companion
 	revision       string
+	successor      *localGenesisSuccessorLocator
 	checkpoint     *vaultfile.PolicyCheckpoint
 	targetPosition int
 	err            error
@@ -176,17 +177,19 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 			group.err = ErrLocalReview
 			continue
 		}
-		checkpoint, revision, err := verifyLocalGenesisCompanion(manifest, companion)
+		verified, err := verifyLocalGenesisCompanion(manifest, companion)
 		if err != nil {
-			clearLocalGenesisCheckpoint(checkpoint)
+			clearLocalGenesisCheckpoint(verified.checkpoint)
 			group.err = ErrLocalReview
 			continue
 		}
 		group.manifest = manifest
 		group.digest = digest
 		group.companion = cloneLocalGenesisCompanion(companion)
-		group.revision = revision
-		group.checkpoint = checkpoint
+		group.revision = verified.revision
+		group.successor = cloneLocalGenesisSuccessor(verified.successor)
+		clearLocalGenesisSuccessor(verified.successor)
+		group.checkpoint = verified.checkpoint
 	}
 
 	targets := make([]personal.OwnedVaultFileTarget, 0, len(groups))
@@ -208,14 +211,23 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 		}
 		uniqueTargets++
 		group.targetPosition = len(targets)
-		targets = append(targets, personal.OwnedVaultFileTarget{
+		target := personal.OwnedVaultFileTarget{
 			JournalPath: group.locator.journalPath,
 			Checkpoint:  *group.checkpoint,
-		})
+		}
+		if group.successor != nil {
+			target.Successor = &personal.OwnedVaultFileFirstSuccessorTarget{
+				BackendRoot: group.successor.backendRoot,
+				BackendName: group.successor.backendName,
+				Pin:         cloneLocalGenesisGenesisPin(group.successor.pin),
+			}
+		}
+		targets = append(targets, target)
 	}
 	defer func() {
 		for _, group := range groups {
 			clearLocalGenesisCheckpoint(group.checkpoint)
+			clearLocalGenesisSuccessor(group.successor)
 		}
 	}()
 
@@ -360,12 +372,25 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 			localError(group.indices)
 			continue
 		}
+		verified, verifyErr := verifyLocalGenesisCompanion(manifest, companion)
+		if verifyErr != nil || verified.revision != group.revision ||
+			!sameLocalGenesisSuccessor(verified.successor, group.successor) {
+			clearLocalGenesisVerified(&verified)
+			_ = parent.LockVaultFileChild(result.Token)
+			consumed[position] = true
+			clearLocalGenesisItems(result.Items)
+			childResults[position] = personal.OwnedVaultFileChildResult{}
+			localError(group.indices)
+			continue
+		}
+		clearLocalGenesisVerified(&verified)
 
 		state := &localGenesisSessionState{
 			parent: parent, configPath: group.locator.configPath,
 			manifest: group.manifest, manifestSHA256: group.digest,
 			companion: cloneLocalGenesisCompanion(group.companion),
-			revision:  group.revision, token: result.Token,
+			revision:  group.revision, successor: cloneLocalGenesisSuccessor(group.successor),
+			token:     result.Token,
 			closeDone: make(chan struct{}),
 		}
 		wrapper := &LocalGenesisSession{state: state}
