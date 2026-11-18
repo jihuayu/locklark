@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
 func TestLocalGenesisExactQueryRealEmptyChild(t *testing.T) {
@@ -155,5 +156,225 @@ func TestLocalGenesisExactQueryValidation(t *testing.T) {
 	got, err := a.QueryExactTitle(LocalGenesisExactQuery{Title: "valid-title", Limit: 1})
 	if err != nil || len(got.Hits) != 0 || got.Truncated {
 		t.Fatal("valid query after validation errors failed")
+	}
+}
+
+func installLocalGenesisActivationProjection(t *testing.T, items *[]personal.VaultFileBaselineItem) {
+	t.Helper()
+	old := localGenesisExactQueryProjectionForTest
+	localGenesisExactQueryProjectionForTest = func() []personal.VaultFileBaselineItem {
+		return append([]personal.VaultFileBaselineItem(nil), (*items)...)
+	}
+	t.Cleanup(func() { localGenesisExactQueryProjectionForTest = old })
+}
+
+func mustLocalGenesisActivationQuery(t *testing.T, session *LocalGenesisSession, title string) LocalGenesisExactQueryResult {
+	t.Helper()
+	result, err := session.QueryExactTitle(LocalGenesisExactQuery{Title: title, Limit: 1})
+	if err != nil || len(result.Hits) != 1 {
+		t.Fatal("QUERY_HIT_MISSING")
+	}
+	return result
+}
+
+func TestLocalGenesisExactQueryActivationReceiver(t *testing.T) {
+	f := newLocalGenesisTwoVaultFixture(t)
+	a, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer a.Close()
+	b, _ := f.open(t, f.secondConfig, f.secondVaultID)
+	defer b.Close()
+
+	hit := personal.VaultFileBaselineItem{ID: f.firstVaultID, Title: t.Name()}
+	items := []personal.VaultFileBaselineItem{hit}
+	installLocalGenesisActivationProjection(t, &items)
+	result := mustLocalGenesisActivationQuery(t, a, hit.Title)
+	sibling := mustLocalGenesisActivationQuery(t, b, hit.Title)
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); err != nil {
+		t.Fatal("ORIGINAL_RECEIVER_REJECTED")
+	}
+	copied := *a
+	if err := copied.ValidateExactQueryHit(result, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("COPIED_RECEIVER_ACCEPTED")
+	}
+	if err := b.ValidateExactQueryHit(result, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("SIBLING_RECEIVER_ACCEPTED")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal("ORIGINAL_CLOSE_FAILED")
+	}
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); err == nil {
+		t.Fatal("CLOSED_RECEIVER_ACCEPTED")
+	}
+	reopened, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer reopened.Close()
+	fresh := mustLocalGenesisActivationQuery(t, reopened, hit.Title)
+	if fresh.binding() != result.binding() || fresh.Hits[0] != result.Hits[0] {
+		t.Fatal("REOPENED_EQUIVALENCE_MISSING")
+	}
+	if err := reopened.ValidateExactQueryHit(result, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("REOPENED_RECEIVER_ACCEPTED_OLD_HIT")
+	}
+	if err := reopened.ValidateExactQueryHit(fresh, hit.ID, hit.Title); err != nil {
+		t.Fatal("REOPENED_RECEIVER_REJECTED_FRESH_HIT")
+	}
+	if err := b.ValidateExactQueryHit(sibling, hit.ID, hit.Title); err != nil {
+		t.Fatal("SIBLING_HIT_LOST")
+	}
+}
+
+func TestLocalGenesisExactQueryActivationImmutableResult(t *testing.T) {
+	f := newLocalGenesisTwoVaultFixture(t)
+	a, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer a.Close()
+
+	hit := personal.VaultFileBaselineItem{ID: f.firstVaultID, Title: t.Name()}
+	other := personal.VaultFileBaselineItem{ID: f.secondVaultID, Title: hit.Title}
+	items := []personal.VaultFileBaselineItem{hit, other}
+	installLocalGenesisActivationProjection(t, &items)
+	result := mustLocalGenesisActivationQuery(t, a, hit.Title)
+	if !result.Truncated || result.Hits[0] != hit {
+		t.Fatal("LIMITED_QUERY_SETUP_FAILED")
+	}
+
+	for _, mutate := range []func(*LocalGenesisExactQueryResult){
+		func(r *LocalGenesisExactQueryResult) { r.ConfigPath = f.secondConfig },
+		func(r *LocalGenesisExactQueryResult) { r.WorkspaceRoot = f.secondConfig },
+		func(r *LocalGenesisExactQueryResult) { r.VaultID = f.secondVaultID },
+		func(r *LocalGenesisExactQueryResult) { r.JournalPath = f.secondConfig },
+		func(r *LocalGenesisExactQueryResult) { r.ManifestSHA256 = t.Name() },
+		func(r *LocalGenesisExactQueryResult) { r.JournalRevision = t.Name() },
+		func(r *LocalGenesisExactQueryResult) { r.Truncated = false },
+	} {
+		changed := result
+		mutate(&changed)
+		if err := a.ValidateExactQueryHit(changed, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+			t.Fatal("ALTERED_RESULT_ACCEPTED")
+		}
+	}
+	result.Hits[0] = other
+	if err := a.ValidateExactQueryHit(result, other.ID, other.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("UNRETURNED_ITEM_ACCEPTED")
+	}
+	forged := result
+	forged.activation = nil
+	if err := a.ValidateExactQueryHit(forged, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("UNBOUND_RESULT_ACCEPTED")
+	}
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); err != nil {
+		t.Fatal("ORIGINAL_MEMBERSHIP_LOST")
+	}
+
+	items = []personal.VaultFileBaselineItem{other}
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("MISSING_ID_ACCEPTED")
+	}
+	changedHit := hit
+	changedHit.Title += t.Name()
+	items = []personal.VaultFileBaselineItem{changedHit}
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); !errors.Is(err, ErrLocalReview) {
+		t.Fatal("CHANGED_TITLE_ACCEPTED")
+	}
+	items = []personal.VaultFileBaselineItem{hit}
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); err != nil {
+		t.Fatal("CURRENT_HIT_REJECTED")
+	}
+}
+
+func TestLocalGenesisExactQueryActivationStaleBinding(t *testing.T) {
+	f := newLocalGenesisTwoVaultFixture(t)
+	a, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer a.Close()
+	b, _ := f.open(t, f.secondConfig, f.secondVaultID)
+	defer b.Close()
+
+	hit := personal.VaultFileBaselineItem{ID: f.firstVaultID, Title: t.Name()}
+	items := []personal.VaultFileBaselineItem{hit}
+	installLocalGenesisActivationProjection(t, &items)
+	result := mustLocalGenesisActivationQuery(t, a, hit.Title)
+	sibling := mustLocalGenesisActivationQuery(t, b, hit.Title)
+	manifest, err := os.ReadFile(f.firstConfig)
+	if err != nil {
+		t.Fatal("MANIFEST_SETUP_FAILED")
+	}
+	replaceLocalGenesisFileStable(t, f.firstConfig, nil)
+	if err := a.ValidateExactQueryHit(result, hit.ID, hit.Title); err == nil {
+		t.Fatal("CHANGED_LOCATOR_ACCEPTED")
+	}
+	replaceLocalGenesisFileStable(t, f.firstConfig, manifest)
+	restored, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer restored.Close()
+	before := mustLocalGenesisActivationQuery(t, restored, hit.Title)
+
+	journal, err := vaultfilejournal.OpenExisting(before.JournalPath)
+	if err != nil {
+		t.Fatal("JOURNAL_OPEN_FAILED")
+	}
+	state, readErr := journal.LoadGenesisBaseline()
+	closeErr := journal.Close()
+	if readErr != nil || closeErr != nil || len(state.RemoteRevision) == 0 {
+		t.Fatal("JOURNAL_BASELINE_SETUP_FAILED")
+	}
+	defer clear(state.BaseBytes)
+	defer clear(state.WorkingBytes)
+	state.RemoteRevision += state.RemoteRevision[:1]
+	nextPath := before.JournalPath + ".next"
+	next, err := vaultfilejournal.Open(nextPath)
+	if err != nil {
+		t.Fatal("NEXT_JOURNAL_OPEN_FAILED")
+	}
+	writeErr := next.InitializeState(state)
+	closeErr = next.Close()
+	if writeErr != nil || closeErr != nil || os.Rename(nextPath, before.JournalPath) != nil {
+		t.Fatal("JOURNAL_REVISION_SETUP_FAILED")
+	}
+	if err := restored.ValidateExactQueryHit(before, hit.ID, hit.Title); err == nil {
+		t.Fatal("CHANGED_REVISION_ACCEPTED")
+	}
+	updated, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer updated.Close()
+	after := mustLocalGenesisActivationQuery(t, updated, hit.Title)
+	if after.JournalRevision == before.JournalRevision || after.ManifestSHA256 != before.ManifestSHA256 {
+		t.Fatal("JOURNAL_REVISION_CHANGE_UNVERIFIED")
+	}
+	if err := updated.ValidateExactQueryHit(after, hit.ID, hit.Title); err != nil {
+		t.Fatal("UPDATED_REVISION_REJECTED")
+	}
+	if err := b.ValidateExactQueryHit(sibling, hit.ID, hit.Title); err != nil {
+		t.Fatal("SIBLING_HIT_LOST")
+	}
+}
+
+func TestLocalGenesisExactQueryActivationLocks(t *testing.T) {
+	f := newLocalGenesisTwoVaultFixture(t)
+	a, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	defer a.Close()
+	b, _ := f.open(t, f.secondConfig, f.secondVaultID)
+	defer b.Close()
+
+	hit := personal.VaultFileBaselineItem{ID: f.firstVaultID, Title: t.Name()}
+	items := []personal.VaultFileBaselineItem{hit}
+	installLocalGenesisActivationProjection(t, &items)
+	result := mustLocalGenesisActivationQuery(t, a, hit.Title)
+	sibling := mustLocalGenesisActivationQuery(t, b, hit.Title)
+
+	old := localGenesisSummaryReadyForTest
+	t.Cleanup(func() { localGenesisSummaryReadyForTest = old })
+	var lockErr error
+	locked := false
+	localGenesisSummaryReadyForTest = func() {
+		lockErr = a.Close()
+		locked = true
+	}
+	err := a.ValidateExactQueryHit(result, hit.ID, hit.Title)
+	localGenesisSummaryReadyForTest = old
+	if !locked || lockErr != nil || err == nil {
+		t.Fatal("LATE_CHILD_LOCK_NOT_ENFORCED")
+	}
+	if err := b.ValidateExactQueryHit(sibling, hit.ID, hit.Title); err != nil {
+		t.Fatal("SIBLING_HIT_LOST")
+	}
+	f.session.Lock()
+	if err := b.ValidateExactQueryHit(sibling, hit.ID, hit.Title); err == nil {
+		t.Fatal("PARENT_LOCK_NOT_ENFORCED")
 	}
 }
