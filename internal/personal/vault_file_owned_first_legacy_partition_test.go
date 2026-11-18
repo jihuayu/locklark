@@ -1239,3 +1239,430 @@ func legacyPartitionReadFile(t *testing.T, path string) []byte {
 	}
 	return raw
 }
+
+func TestOwnedVaultFileLegacyPartitionReconstructsVerifiedProvenance(t *testing.T) {
+	dir := t.TempDir()
+
+	// A real independent source personal vault with two declared partitions.
+	// The selected partition carries every represented field the current
+	// authenticated item format stores; the other partition deliberately has
+	// the same item count so a count-only check would accept it.
+	sourcePath := filepath.Join(dir, "verify-source.ll")
+	sourcePassword := "synthetic-verify-source-factor"
+	sourceKey := bytes.Repeat([]byte{0x35}, 16)
+	if err := Create(sourcePath, sourcePassword, sourceKey); err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_CREATE_FAILED")
+	}
+	sourceSession, err := UnlockSession(sourcePath, []byte(sourcePassword), sourceKey, time.Hour)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_UNLOCK_FAILED")
+	}
+	t.Cleanup(sourceSession.Lock)
+	selected, err := sourceSession.CreateVault("Verified Selected", "selected source partition", "folder", v2Gate(t, sourceSession))
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_SELECTED_FAILED")
+	}
+	other, err := sourceSession.CreateVault("Verified Other", "other source partition", "folder", v2Gate(t, sourceSession))
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_OTHER_FAILED")
+	}
+
+	stamp := time.Unix(1_700_002_345, 0).UTC()
+	trashedAt := stamp.Add(time.Hour)
+	auto := true
+	add := func(item vault.Item) string {
+		t.Helper()
+		id, _, err := sourceSession.AddItem(item, v2Gate(t, sourceSession))
+		if err != nil {
+			t.Fatalf("VERIFY_PROVENANCE_SOURCE_ADD_FAILED: %v", err)
+		}
+		return id
+	}
+	selectedActiveID := add(vault.Item{
+		Kind: "login", Category: vault.CategoryLogin, VaultID: selected.ID,
+		Title: "Verified active login", Username: "verified-user", Password: "verified-password",
+		URL: "https://verified.example.test/", Notes: "verified notes",
+		URLs: []vault.ItemURL{
+			{Label: "primary", URL: "https://verified.example.test/", Primary: true, MatchMode: vault.URLMatchOrigin},
+			{Label: "secondary", URL: "https://secondary.verified.example.test/", MatchMode: vault.URLMatchHost},
+		},
+		Favorite: true, AutoSubmit: &auto, Tags: []string{"verified", "provenance"},
+		Sections: []vault.ItemSection{{ID: "verified-section", Title: "Verified fields", Fields: []vault.CustomField{
+			{ID: "verified-concealed", Label: "Concealed", Type: vault.FieldTypeConcealed, Value: "verified-concealed-value", Protected: true},
+			{ID: "verified-email", Label: "Email", Type: vault.FieldTypeEmail, Value: "verified@example.test"},
+		}}},
+		History: []vault.ItemHistoryEntry{{
+			Timestamp: stamp.Unix(), Action: "edit", Password: "verified-prior-password", Title: "Verified prior title",
+			Username: "verified-prior-user", Notes: "verified prior notes",
+			Sections: []vault.ItemSection{{ID: "verified-prior-section", Title: "Prior", Fields: []vault.CustomField{{
+				ID: "verified-prior-field", Label: "Prior", Type: vault.FieldTypeText, Value: "verified-prior-value",
+			}}}},
+		}},
+		Attachments: []vault.AttachmentMeta{{
+			FileName: "verified.bin", MIMEType: "application/octet-stream", Protected: true,
+			Content: []byte{0x00, 0x01, 0x7f, 0xff, 0x10},
+		}},
+		ImportSource: []byte("verified-import-provenance"),
+	})
+	selectedTrashedID := add(vault.Item{
+		Kind: "login", Category: vault.CategoryLogin, VaultID: selected.ID,
+		Title: "Verified trashed login", Username: "verified-trashed-user", Password: "verified-trashed-password",
+		State: "trashed", PreviousState: "archived", TrashedAt: &trashedAt,
+		History:      []vault.ItemHistoryEntry{{Timestamp: stamp.Unix(), Action: "edit", Title: "Verified trashed prior"}},
+		ImportSource: []byte("verified-trashed-import-provenance"),
+		Attachments: []vault.AttachmentMeta{{
+			FileName: "verified-trashed.bin", MIMEType: "application/octet-stream", Protected: true,
+			Content: []byte{0xde, 0xad, 0xbe, 0xef},
+		}},
+	})
+	selectedDocumentID := add(vault.Item{
+		Kind: "document", Category: vault.CategoryDocument, VaultID: selected.ID,
+		Title: "Verified document", Filename: "verified-document.bin",
+		Attachment: []byte{0x50, 0x4b, 0x03, 0x04}, AttachmentProtected: true,
+		ImportSource: []byte("verified-document-import-provenance"),
+	})
+	selectedCardID := add(vault.Item{
+		Kind: "credit_card", Category: vault.CategoryCreditCard, VaultID: selected.ID,
+		Title: "Verified card",
+		CreditCard: &vault.CreditCardDetails{
+			CardholderName: "Synthetic Verified Holder", Type: "visa", Number: "4111111111111111",
+			Verification: "123", ExpiryDate: "2030-01", ValidFrom: "2020-01",
+			PIN: "9999", IssuingBank: "Synthetic Verified Bank",
+		},
+	})
+	otherIDs := make([]string, 0, 4)
+	for i := 0; i < 4; i++ {
+		otherIDs = append(otherIDs, add(vault.Item{
+			Kind: "login", Category: vault.CategoryLogin, VaultID: other.ID,
+			Title: "Other login", Username: "other-user", Password: "other-password",
+			Notes: "other partition payload only",
+		}))
+	}
+
+	sourceArchivePath := filepath.Join(dir, "verify-source.llb")
+	sourceKit, err := Backup(sourcePath, sourceArchivePath, sourcePassword, sourceKey)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_BACKUP_FAILED")
+	}
+	sourceArchive := legacyPartitionReadFile(t, sourceArchivePath)
+	sourceArchiveBefore := bytes.Clone(sourceArchive)
+	sourceArchiveFileBefore := legacyPartitionReadFile(t, sourceArchivePath)
+
+	sourcePayload, err := verifyRecoveryArchive(sourceArchive, sourcePassword, sourceKey, sourceKit, true)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_VERIFY_FAILED")
+	}
+	defer clearDecodedArchiveSensitive(sourcePayload)
+	var sourceMeta *vault.VaultMeta
+	sourceItems := make([]vault.Item, 0, 4)
+	otherItems := make([]vault.Item, 0, 4)
+	for i := range sourcePayload.Items {
+		switch sourcePayload.Items[i].EffectiveVaultID() {
+		case selected.ID:
+			sourceItems = append(sourceItems, sourcePayload.Items[i])
+		case other.ID:
+			otherItems = append(otherItems, sourcePayload.Items[i])
+		}
+	}
+	for i := range sourcePayload.Vaults {
+		if sourcePayload.Vaults[i].ID == selected.ID {
+			metadata := sourcePayload.Vaults[i]
+			sourceMeta = &metadata
+			break
+		}
+	}
+	if sourceMeta == nil || len(sourceItems) != 4 || len(otherItems) != 4 {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_SHAPE_MISMATCH")
+	}
+	selectedSourceIDs := map[string]bool{
+		selectedActiveID: true, selectedTrashedID: true, selectedDocumentID: true, selectedCardID: true,
+	}
+	for i := range sourceItems {
+		if !selectedSourceIDs[sourceItems[i].ID] {
+			t.Fatal("VERIFY_PROVENANCE_SOURCE_SELECTED_ID_MISMATCH")
+		}
+	}
+	for _, id := range otherIDs {
+		found := false
+		for i := range otherItems {
+			if otherItems[i].ID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("VERIFY_PROVENANCE_SOURCE_OTHER_ID_MISSING")
+		}
+	}
+	byID := make(map[string]vault.Item, len(sourceItems))
+	for i := range sourceItems {
+		byID[sourceItems[i].ID] = sourceItems[i]
+	}
+	if item := byID[selectedActiveID]; len(item.History) == 0 || len(item.Sections) == 0 ||
+		len(item.URLs) != 2 || len(item.Attachments) != 1 || len(item.Attachments[0].Content) == 0 ||
+		!item.Attachments[0].Protected || len(item.ImportSource) == 0 {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_ACTIVE_REPRESENTATION_MISSING")
+	}
+	if item := byID[selectedTrashedID]; item.State != "trashed" || item.PreviousState != "archived" ||
+		item.TrashedAt == nil || len(item.History) == 0 || len(item.ImportSource) == 0 {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_TRASH_REPRESENTATION_MISSING")
+	}
+	if item := byID[selectedDocumentID]; len(item.Attachment) == 0 || !item.AttachmentProtected {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_DOCUMENT_REPRESENTATION_MISSING")
+	}
+	if item := byID[selectedCardID]; item.CreditCard == nil || item.CreditCard.Number == "" {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_TYPED_REPRESENTATION_MISSING")
+	}
+
+	// Two real destination custody scopes with explicitly private journal
+	// parents and published genesis baselines observed from the live backend.
+	destPath := filepath.Join(dir, "verify-destination.ll")
+	destPassword := "synthetic-verify-destination-factor"
+	destKey := bytes.Repeat([]byte{0x45}, 16)
+	if err := Create(destPath, destPassword, destKey); err != nil {
+		t.Fatal("VERIFY_PROVENANCE_DEST_CREATE_FAILED")
+	}
+	destSession, err := UnlockSession(destPath, []byte(destPassword), destKey, time.Hour)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_DEST_UNLOCK_FAILED")
+	}
+	t.Cleanup(destSession.Lock)
+	prepareOwner := func(label string) VaultFileOwnershipPublic {
+		t.Helper()
+		selector, err := randomID()
+		if err != nil {
+			t.Fatalf("VERIFY_PROVENANCE_OWNER_%s_FAILED", label)
+		}
+		public, err := destSession.PrepareVaultFileOwnership(selector)
+		if err != nil {
+			t.Fatalf("VERIFY_PROVENANCE_CUSTODY_%s_FAILED", label)
+		}
+		return public
+	}
+	publicA := prepareOwner("A")
+	publicB := prepareOwner("B")
+	destArchivePath := filepath.Join(dir, "verify-destination.llb")
+	destKit, err := Backup(destPath, destArchivePath, destPassword, destKey)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_DEST_BACKUP_FAILED")
+	}
+	journalDir := legacyPartitionPrivateDir(t, dir, "verify-genesis-journals")
+	publish := func(name string, public VaultFileOwnershipPublic) legacyPartitionGenesisScope {
+		t.Helper()
+		intentPath := filepath.Join(journalDir, "genesis-"+name+".journal")
+		if _, err := destSession.PrepareVaultFileGenesis(VaultFileGenesisRequest{
+			VaultID: public.VaultID, Name: "verified-provenance-" + name, IntentPath: intentPath, ArchivePath: destArchivePath,
+		}, []byte(destPassword), destKey, []byte(destKit)); err != nil {
+			t.Fatalf("VERIFY_PROVENANCE_GENESIS_%s_FAILED: %v", name, err)
+		}
+		return legacyPartitionPublishGenesis(t, dir, name, public, intentPath)
+	}
+	scopeA := publish("a", publicA)
+	scopeB := publish("b", publicB)
+	t.Cleanup(func() {
+		clearVaultFilePolicyCheckpoint(scopeA.checkpoint)
+		clearVaultFilePolicyCheckpoint(scopeB.checkpoint)
+	})
+	localAge := legacyPartitionLocalAge(t, destSession)
+
+	seal := func(name string, scope legacyPartitionGenesisScope, vaultID string) VaultFileSealedLegacyPartition {
+		t.Helper()
+		sealed, err := destSession.SealOwnedVaultFileFirstItemsFromLegacyPartition(OwnedVaultFileLegacyPartitionRequest{
+			JournalPath: scope.journalPath, Target: scope.target, Checkpoint: scope.checkpoint,
+			ExpectedGenesis: scope.genesis, Password: []byte(destPassword), Key: destKey,
+			Source: LegacyVaultPartitionSource{
+				Archive: sourceArchive, Password: sourcePassword, Key: sourceKey,
+				RecoveryKit: sourceKit, VaultID: vaultID,
+			},
+		})
+		if err != nil {
+			t.Fatalf("VERIFY_PROVENANCE_SEAL_%s_FAILED: %v", name, err)
+		}
+		return sealed
+	}
+	sealed := seal("selected", scopeA, selected.ID)
+	defer sealed.Clear()
+	candidate := bytes.Clone(sealed.Sealed)
+	candidateBefore := bytes.Clone(candidate)
+	sealedOther := seal("other_partition", scopeA, other.ID)
+	defer sealedOther.Clear()
+	candidateOther := bytes.Clone(sealedOther.Sealed)
+	sealedForeign := seal("foreign_scope", scopeB, selected.ID)
+	defer sealedForeign.Clear()
+	candidateForeign := bytes.Clone(sealedForeign.Sealed)
+	if bytes.Equal(candidate, candidateOther) || bytes.Equal(candidate, candidateForeign) ||
+		bytes.Equal(candidateOther, candidateForeign) {
+		t.Fatal("VERIFY_PROVENANCE_CANDIDATES_NOT_DISTINCT")
+	}
+
+	expectedDigest := sha256.Sum256(sourceArchive)
+	request := OwnedVaultFileLegacyPartitionVerificationRequest{
+		OwnedVaultFileLegacyPartitionRequest: OwnedVaultFileLegacyPartitionRequest{
+			JournalPath: scopeA.journalPath, Target: scopeA.target, Checkpoint: scopeA.checkpoint,
+			ExpectedGenesis: scopeA.genesis, Password: []byte(destPassword), Key: destKey,
+			Source: LegacyVaultPartitionSource{
+				Archive: sourceArchive, Password: sourcePassword, Key: sourceKey,
+				RecoveryKit: sourceKit, VaultID: selected.ID,
+			},
+		},
+		Candidate:                   candidate,
+		ExpectedSourceArchiveSHA256: expectedDigest,
+	}
+
+	journalABefore := legacyPartitionReadFile(t, scopeA.journalPath)
+	journalBBefore := legacyPartitionReadFile(t, scopeB.journalPath)
+	destBefore := legacyPartitionReadFile(t, destPath)
+	backendABefore, backendARevisionBefore := legacyPartitionReadBackend(t, scopeA.backendRoot, scopeA.target.BackendName)
+	backendBBefore, backendBRevisionBefore := legacyPartitionReadBackend(t, scopeB.backendRoot, scopeB.target.BackendName)
+	defer clear(backendABefore)
+	defer clear(backendBBefore)
+
+	verified, err := destSession.VerifyOwnedVaultFileLegacyPartition(request)
+	if err != nil {
+		t.Fatalf("VERIFY_PROVENANCE_RECONSTRUCT_FAILED: %v", err)
+	}
+	defer verified.Clear()
+	if verified.SourceArchiveSHA256 != expectedDigest || verified.SourceVaultID != selected.ID ||
+		verified.SourceVault == nil || !reflect.DeepEqual(*verified.SourceVault, *sourceMeta) {
+		t.Fatal("VERIFY_PROVENANCE_RECONSTRUCTED_SOURCE_MISMATCH")
+	}
+	if verified.DestinationVaultID != scopeA.target.Pin.Root.VaultID {
+		t.Fatal("VERIFY_PROVENANCE_RECONSTRUCTED_DESTINATION_MISMATCH")
+	}
+	if len(verified.ItemMapping) != len(sourceItems) {
+		t.Fatal("VERIFY_PROVENANCE_RECONSTRUCTED_MAPPING_SHAPE_MISMATCH")
+	}
+	for i := range sourceItems {
+		if verified.ItemMapping[sourceItems[i].ID] != sourceItems[i].ID {
+			t.Fatal("VERIFY_PROVENANCE_RECONSTRUCTED_MAPPING_MISMATCH")
+		}
+	}
+
+	// Reopen the exact sealed bytes independently of the verify call. Its
+	// authenticated content must be the complete selected source partition.
+	candidateFile, err := vaultfile.ParseFile(candidate)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_CANDIDATE_PARSE_FAILED")
+	}
+	_, reopenedMeta, reopened, err := vault.OpenAuthenticatedItems(candidate, scopeA.checkpoint,
+		candidateFile.Header.AuthorDeviceID, localAge)
+	if err != nil {
+		t.Fatal("VERIFY_PROVENANCE_CANDIDATE_REOPEN_FAILED")
+	}
+	defer clear(reopenedMeta)
+	defer clearAuthenticatedItems(reopened)
+	if len(reopenedMeta) != 0 || !legacyPartitionItemsRepresented(sourceItems, reopened) {
+		t.Fatal("VERIFY_PROVENANCE_CANDIDATE_REPRESENTED_MISMATCH")
+	}
+
+	// The exact candidate bytes were not mutated by verification.
+	if !bytes.Equal(candidate, candidateBefore) {
+		t.Fatal("VERIFY_PROVENANCE_CANDIDATE_CHANGED")
+	}
+
+	refuse := func(name string, mutate func(*OwnedVaultFileLegacyPartitionVerificationRequest), want error) {
+		t.Helper()
+		bad := request
+		mutate(&bad)
+		out, err := destSession.VerifyOwnedVaultFileLegacyPartition(bad)
+		if err == nil || want != nil && !errors.Is(err, want) {
+			t.Fatalf("VERIFY_PROVENANCE_REFUSAL_%s: err=%v want=%v", name, err, want)
+		}
+		if out.SourceVault != nil || out.SourceVaultID != "" ||
+			out.SourceArchiveSHA256 != [sha256.Size]byte{} ||
+			out.DestinationVaultID != "" || len(out.ItemMapping) != 0 {
+			t.Fatalf("VERIFY_PROVENANCE_REFUSAL_%s_LEAKED_OUTPUT", name)
+		}
+	}
+	refuse("missing_candidate", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Candidate = nil
+	}, ErrVaultFileBaselineVerification)
+	refuse("missing_expected_digest", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.ExpectedSourceArchiveSHA256 = [sha256.Size]byte{}
+	}, ErrLegacyVaultPartitionPayload)
+	refuse("wrong_expected_digest", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.ExpectedSourceArchiveSHA256 = sha256.Sum256([]byte(destKit))
+	}, ErrLegacyVaultPartitionPayload)
+	refuse("missing_recovery_kit", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Source.RecoveryKit = ""
+	}, ErrLegacyVaultPartitionPayload)
+	refuse("display_name_selector", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Source.VaultID = selected.Name
+	}, ErrLegacyVaultPartitionSelector)
+	// other.ID is a different real partition declared by the same archive and
+	// the candidate is still the selected partition's exact bytes.
+	refuse("wrong_selector", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Source.VaultID = other.ID
+	}, ErrLegacyVaultPartitionPayload)
+	refuse("wrong_source_password", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Source.Password = "wrong-source-factor"
+	}, nil)
+	refuse("wrong_source_key", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Source.Key = bytes.Repeat([]byte{0x72}, 16)
+	}, nil)
+	refuse("wrong_dest_password", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Password = []byte("wrong-destination-factor")
+	}, ErrVaultFileScopedFactors)
+	refuse("wrong_dest_key", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Key = bytes.Repeat([]byte{0x73}, 16)
+	}, ErrVaultFileScopedFactors)
+	refuse("wrong_target", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Target = scopeB.target
+	}, ErrVaultFileBaselineVerification)
+	refuse("wrong_checkpoint", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Checkpoint = scopeB.checkpoint
+	}, ErrVaultFileBaselineVerification)
+	refuse("corrupt_candidate", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Candidate = bytes.Clone(candidate)
+		r.Candidate[len(r.Candidate)-1] ^= 0xff
+	}, ErrVaultFileBaselineVerification)
+	refuse("other_partition_candidate", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Candidate = candidateOther
+	}, ErrLegacyVaultPartitionPayload)
+	refuse("foreign_scope_candidate", func(r *OwnedVaultFileLegacyPartitionVerificationRequest) {
+		r.Candidate = candidateForeign
+	}, ErrVaultFileBaselineVerification)
+
+	// The verify path and all refusals were observation-only.
+	if !bytes.Equal(sourceArchive, sourceArchiveBefore) ||
+		!bytes.Equal(legacyPartitionReadFile(t, sourceArchivePath), sourceArchiveFileBefore) {
+		t.Fatal("VERIFY_PROVENANCE_SOURCE_ARCHIVE_CHANGED")
+	}
+	if !bytes.Equal(legacyPartitionReadFile(t, destPath), destBefore) {
+		t.Fatal("VERIFY_PROVENANCE_DEST_PERSONAL_CHANGED")
+	}
+	if !bytes.Equal(legacyPartitionReadFile(t, scopeA.journalPath), journalABefore) ||
+		!bytes.Equal(legacyPartitionReadFile(t, scopeB.journalPath), journalBBefore) {
+		t.Fatal("VERIFY_PROVENANCE_DEST_JOURNAL_CHANGED")
+	}
+	assertBackend := func(scope legacyPartitionGenesisScope, want []byte, wantRevision vaultfilebackend.Revision, label string) {
+		t.Helper()
+		got, revision := legacyPartitionReadBackend(t, scope.backendRoot, scope.target.BackendName)
+		defer clear(got)
+		if !bytes.Equal(got, want) || revision != wantRevision {
+			t.Fatalf("VERIFY_PROVENANCE_BACKEND_%s_CHANGED", label)
+		}
+	}
+	assertBackend(scopeA, backendABefore, backendARevisionBefore, "A")
+	assertBackend(scopeB, backendBBefore, backendBRevisionBefore, "B")
+
+	// A live genesis revision mismatch must fail closed even when the candidate
+	// itself is still the exact previously sealed bytes.
+	advancedRevision := legacyPartitionReplaceBackend(t, scopeA, scopeA.revision, scopeA.genesis)
+	if advancedRevision == scopeA.revision {
+		t.Fatal("VERIFY_PROVENANCE_ADVANCED_REVISION_UNCHANGED")
+	}
+	out, err := destSession.VerifyOwnedVaultFileLegacyPartition(request)
+	if !errors.Is(err, ErrVaultFileBaselineJournal) {
+		t.Fatalf("VERIFY_PROVENANCE_ADVANCED_REVISION_NOT_REFUSED: %v", err)
+	}
+	if out.SourceVault != nil || out.SourceVaultID != "" || out.SourceArchiveSHA256 != [sha256.Size]byte{} ||
+		out.DestinationVaultID != "" || len(out.ItemMapping) != 0 {
+		t.Fatal("VERIFY_PROVENANCE_ADVANCED_REVISION_LEAKED_OUTPUT")
+	}
+	advancedBytes, advancedRevisionNow := legacyPartitionReadBackend(t, scopeA.backendRoot, scopeA.target.BackendName)
+	defer clear(advancedBytes)
+	if !bytes.Equal(advancedBytes, scopeA.genesis) || advancedRevisionNow != advancedRevision {
+		t.Fatal("VERIFY_PROVENANCE_ADVANCED_BACKEND_MUTATED")
+	}
+}

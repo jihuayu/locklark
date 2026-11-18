@@ -1,12 +1,14 @@
 package personal
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"reflect"
 
 	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 )
 
 var (
@@ -45,6 +47,48 @@ type OwnedVaultFileLegacyPartitionRequest struct {
 	Password        []byte
 	Key             []byte
 	Source          LegacyVaultPartitionSource
+}
+
+// OwnedVaultFileLegacyPartitionVerificationRequest is the narrow input to one
+// verification of an exact previously sealed legacy-partition successor. It
+// reuses the seal request's destination authorization and Source unchanged,
+// adding only the exact candidate bytes and the caller's independently
+// persisted nonzero digest of the complete source archive.
+type OwnedVaultFileLegacyPartitionVerificationRequest struct {
+	OwnedVaultFileLegacyPartitionRequest
+	Candidate                   []byte
+	ExpectedSourceArchiveSHA256 [sha256.Size]byte
+}
+
+// VaultFileVerifiedLegacyPartition is the bounded result of reconstructing the
+// legacy-to-destination provenance from one exact sealed candidate. It retains
+// only the verified source archive digest, source partition identity and signed
+// metadata, the destination vault identity and the preserved item mapping. It
+// never retains candidate bytes, decrypted item content, recovery factors, a
+// VUK or a signing key.
+type VaultFileVerifiedLegacyPartition struct {
+	SourceArchiveSHA256 [sha256.Size]byte
+	SourceVaultID       string
+	SourceVault         *vault.VaultMeta
+	DestinationVaultID  string
+
+	// ItemMapping maps each preserved source item ID to its verified
+	// destination item ID.
+	ItemMapping map[string]string
+}
+
+// Clear drops every retained mapping and provenance value. The strings were
+// never secret, but dropping the references keeps the result ownership
+// explicit and bounded.
+func (v *VaultFileVerifiedLegacyPartition) Clear() {
+	if v == nil {
+		return
+	}
+	v.ItemMapping = nil
+	v.SourceArchiveSHA256 = [sha256.Size]byte{}
+	v.SourceVaultID = ""
+	v.SourceVault = nil
+	v.DestinationVaultID = ""
 }
 
 // VaultFileSealedLegacyPartition is the real signed, independently encrypted
@@ -123,25 +167,11 @@ func (s *Session) SealOwnedVaultFileFirstItemsFromLegacyPartition(req OwnedVault
 		}
 	}()
 
-	sourceDigest := sha256.Sum256(req.Source.Archive)
-	p, err := verifyRecoveryArchive(req.Source.Archive, req.Source.Password, req.Source.Key, req.Source.RecoveryKit, true)
-	if err != nil {
-		return out, err
-	}
-	defer clearDecodedArchiveSensitive(p)
-
-	group, declaration, err := selectLegacyVaultPartition(p, req.Source.VaultID)
-	if err != nil {
-		return out, err
-	}
-	items, err := materializeLegacyVaultPartitionItems(p, group, req.Source.VaultID)
+	sourceDigest, declaration, items, err := authenticateLegacyVaultPartitionSource(req.Source)
 	if err != nil {
 		return out, err
 	}
 	defer clearAuthenticatedItems(items)
-	if vault.ValidateItems([]byte{}, items) != nil {
-		return out, ErrLegacyVaultPartitionPayload
-	}
 
 	sealed, err := s.sealOwnedVaultFileFirstItemsWithScope(scope, req.JournalPath, req.Target, req.Checkpoint, req.ExpectedGenesis, items)
 	if err != nil {
@@ -169,11 +199,283 @@ func (s *Session) SealOwnedVaultFileFirstItemsFromLegacyPartition(req OwnedVault
 	out.VaultFileSealedFirstItem = sealed
 	out.SourceArchiveSHA256 = sourceDigest
 	out.SourceVaultID = req.Source.VaultID
-	if declaration != nil {
-		metadata := *declaration
-		out.SourceVault = &metadata
-	}
+	out.SourceVault = declaration
 	return out, nil
+}
+
+// VerifyOwnedVaultFileLegacyPartition reconstructs the legacy-to-destination
+// provenance from one exact previously sealed candidate. It never seals,
+// publishes, acknowledges or writes the journal, backend, personal store or
+// source archive; it does not need the in-memory result of the original seal
+// and accepts no caller-provided receipt.
+//
+// The destination is authenticated with the same full factors, current owner
+// record, exact named backend target and companion checkpoint as
+// SealOwnedVaultFileFirstItemsFromLegacyPartition. The complete source archive
+// is authenticated again with the same recovery factors and partitioned using
+// the same signed declarations; the caller's independently persisted archive
+// digest and explicit source selector must match. The exact pristine
+// generation-zero journal baseline is authenticated under the pinned canonical
+// genesis, its named live backend object is read with both bytes and opaque
+// revision bound, and only then is the caller's candidate accepted as the
+// complete immediate first content transition from those exact genesis bytes.
+//
+// The candidate is opened under the authorized owned key scope and every
+// represented field, stable ID, history entry, current attachment byte and
+// trash state must match the selected source records exactly. A foreign or
+// wrong-root candidate, the other partition, a corrupt or valid-but-different
+// payload, a changed live genesis revision and a wrong factor or scope all fail
+// closed. The result retains only the verified source provenance and the
+// identity-preserving item mapping; it retains no candidate bytes, decrypted
+// item, recovery factor, VUK or signing key. The caller owns the result and
+// should call Clear when finished.
+func (s *Session) VerifyOwnedVaultFileLegacyPartition(req OwnedVaultFileLegacyPartitionVerificationRequest) (out VaultFileVerifiedLegacyPartition, retErr error) {
+	if s == nil {
+		return out, ErrSessionLocked
+	}
+	if len(req.Candidate) == 0 {
+		return out, ErrVaultFileBaselineVerification
+	}
+	var zeroDigest [sha256.Size]byte
+	if req.ExpectedSourceArchiveSHA256 == zeroDigest || len(req.Source.Archive) == 0 {
+		return out, ErrLegacyVaultPartitionPayload
+	}
+	selector := req.Source.VaultID
+	if selector == "" {
+		return out, ErrLegacyVaultPartitionSelector
+	}
+	if req.JournalPath == "" || len(req.ExpectedGenesis) == 0 {
+		return out, ErrVaultFileEditVerification
+	}
+	if req.Source.RecoveryKit == "" {
+		return out, ErrLegacyVaultPartitionPayload
+	}
+
+	scope, err := s.authenticateOwnedVaultFileWriteScope(req.Target, req.Checkpoint, req.Password, req.Key)
+	if err != nil {
+		return out, err
+	}
+	defer scope.clear()
+	defer func() {
+		if retErr != nil {
+			out.Clear()
+		}
+	}()
+
+	if sha256.Sum256(req.Source.Archive) != req.ExpectedSourceArchiveSHA256 {
+		return out, ErrLegacyVaultPartitionPayload
+	}
+	sourceDigest, declaration, items, err := authenticateLegacyVaultPartitionSource(req.Source)
+	if err != nil {
+		return out, err
+	}
+	defer clearAuthenticatedItems(items)
+	if sourceDigest != req.ExpectedSourceArchiveSHA256 {
+		return out, ErrLegacyVaultPartitionPayload
+	}
+
+	state, deviceID, _, err := verifyLegacyPartitionGenesisBaseline(req.JournalPath, req.Target, req.Checkpoint, req.ExpectedGenesis, scope)
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		clear(state.BaseBytes)
+		clear(state.WorkingBytes)
+	}()
+
+	mapping, err := verifyLegacyPartitionCandidate(req.Candidate, state, req.Checkpoint, scope, deviceID, items)
+	if err != nil {
+		return out, err
+	}
+	if err := verifyLegacyPartitionJournalUnchanged(req.JournalPath, state); err != nil {
+		return out, err
+	}
+	if err := readOwnedVaultFileSuccessorBackend(req.Target, state.BaseBytes, state.RemoteRevision); err != nil {
+		return out, err
+	}
+	if err := s.revalidateOwnedVaultFileWriteScope(scope); err != nil {
+		return out, err
+	}
+	if err := s.active(false); err != nil {
+		return out, err
+	}
+
+	out.SourceArchiveSHA256 = sourceDigest
+	out.SourceVaultID = selector
+	out.SourceVault = declaration
+	out.DestinationVaultID = req.Checkpoint.VaultID
+	out.ItemMapping = mapping
+	return out, nil
+}
+
+// authenticateLegacyVaultPartitionSource is the shared archive authentication
+// and partition materialization used by both the seal and verify paths. The
+// returned items are caller-owned deep copies and are non-nil even for an
+// empty selected partition. Any error returns no items.
+func authenticateLegacyVaultPartitionSource(source LegacyVaultPartitionSource) ([sha256.Size]byte, *vault.VaultMeta, []vault.Item, error) {
+	digest := sha256.Sum256(source.Archive)
+	p, err := verifyRecoveryArchive(source.Archive, source.Password, source.Key, source.RecoveryKit, true)
+	if err != nil {
+		return digest, nil, nil, err
+	}
+	defer clearDecodedArchiveSensitive(p)
+
+	group, declaration, err := selectLegacyVaultPartition(p, source.VaultID)
+	if err != nil {
+		return digest, nil, nil, err
+	}
+	items, err := materializeLegacyVaultPartitionItems(p, group, source.VaultID)
+	if err != nil {
+		return digest, nil, nil, err
+	}
+	if vault.ValidateItems([]byte{}, items) != nil {
+		clearAuthenticatedItems(items)
+		return digest, nil, nil, ErrLegacyVaultPartitionPayload
+	}
+	var metadata *vault.VaultMeta
+	if declaration != nil {
+		clone := *declaration
+		metadata = &clone
+	}
+	return digest, metadata, items, nil
+}
+
+// verifyLegacyPartitionGenesisBaseline authenticates the exact pristine
+// generation-zero journal baseline and its current account device authority.
+// It returns owned state bytes that the caller must clear.
+func verifyLegacyPartitionGenesisBaseline(journalPath string, target OwnedVaultFileFirstSuccessorTarget, checkpoint *vaultfile.PolicyCheckpoint, expectedGenesis []byte, scope *ownedVaultFileWriteScope) (state vaultfilejournal.State, deviceID, principalID string, retErr error) {
+	if scope == nil || scope.ageIdentity == nil || journalPath == "" || len(expectedGenesis) == 0 ||
+		!validOwnedVaultFileFirstSuccessorTarget(target) ||
+		!ownedVaultFileFirstSuccessorMatchesCheckpoint(target, checkpoint) {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+
+	j, err := vaultfilejournal.OpenExisting(journalPath)
+	if err != nil {
+		return state, "", "", ErrVaultFileBaselineJournal
+	}
+	loaded, loadErr := j.LoadGenesisBaseline()
+	closeErr := j.Close()
+	if loadErr != nil || closeErr != nil {
+		clear(loaded.BaseBytes)
+		clear(loaded.WorkingBytes)
+		return state, "", "", ErrVaultFileBaselineJournal
+	}
+	state = loaded
+	defer func() {
+		if retErr != nil {
+			clear(state.BaseBytes)
+			clear(state.WorkingBytes)
+		}
+	}()
+
+	if !bytes.Equal(state.BaseBytes, expectedGenesis) ||
+		sha256.Sum256(state.BaseBytes) != target.Pin.SealedSHA256 {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	genesisCheckpoint, err := vaultfile.VerifyGenesis(state.BaseBytes, &target.Pin.Root)
+	if err != nil || !sameVaultFilePolicyCheckpoint(genesisCheckpoint, checkpoint) {
+		clearVaultFilePolicyCheckpoint(genesisCheckpoint)
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	clearVaultFilePolicyCheckpoint(genesisCheckpoint)
+
+	base, err := vaultfile.ParseFile(state.BaseBytes)
+	if err != nil || len(base.SignedPolicyProofs) == 0 ||
+		base.Header.OpID != target.Pin.OperationID ||
+		base.Header.VaultID != checkpoint.VaultID ||
+		base.Header.ContentSeq != 0 {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	policy := &base.SignedPolicyProofs[len(base.SignedPolicyProofs)-1].Policy
+	if policy.PolicySeq != base.Header.PolicySeq ||
+		!bytes.Equal(vaultfile.PolicyDigest(policy), base.Header.PolicyDigest) {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	writerID, writerOK := localVaultFileWriterDevice(policy, scope.recipient, scope.signerPublic)
+	readerID, readerOK := localVaultFileReaderDevice(policy, scope.recipient, scope.signerPublic)
+	if !writerOK || !readerOK || writerID != readerID {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	principal, principalOK := ownedVaultFileDevicePrincipal(policy, writerID)
+	if !principalOK {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+
+	_, metadata, current, err := vault.OpenAuthenticatedItems(state.BaseBytes, checkpoint, writerID, scope.ageIdentity)
+	if err != nil {
+		return state, "", "", ErrVaultFileBaselineVerification
+	}
+	defer clear(metadata)
+	defer clearAuthenticatedItems(current)
+	if len(metadata) != 0 || len(current) != 0 {
+		return state, "", "", ErrVaultFileEditReview
+	}
+	return state, writerID, principal, nil
+}
+
+// verifyLegacyPartitionJournalUnchanged re-reads the exact pristine baseline
+// after candidate verification so a concurrent journal advance cannot be
+// mistaken for the state that authorized the returned provenance.
+func verifyLegacyPartitionJournalUnchanged(journalPath string, want vaultfilejournal.State) error {
+	j, err := vaultfilejournal.OpenExisting(journalPath)
+	if err != nil {
+		return ErrVaultFileBaselineJournal
+	}
+	state, loadErr := j.LoadGenesisBaseline()
+	closeErr := j.Close()
+	defer clear(state.BaseBytes)
+	defer clear(state.WorkingBytes)
+	if loadErr != nil || closeErr != nil {
+		return ErrVaultFileBaselineJournal
+	}
+	if state.Generation != want.Generation || state.RemoteRevision != want.RemoteRevision ||
+		!bytes.Equal(state.BaseBytes, want.BaseBytes) || !bytes.Equal(state.WorkingBytes, want.WorkingBytes) {
+		return ErrVaultFileBaselineJournal
+	}
+	return nil
+}
+
+// verifyLegacyPartitionCandidate requires the exact authenticated immediate
+// first content transition and then exact semantic equivalence with the
+// selected source records. Counts alone are never sufficient: stable IDs and
+// every represented field are compared by sameLegacyPartitionItems.
+func verifyLegacyPartitionCandidate(candidate []byte, state vaultfilejournal.State, checkpoint *vaultfile.PolicyCheckpoint, scope *ownedVaultFileWriteScope, deviceID string, want []vault.Item) (map[string]string, error) {
+	if scope == nil || scope.ageIdentity == nil || checkpoint == nil || deviceID == "" || len(candidate) == 0 {
+		return nil, ErrVaultFileBaselineVerification
+	}
+	if err := vaultfile.VerifyContentTransition(state.BaseBytes, candidate, checkpoint); err != nil {
+		return nil, ErrVaultFileBaselineVerification
+	}
+	next, err := vaultfile.ParseFile(candidate)
+	if err != nil || next.Header.AuthorDeviceID != deviceID ||
+		next.Header.VaultID != checkpoint.VaultID ||
+		next.Header.PolicySeq != checkpoint.PolicySeq ||
+		!bytes.Equal(next.Header.PolicyDigest, checkpoint.PolicyDigest) ||
+		next.Header.ContentSeq != 1 {
+		return nil, ErrVaultFileBaselineVerification
+	}
+	_, metadata, got, err := vault.OpenAuthenticatedItems(candidate, checkpoint, deviceID, scope.ageIdentity)
+	if err != nil {
+		return nil, ErrVaultFileBaselineVerification
+	}
+	defer clear(metadata)
+	defer clearAuthenticatedItems(got)
+	if len(metadata) != 0 || !sameLegacyPartitionItems(want, got) {
+		return nil, ErrLegacyVaultPartitionPayload
+	}
+
+	mapping := make(map[string]string, len(want))
+	for i := range want {
+		if want[i].ID == "" || got[i].ID != want[i].ID {
+			return nil, ErrLegacyVaultPartitionPayload
+		}
+		if _, duplicate := mapping[want[i].ID]; duplicate {
+			return nil, ErrLegacyVaultPartitionPayload
+		}
+		mapping[want[i].ID] = got[i].ID
+	}
+	return mapping, nil
 }
 
 // selectLegacyVaultPartition maps the explicit source selector to exactly one
