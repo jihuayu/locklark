@@ -1,13 +1,18 @@
 """Security assertions in the external quick-search oracle, without app hooks."""
 import ast
 import inspect
+import pathlib
+import shutil
+import subprocess
+import tempfile
 import time
 import unittest
+import desktop_quick_search_acceptance as quick_search
 from desktop_quick_search_acceptance import disclosure_action, QuickSearchAcceptance
 from desktop_native_acceptance import AcceptanceFailure
 from desktop_quick_search_probe import exact_result_ids
 from desktop_quick_search_x11 import ShortcutLauncher, ShortcutFailure, top_level_source
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 class OracleTests(unittest.TestCase):
@@ -45,6 +50,190 @@ class OracleTests(unittest.TestCase):
                 self.assertEqual(launcher.errors,[])
             else:
                 with self.assertRaises(ShortcutFailure):launcher.window_manager_ready()
+
+
+class WindowManagerStartupTests(unittest.TestCase):
+    class Clock:
+        def __init__(self):self.now=0.0;self.sleeps=[]
+        def monotonic(self):return self.now
+        def sleep(self,seconds):self.sleeps.append(seconds);self.now+=max(seconds,.02)
+
+    class Child:
+        def __init__(self,polls):self.polls=list(polls);self.calls=0
+        def poll(self):
+            self.calls+=1
+            return self.polls.pop(0) if len(self.polls)>1 else self.polls[0]
+
+    class Launcher:
+        def __init__(self,ready):self.ready=list(ready);self.calls=0
+        def window_manager_ready(self):
+            self.calls+=1
+            value=self.ready.pop(0) if len(self.ready)>1 else self.ready[0]
+            if isinstance(value,Exception):raise value
+            return value
+
+    def acceptance(self):
+        q=QuickSearchAcceptance.__new__(QuickSearchAcceptance)
+        q.env={};q.state=pathlib.Path(tempfile.mkdtemp(prefix="quick-wm-test-"))
+        self.addCleanup(shutil.rmtree,q.state,True)
+        q.launcher=None;q.wm=None;q.wm_ready=False;q.reason="acceptance";q.stage="setup"
+        q.log=Mock()
+        q.wm_startup={"state":"discovery","mode":"none","elapsed_ms":0,
+                      "probes":0,"launches":0,"deadline_ms":5000}
+        return q
+
+    def prepare(self,q,launcher,child=None,run_error=None,error=AcceptanceFailure):
+        clock=self.Clock()
+        fake=Mock()
+        fake.CalledProcessError=subprocess.CalledProcessError
+        if run_error is not None:fake.run.side_effect=run_error
+        if child is not None:fake.Popen.return_value=child
+        with patch.object(quick_search,"ShortcutLauncher",return_value=launcher), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",clock):
+            with self.assertRaises(error):q.prepare_window_manager()
+        return fake,clock
+
+    def test_owned_child_exit_is_distinct_from_a_live_child_at_the_deadline(self):
+        q=self.acceptance()
+        fake,clock=self.prepare(q,self.Launcher([False]),self.Child([1]))
+        self.assertEqual(q.reason,"window-manager-unavailable")
+        self.assertEqual(q.wm_startup["state"],"exited")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(q.wm_startup["launches"],1)
+        self.assertEqual(q.wm_startup["probes"],2)
+        self.assertEqual(q.wm_startup["elapsed_ms"],0)
+        self.assertEqual(fake.Popen.call_count,1)
+        self.assertEqual(fake.run.call_count,1)
+
+        q=self.acceptance()
+        fake,clock=self.prepare(q,self.Launcher([False]),self.Child([None]))
+        self.assertEqual(q.reason,"window-manager-unavailable")
+        self.assertEqual(q.wm_startup["state"],"deadline")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(q.wm_startup["launches"],1)
+        self.assertEqual(q.wm_startup["elapsed_ms"],5000)
+        self.assertGreaterEqual(q.wm_startup["probes"],2)
+        self.assertLessEqual(q.wm_startup["probes"],252)
+        self.assertEqual(fake.Popen.call_count,1)
+        self.assertEqual(fake.run.call_count,1)
+
+    def test_owned_readiness_keeps_its_full_window_after_a_slow_prelaunch(self):
+        q=self.acceptance();clock=self.Clock()
+        fake=Mock();fake.CalledProcessError=subprocess.CalledProcessError
+        fake.Popen.return_value=self.Child([None])
+        # Discovery and private-environment setup consume more than the whole
+        # startup budget before the one owned spawn returns.
+        def slow_prelaunch(*args,**kwargs):clock.now=5.25
+        fake.run.side_effect=slow_prelaunch
+        ready_at=[5.25+4.9]
+        class TimedLauncher:
+            def window_manager_ready(self):return clock.now>=ready_at[0]
+        with patch.object(quick_search,"ShortcutLauncher",return_value=TimedLauncher()), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",clock):
+            q.prepare_window_manager()
+        self.assertTrue(q.wm_ready)
+        self.assertEqual(q.wm_startup["state"],"ready")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(q.wm_startup["launches"],1)
+        self.assertGreaterEqual(q.wm_startup["elapsed_ms"],4900)
+        self.assertLess(q.wm_startup["elapsed_ms"],5000)
+        self.assertGreaterEqual(q.wm_startup["probes"],200)
+        self.assertEqual(fake.Popen.call_count,1)
+        self.assertEqual(fake.run.call_count,1)
+
+    def test_owned_deadline_is_five_seconds_after_spawn_not_after_prelaunch(self):
+        q=self.acceptance();clock=self.Clock()
+        fake=Mock();fake.CalledProcessError=subprocess.CalledProcessError
+        fake.Popen.return_value=self.Child([None])
+        def slow_prelaunch(*args,**kwargs):clock.now=5.25
+        fake.run.side_effect=slow_prelaunch
+        with patch.object(quick_search,"ShortcutLauncher",return_value=self.Launcher([False])), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",clock):
+            with self.assertRaises(AcceptanceFailure):q.prepare_window_manager()
+        self.assertEqual(q.wm_startup["state"],"deadline")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(q.wm_startup["elapsed_ms"],5000)
+        self.assertGreaterEqual(clock.now,10.25)
+        self.assertGreater(q.wm_startup["probes"],200)
+        self.assertEqual(fake.Popen.call_count,1)
+        self.assertEqual(fake.run.call_count,1)
+
+    def test_valid_ewmh_is_the_only_ready_proof(self):
+        q=self.acceptance()
+        fake=Mock()
+        with patch.object(quick_search,"ShortcutLauncher",return_value=self.Launcher([True])), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",self.Clock()):
+            q.prepare_window_manager()
+        self.assertTrue(q.wm_ready)
+        self.assertEqual(q.wm_startup["state"],"ready")
+        self.assertEqual(q.wm_startup["mode"],"pre-existing")
+        self.assertEqual(q.wm_startup["launches"],0)
+        fake.run.assert_not_called();fake.Popen.assert_not_called()
+
+        q,fake,clock=self.acceptance_and_owned_ready()
+        self.assertTrue(q.wm_ready)
+        self.assertEqual(q.wm_startup["state"],"ready")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(q.wm_startup["launches"],1)
+        self.assertEqual(fake.Popen.call_count,1)
+        self.assertEqual(fake.run.call_count,1)
+
+    def acceptance_and_owned_ready(self):
+        q=self.acceptance();clock=self.Clock()
+        fake=Mock();fake.CalledProcessError=subprocess.CalledProcessError
+        fake.Popen.return_value=self.Child([None])
+        with patch.object(quick_search,"ShortcutLauncher",return_value=self.Launcher([False,True])), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",clock):
+            q.prepare_window_manager()
+        return q,fake,clock
+
+    def test_startup_probe_and_spawn_failures_keep_their_own_states(self):
+        q=self.acceptance()
+        fake,clock=self.prepare(q,self.Launcher([False,ShortcutFailure("x-protocol")]),
+                                error=ShortcutFailure)
+        self.assertEqual(q.reason,"window-manager-discovery")
+        self.assertEqual(q.wm_startup["state"],"probe-failed")
+        self.assertEqual(q.wm_startup["mode"],"owned")
+        self.assertEqual(fake.Popen.call_count,1)
+
+        q=self.acceptance()
+        fake,clock=self.prepare(q,self.Launcher([False]),run_error=OSError("synthetic"),
+                                error=OSError)
+        self.assertEqual(q.reason,"window-manager-discovery")
+        self.assertEqual(q.wm_startup["state"],"environment-failed")
+        self.assertEqual(q.wm_startup["launches"],0)
+        fake.Popen.assert_not_called()
+
+        q=self.acceptance();clock=self.Clock()
+        fake=Mock();fake.CalledProcessError=subprocess.CalledProcessError
+        fake.Popen.side_effect=OSError("synthetic")
+        with patch.object(quick_search,"ShortcutLauncher",return_value=self.Launcher([False])), \
+             patch.object(quick_search,"subprocess",fake), \
+             patch.object(quick_search,"time",clock):
+            with self.assertRaises(OSError):q.prepare_window_manager()
+        self.assertEqual(q.reason,"window-manager-discovery")
+        self.assertEqual(q.wm_startup["state"],"spawn-failed")
+        self.assertEqual(q.wm_startup["launches"],0)
+
+    def test_startup_diagnostic_is_fixed_bounded_and_failure_only(self):
+        q=self.acceptance()
+        q.wm_startup={"state":"deadline","mode":"owned","elapsed_ms":99999,
+                      "probes":999999,"launches":7,"deadline_ms":5000}
+        self.assertEqual(q.startup_diagnostic(),
+                         "Desktop quick search startup diagnostics: window_manager_state=deadline "
+                         "window_manager_mode=owned window_manager_ready=false "
+                         "window_manager_elapsed_ms=5000 window_manager_deadline_ms=5000 "
+                         "window_manager_probes=10000 window_manager_launches=1")
+        for unsafe in ("DISPLAY",":99","/tmp/","pid=","Traceback","synthetic","private-output"):
+            self.assertNotIn(unsafe,q.startup_diagnostic())
+        for state in ("discovery","ready","pending","unexpected"):
+            q.wm_startup["state"]=state
+            self.assertIsNone(q.startup_diagnostic())
 
 
 class WindowSourceTests(unittest.TestCase):

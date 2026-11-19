@@ -2,6 +2,7 @@ package teamfiles
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,14 +16,16 @@ func TestTransferFailedPublicationDoesNotClaimSuccessOrRemoveCompleteFinal(t *te
 		parent := t.TempDir()
 		path := filepath.Join(parent, "transfer.json")
 		raw := []byte("complete public encrypted artifact")
-		err := writeNew(path, raw, func(tmp, final string) error {
-			if published {
-				if err := publishLocalFile(tmp, final); err != nil {
-					return err
-				}
-			}
-			return errors.New("injected publication failure")
-		})
+		hooks := localWriteHooks{}
+		if published {
+			// The final link is visible when this seam runs; the injected
+			// failure must still clean the owned stage and leave a one-link
+			// final file.
+			hooks.afterPublish = func() error { return errors.New("injected publication failure") }
+		} else {
+			hooks.beforeLink = func() error { return errors.New("injected publication failure") }
+		}
+		err := writeNew(path, raw, hooks)
 		if published {
 			observed, readErr := Read(path, 1024, true)
 			if !errors.Is(err, ErrPublicationUnknown) || readErr != nil || !bytes.Equal(observed, raw) {
@@ -135,5 +138,68 @@ func TestTransferBoundedReadAndOwnedCleanup(t *testing.T) {
 	}
 	if Distinct(path, path) || Distinct(path, filepath.Join(parent, ".", "record")) {
 		t.Fatal("path alias accepted")
+	}
+}
+
+func TestTransferExplicitBoundedHelperDoesNotWidenExistingLimits(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, "custody-artifact")
+	raw := bytes.Repeat([]byte{0x5a}, 17<<20)
+	defer clear(raw)
+	if err := WriteNew(path, raw); !errors.Is(err, ErrFile) {
+		t.Fatal("existing write limit was widened")
+	}
+	if err := WriteNewLimited(context.Background(), path, raw, 32<<20); err != nil {
+		t.Fatal("explicit bounded write refused a supported size")
+	}
+	got, err := ReadLimited(context.Background(), path, 32<<20, true)
+	if err != nil || !bytes.Equal(got, raw) {
+		clear(got)
+		t.Fatal("explicit bounded read did not return the exact bytes")
+	}
+	clear(got)
+	if err := WriteNewLimited(context.Background(), filepath.Join(parent, "too-small"), raw, 16<<20); !errors.Is(err, ErrFile) {
+		t.Fatal("explicit bound was not enforced")
+	}
+	if _, err := ReadLimited(context.Background(), path, maxBoundedFileBytes+1, true); !errors.Is(err, ErrFile) {
+		t.Fatal("explicit read bound exceeded the fixed maximum")
+	}
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelled := filepath.Join(parent, "cancelled")
+	if err := WriteNewLimited(cancelCtx, cancelled, raw[:1024], 1024); !errors.Is(err, context.Canceled) {
+		t.Fatal("pre-publication cancellation was not reported")
+	}
+	if _, err := os.Lstat(cancelled); !os.IsNotExist(err) {
+		t.Fatal("pre-publication cancellation exposed a final name")
+	}
+	if entries, err := os.ReadDir(parent); err != nil || len(entries) != 1 {
+		t.Fatal("bounded helper retained a temporary file")
+	}
+}
+
+func TestBoundedWriteCancellationAfterVisibilityIsUnknown(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, "custody-artifact")
+	raw := []byte("complete encrypted custody artifact")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := writeNewLimited(ctx, path, raw, 1024, localWriteHooks{
+		afterPublish: func() error {
+			cancel()
+			return nil
+		},
+	})
+	if !errors.Is(err, ErrPublicationUnknown) {
+		t.Fatal("post-visibility cancellation claimed a definite outcome")
+	}
+	got, readErr := Read(path, 1024, true)
+	if readErr != nil || !bytes.Equal(got, raw) {
+		clear(got)
+		t.Fatal("post-visibility cancellation did not preserve the complete final file")
+	}
+	clear(got)
+	if entries, readErr := os.ReadDir(parent); readErr != nil || len(entries) != 1 {
+		t.Fatal("post-visibility cancellation retained a temporary file")
 	}
 }

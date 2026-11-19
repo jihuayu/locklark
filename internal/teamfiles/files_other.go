@@ -2,7 +2,10 @@
 
 package teamfiles
 
-import "os"
+import (
+	"context"
+	"os"
+)
 
 func trustedParent(string) error                   { return ErrFile }
 func trustedFile(string, bool) error               { return ErrFile }
@@ -11,3 +14,11 @@ func openLocalFile(string, bool) (*os.File, error) { return nil, ErrFile }
 func publishLocalFile(string, string) error        { return ErrFile }
 func equalPath(a, b string) bool                   { return a == b }
 func validPlatformPath(string) bool                { return false }
+
+func writeNewAtPath(context.Context, string, []byte, string, localWriteHooks) error {
+	return ErrFile
+}
+
+func readBoundedAtPath(context.Context, string, int64, bool, localReadHooks) ([]byte, error) {
+	return nil, ErrFile
+}

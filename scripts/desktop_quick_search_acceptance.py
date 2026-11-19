@@ -13,6 +13,16 @@ from desktop_quick_search_probe import QuickMetadataReader
 from browser_native_x11 import failure_reason as native_reason
 
 
+WM_STARTUP_DEADLINE=5.0
+WM_STARTUP_DEADLINE_MS=int(WM_STARTUP_DEADLINE*1000)
+WM_STARTUP_STATES=frozenset(("discovery","ready","launcher-failed","environment-failed",
+                             "spawn-failed","probe-failed","exited","deadline"))
+WM_STARTUP_FAILURES=frozenset(("launcher-failed","environment-failed","spawn-failed",
+                               "probe-failed","exited","deadline"))
+WM_STARTUP_MODES=frozenset(("none","pre-existing","owned"))
+WM_STARTUP_PROBES_MAX=10000
+
+
 def disclosure_action(action):
     return (isinstance(action,str) and
             (action.startswith(("item.reveal.","item.desktop.show.","item.desktop.copy.","item.browser.fill", "item.run.","item.inject."))
@@ -28,6 +38,8 @@ class QuickSearchAcceptance(Acceptance):
         self.shortcut_observations=[]
         self.wm=None
         self.wm_ready=False
+        self.wm_startup={"state":"discovery","mode":"none","elapsed_ms":0,
+                         "probes":0,"launches":0,"deadline_ms":WM_STARTUP_DEADLINE_MS}
         self.completed=[]
         self.reader=None
         self.last_metadata={}
@@ -57,20 +69,65 @@ class QuickSearchAcceptance(Acceptance):
         # attributed to a wake that already succeeded.
         self.reason="wake-complete"
 
+    def record_window_manager_startup(self,state,mode,origin):
+        if state in WM_STARTUP_STATES:self.wm_startup["state"]=state
+        if mode in WM_STARTUP_MODES:self.wm_startup["mode"]=mode
+        elapsed=min(max(int((time.monotonic()-origin)*1000),0),WM_STARTUP_DEADLINE_MS)
+        self.wm_startup["elapsed_ms"]=elapsed
+
+    def window_manager_probe(self,origin):
+        self.wm_startup["probes"]=min(self.wm_startup.get("probes",0)+1,WM_STARTUP_PROBES_MAX)
+        try:return self.launcher.window_manager_ready()
+        except ShortcutFailure:
+            self.record_window_manager_startup("probe-failed",self.wm_startup.get("mode","none"),origin)
+            raise
+
     def prepare_window_manager(self):
+        # Readiness proof, the single owned launch, EWMH validation and owned
+        # cleanup are unchanged. Prelaunch observation gets its own origin;
+        # the owned readiness budget begins only when that spawn returns.
         self.reason="window-manager-discovery"
-        self.launcher=ShortcutLauncher()
-        if self.launcher.window_manager_ready():self.wm_ready=True;return
+        prelaunch_started=time.monotonic()
+        self.wm_startup={"state":"discovery","mode":"none","elapsed_ms":0,
+                         "probes":0,"launches":0,"deadline_ms":WM_STARTUP_DEADLINE_MS}
+        try:self.launcher=ShortcutLauncher()
+        except (ShortcutFailure,OSError):
+            self.record_window_manager_startup("launcher-failed","none",prelaunch_started)
+            raise
+        if self.window_manager_probe(prelaunch_started):
+            self.wm_ready=True
+            self.record_window_manager_startup("ready","pre-existing",prelaunch_started)
+            return
         wm_env=dict(self.env)
-        for variable,folder in (("XDG_CONFIG_HOME","wm-config"),("XDG_CACHE_HOME","wm-cache"),("XDG_DATA_HOME","wm-data")):
-            target=self.state/folder;target.mkdir(mode=0o700);wm_env[variable]=str(target)
-        subprocess.run(["dbus-update-activation-environment","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME"],env=wm_env,check=True,stdout=self.log,stderr=self.log)
-        self.wm=subprocess.Popen(["xfwm4","--compositor=off","--vblank=off","--sm-client-disable"],env=wm_env,stdout=self.log,stderr=self.log)
-        deadline=time.monotonic()+5
+        try:
+            for variable,folder in (("XDG_CONFIG_HOME","wm-config"),("XDG_CACHE_HOME","wm-cache"),("XDG_DATA_HOME","wm-data")):
+                target=self.state/folder;target.mkdir(mode=0o700);wm_env[variable]=str(target)
+            subprocess.run(["dbus-update-activation-environment","XDG_CONFIG_HOME","XDG_CACHE_HOME","XDG_DATA_HOME"],env=wm_env,check=True,stdout=self.log,stderr=self.log)
+        except (OSError,subprocess.CalledProcessError):
+            self.record_window_manager_startup("environment-failed","none",prelaunch_started)
+            raise
+        try:self.wm=subprocess.Popen(["xfwm4","--compositor=off","--vblank=off","--sm-client-disable"],env=wm_env,stdout=self.log,stderr=self.log)
+        except OSError:
+            self.record_window_manager_startup("spawn-failed","none",prelaunch_started)
+            raise
+        # Published baseline: exactly five seconds of EWMH readiness after the
+        # one owned Popen returns. Prelaunch discovery/environment time never
+        # consumes this window, and the diagnostic below uses this origin.
+        readiness_started=time.monotonic()
+        self.wm_startup["launches"]=1
+        self.wm_startup["mode"]="owned"
+        deadline=readiness_started+WM_STARTUP_DEADLINE
         while time.monotonic()<deadline:
-            if self.launcher.window_manager_ready():self.wm_ready=True;return
+            if self.window_manager_probe(readiness_started):
+                self.wm_ready=True
+                self.record_window_manager_startup("ready","owned",readiness_started)
+                return
             if self.wm.poll() is not None:break
             time.sleep(.02)
+        # A reaped child that never published valid EWMH is a separate
+        # startup outcome from one still alive at the unchanged deadline.
+        state="exited" if self.wm.poll() is not None else "deadline"
+        self.record_window_manager_startup(state,"owned",readiness_started)
         self.reason="window-manager-unavailable";raise AcceptanceFailure()
 
     def metadata(self,expected=(),target=""):
@@ -133,6 +190,36 @@ class QuickSearchAcceptance(Acceptance):
                 "native_focus_after_shortcut="+("true" if native else "false")+
                 " target_focused="+("true" if self.last_metadata.get("target_focused") is True else "false")+
                 " target_focus_elapsed_ms="+str(elapsed))
+
+    def startup_diagnostic(self):
+        startup=getattr(self,"wm_startup",None)
+        if not isinstance(startup,dict):return None
+        state=startup.get("state")
+        if not isinstance(state,str) or state not in WM_STARTUP_FAILURES:return None
+        mode=startup.get("mode")
+        if not isinstance(mode,str) or mode not in WM_STARTUP_MODES:mode="none"
+        elapsed=startup.get("elapsed_ms")
+        if type(elapsed) is not int:elapsed=0
+        elapsed=min(max(elapsed,0),WM_STARTUP_DEADLINE_MS)
+        probes=startup.get("probes")
+        if type(probes) is not int:probes=0
+        probes=min(max(probes,0),WM_STARTUP_PROBES_MAX)
+        launches=startup.get("launches")
+        if type(launches) is not int:launches=0
+        launches=min(max(launches,0),1)
+        deadline=startup.get("deadline_ms")
+        if type(deadline) is not int or deadline!=WM_STARTUP_DEADLINE_MS:
+            deadline=WM_STARTUP_DEADLINE_MS
+        # Fixed enums and bounded counters only: no child output, path,
+        # display identifier, process detail or exception text.
+        return ("Desktop quick search startup diagnostics: "
+                "window_manager_state="+state+
+                " window_manager_mode="+mode+
+                " window_manager_ready=false"+
+                " window_manager_elapsed_ms="+str(elapsed)+
+                " window_manager_deadline_ms="+str(deadline)+
+                " window_manager_probes="+str(probes)+
+                " window_manager_launches="+str(launches))
 
     def tab_select(self,expected,target):
         self.phase("keyboard-select-stable-id")
@@ -293,15 +380,19 @@ class QuickSearchAcceptance(Acceptance):
         except Exception as error:
             kind={AcceptanceFailure:"acceptance",ShortcutFailure:"shortcut",OSError:"os",json.JSONDecodeError:"json"}.get(type(error),"unexpected")
             failure={"stage":self.stage,"reason":self.reason,"error_class":kind,
-                     "shortcut":self.shortcut_observations,"ewmh_window_manager_ready":self.wm_ready,"native_action":self.native_action,
+                     "shortcut":self.shortcut_observations,"ewmh_window_manager_ready":self.wm_ready,
+                     "window_manager_startup":self.wm_startup,"native_action":self.native_action,
                      "native_elapsed_ms":self.native_elapsed_ms,"metadata":self.last_metadata}
             try:failure["controls"]=self.controls()
             except Exception:failure["controls_unavailable"]=True
             with os.fdopen(os.open(self.diagnostics/"failure.json",os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600),"w") as out:json.dump(failure,out)
             self.reason,self.native_action=failure["reason"],failure["native_action"]
             self.emit(self.failure_diagnostic())
+            startup=self.startup_diagnostic()
+            if startup:self.emit(startup)
         finally:
             record={"ewmh_window_manager_ready":self.wm_ready,
+                    "window_manager_startup":self.wm_startup,
                     "shortcut_observations":self.shortcut_observations,
                     "completed_cases":self.completed}
             try:
