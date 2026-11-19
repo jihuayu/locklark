@@ -728,55 +728,65 @@ func sealVaultFileBackupCustody(ctx context.Context, source VaultFileBackupCusto
 // single-owner-record binding inside the payload. Wrong factors, swapped or
 // corrupted artifacts, a wrong checkpoint, a self-asserted scope or a changed
 // source are refused before any source value is returned. Private owner seeds
-// stay inside this function and are cleared.
+// stay inside this package; the exported form discards them before returning.
 func OpenVaultFileBackupCustody(ctx context.Context, artifact []byte, expected vaultfile.PolicyCheckpoint, factor *VaultFileBackupRecoveryFactor) (source VaultFileBackupCustodySource, ownership VaultFileOwnershipPublic, retErr error) {
+	source, ownership, owner, err := openVaultFileBackupCustodyRecord(ctx, artifact, expected, factor)
+	clearVaultFileOwners([]vaultFileOwnerRecord{owner})
+	return source, ownership, err
+}
+
+// openVaultFileBackupCustodyRecord is the in-package form of the opener. It
+// returns the single authenticated private owner/recovery record only to owning
+// personal code that preserves it in the destination's encrypted owner store.
+// The exported reopen path above always clears that record.
+func openVaultFileBackupCustodyRecord(ctx context.Context, artifact []byte, expected vaultfile.PolicyCheckpoint, factor *VaultFileBackupRecoveryFactor) (source VaultFileBackupCustodySource, ownership VaultFileOwnershipPublic, owner vaultFileOwnerRecord, retErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if !validVaultFileBackupCustodyCheckpoint(expected) || factor == nil {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "request")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "request")
 	}
 	if len(artifact) == 0 || len(artifact) > maxVaultFileBackupCustodyArtifact {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyLimit, "artifact")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyLimit, "artifact")
 	}
 	if err := ctx.Err(); err != nil {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyCanceled, "context")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyCanceled, "context")
 	}
 	var envelope vaultFileBackupCustodyArtifact
 	if err := decodeVaultFileBackupCustodyJSON(artifact, &envelope); err != nil {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "artifact")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "artifact")
 	}
 	if envelope.Header.Format != vaultFileBackupCustodyFormat || envelope.Header.Version != 1 ||
 		envelope.Header.VaultID != expected.VaultID ||
 		!sameVaultFileBackupCustodyCheckpoint(envelope.Header.Checkpoint, expected) ||
 		len(envelope.Signature) != ed25519.SignatureSize || len(envelope.Data) == 0 {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "header")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "header")
 	}
 	message, err := vaultFileBackupCustodySigningMessage(envelope.Header, envelope.Data)
 	if err != nil || !ed25519.Verify(expected.OwnerRootPublicKey, message[:], envelope.Signature) {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "signature")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "signature")
 	}
 	identity, err := factor.identity()
 	if err != nil {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "factor")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "factor")
 	}
 	plain, err := openVaultFileBackupCustodyBytes(envelope.Data, identity)
 	if err != nil {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "decrypt")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "decrypt")
 	}
 	defer clear(plain)
 	var payload vaultFileBackupCustodyPayload
 	if err := decodeVaultFileBackupCustodyJSON(plain, &payload); err != nil ||
 		payload.Format != vaultFileBackupCustodyFormat || payload.Version != 1 {
 		clearVaultFileOwners([]vaultFileOwnerRecord{payload.Owner})
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "payload")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "payload")
 	}
 	defer clearVaultFileOwners([]vaultFileOwnerRecord{payload.Owner})
 	defer func() { payload.Current = nil; payload.Origin = nil }()
 	envelopeHeader, err1 := json.Marshal(envelope.Header)
 	payloadHeader, err2 := json.Marshal(payload.Header)
 	if err1 != nil || err2 != nil || !bytes.Equal(envelopeHeader, payloadHeader) {
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "self scope")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "self scope")
 	}
 	candidate := VaultFileBackupCustodySource{
 		VaultID:         payload.Header.VaultID,
@@ -791,30 +801,31 @@ func OpenVaultFileBackupCustody(ctx context.Context, artifact []byte, expected v
 	current, err := verifyVaultFileBackupCustodySource(candidate, expected)
 	if err != nil {
 		candidate.Clear()
-		return source, ownership, err
+		return source, ownership, owner, err
 	}
 	sourceIdentity := VaultFileBackupCustodySourceIdentity(candidate)
 	if payload.Header.CurrentSHA256 != vaultFileBackupCustodyHexSHA256(candidate.Current) ||
 		payload.Header.OriginSHA256 != vaultFileBackupCustodyHexSHA256(candidate.Origin) ||
 		payload.Header.SourceIdentity != sourceIdentity {
 		candidate.Clear()
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "source binding")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "source binding")
 	}
 	candidate.SourceIdentity = sourceIdentity
 	projection, err := vaultFileOwnerPublic(payload.Owner)
 	if err != nil {
 		candidate.Clear()
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "owner")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustody, "owner")
 	}
 	if err := bindVaultFileBackupCustodyOwner(payload.Owner, projection, expected, current); err != nil {
 		candidate.Clear()
-		return source, ownership, err
+		return source, ownership, owner, err
 	}
 	if err := ctx.Err(); err != nil {
 		candidate.Clear()
-		return source, ownership, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyCanceled, "context")
+		return source, ownership, owner, vaultFileBackupCustodyError(ErrVaultFileBackupCustodyCanceled, "context")
 	}
-	return candidate, projection, nil
+	owner = cloneVaultFileOwners([]vaultFileOwnerRecord{payload.Owner})[0]
+	return candidate, projection, owner, nil
 }
 
 // VaultFileBackupCustodySourceIdentity is the stable, domain-separated local
