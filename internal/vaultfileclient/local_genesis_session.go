@@ -307,6 +307,13 @@ func (s *localGenesisSessionState) revalidateLocator() error {
 }
 
 func (s *localGenesisSessionState) close() error {
+	return s.closeWith(nil)
+}
+
+// closeWith is the single completion path. A claimed close retires exactly the
+// claimed child and returns the real close error; the ordinary close keeps the
+// existing token-only behavior for every prior call site.
+func (s *localGenesisSessionState) closeWith(claim *personal.VaultFileReadDeliveryClaim) error {
 	s.mu.Lock()
 	if s.closed {
 		done := s.closeDone
@@ -336,7 +343,11 @@ func (s *localGenesisSessionState) close() error {
 
 	var err error
 	if parent != nil {
-		err = parent.LockVaultFileChild(token)
+		if claim != nil {
+			err = claim.CloseChild(parent)
+		} else {
+			err = parent.LockVaultFileChild(token)
+		}
 	}
 	s.mu.Lock()
 	s.closeErr = err

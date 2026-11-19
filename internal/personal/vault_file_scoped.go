@@ -145,6 +145,7 @@ type vaultFileChild struct {
 	// after the real handle.Close has returned, so every later close and the
 	// parent drain wait for actual VUK clearing rather than the flag.
 	closed    bool
+	closeErr  error
 	closeDone chan struct{}
 }
 
@@ -1172,20 +1173,27 @@ func (s *Session) drainVaultFileChildren() {
 // while a retiring child still owns a VUK. This function never takes
 // Session.mu or saveMu.
 func (s *Session) retireVaultFileChild(child *vaultFileChild) {
+	_ = s.retireVaultFileChildWithError(child)
+}
+
+// retireVaultFileChildWithError is the exact completion path that also returns
+// the real handle close error to a caller that must fail closed on it.
+func (s *Session) retireVaultFileChildWithError(child *vaultFileChild) error {
 	if child == nil {
-		return
+		return nil
 	}
-	child.close()
+	err := child.close()
 	s.vaultFileMu.Lock()
 	delete(s.vaultFileAll, child)
 	s.vaultFileMu.Unlock()
+	return err
 }
 
 // close revokes the handle and waits for the actual handle.Close. The first
 // closer sets closed, runs the private seam and closes the handle outside
 // child.mu; later closers wait on closeDone. child.mu is never held while
 // waiting, so completion cleanup can never try to take Session.mu.
-func (c *vaultFileChild) close() {
+func (c *vaultFileChild) close() error {
 	c.mu.Lock()
 	if c.closed {
 		done := c.closeDone
@@ -1193,7 +1201,10 @@ func (c *vaultFileChild) close() {
 		if done != nil {
 			<-done
 		}
-		return
+		c.mu.Lock()
+		err := c.closeErr
+		c.mu.Unlock()
+		return err
 	}
 	c.closed = true
 	if c.closeDone == nil {
@@ -1205,12 +1216,15 @@ func (c *vaultFileChild) close() {
 	if vaultFileChildBeforeHandleClose != nil {
 		vaultFileChildBeforeHandleClose()
 	}
+	var err error
 	if handle != nil {
-		_ = handle.Close()
+		err = handle.Close()
 	}
 	c.mu.Lock()
+	c.closeErr = err
 	close(done)
 	c.mu.Unlock()
+	return err
 }
 
 func (c *vaultFileChild) readHandle() (*vaultfile.ScopedUnlock, error) {
