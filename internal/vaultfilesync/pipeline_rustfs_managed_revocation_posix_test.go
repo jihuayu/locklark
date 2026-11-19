@@ -85,6 +85,7 @@ type managedRevocationMaterial struct {
 
 	formerID       string
 	formerIdentity *age.X25519Identity
+	formerSigning  ed25519.PrivateKey
 }
 
 // managedRevocationProof returns a structurally valid root-signed proof of p.
@@ -141,7 +142,7 @@ func newManagedRevocationMaterial(t *testing.T) *managedRevocationMaterial {
 	if err != nil {
 		t.Fatalf("generate synthetic former-writer age identity failed: %s", rustfsPipelineSafeError(err))
 	}
-	formerPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	formerPublic, formerSigning, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate synthetic former-writer signing key failed: %s", rustfsPipelineSafeError(err))
 	}
@@ -211,6 +212,7 @@ func newManagedRevocationMaterial(t *testing.T) *managedRevocationMaterial {
 		ownerSigning:   ownerSigning,
 		formerID:       managedRevocationFormerDeviceID,
 		formerIdentity: formerIdentity,
+		formerSigning:  formerSigning,
 	}
 	if !managedRevocationHasDevice(p, material.formerID) {
 		t.Fatal("synthetic current policy does not contain the former writer device")
