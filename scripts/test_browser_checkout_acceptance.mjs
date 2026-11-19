@@ -2736,6 +2736,78 @@ test("post-repair QuickFill=false refusal refreshes the source, rejects the rout
   const native = at("const reviewShowing = async () => {");
   assert.ok(refresh < rowClick && rowClick < unique && unique < attach);
   assert.ok(attach < native);
+  // The route-target and uniqueness proof is read first on every poll. Only a
+  // poll that finds no new target starts one non-blocking page evaluation for
+  // the popup's fixed toast booleans and bounded visible view. The sample is
+  // never awaited, so its CDP timeout cannot move the route wait.
+  const routeCandidates = at("const candidates = (await routeTargets())");
+  const openSample = at("routeOpenSample = popup");
+  assert.ok(
+    rowClick < routeCandidates &&
+      routeCandidates < unique &&
+      unique < openSample,
+  );
+  assert.equal(
+    countMatches(block, /popup\s*\.evaluate\(POST_REPAIR_ROUTE_OPEN_PROBE\)/g),
+    1,
+  );
+  assert.doesNotMatch(block, /popup\.text\("#toast"\)/);
+  assert.doesNotMatch(block, /document\.body\?\.dataset\?\.view/);
+  assert.doesNotMatch(block, /await\s+popup\s*\.evaluate\(/);
+  assert.match(block, /\.catch\(\(\) => \{\}\)/);
+  assert.match(block, /routeOpenObservationLive = false/);
+  // The observation is snapshotted only by the exact failed route-wait catch.
+  assert.match(
+    block,
+    /failedPostRepairRouteOpen\(\n\s+error,\n\s+stage,\n\s+opened,\n\s+postRepairRouteOpen,\n\s+\)/,
+  );
+  assert.match(source, /postRepairRouteOpen: postRepairRouteOpenFailure/);
+  assert.doesNotMatch(
+    source,
+    /postRepairRouteOpen: sanitizePostRepairRouteOpen\(/,
+  );
+  // The idle contract's revocationHarness extracts only routeRevokedProbe up to
+  // the field-copy header and does not inject ROUTE_VIEWS. The checkout probe
+  // slice also starts at ROUTE_PAGE_STATE. The new diagnostic block stays above
+  // both narrower ownership seams, so its module literal can never be captured
+  // as an undefined fixture.
+  const pageStateStart = source.indexOf("const ROUTE_PAGE_STATE =");
+  const revocationStart = source.indexOf("function routeRevokedProbe(");
+  const revocationStop = source.indexOf(
+    "\n// Route field-copy acceptance",
+    revocationStart,
+  );
+  const routeOpenProbe = source.indexOf(
+    "const POST_REPAIR_ROUTE_OPEN_PROBE =",
+  );
+  const routeOpenHelper = source.indexOf(
+    "function failedPostRepairRouteOpen(",
+  );
+  assert.ok(
+    pageStateStart > 0 &&
+      revocationStart > pageStateStart &&
+      revocationStop > revocationStart &&
+      routeOpenProbe > 0 &&
+      routeOpenProbe < pageStateStart &&
+      routeOpenHelper > routeOpenProbe &&
+      routeOpenHelper < pageStateStart,
+  );
+  const diagnosticBlock =
+    /POST_REPAIR_ROUTE_OPEN_PROBE|failedPostRepairRouteOpen|sanitizePostRepairRouteOpen|\bROUTE_VIEWS\b/;
+  assert.doesNotMatch(
+    source.slice(
+      pageStateStart,
+      source.indexOf(
+        "\n// Diagnostics only for the default QuickFill=false post-repair refusal.",
+        pageStateStart,
+      ),
+    ),
+    diagnosticBlock,
+  );
+  assert.doesNotMatch(
+    source.slice(revocationStart, revocationStop),
+    diagnosticBlock,
+  );
   // Both real native controls are inspected; only the rejection is clicked.
   assert.match(
     block,
@@ -2773,6 +2845,187 @@ test("post-repair QuickFill=false refusal refreshes the source, rejects the rout
     '"Refused route disclosed a synthetic fixture value"',
   );
   assert.ok(reopen > close && noDetail > reopen && noCanary > noDetail);
+});
+
+test("post-repair route-open diagnostic keeps only fixed booleans and the bounded visible view", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("function sanitizePostRepairRouteOpen(");
+  const stop = source.indexOf("\n}", start) + 2;
+  const views = source.match(/^const ROUTE_VIEWS = .+;$/m)?.[0];
+  assert.ok(start > 0 && stop > start, "route-open sanitizer must exist");
+  assert.ok(views, "route view enum must exist");
+  const context = vm.createContext({});
+  vm.runInContext(
+    views + "\n" + source.slice(start, stop) +
+      "\nthis.clean = sanitizePostRepairRouteOpen;",
+    context,
+  );
+  // Cross-realm values are normalized before the strict deep comparison.
+  const clean = (value) =>
+    JSON.parse(JSON.stringify(context.clean(value)));
+  assert.deepEqual(
+    clean({
+      routeOpenRefused: true,
+      detailRequestRefused: true,
+      view: "vault",
+    }),
+    { routeOpenRefused: true, detailRequestRefused: true, view: "vault" },
+  );
+  const raw = "RAW-canary-id-url-value";
+  const unknown = clean({
+    routeOpenRefused: "true",
+    detailRequestRefused: 1,
+    view: raw,
+  });
+  assert.deepEqual(unknown, {
+    routeOpenRefused: false,
+    detailRequestRefused: false,
+    view: "other",
+  });
+  assert.equal(JSON.stringify(unknown).includes(raw), false);
+});
+
+test("post-repair route-open probe keeps toast text in the page and returns only fixed bounded fields", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const views = source.match(/^const ROUTE_VIEWS = .+;$/m)?.[0];
+  const probe = source.match(
+    /^const POST_REPAIR_ROUTE_OPEN_PROBE = (`[\s\S]*?`);$/m,
+  )?.[1];
+  assert.ok(views && probe, "route-open page probe must exist");
+  const context = vm.createContext({});
+  vm.runInContext(views + "\nthis.probe = " + probe + ";", context);
+  const expression = context.probe;
+  const run = (toast, view) => {
+    const page = vm.createContext({
+      document: {
+        querySelector: (selector) =>
+          selector === "#toast" ? { innerText: toast } : null,
+        body: { dataset: { view } },
+      },
+    });
+    return JSON.parse(JSON.stringify(vm.runInContext(expression, page)));
+  };
+  assert.deepEqual(run("无法在新标签页打开详情，请重试", "vault"), {
+    routeOpenRefused: true,
+    detailRequestRefused: false,
+    view: "vault",
+  });
+  assert.deepEqual(run("无法读取条目详情", "detail"), {
+    routeOpenRefused: false,
+    detailRequestRefused: true,
+    view: "detail",
+  });
+  const raw = "RAW-toast-id-url-value";
+  const unknown = run(raw, "RAW-view");
+  assert.deepEqual(unknown, {
+    routeOpenRefused: false,
+    detailRequestRefused: false,
+    view: "other",
+  });
+  assert.equal(JSON.stringify(unknown).includes(raw), false);
+  assert.equal(JSON.stringify(unknown).includes("RAW-view"), false);
+});
+
+test("post-repair route-open report is limited to the failed route wait with no new route", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const views = source.match(/^const ROUTE_VIEWS = .+;$/m)?.[0];
+  const cleanStart = source.indexOf("function sanitizePostRepairRouteOpen(");
+  const cleanStop = source.indexOf("\n}", cleanStart) + 2;
+  const failStart = source.indexOf("function failedPostRepairRouteOpen(");
+  const failStop = source.indexOf("\n}", failStart) + 2;
+  assert.ok(views, "route view enum must exist");
+  assert.ok(cleanStart > 0 && cleanStop > cleanStart);
+  assert.ok(failStart > 0 && failStop > failStart);
+  const context = vm.createContext({});
+  vm.runInContext(
+    views + "\n" +
+      source.slice(cleanStart, cleanStop) + "\n" +
+      source.slice(failStart, failStop) +
+      "\nthis.failed = failedPostRepairRouteOpen;",
+    context,
+  );
+  const failed = (...args) => {
+    const value = context.failed(...args);
+    return value === null ? null : JSON.parse(JSON.stringify(value));
+  };
+  const sample = {
+    routeOpenRefused: true,
+    detailRequestRefused: false,
+    view: "vault",
+  };
+  assert.deepEqual(
+    failed(
+      Error("Route page did not open"),
+      "post-repair:route-click",
+      undefined,
+      sample,
+    ),
+    sample,
+  );
+  // A route success, another failure and another stage never keep the field.
+  assert.equal(
+    failed(
+      Error("Route page did not open"),
+      "post-repair:route-click",
+      { id: "route-target" },
+      sample,
+    ),
+    null,
+  );
+  assert.equal(
+    failed(
+      Error("Route page must be unique"),
+      "post-repair:route-click",
+      undefined,
+      sample,
+    ),
+    null,
+  );
+  assert.equal(
+    failed(
+      Error("Route page did not open"),
+      "post-repair:route-detail",
+      undefined,
+      sample,
+    ),
+    null,
+  );
+  // No sample means no field, and malformed samples stay bounded.
+  assert.equal(
+    failed(
+      Error("Route page did not open"),
+      "post-repair:route-click",
+      undefined,
+      null,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    failed(
+      Error("Route page did not open"),
+      "post-repair:route-click",
+      undefined,
+      {
+        routeOpenRefused: "true",
+        detailRequestRefused: 1,
+        view: "RAW-view",
+      },
+    ),
+    {
+      routeOpenRefused: false,
+      detailRequestRefused: false,
+      view: "other",
+    },
+  );
 });
 
 // Read once at module load, before any test text exists, so anchor-count

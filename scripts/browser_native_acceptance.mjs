@@ -762,6 +762,47 @@ const ROUTE_RELOAD = Object.freeze([{ key: "Control_L+r" }]);
 const ROUTE_NATIVE_TITLE = "Locklark · 浏览器原生确认";
 const ROUTE_NATIVE_ABSENT_LIMIT = 3000;
 let routeMouseRejected = null;
+// Diagnostics only for the post-repair route click before a route target is
+// found. Kept above both route-probe extraction seams (the idle contract's
+// revocationHarness starts at routeRevokedProbe; the checkout probe slice
+// starts at ROUTE_PAGE_STATE) so this block's ROUTE_VIEWS literal is resolved
+// by the module, not by a narrower fixture. One read-only page evaluation
+// classifies the popup's own fixed production toasts into a route-open refusal
+// and a QuickFill detail refusal, and reports the bounded visible view so the
+// detail path stays distinguishable from a still-open vault click. The raw
+// toast text, target identity, URL and any value never leave the page. This is
+// a diagnostic only, never a root-cause claim or a gate.
+const POST_REPAIR_ROUTE_OPEN_PROBE = `(()=>{
+  const toast=document.querySelector('#toast');
+  const toastText=toast?String(toast.innerText||''):'';
+  const view=(document.body&&document.body.dataset.view)||'';
+  return {
+    routeOpenRefused:toastText===${JSON.stringify("无法在新标签页打开详情，请重试")},
+    detailRequestRefused:toastText===${JSON.stringify("无法读取条目详情")},
+    view:${JSON.stringify(ROUTE_VIEWS)}.includes(view)?view:'other'
+  };
+})()`;
+let postRepairRouteOpen = null;
+let postRepairRouteOpenFailure = null;
+function sanitizePostRepairRouteOpen(value) {
+  return {
+    routeOpenRefused: value?.routeOpenRefused === true,
+    detailRequestRefused: value?.detailRequestRefused === true,
+    view: ROUTE_VIEWS.includes(value?.view) ? value.view : "other",
+  };
+}
+// Only the failed route wait at this exact stage, with no new route target,
+// may expose the observation. A later failure after an exact route opened, a
+// different failure, or a successful route never keeps this field.
+function failedPostRepairRouteOpen(error, stage, opened, sample) {
+  if (
+    stage !== "post-repair:route-click" ||
+    error?.message !== "Route page did not open" ||
+    opened
+  )
+    return null;
+  return sample ? sanitizePostRepairRouteOpen(sample) : null;
+}
 // Fixed fragments shared by the route page probes. Each handler resolves the
 // current nodes on every read and never holds references to them.
 const ROUTE_PAGE_STATE = `(()=>{
@@ -3027,14 +3068,60 @@ try {
     // path: one persistent route tab, never a popup item-get.
     await popup.click(target);
     let opened;
-    await eventually(async () => {
-      const candidates = (await routeTargets()).filter(
-        (candidate) => !routeIdsBefore.has(candidate.id),
+    let routeOpenObservationLive = true;
+    let routeOpenSample = null;
+    try {
+      await eventually(async () => {
+        // Route target and uniqueness proof has priority on every poll. The
+        // diagnostic sample starts only after this poll found no new target.
+        const candidates = (await routeTargets()).filter(
+          (candidate) => !routeIdsBefore.has(candidate.id),
+        );
+        if (candidates.length > 1) throw Error("Route page must be unique");
+        opened = candidates[0];
+        // Diagnostics only: at most one non-blocking read-only page
+        // evaluation is in flight. It returns fixed booleans plus the bounded
+        // view enum, is never awaited, handles its own rejection, and may
+        // update only while this route wait is open. Its CDP timeout therefore
+        // cannot extend, precede or replace the route/uniqueness proof or
+        // produce output after the wait closes.
+        if (!opened && routeOpenObservationLive && !routeOpenSample) {
+          routeOpenSample = popup
+            .evaluate(POST_REPAIR_ROUTE_OPEN_PROBE)
+            .then((value) => {
+              if (!routeOpenObservationLive) return;
+              postRepairRouteOpen = {
+                routeOpenRefused:
+                  postRepairRouteOpen?.routeOpenRefused === true ||
+                  value?.routeOpenRefused === true,
+                detailRequestRefused:
+                  postRepairRouteOpen?.detailRequestRefused === true ||
+                  value?.detailRequestRefused === true,
+                view: value?.view,
+              };
+            })
+            .catch(() => {})
+            .finally(() => {
+              routeOpenSample = null;
+            });
+        }
+        return !!opened;
+      }, "Route page did not open");
+    } catch (error) {
+      // Keep the observation only for this exact failed route wait with no
+      // new target. Success and every other failure leave the report field
+      // absent, including failures that happen after an exact route opened.
+      postRepairRouteOpenFailure = failedPostRepairRouteOpen(
+        error,
+        stage,
+        opened,
+        postRepairRouteOpen,
       );
-      if (candidates.length > 1) throw Error("Route page must be unique");
-      opened = candidates[0];
-      return !!opened;
-    }, "Route page did not open");
+      throw error;
+    } finally {
+      // Any sample that settles after this point is ignored, not reported.
+      routeOpenObservationLive = false;
+    }
     const routeTarget = opened.id;
     assert.equal(
       (await routeTargets()).length,
@@ -3608,6 +3695,14 @@ try {
                 }
               : {}),
           }
+        : {}),
+      // Present only when the post-repair route wait itself failed with
+      // "Route page did not open" and no new route target was confirmed; never
+      // for a route success or any other failure. Fixed booleans plus the
+      // bounded visible view enum only; no toast text, target, id, title, URL
+      // or value.
+      ...(postRepairRouteOpenFailure
+        ? { postRepairRouteOpen: postRepairRouteOpenFailure }
         : {}),
       // Present only once the default post-repair QuickFill=false route was
       // inspected after its native rejection: fixed booleans/enums only.
