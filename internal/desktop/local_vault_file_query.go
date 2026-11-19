@@ -173,6 +173,18 @@ type localVaultFileQueryActivation struct {
 	id, title       string
 }
 
+// localVaultFileQueryPendingActivation is one already-authorized UI click held
+// behind its exact current sweep. It never carries proof, a wrapper or a
+// capability; it only freezes the same immutable hit and generation so the
+// normal activation path can recheck Active routing after the sweep settles.
+type localVaultFileQueryPendingActivation struct {
+	sweep           *localVaultFileQuerySweep
+	queryGeneration uint64
+	queryOperation  *localVaultFileQueryOperation
+	hit             *localVaultFileQueryHit
+	result          *localVaultFileQueryResult
+}
+
 // localVaultFileQuerySweep is one lifecycle-bound per-query background
 // revalidation. It borrows the exact wrappers of the current results only for
 // the duration of the worker and never owns, closes, replaces or reactivates a
@@ -215,7 +227,10 @@ type localVaultFileQueryState struct {
 	current    *localVaultFileQueryOperation
 	results    []*localVaultFileQueryResult
 	activation *localVaultFileQueryActivation
-	sweep      *localVaultFileQuerySweep
+	// pendingActivation is the single exact click serialized behind its own
+	// current sweep. It is cleared on query/cancel/lock/replacement boundaries.
+	pendingActivation *localVaultFileQueryPendingActivation
+	sweep             *localVaultFileQuerySweep
 }
 
 func clearLocalVaultFileExactResult(result *vaultfileclient.LocalGenesisExactQueryResult) {
@@ -245,6 +260,7 @@ func (a *App) localVaultFileQueryChanged() {
 	state.query.current = nil
 	state.query.results = nil
 	state.query.activation = nil
+	state.query.pendingActivation = nil
 	state.query.status = localVaultFileQueryPrompt
 }
 
@@ -260,6 +276,7 @@ func (a *App) cancelLocalVaultFileQuery() {
 	state.query.current = nil
 	state.query.results = nil
 	state.query.activation = nil
+	state.query.pendingActivation = nil
 	state.query.status = ""
 	state.query.title = ""
 }
@@ -281,6 +298,43 @@ func (a *App) cancelLocalVaultFileQuerySweep(sweep *localVaultFileQuerySweep) {
 	if a.localVaultFiles.query.sweep == sweep {
 		a.localVaultFiles.query.sweep = nil
 	}
+	a.cancelLocalVaultFileQueryPendingActivationForSweep(sweep)
+}
+
+func (a *App) cancelLocalVaultFileQueryPendingActivationForSweep(sweep *localVaultFileQuerySweep) {
+	state := &a.localVaultFiles
+	if state.query.pendingActivation != nil &&
+		state.query.pendingActivation.sweep == sweep {
+		state.query.pendingActivation = nil
+	}
+}
+
+// settleLocalVaultFileQueryPendingActivation ends the one click held behind a
+// sweep that could not observe Active routing at its completion boundary. Busy
+// is a terminal checkpoint for this exact pending click, not a new state: clear
+// only that click and publish the same finite activation/requery feedback the
+// normal refusal path uses. A replacement query, cancel, lock or parent/App
+// generation change never receives this status. The authorized results and
+// live sibling proofs are left untouched, so a later explicit click after the
+// parent cache returns Active runs the normal authenticated activation once.
+func (a *App) settleLocalVaultFileQueryPendingActivation(sweep *localVaultFileQuerySweep, cache personal.VaultFileCacheState) {
+	state := &a.localVaultFiles
+	pending := state.query.pendingActivation
+	if pending == nil || pending.sweep != sweep {
+		return
+	}
+	state.query.pendingActivation = nil
+	if cache != personal.VaultFileCacheBusy {
+		return
+	}
+	if state.query.operation != nil || state.query.current != sweep.queryOperation ||
+		state.query.sequence != sweep.queryGeneration ||
+		pending.queryOperation != sweep.queryOperation ||
+		pending.queryGeneration != sweep.queryGeneration ||
+		a.session != sweep.parent || a.generation != sweep.generation {
+		return
+	}
+	state.query.status = localVaultFileQueryActivationFailed
 }
 
 // searchLocalVaultFileExactTitle is the normal local-vault query action. It
@@ -300,6 +354,7 @@ func (a *App) searchLocalVaultFileExactTitle() {
 		state.query.current = nil
 		state.query.results = nil
 		state.query.activation = nil
+		state.query.pendingActivation = nil
 		state.query.status = fmt.Sprintf("请输入非空且不超过 %d 字节的完整标题。", vaultfileclient.LocalGenesisExactQueryTitleBytesMax)
 		return
 	}
@@ -327,6 +382,7 @@ func (a *App) beginLocalVaultFileExactQuery(title string) *localVaultFileQueryOp
 	state.query.current = nil
 	state.query.results = nil
 	state.query.activation = nil
+	state.query.pendingActivation = nil
 	state.query.status = localVaultFileQueryWorking
 	if len(sources) == 0 {
 		state.query.status = "当前没有已打开且可查询的独立文件库。"
@@ -619,8 +675,9 @@ func (a *App) scheduleLocalVaultFileQueryRevalidation() *localVaultFileQuerySwee
 func (a *App) scheduleLocalVaultFileQueryRevalidationAt(now time.Time) *localVaultFileQuerySweep {
 	state := &a.localVaultFiles
 	if state.query.operation != nil || state.query.current == nil ||
-		state.query.sweep != nil || a.session == nil || !a.session.Unlocked() ||
-		a.dispatch == nil {
+		state.query.sweep != nil || state.query.activation != nil ||
+		state.query.pendingActivation != nil ||
+		a.session == nil || !a.session.Unlocked() || a.dispatch == nil {
 		return nil
 	}
 	parentPath, cache := a.localVaultFileRoutingPath()
@@ -642,7 +699,8 @@ func (a *App) scheduleLocalVaultFileQueryRevalidationAt(now time.Time) *localVau
 		}
 		results = append(results, result)
 	}
-	if len(results) == 0 || state.query.current != current || state.query.operation != nil {
+	if len(results) == 0 || state.query.current != current || state.query.operation != nil ||
+		state.query.activation != nil || state.query.pendingActivation != nil {
 		return nil
 	}
 	// Reserve and advance this generation only when a sweep actually starts.
@@ -695,12 +753,14 @@ func (a *App) launchLocalVaultFileQueryRevalidation(sweep *localVaultFileQuerySw
 func (a *App) finishLocalVaultFileQueryRevalidation(sweep *localVaultFileQuerySweep, stale []*localVaultFileQueryResult) {
 	state := &a.localVaultFiles
 	if sweep == nil || state.query.sweep != sweep {
+		a.cancelLocalVaultFileQueryPendingActivationForSweep(sweep)
 		return
 	}
 	if state.query.operation != nil || state.query.current != sweep.queryOperation ||
 		state.query.sequence != sweep.queryGeneration || a.session != sweep.parent ||
 		a.generation != sweep.generation {
 		state.query.sweep = nil
+		a.cancelLocalVaultFileQueryPendingActivationForSweep(sweep)
 		return
 	}
 	if cache := a.syncLocalVaultFileSessions(); cache != personal.VaultFileCacheActive ||
@@ -708,6 +768,7 @@ func (a *App) finishLocalVaultFileQueryRevalidation(sweep *localVaultFileQuerySw
 		if state.query.sweep == sweep {
 			state.query.sweep = nil
 		}
+		a.settleLocalVaultFileQueryPendingActivation(sweep, cache)
 		return
 	}
 	parentPath, cache := a.localVaultFileRoutingPath()
@@ -719,9 +780,19 @@ func (a *App) finishLocalVaultFileQueryRevalidation(sweep *localVaultFileQuerySw
 		if state.query.sweep == sweep {
 			state.query.sweep = nil
 		}
+		a.settleLocalVaultFileQueryPendingActivation(sweep, cache)
 		return
 	}
 
+	// Detach the one queued click from the sweep before applying results. It is
+	// resumed only after the sweep's exact stale drops and the fresh Active
+	// routing check, and only for its original immutable hit.
+	pending := state.query.pendingActivation
+	if pending != nil && pending.sweep == sweep {
+		state.query.pendingActivation = nil
+	} else {
+		pending = nil
+	}
 	staleSet := make(map[*localVaultFileQueryResult]struct{}, len(stale))
 	for _, result := range stale {
 		staleSet[result] = struct{}{}
@@ -743,30 +814,53 @@ func (a *App) finishLocalVaultFileQueryRevalidation(sweep *localVaultFileQuerySw
 		changed = true
 	}
 	state.query.sweep = nil
-	if !changed {
-		return
-	}
-	if state.query.operation != nil || state.query.current != sweep.queryOperation ||
-		state.query.sequence != sweep.queryGeneration || a.session != sweep.parent ||
-		a.generation != sweep.generation {
-		return
-	}
-	count := 0
-	for _, result := range state.query.results {
-		if !a.localVaultFileQueryResultAuthorized(result) ||
-			!a.localVaultFileQueryResultLifecycleCurrent(parentPath, result) {
-			continue
+	if changed {
+		if state.query.operation != nil || state.query.current != sweep.queryOperation ||
+			state.query.sequence != sweep.queryGeneration || a.session != sweep.parent ||
+			a.generation != sweep.generation {
+			return
 		}
-		count += len(result.hits)
+		count := 0
+		for _, result := range state.query.results {
+			if !a.localVaultFileQueryResultAuthorized(result) ||
+				!a.localVaultFileQueryResultLifecycleCurrent(parentPath, result) {
+				continue
+			}
+			count += len(result.hits)
+		}
+		if count == 0 {
+			state.query.status = localVaultFileQueryStale
+		} else {
+			state.query.status = fmt.Sprintf("精确查询找到 %d 条%s", count, localVaultFileQueryPartialSuffix)
+		}
+		if a.win != nil {
+			a.win.Invalidate()
+		}
 	}
-	if count == 0 {
-		state.query.status = localVaultFileQueryStale
-	} else {
-		state.query.status = fmt.Sprintf("精确查询找到 %d 条%s", count, localVaultFileQueryPartialSuffix)
+	if pending != nil {
+		a.resumeLocalVaultFileQueryPendingActivation(pending)
 	}
-	if a.win != nil {
-		a.win.Invalidate()
+}
+
+// resumeLocalVaultFileQueryPendingActivation consumes the single click that was
+// waiting for its own sweep. It never retries: it starts the existing
+// authenticated activation at most once, and only while the original query,
+// parent, App generation, hit, result and locked routing path are still current.
+func (a *App) resumeLocalVaultFileQueryPendingActivation(pending *localVaultFileQueryPendingActivation) {
+	if pending == nil {
+		return
 	}
+	state := &a.localVaultFiles
+	if pending.sweep == nil || state.query.sweep != nil ||
+		state.query.operation != nil || state.query.current != pending.queryOperation ||
+		state.query.sequence != pending.queryGeneration ||
+		pending.result == nil || a.session != pending.result.parent ||
+		a.generation != pending.result.generation ||
+		!a.localVaultFileQueryHitAuthorized(pending.hit) {
+		state.query.status = localVaultFileQueryActivationFailed
+		return
+	}
+	a.startLocalVaultFileQueryActivation(pending.hit)
 }
 
 // localVaultFileQueryHits returns only hits whose exact wrapper/slot/account/
@@ -792,6 +886,12 @@ func (a *App) localVaultFileQueryHits() []*localVaultFileQueryHit {
 // the exact hit and launches the captured wrapper's ValidateExactQueryHit
 // before any destination selection. The dispatch path selects only after that
 // validation returned nil and the full lifecycle is still current.
+//
+// A click that arrives while the hit's own current query sweep is in flight is
+// serialized behind that sweep instead of being rejected by a transient Busy
+// parent snapshot. The wait does not authenticate, serve stale data or widen the
+// result set; after the sweep settles, the same immutable hit must pass the
+// normal Active check before the existing validation starts.
 func (a *App) activateLocalVaultFileQueryHit(hit *localVaultFileQueryHit) {
 	state := &a.localVaultFiles
 	if hit == nil || hit.result == nil || hit.id == "" || hit.title == "" {
@@ -801,10 +901,82 @@ func (a *App) activateLocalVaultFileQueryHit(hit *localVaultFileQueryHit) {
 		state.query.status = localVaultFileQueryWorking
 		return
 	}
-	if !a.localVaultFileQueryHitAuthorized(hit) ||
-		!a.localVaultFileQueryResultCurrent(hit.result) {
+	if !a.localVaultFileQueryHitAuthorized(hit) {
 		state.query.status = localVaultFileQueryFailed
 		return
+	}
+	if state.query.activation != nil {
+		state.query.status = localVaultFileQueryWorking
+		return
+	}
+	if state.query.sweep != nil {
+		if !a.localVaultFileQueryPendingActivationCurrent(hit, state.query.sweep) {
+			state.query.status = localVaultFileQueryActivationFailed
+			return
+		}
+		// A newer click on an authorized row supersedes only the older queued
+		// click. It keeps its own exact immutable hit; it is never remapped to
+		// another query or sibling.
+		state.query.pendingActivation = &localVaultFileQueryPendingActivation{
+			sweep:           state.query.sweep,
+			queryGeneration: state.query.sequence,
+			queryOperation:  state.query.current,
+			hit:             hit,
+			result:          hit.result,
+		}
+		state.query.status = localVaultFileQueryWorking
+		return
+	}
+	state.query.pendingActivation = nil
+	if !a.startLocalVaultFileQueryActivation(hit) {
+		return
+	}
+}
+
+// localVaultFileQueryPendingActivationCurrent checks the cache-independent
+// lifecycle that lets one click wait for its own sweep. It deliberately does not
+// take a new parent cache snapshot: the exact pending hit must belong to the
+// sweep's query generation and still be bound to the same parent, App
+// generation, slot, wrapper, ref tuple and workspace. The fresh Active routing
+// check happens only after the sweep has settled.
+func (a *App) localVaultFileQueryPendingActivationCurrent(hit *localVaultFileQueryHit, sweep *localVaultFileQuerySweep) bool {
+	state := &a.localVaultFiles
+	if hit == nil || hit.result == nil || sweep == nil ||
+		state.query.sweep != sweep ||
+		state.query.operation != nil || state.query.current != sweep.queryOperation ||
+		state.query.sequence != sweep.queryGeneration ||
+		sweep.queryOperation == nil || sweep.queryGeneration != state.query.sequence ||
+		a.session == nil || a.session != sweep.parent || a.generation != sweep.generation ||
+		hit.result.parent != sweep.parent || hit.result.generation != sweep.generation ||
+		hit.result.parentPath != sweep.parentPath ||
+		hit.result.queryOperation != sweep.queryOperation ||
+		hit.result.queryGeneration != sweep.queryGeneration ||
+		!a.localVaultFileQueryHitAuthorized(hit) ||
+		!a.localVaultFileQueryResultLifecycleCurrent(sweep.parentPath, hit.result) {
+		return false
+	}
+	for _, result := range sweep.results {
+		if result == hit.result {
+			return true
+		}
+	}
+	return false
+}
+
+// startLocalVaultFileQueryActivation is the single authenticated activation
+// entry. It is called only after the current sweep has settled (or when no
+// sweep is in flight), so its normal Active snapshot is never replaced by a
+// wait or a stale route. Failure leaves the prior query scope unchanged apart
+// from the finite activation-failed status.
+func (a *App) startLocalVaultFileQueryActivation(hit *localVaultFileQueryHit) bool {
+	state := &a.localVaultFiles
+	if hit == nil || hit.result == nil || hit.id == "" || hit.title == "" ||
+		state.query.activation != nil || state.query.pendingActivation != nil ||
+		state.query.sweep != nil || state.query.operation != nil ||
+		!a.localVaultFileQueryHitAuthorized(hit) ||
+		!a.localVaultFileQueryResultCurrent(hit.result) {
+		state.query.status = localVaultFileQueryActivationFailed
+		return false
 	}
 	op := &localVaultFileQueryActivation{
 		queryGeneration: state.query.sequence,
@@ -821,6 +993,7 @@ func (a *App) activateLocalVaultFileQueryHit(hit *localVaultFileQueryHit) {
 			dispatch(func() { a.finishLocalVaultFileQueryActivation(op, err) })
 		}
 	})
+	return true
 }
 
 func (a *App) finishLocalVaultFileQueryActivation(op *localVaultFileQueryActivation, err error) {
@@ -887,6 +1060,9 @@ func (a *App) dropLocalVaultFileQueryResult(result *localVaultFileQueryResult) {
 		state.query.results = state.query.results[:len(state.query.results)-1]
 		if state.query.activation != nil && state.query.activation.result == result {
 			state.query.activation = nil
+		}
+		if state.query.pendingActivation != nil && state.query.pendingActivation.result == result {
+			state.query.pendingActivation = nil
 		}
 		if state.activeItem.scope == result.scope && state.activeItem.parent == result.parent &&
 			state.activeItem.generation == result.generation {

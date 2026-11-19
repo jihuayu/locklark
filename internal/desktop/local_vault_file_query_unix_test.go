@@ -347,3 +347,327 @@ func TestDesktopLocalVaultExactQueryActivation(t *testing.T) {
 		t.Fatal("DESKTOP_LOCAL_QUERY_BACKGROUND_B_ACTIVATION_FAILED")
 	}
 }
+
+// desktopLocalVaultQueryHoldOwnSweep starts one real current-query sweep,
+// runs its worker, leaves its production dispatch pending so the sweep is
+// still current, and then holds the actual parent cache busy. beforeLaunch runs
+// after scheduling and before Summary so a test can advance only its chosen
+// backend. The returned release is idempotent and registered for cleanup.
+func desktopLocalVaultQueryHoldOwnSweep(t *testing.T, fx *desktopLocalVaultQueryFixture,
+	now time.Time, beforeLaunch func()) func() {
+	t.Helper()
+	fx.queue.drain(t)
+	sweep := fx.app.scheduleLocalVaultFileQueryRevalidationAt(now)
+	if sweep == nil || len(fx.queue.launches) != 1 {
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_NOT_STARTED")
+	}
+	if beforeLaunch != nil {
+		beforeLaunch()
+	}
+	fx.queue.runLaunch(t)
+	if len(fx.queue.dispatches) != 1 ||
+		fx.app.localVaultFiles.query.sweep != sweep {
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_DID_NOT_STAY_CURRENT")
+	}
+	return holdDesktopParentDBBusy(t, &localVaultSessionFixture{parent: fx.app.session})
+}
+
+func TestDesktopLocalVaultExactQueryActivationSurvivesOwnSweep(t *testing.T) {
+	fx := newDesktopLocalVaultQueryFixture(t)
+	hits := fx.query(t)
+	byID := fx.hitsByID(t, hits)
+	hitB := byID[desktopLocalVaultQueryIDB]
+	if hitB == nil {
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_B_MISSING")
+	}
+	queryNow := time.Unix(1_800_000_000, 0)
+	release := desktopLocalVaultQueryHoldOwnSweep(t, fx, queryNow, nil)
+
+	// The exact B row is enabled and current, while the owned sweep is still
+	// current and the real parent cache is transiently Busy. The click must be
+	// held as one exact operation, not authenticated and not reported failed.
+	fx.app.activateLocalVaultFileQueryHit(hitB)
+	pending := fx.app.localVaultFiles.query.pendingActivation
+	if pending == nil || pending.hit != hitB || pending.result != hitB.result ||
+		fx.app.localVaultFiles.query.activation != nil ||
+		len(fx.queue.launches) != 0 {
+		release()
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_CLICK_NOT_HELD")
+	}
+	if fx.app.scheduleLocalVaultFileQueryRevalidationAt(
+		queryNow.Add(localVaultFileQueryRevalidationMinStart)) != nil ||
+		len(fx.queue.launches) != 0 {
+		release()
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_STARTED_SECOND_SWEEP")
+	}
+
+	release()
+	fx.queue.runDispatch(t)
+	if len(fx.queue.launches) != 1 ||
+		fx.app.localVaultFiles.query.pendingActivation != nil ||
+		fx.app.localVaultFiles.query.activation == nil {
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_CLICK_NOT_RESUMED")
+	}
+	if fx.app.scheduleLocalVaultFileQueryRevalidationAt(
+		queryNow.Add(2*localVaultFileQueryRevalidationMinStart)) != nil ||
+		len(fx.queue.launches) != 1 {
+		t.Fatal("DESKTOP_LOCAL_QUERY_ACTIVATION_STARTED_PARALLEL_SWEEP")
+	}
+	fx.queue.runLaunch(t)
+	if fx.app.scheduleLocalVaultFileQueryRevalidationAt(
+		queryNow.Add(3*localVaultFileQueryRevalidationMinStart)) != nil ||
+		len(fx.queue.launches) != 0 {
+		t.Fatal("DESKTOP_LOCAL_QUERY_ACTIVATION_IN_FLIGHT_STARTED_SWEEP")
+	}
+	fx.queue.runDispatch(t)
+	fx.queue.drain(t)
+	active, ok := fx.app.localVaultFileActiveItemCurrent()
+	if fx.app.localVaultFiles.selected != fx.bPath || !ok ||
+		active.id != desktopLocalVaultQueryIDB ||
+		active.title != desktopLocalVaultQueryTitle {
+		t.Fatal("DESKTOP_LOCAL_QUERY_OWN_SWEEP_B_ACTIVATION_FAILED")
+	}
+}
+
+func TestDesktopLocalVaultExactQueryActivationRefusesStaleOwnSweepClick(t *testing.T) {
+	t.Run("background-stale-hit", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		hitB := fx.hitsByID(t, hits)[desktopLocalVaultQueryIDB]
+		if hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_STALE_CLICK_B_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), func() {
+				desktopLocalVaultQueryDriftA(t, fx.bManifest)
+			})
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_STALE_CLICK_NOT_HELD")
+		}
+		release()
+		fx.queue.drain(t)
+		if fx.app.localVaultFiles.query.pendingActivation != nil ||
+			fx.app.localVaultFiles.query.activation != nil ||
+			fx.app.localVaultFiles.selected != "" {
+			t.Fatal("DESKTOP_LOCAL_QUERY_STALE_CLICK_ACTIVATED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			t.Fatal("DESKTOP_LOCAL_QUERY_STALE_CLICK_PUBLISHED_ACTIVE")
+		}
+		after := fx.app.localVaultFileQueryHits()
+		if len(after) != 1 || after[0].id != desktopLocalVaultQueryIDA {
+			t.Fatal("DESKTOP_LOCAL_QUERY_STALE_CLICK_WIDENED_RESULTS")
+		}
+	})
+
+	t.Run("busy-at-sweep-dispatch", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		byID := fx.hitsByID(t, hits)
+		hitA, hitB := byID[desktopLocalVaultQueryIDA], byID[desktopLocalVaultQueryIDB]
+		if hitA == nil || hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_ROWS_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), nil)
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_CLICK_NOT_HELD")
+		}
+		// Dispatch the owned sweep's completion while the real parent cache is
+		// still Busy. The held click must terminate once, not remain Working.
+		fx.queue.runDispatch(t)
+		state := &fx.app.localVaultFiles
+		if state.query.pendingActivation != nil ||
+			state.query.activation != nil ||
+			state.query.sweep != nil ||
+			len(fx.queue.launches) != 0 {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_DELIVERED_WORK")
+		}
+		if state.query.status != localVaultFileQueryActivationFailed {
+			release()
+			t.Fatalf("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_STICKY_STATUS: %q", state.query.status)
+		}
+		if len(state.query.results) != 2 ||
+			!fx.app.localVaultFileQueryHitAuthorized(hitA) ||
+			!fx.app.localVaultFileQueryHitAuthorized(hitB) ||
+			len(hitA.result.proof.Hits) != 1 ||
+			len(hitB.result.proof.Hits) != 1 {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_LOST_SIBLING")
+		}
+		if state.selected != "" {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_SELECTED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_PUBLISHED_ACTIVE")
+		}
+		if len(fx.queue.launches) != 0 || len(fx.queue.dispatches) != 0 {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_DISPATCH_AUTO_RETRIED")
+		}
+		release()
+		if len(fx.queue.launches) != 0 || len(fx.queue.dispatches) != 0 {
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_RELEASE_AUTO_RETRIED")
+		}
+		if after := fx.app.localVaultFileQueryHits(); len(after) != 2 {
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_RELEASE_ROWS_NOT_RESTORED")
+		}
+		// Only an explicit new user click after the cache clears authenticates.
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.activation == nil ||
+			len(fx.queue.launches) != 1 {
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_RETRY_NOT_AUTHENTICATED")
+		}
+		fx.queue.runLaunch(t)
+		fx.queue.runDispatch(t)
+		fx.queue.drain(t)
+		active, ok := fx.app.localVaultFileActiveItemCurrent()
+		if fx.app.localVaultFiles.selected != fx.bPath || !ok ||
+			active.id != desktopLocalVaultQueryIDB ||
+			active.title != desktopLocalVaultQueryTitle {
+			t.Fatal("DESKTOP_LOCAL_QUERY_BUSY_RETRY_B_ACTIVATION_FAILED")
+		}
+	})
+
+	t.Run("lock-target", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		hitB := fx.hitsByID(t, hits)[desktopLocalVaultQueryIDB]
+		if hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_LOCK_CLICK_B_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), nil)
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_LOCK_CLICK_NOT_HELD")
+		}
+		if fx.app.beginLocalVaultFileLock(hitB.result.scope) == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_LOCK_CLICK_LOCK_NOT_STARTED")
+		}
+		release()
+		fx.queue.drain(t)
+		if fx.app.localVaultFiles.query.pendingActivation != nil ||
+			fx.app.localVaultFiles.query.activation != nil ||
+			fx.app.localVaultFiles.selected != "" {
+			t.Fatal("DESKTOP_LOCAL_QUERY_LOCK_CLICK_ACTIVATED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			t.Fatal("DESKTOP_LOCAL_QUERY_LOCK_CLICK_PUBLISHED_ACTIVE")
+		}
+	})
+
+	t.Run("query-cancel", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		hitB := fx.hitsByID(t, hits)[desktopLocalVaultQueryIDB]
+		if hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_CANCEL_CLICK_B_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), nil)
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_CANCEL_CLICK_NOT_HELD")
+		}
+		fx.app.localVaultFileQueryChanged()
+		if fx.app.localVaultFiles.query.pendingActivation != nil ||
+			fx.app.localVaultFiles.query.sweep != nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_CANCEL_KEPT_PENDING")
+		}
+		release()
+		fx.queue.runDispatch(t)
+		fx.queue.drain(t)
+		if fx.app.localVaultFiles.query.activation != nil ||
+			fx.app.localVaultFiles.selected != "" {
+			t.Fatal("DESKTOP_LOCAL_QUERY_CANCEL_CLICK_ACTIVATED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			t.Fatal("DESKTOP_LOCAL_QUERY_CANCEL_CLICK_PUBLISHED_ACTIVE")
+		}
+	})
+
+	t.Run("query-replace", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		hitB := fx.hitsByID(t, hits)[desktopLocalVaultQueryIDB]
+		if hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_CLICK_B_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), nil)
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_CLICK_NOT_HELD")
+		}
+		release()
+		fx.app.localVaultFiles.query.title = desktopLocalVaultQueryTitle
+		fx.app.searchLocalVaultFileExactTitle()
+		if fx.app.localVaultFiles.query.pendingActivation != nil ||
+			fx.app.localVaultFiles.query.operation == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_KEPT_PENDING")
+		}
+		fx.queue.runDispatch(t)
+		fx.queue.runLaunch(t)
+		fx.queue.runDispatch(t)
+		fx.queue.drain(t)
+		if fx.app.localVaultFiles.selected != "" {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_CLICK_ACTIVATED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_CLICK_PUBLISHED_ACTIVE")
+		}
+		if fx.app.activateLocalVaultFileQueryHit(hitB); len(fx.queue.launches) != 0 {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_OLD_HIT_QUEUED")
+		}
+		after := fx.app.localVaultFileQueryHits()
+		if len(after) != 2 {
+			t.Fatal("DESKTOP_LOCAL_QUERY_REPLACE_NEW_RESULTS_MISSING")
+		}
+	})
+
+	t.Run("account-lock", func(t *testing.T) {
+		fx := newDesktopLocalVaultQueryFixture(t)
+		hits := fx.query(t)
+		hitB := fx.hitsByID(t, hits)[desktopLocalVaultQueryIDB]
+		if hitB == nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_ACCOUNT_CLICK_B_MISSING")
+		}
+		release := desktopLocalVaultQueryHoldOwnSweep(t, fx,
+			time.Unix(1_800_000_000, 0), nil)
+		fx.app.activateLocalVaultFileQueryHit(hitB)
+		if fx.app.localVaultFiles.query.pendingActivation == nil {
+			release()
+			t.Fatal("DESKTOP_LOCAL_QUERY_ACCOUNT_CLICK_NOT_HELD")
+		}
+		// Release the artificial cache barrier before the real account lock so
+		// its own held operation can settle; the sweep dispatch is still pending.
+		release()
+		fx.app.Lock()
+		if fx.app.localVaultFiles.query.pendingActivation != nil ||
+			fx.app.localVaultFiles.query.sweep != nil {
+			t.Fatal("DESKTOP_LOCAL_QUERY_ACCOUNT_KEPT_PENDING")
+		}
+		fx.queue.drain(t)
+		if fx.app.session != nil ||
+			fx.app.localVaultFiles.query.activation != nil ||
+			fx.app.localVaultFiles.selected != "" {
+			t.Fatal("DESKTOP_LOCAL_QUERY_ACCOUNT_CLICK_ACTIVATED")
+		}
+		if _, ok := fx.app.localVaultFileActiveItemCurrent(); ok {
+			t.Fatal("DESKTOP_LOCAL_QUERY_ACCOUNT_CLICK_PUBLISHED_ACTIVE")
+		}
+	})
+}
