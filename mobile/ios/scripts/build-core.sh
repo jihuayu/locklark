@@ -22,7 +22,7 @@ for tool in gomobile gobind; do
   "$go_bin" install "golang.org/x/mobile/cmd/$tool"
 done
 GO_BIN="$go_bin" "$python_bin" mobile/core/scripts/source-manifest.py --check-tool-paths --tools-dir "$GOBIN"
-"$GOBIN/gomobile" init
+# bind resolves gobind from PATH itself; init would reinstall an unpinned gobind.
 "$GOBIN/gomobile" bind -target=ios,iossimulator -iosversion=17.0 -prefix Mobilecore -trimpath -o "$ios_dir/Build/Mobilecore.xcframework" ./mobile/core
 test -f "$ios_dir/Build/Mobilecore.xcframework/Info.plist"
 echo "ios core XCFramework built"

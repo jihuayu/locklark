@@ -53,12 +53,64 @@ func systemStoreID(path string) (string, string, error) {
 	return hex.EncodeToString(hash[:]), absolute, nil
 }
 
-// EnableSystemUnlock requires this session's full-factor unlock and does not
-// extend its fixed 24-hour deadline. The OS adapter may prompt during enrollment.
+// SystemUnlockNeverExpire represents a non-expiring quick-unlock enrollment.
+const (
+	SystemUnlockNeverExpire = time.Duration(0)
+	systemUnlockNeverSpan   = 100 * 365 * 24 * time.Hour
+)
+
+func validSystemUnlockSpan(d time.Duration) bool {
+	switch d {
+	case 24 * time.Hour,
+		7 * 24 * time.Hour,
+		14 * 24 * time.Hour,
+		30 * 24 * time.Hour,
+		90 * 24 * time.Hour,
+		systemUnlockNeverSpan:
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeSystemUnlockTTL(ttl time.Duration) (time.Duration, bool) {
+	if ttl == SystemUnlockNeverExpire {
+		return systemUnlockNeverSpan, true
+	}
+	if !validSystemUnlockSpan(ttl) {
+		return 0, false
+	}
+	return ttl, true
+}
+
+// CanEnableSystemUnlock reports whether this session holds a full-factor unlock
+// eligible for system quick-unlock enrollment.
+func (s *Session) CanEnableSystemUnlock() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active(false) == nil && !s.fullUnlock.IsZero() && time.Since(s.fullUnlock) >= 0
+}
+
+// EnableSystemUnlock enables system quick unlock with the default 24-hour window.
+// It requires this session's full-factor unlock and does not extend its deadline.
 func (s *Session) EnableSystemUnlock(store SystemUnlockStore) error {
+	return s.EnableSystemUnlockFor(store, 24*time.Hour)
+}
+
+// EnableSystemUnlockFor enables system quick unlock for one of the configured
+// preset validity periods (or SystemUnlockNeverExpire). It requires this session's
+// full-factor unlock and measures expiry from that full-factor unlock timestamp.
+func (s *Session) EnableSystemUnlockFor(store SystemUnlockStore, ttl time.Duration) error {
+	span, ok := normalizeSystemUnlockTTL(ttl)
+	if !ok {
+		return ErrSystemUnlockExpired
+	}
 	systemUnlockOperations.Lock()
 	defer systemUnlockOperations.Unlock()
-	raw, id, e := s.prepareSystemUnlock(store)
+	raw, id, e := s.prepareSystemUnlock(store, span)
 	if e != nil {
 		return e
 	}
@@ -79,13 +131,14 @@ func (s *Session) EnableSystemUnlock(store SystemUnlockStore) error {
 	}
 	return nil
 }
-func (s *Session) prepareSystemUnlock(store SystemUnlockStore) ([]byte, string, error) {
+
+func (s *Session) prepareSystemUnlock(store SystemUnlockStore, span time.Duration) ([]byte, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if store == nil || s.active(false) != nil {
 		return nil, "", ErrSessionLocked
 	}
-	if s.fullUnlock.IsZero() || time.Since(s.fullUnlock) < 0 || time.Since(s.fullUnlock) >= 24*time.Hour {
+	if !validSystemUnlockSpan(span) || s.fullUnlock.IsZero() || time.Since(s.fullUnlock) < 0 || time.Since(s.fullUnlock) >= span {
 		return nil, "", ErrSystemUnlockExpired
 	}
 	id, path, e := systemStoreID(s.path)
@@ -95,7 +148,7 @@ func (s *Session) prepareSystemUnlock(store SystemUnlockStore) ([]byte, string, 
 	if _, e = s.execute("desktop.system.enable", vault.Item{}, nil, commandOption{}); e != nil {
 		return nil, "", e
 	}
-	capsule := systemCapsule{1, path, s.slotDigest, s.material, s.fullUnlock, s.fullUnlock.Add(24 * time.Hour)}
+	capsule := systemCapsule{1, path, s.slotDigest, s.material, s.fullUnlock, s.fullUnlock.Add(span)}
 	raw, e := json.Marshal(capsule)
 	if e != nil {
 		return nil, "", ErrSessionLocked
@@ -112,7 +165,7 @@ func UnlockWithSystem(path string, store SystemUnlockStore, idle time.Duration) 
 func UnlockWithSystemContext(ctx context.Context, path string, store SystemUnlockStore, idle time.Duration) (*Session, error) {
 	systemUnlockOperations.Lock()
 	defer systemUnlockOperations.Unlock()
-	if ctx == nil || ctx.Err() != nil || store == nil || idle < time.Second || idle > 15*time.Minute {
+	if ctx == nil || ctx.Err() != nil || store == nil || !validSessionIdle(idle) {
 		return nil, ErrSessionLocked
 	}
 	id, absolute, e := systemStoreID(path)
@@ -136,10 +189,14 @@ func UnlockWithSystemContext(ctx context.Context, path string, store SystemUnloc
 		return nil, ErrSystemUnlockExpired
 	}
 	now := time.Now()
-	if capsule.Version != 1 || capsule.Path != absolute || len(capsule.Identity) == 0 || now.Before(capsule.Created) || !now.Before(capsule.Expires) || capsule.Expires.Sub(capsule.Created) != 24*time.Hour {
+	if capsule.Version != 1 || capsule.Path != absolute || len(capsule.Identity) == 0 || now.Before(capsule.Created) || !now.Before(capsule.Expires) || !validSystemUnlockSpan(capsule.Expires.Sub(capsule.Created)) {
 		return nil, ErrSystemUnlockExpired
 	}
-	s := &Session{path: path, material: append([]byte(nil), capsule.Identity...), slotDigest: capsule.Slot, last: now, idle: idle, pending: make(map[*NativeField]bool)}
+	// Quick unlock restores the pre-enrollment material, not a full-factor
+	// unlock: newUnlockedSession's fullUnlock epoch is cleared below so this
+	// session can never extend or re-enroll OS quick unlock.
+	s := newUnlockedSession(path, append([]byte(nil), capsule.Identity...), capsule.Slot, now, idle)
+	s.fullUnlock = time.Time{}
 	if ctx.Err() != nil {
 		s.Lock()
 		return nil, ErrSessionLocked

@@ -1,1 +1,2 @@
 plugins/github-pull-reader/index.ts text eol=lf
+pkg/vaultfile/testdata/vaultfile-v1-vectors.json text eol=lf

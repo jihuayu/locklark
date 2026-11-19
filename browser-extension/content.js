@@ -355,7 +355,7 @@
     const b = element("button", label);
     b.type = "button";
     b.addEventListener("click", (e) => {
-      if (e.isTrusted) void action();
+      if (e.isTrusted) void action(e);
     });
     box.append(b);
     return b;
@@ -418,6 +418,26 @@
       return rect.width > 0 && rect.height > 0;
     } catch {
       return false;
+    }
+  }
+  // Credit-card fills cross an asynchronous native approval, so transient
+  // activation cannot be re-checked in the injected frame later. Mint a
+  // one-time proof (nonce plus its mint time) here, synchronously inside the
+  // trusted click. No tab/frame/document id is claimed: the worker binds the
+  // nonce to the sender the browser reports and consumes it exactly once.
+  function cardGesture(event) {
+    try {
+      if (event?.isTrusted !== true) return null;
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      if (activation != null && activation.isActive !== true) return null;
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const nonce = [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      return { v: 2, scope: "credit_card", at: Date.now(), nonce };
+    } catch {
+      return null;
     }
   }
   function deepAll(selector) {
@@ -1108,7 +1128,10 @@
           box,
           (row.title || "未命名条目") +
             (row.subtitle ? " · " + row.subtitle : ""),
-          () => {
+          (clickEvent) => {
+            const userGesture =
+              category === "credit_card" ? cardGesture(clickEvent) : null;
+            if (category === "credit_card" && !userGesture) return;
             dismiss();
             void send({
               type:
@@ -1117,6 +1140,7 @@
                   : "inline-fill-card",
               id: row.id,
               revision: row.revision,
+              ...(userGesture ? { userGesture } : {}),
             });
           },
         );
@@ -1639,6 +1663,7 @@
   let otpDetector = null,
     otpScanning = false,
     otpScanTimer = null,
+    otpObserver = null,
     otpScans = 0;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
@@ -1648,21 +1673,53 @@
       hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
     return hash.toString(36) + ":" + text.length;
   }
-  function otpPageRelevant() {
+  function otpPageRelevant(candidates = []) {
     if (
       /2fa|mfa|two[-_]?factor|authenticator|totp|otp|setup|security/i.test(
         location.pathname + location.search,
       )
     )
       return true;
+    // Never read body.innerText here: it forces a full-page style/layout flush
+    // on every mutation. Title, headings, dialogs, forms and the candidate's
+    // nearest container are layout-free and enough to recognize setup pages.
+    const pieces = [];
     try {
-      const text = String(document.body?.innerText || "").slice(0, 20000);
-      return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
-        text,
+      pieces.push(String(document.title || ""));
+    } catch {}
+    let nodes = [];
+    try {
+      nodes = document.querySelectorAll(
+        "h1,h2,h3,[role='dialog'],dialog,form",
       );
     } catch {
-      return false;
+      nodes = [];
     }
+    for (const node of nodes) {
+      if (pieces.length >= 64) break;
+      try {
+        pieces.push(String(node.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    for (const node of candidates) {
+      if (pieces.length >= 72) break;
+      try {
+        let container = null;
+        if (typeof node.closest === "function")
+          container = node.closest("form,[role='dialog'],dialog,main,section");
+        if (!container) {
+          const parent = node.parentElement || null;
+          const tag = String(parent?.tagName || "").toUpperCase();
+          if (parent && tag !== "BODY" && tag !== "HTML") container = parent;
+        }
+        if (container)
+          pieces.push(String(container.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    const text = pieces.join("\n").slice(0, 20000);
+    return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
+      text,
+    );
   }
   function otpImages() {
     const found = [];
@@ -1757,22 +1814,43 @@
     }
     button(box, "忽略", () => dismiss());
   }
+  function stopOTPCapture() {
+    if (otpScanTimer) {
+      clearTimeout(otpScanTimer);
+      otpScanTimer = null;
+    }
+    if (otpObserver) {
+      try {
+        otpObserver.disconnect();
+      } catch {}
+      otpObserver = null;
+    }
+  }
   async function otpScan() {
     if (
       otpScanning ||
       !otpDetector ||
       siteSettings.otpCapture === false ||
       document.visibilityState !== "visible" ||
-      otpScans >= OTP_SCAN_LIMIT ||
-      host ||
-      !otpPageRelevant()
+      host
     )
       return;
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture();
+      return;
+    }
+    // Candidate discovery is cheap and bounded. Do it before any page-text
+    // relevance check so ordinary pages never pay for relevance work and a
+    // scan with no QR-sized candidate exits without touching the page text.
+    const candidates = otpImages();
+    if (!candidates.length) return;
+    if (!otpPageRelevant(candidates)) return;
     otpScanning = true;
     try {
-      for (const node of otpImages()) {
+      for (const node of candidates) {
         otpSeen.add(node);
         otpScans++;
+        if (otpScans >= OTP_SCAN_LIMIT) stopOTPCapture();
         const found = await otpDecode(node);
         if (!found) continue;
         const key = otpHash(found.raw);
@@ -1786,6 +1864,10 @@
     }
   }
   function scheduleOTPScan(delay = 1500) {
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture();
+      return;
+    }
     if (otpScanTimer || !otpDetector || siteSettings.otpCapture === false) return;
     otpScanTimer = setTimeout(() => {
       otpScanTimer = null;
@@ -1810,11 +1892,14 @@
     });
     if (typeof MutationObserver === "function") {
       try {
-        new MutationObserver(() => scheduleOTPScan()).observe(
-          document.documentElement,
-          { childList: true, subtree: true },
-        );
-      } catch {}
+        otpObserver = new MutationObserver(() => scheduleOTPScan());
+        otpObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+        });
+      } catch {
+        otpObserver = null;
+      }
     }
   }
   void installOTPCapture();
@@ -2178,49 +2263,6 @@
   else void checkPendingSave();
   setTimeout(() => void checkPendingSave(), 1200);
 
-  function fillFields(fields) {
-    if (!fields || typeof fields !== "object" || Array.isArray(fields))
-      return 0;
-    const inputs = [...document.querySelectorAll("input,textarea,select")];
-    let filled = 0;
-    for (const [key, value] of Object.entries(fields).slice(0, 100)) {
-      if (typeof value !== "string" || value.length > 16384) continue;
-      const normalized = key.toLowerCase().replace(/[_-]/g, "");
-      const input = inputs.find((element) => {
-        if (element.disabled || element.readOnly) return false;
-        const autocomplete = (
-          element.getAttribute?.("autocomplete") ||
-          element.autocomplete ||
-          ""
-        )
-          .toLowerCase()
-          .replace(/[_-]/g, "");
-        return (
-          autocomplete === normalized ||
-          String(element.name || "")
-            .toLowerCase()
-            .replace(/[_-]/g, "") === normalized ||
-          String(element.id || "")
-            .toLowerCase()
-            .replace(/[_-]/g, "") === normalized
-        );
-      });
-      if (!input) continue;
-      const prototype =
-        input instanceof HTMLTextAreaElement
-          ? HTMLTextAreaElement.prototype
-          : input instanceof HTMLSelectElement
-            ? HTMLSelectElement.prototype
-            : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-      if (!setter) continue;
-      setter.call(input, value);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      filled++;
-    }
-    return filled;
-  }
   try {
     api.runtime.onMessage.addListener((message, sender, respond) => {
       if (!sender || sender.id !== api.runtime.id) return false;
@@ -2262,14 +2304,6 @@
           void showSuggestions(input);
         }
         respond({ opened: !!input });
-        return true;
-      }
-      if (message?.type === "locklark:fill-fields") {
-        let filled = 0;
-        try {
-          filled = fillFields(message.fields);
-        } catch {}
-        respond({ filled });
         return true;
       }
       return false;

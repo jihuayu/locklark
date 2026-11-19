@@ -17,8 +17,10 @@ func TestSecurityViewShowsSystemUnlockCapability(t *testing.T) {
 	for _, want := range []string{
 		"快捷解锁：" + osunlock.Label(),
 		osunlock.Description(),
-		"启用系统快捷解锁（有效期 24 小时）",
+		"启用系统快捷解锁",
 		"停用系统快捷解锁",
+		"应用更新",
+		"检查更新…",
 	} {
 		if !tester.HasText(want) {
 			t.Fatalf("security page missing %q", want)
@@ -28,7 +30,7 @@ func TestSecurityViewShowsSystemUnlockCapability(t *testing.T) {
 	// inside the viewport; otherwise the native acceptance driver cannot click
 	// them and users cannot turn quick unlock off.
 	small := ui.NewTester(a.securityView, 980, 680)
-	for _, label := range []string{"启用系统快捷解锁（有效期 24 小时）", "停用系统快捷解锁"} {
+	for _, label := range []string{"启用系统快捷解锁", "停用系统快捷解锁"} {
 		rect, ok := small.Find(label)
 		if !ok {
 			t.Fatalf("security page at minimum size missing %q", label)

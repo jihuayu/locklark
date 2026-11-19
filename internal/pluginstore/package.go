@@ -145,16 +145,23 @@ func Sign(p Release, key ed25519.PrivateKey) ([]byte, error) {
 // learned from the package itself. Canonical encoding rejects duplicate fields,
 // unknown fields, alternate casing, trailing data and noncanonical numbers.
 func Verify(raw []byte, id, publisher string) (Release, error) {
+	p, _, e := verifyDigest(raw, id, publisher)
+	return p, e
+}
+
+// verifyDigest returns the verified release and the SHA-256 digest of the exact
+// signed bytes it decoded, so callers need not hash the bundle twice.
+func verifyDigest(raw []byte, id, publisher string) (Release, string, error) {
 	if len(raw) == 0 || len(raw) > MaxPackage || !ValidID(id) {
-		return Release{}, ErrInvalid
+		return Release{}, "", ErrInvalid
 	}
 	key, e := publicKey(publisher)
 	if e != nil {
-		return Release{}, ErrInvalid
+		return Release{}, "", ErrInvalid
 	}
 	var p Release
 	if json.Unmarshal(raw, &p) != nil || !p.shape() || p.ID != id || p.Publisher != publisher || len(p.Signature) != 64 || !bytes.Equal(raw, encoded(p)) || !ed25519.Verify(key, p.proof(), p.Signature) {
-		return Release{}, ErrInvalid
+		return Release{}, "", ErrInvalid
 	}
-	return p, nil
+	return p, Digest(raw), nil
 }

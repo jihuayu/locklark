@@ -142,14 +142,34 @@ func fieldValue(detail *personal.ItemDetail, key string) (string, bool) {
 			return detail.Identity.BirthDate, true
 		case "company":
 			return detail.Identity.Company, true
+		case "department":
+			return detail.Identity.Department, true
 		case "job_title":
 			return detail.Identity.JobTitle, true
+		case "ssn":
+			return detail.Identity.SSN, true
+		case "passport_number":
+			return detail.Identity.PassportNumber, true
+		case "license_number":
+			return detail.Identity.LicenseNumber, true
 		case "email":
 			return detail.Identity.Email, true
 		case "phone":
 			return detail.Identity.Phone, true
 		case "address":
 			return joinNonEmpty(" ", detail.Identity.AddressLine1, detail.Identity.AddressLine2, detail.Identity.City, detail.Identity.State, detail.Identity.PostalCode, detail.Identity.Country), true
+		case "address_line1":
+			return detail.Identity.AddressLine1, true
+		case "address_line2":
+			return detail.Identity.AddressLine2, true
+		case "city":
+			return detail.Identity.City, true
+		case "state":
+			return detail.Identity.State, true
+		case "postal_code":
+			return detail.Identity.PostalCode, true
+		case "country":
+			return detail.Identity.Country, true
 		case "website":
 			return detail.Identity.Website, true
 		}
@@ -226,7 +246,8 @@ func isConcealedKey(detail *personal.ItemDetail, key string) bool {
 		}
 	}
 	switch key {
-	case "credit_card.number", "credit_card.verification", "credit_card.pin":
+	case "credit_card.number", "credit_card.verification", "credit_card.pin",
+		"identity.ssn", "identity.passport_number", "identity.license_number":
 		return true
 	}
 	return false
@@ -251,9 +272,69 @@ func fieldLabel(key string) string {
 		return "网站 " + strings.TrimPrefix(key, "url:")
 	}
 	if strings.HasPrefix(key, "credit_card.") {
+		switch strings.TrimPrefix(key, "credit_card.") {
+		case "name":
+			return "持卡人姓名"
+		case "type":
+			return "卡组织 / 类型"
+		case "number":
+			return "卡号"
+		case "verification":
+			return "安全码 (CVV/CVC)"
+		case "expiry":
+			return "有效期"
+		case "valid_from":
+			return "生效日期"
+		case "pin":
+			return "取现 / 交易 PIN"
+		case "issuing_bank":
+			return "发卡银行"
+		}
 		return "信用卡 " + strings.TrimPrefix(key, "credit_card.")
 	}
 	if strings.HasPrefix(key, "identity.") {
+		switch strings.TrimPrefix(key, "identity.") {
+		case "last_name":
+			return "姓"
+		case "first_name":
+			return "名"
+		case "middle_name":
+			return "中间名"
+		case "birth_date":
+			return "出生日期"
+		case "company":
+			return "公司 / 单位"
+		case "department":
+			return "部门"
+		case "job_title":
+			return "职位"
+		case "ssn":
+			return "身份证 / 证件号"
+		case "passport_number":
+			return "护照号"
+		case "license_number":
+			return "驾驶证号"
+		case "email":
+			return "电子邮箱"
+		case "phone":
+			return "手机 / 电话"
+		case "country":
+			return "国家 / 地区"
+		case "state":
+			return "省 / 直辖市 / 州"
+		case "city":
+			return "城市"
+		case "address":
+			return "地址"
+		case "address_line1":
+			return "街道地址"
+		case "address_line2":
+			return "详细地址（楼栋/门牌）"
+		case "postal_code":
+			return "邮政编码"
+		case "website":
+			return "个人网站"
+		}
 		return "身份 " + strings.TrimPrefix(key, "identity.")
 	}
 	if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
@@ -262,15 +343,27 @@ func fieldLabel(key string) string {
 	return key
 }
 
+// releasePlainDetail drops the unmasked detail once no disclosure still needs
+// it. Revealed fields and an open Large Type view are independent owners of the
+// same plaintext buffer, so one ending must not invalidate the other.
+func (a *App) releasePlainDetail() {
+	if len(a.v2.revealed) == 0 && !a.v2.largeTypeOpen {
+		a.v2.detailPlain = nil
+	}
+}
+
 // revealField toggles a concealed field. The unmasked value is held only in
-// detailPlain and is dropped when the exposure timer fires or the vault locks.
+// detailPlain and is dropped when the last exposure ends or the vault locks.
 func (a *App) revealField(key string) {
 	if a.v2.detail == nil {
 		return
 	}
 	if a.v2.revealed[key] {
 		delete(a.v2.revealed, key)
-		a.v2.revealUntil = time.Time{}
+		if len(a.v2.revealed) == 0 {
+			a.v2.revealUntil = time.Time{}
+			a.releasePlainDetail()
+		}
 		a.status = "字段已隐藏"
 		return
 	}
@@ -287,39 +380,189 @@ func (a *App) revealField(key string) {
 
 func (a *App) RevealField(key string) { a.revealField(key) }
 
+// narrowPasswordDisclosure is the only plaintext the security.revealPasswords
+// preference may surface by default: one password, read through the audited
+// Session.PrepareField("password", "show") capability and consumed immediately.
+// The value is held only in this narrow App state, never in a cached plaintext
+// detail; the UI renders it while the disclosure lease is live and hides it as
+// soon as the preference is turned off.
+type narrowPasswordDisclosure struct {
+	value    []byte
+	until    time.Time
+	itemID   string
+	revision string
+}
+
+func (d narrowPasswordDisclosure) current(itemID, revision string, now time.Time) bool {
+	return len(d.value) > 0 && d.itemID == itemID && d.revision == revision && now.Before(d.until)
+}
+
+// revealPasswordByDefault applies security.revealPasswords to the selected
+// item. Only a login item with a real stored password is considered, and the
+// value comes from a narrow password-only disclosure instead of a full
+// plaintext detail read. The read is deferred to the background ticker so the
+// selection's own detail read is not serialized behind it; the preference is
+// re-checked when the asynchronous result arrives, and turning the preference
+// off retracts any live value.
+func (a *App) revealPasswordByDefault() {
+	if a.session == nil || a.v2.detail == nil || !a.settingsSnapshot().RevealPasswords {
+		return
+	}
+	if a.defaultRevealAt.IsZero() {
+		a.defaultRevealAt = time.Now()
+	}
+}
+
+// defaultRevealDelay debounces the revealPasswords read after a selection so a
+// slow metadata read never queues behind it.
+const defaultRevealDelay = 500 * time.Millisecond
+
+// requestPasswordReveal starts at most one narrow password disclosure.
+func (a *App) requestPasswordReveal() {
+	d := a.v2.detail
+	if a.session == nil || d == nil || d.Kind != string(vault.CategoryLogin) || !a.settingsSnapshot().RevealPasswords || a.narrowRevealPending || a.busy || a.v2.narrowPassword.value != nil {
+		return
+	}
+	s, target := a.session, personal.RevealTarget{ID: d.ID, Revision: d.Revision, Field: "password"}
+	exposure, generation := a.exposureGeneration, a.generation
+	a.narrowRevealPending = true
+	a.narrowRevealSeq++
+	seq := a.narrowRevealSeq
+	// done clears pending only for the request that owns the sequence. A stale
+	// callback from an older read must never clear a newer request.
+	done := func() {
+		if a.narrowRevealSeq == seq {
+			a.narrowRevealPending = false
+		}
+	}
+	a.run(func() outcome {
+		f, err := s.PrepareField(target, "show")
+		if err != nil {
+			// runContext never runs drop for a plain error, so the failed read
+			// releases pending itself on the UI thread.
+			a.dispatch(done)
+			return outcome{err: err}
+		}
+		var disclosed narrowPasswordDisclosure
+		err = s.Consume(f, func(value []byte) error {
+			if len(value) == 0 {
+				return nil
+			}
+			disclosed = narrowPasswordDisclosure{value: append([]byte(nil), value...), until: time.Now().Add(15 * time.Second), itemID: target.ID, revision: target.Revision}
+			return nil
+		})
+		if err != nil {
+			clear(disclosed.value)
+			a.dispatch(done)
+			return outcome{err: err}
+		}
+		return outcome{drop: func() {
+			done()
+			clear(disclosed.value)
+		}, apply: func() {
+			done()
+			// Transfer ownership to the App before the deferred scratch clear.
+			value := disclosed.value
+			disclosed.value = nil
+			if len(value) == 0 || !a.settingsSnapshot().RevealPasswords || !a.narrowDisclosureCurrent(s, target, generation, exposure) {
+				clear(value)
+				return
+			}
+			disclosed.value = value
+			a.v2.narrowPassword = disclosed
+			a.v2.revealUntil = disclosed.until
+			a.status = "已按设置显示密码 15 秒"
+		}}
+	})
+}
+
+// narrowDisclosureCurrent is the UI-only staleness guard for an asynchronous
+// password disclosure: the same session, item, generation, exposure and vault
+// page must still be active.
+func (a *App) narrowDisclosureCurrent(s *personal.Session, target personal.RevealTarget, generation, exposure uint64) bool {
+	return a.exposureCurrent(s, personal.NativeOTPTarget{ID: target.ID, Revision: target.Revision}, generation, exposure) && a.v2.detail != nil && a.v2.detail.ID == target.ID && a.v2.detail.Kind == string(vault.CategoryLogin)
+}
+
+// hideNarrowPassword drops any live password-only disclosure. An active
+// preference re-arms itself for the still-selected login item through the
+// background ticker on the next explicit activity or selection; hiding here is
+// never followed by an automatic immediate reappearance within the same tick.
+func (a *App) hideNarrowPassword() bool {
+	if a.v2.narrowPassword.value == nil {
+		return false
+	}
+	clear(a.v2.narrowPassword.value)
+	a.v2.narrowPassword = narrowPasswordDisclosure{}
+	return true
+}
+
 func (a *App) hideRevealed() {
 	a.v2.revealed = map[string]bool{}
 	a.v2.revealUntil = time.Time{}
 	a.v2.detailPlain = nil
+	a.hideNarrowPassword()
+}
+
+// revealPasswordValue is the narrow-disclosure lookup used by the detail pane.
+func (a *App) revealPasswordValue() string {
+	d := a.v2.detail
+	if d == nil || !a.v2.narrowPassword.current(d.ID, d.Revision, time.Now()) {
+		return ""
+	}
+	return string(a.v2.narrowPassword.value)
 }
 
 // copyField copies a field with an owned clipboard lease. The background
-// ticker performs the clear even when no View is rendering.
+// ticker performs the clear even when no View is rendering. Non-concealed
+// fields are already present in the masked detail, so copying them must not
+// pull the full plaintext item into memory.
 func (a *App) copyField(key string) {
 	if a.v2.detail == nil {
 		return
 	}
+	a.onevra.copyIntent = key
+	if key == "otp" {
+		// A one-time code copied through the field action must honour the
+		// same OTP-validity cap as the dedicated "copy code" action.
+		a.requestOTP("copy")
+		return
+	}
+	if !isConcealedKey(a.v2.detail, key) {
+		value, ok := fieldValue(a.v2.detail, key)
+		a.copyValue(value, ok)
+		a.releasePlainDetail()
+		return
+	}
 	a.loadPlainDetail(func(plain *personal.ItemDetail) {
 		value, ok := fieldValue(plain, key)
-		if !ok {
-			a.status = "字段不存在"
-			return
-		}
-		if value == "" {
-			a.status = "字段为空"
-			return
-		}
-		s, generation := a.session, a.generation
-		valid := func() bool {
-			return a.session == s && a.generation == generation && a.v2.detail != nil
-		}
-		timeout := a.clipboardTimeout()
-		if err := a.writeClipboard([]byte(value), clipboardDeadline(timeout), valid); err != nil {
-			a.status = message(err)
-			return
-		}
-		a.status = clipboardStatus(timeout)
+		a.copyValue(value, ok)
+		a.releasePlainDetail()
 	})
+}
+
+func (a *App) copyValue(value string, ok bool) {
+	if !ok {
+		a.status = "字段不存在"
+		return
+	}
+	if value == "" {
+		a.status = "字段为空"
+		return
+	}
+	s, generation := a.session, a.generation
+	valid := func() bool {
+		return a.session == s && a.generation == generation && a.v2.detail != nil
+	}
+	timeout := a.clipboardTimeout()
+	if err := a.writeClipboard([]byte(value), clipboardDeadline(timeout), valid); err != nil {
+		a.status = message(err)
+		return
+	}
+	a.status = clipboardStatus(timeout)
+	if key := a.onevra.copyIntent; key != "" && a.v2.detail != nil {
+		a.markCopied(a.v2.detail.ID, key, timeout)
+	}
+	a.onevra.copyIntent = ""
 }
 
 func (a *App) CopyField(key string) { a.copyField(key) }
@@ -374,18 +617,15 @@ func (a *App) restoreHistory(index int) error {
 	id, revision := a.v2.detail.ID, a.v2.detail.Revision
 	filter := a.currentFilter()
 	query := a.currentV2Query()
-	var opErr error
 	var saved personal.ItemDetail
 	var snap v2Snapshot
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
 		newRevision, err := s.RestoreHistory(id, revision, index, g)
 		if err != nil {
-			opErr = err
 			return nativeResult{err: err}
 		}
 		saved, err = s.GetItemDetail(id, newRevision, false)
 		if err != nil {
-			opErr = err
 			return nativeResult{err: err}
 		}
 		snap = a.captureV2(s, filter)
@@ -401,12 +641,11 @@ func (a *App) restoreHistory(index int) error {
 		a.status = "条目历史已还原"
 	})
 	if !ok {
-		if opErr == nil {
-			opErr = personal.ErrMutationRefused
-		}
-		return opErr
+		return personal.ErrMutationRefused
 	}
-	return opErr
+	// The restore is asynchronous; its failure is reported through a.status by
+	// the dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) RestoreHistory(index int) error { return a.restoreHistory(index) }
@@ -434,6 +673,7 @@ func (a *App) closeLargeType() {
 	a.v2.largeTypeKey = ""
 	a.v2.largeTypeLabel = ""
 	a.v2.largeTypeValue = ""
+	a.releasePlainDetail()
 }
 
 func (a *App) CloseLargeType() { a.closeLargeType() }
@@ -511,5 +751,3 @@ func (a *App) largeTypeView(c *ui.Context) {
 		})
 	})
 }
-
-

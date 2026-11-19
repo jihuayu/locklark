@@ -8,7 +8,6 @@ import (
 	"github.com/egoist/mygo/ui"
 	pwgen "github.com/jihuayu/locklark/internal/password"
 	oneui "github.com/oneo-me/onevra/source/components"
-	"github.com/oneo-me/onevra/source/icons/lucide"
 )
 
 // generatorState is the desktop Password Generator popover state. It is part
@@ -208,156 +207,112 @@ func clipboardDeadline(timeout time.Duration) time.Time {
 	return time.Now().Add(timeout)
 }
 
-func generatorStrengthTone(entropy int) oneui.BadgeTone {
+func generatorStrengthColor(t *ui.Theme, entropy int) ui.Color {
 	switch {
 	case entropy >= 100:
-		return oneui.BadgeSuccess
+		return t.Success
 	case entropy >= 75:
-		return oneui.BadgeAccent
+		return t.Accent
 	case entropy >= 50:
-		return oneui.BadgeWarning
+		return t.Warning
 	default:
-		return oneui.BadgeDanger
+		return t.Danger
 	}
 }
 
 func (a *App) generatorView(c *ui.Context) {
 	t := c.Theme()
 	g := &a.v2.generator
-	ui.Column(c.Key("generator")).Role(ui.RoleGroup).Label("密码生成器").FillWidth().MinWidth(0).Gap(t.Space(3)).Children(func() {
-		// Header
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
-			iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
-				Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
-			iconBox.Children(func() {
-				oneui.Icon(c, lucide.Sparkles()).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
-			})
-			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
-				oneui.Text(c, "密码生成器").FontSize(t.Rem(1.35)).Bold().SingleLine()
-				oneui.Text(c, "基于系统级加密随机源生成高强度随机密码、易记短语或 PIN 码。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-			})
-		})
+	if g.preview == "" && g.status == "" {
+		a.regenerateGenerator()
+	}
+	ui.Column(c.Key("generator")).Role(ui.RoleGroup).Label("密码生成器").FillWidth().MinWidth(0).AlignItems(ui.Center).Children(func() {
+		ui.Column(c).FillWidth().MaxWidth(600).MinWidth(0).Gap(t.Space(4)).Children(func() {
+			onevraPageHeader(c, "密码生成器", "基于系统级加密随机源生成高强度随机密码、易记短语或 PIN 码。")
 
-		// Segmented mode selector
-		ui.Row(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(1.5)).Wrap().Gap(t.Space(1)).Children(func() {
-			for _, mode := range []struct {
-				id    pwgen.Mode
-				label string
-			}{
-				{pwgen.ModeRandom, "随机密码"},
-				{pwgen.ModeMemorable, "易记短语"},
-				{pwgen.ModePIN, "PIN 码"},
-			} {
-				mode := mode
-				variant := oneui.ButtonGhost
-				if g.mode == mode.id {
-					variant = oneui.ButtonPrimary
-				}
-				oneui.Button(c, mode.label, variant).OnClick(func() { a.setGeneratorMode(mode.id) })
+			if next, changed := onevraSegmented(c, string(g.mode), [][2]string{
+				{string(pwgen.ModeRandom), "随机密码"},
+				{string(pwgen.ModeMemorable), "易记短语"},
+				{string(pwgen.ModePIN), "PIN 码"},
+			}); changed {
+				a.setGeneratorMode(pwgen.Mode(next))
 			}
-		})
 
-		// Prominent preview card
-		ui.Column(c).FillWidth().Border(1, t.Accent.Alpha(.45)).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(3.5)).Gap(t.Space(2)).Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-				oneui.Text(c, "候选密码预览").FontSize(t.Rem(.76)).Bold().TextColor(t.TextMuted).Grow(1)
-				if g.entropy > 0 {
-					oneui.Badge(c, fmt.Sprintf("%s · %d bits", generatorStrength(g.entropy), g.entropy), oneui.BadgeOptions{
-						Tone: generatorStrengthTone(g.entropy),
-					})
-				}
-			})
-			previewBox := ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).
-				Background(t.Background).Padding(t.Space(2.5), t.Space(3))
-			previewBox.Children(func() {
-				shown := g.preview
-				if shown == "" {
-					shown = "—"
-				}
-				oneui.Text(c, shown).FontSize(t.Rem(1.25)).Bold().Wrap()
-			})
-			if g.status != "" {
-				oneui.Text(c, g.status).FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
-			}
-		})
-
-		// Mode options card
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(3)).Gap(t.Space(2.5)).Children(func() {
-			oneui.Text(c, "生成参数").Bold()
-			switch g.mode {
-			case pwgen.ModeMemorable:
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-					oneui.Text(c, fmt.Sprintf("词数：%d", g.wordCount)).Bold().Grow(1)
-					oneui.Button(c, "减少词数", oneui.ButtonOutline).Disabled(g.wordCount <= 3).OnClick(func() {
-						if g.wordCount > 3 {
-							g.wordCount--
-							a.regenerateGenerator()
-						}
-					})
-					oneui.Button(c, "增加词数", oneui.ButtonOutline).Disabled(g.wordCount >= 15).OnClick(func() {
-						if g.wordCount < 15 {
-							g.wordCount++
-							a.regenerateGenerator()
+			// Candidate preview surface
+			onevraGroup(c, "候选密码预览", func(row func(func())) {
+				row(func() {
+					ui.Column(c).FillWidth().MinWidth(0).Gap(t.Space(2)).Children(func() {
+						ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+							ui.Column(c).Grow(1).MinWidth(0).Children(func() {
+								shown := g.preview
+								if shown == "" {
+									shown = "—"
+								}
+								onevraSecretText(c, shown)
+							})
+							if g.entropy > 0 {
+								onevraPill(c, fmt.Sprintf("%s · %d bits", generatorStrength(g.entropy), g.entropy), generatorStrengthColor(t, g.entropy))
+							}
+						})
+						if g.status != "" {
+							oneui.Text(c, g.status).FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
 						}
 					})
 				})
-				sep := oneui.TextBox(c, &g.separator, oneui.TextBoxOptions{}).Label("分隔符").Placeholder("hyphens, spaces, periods, commas, underscores, numbers")
-				if sep.Changed() {
-					a.regenerateGenerator()
-				}
-				oneui.Checkbox(c, &g.capitalize, "首字母大写").OnChange(a.regenerateGenerator)
-			case pwgen.ModePIN:
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-					oneui.Text(c, fmt.Sprintf("PIN 长度：%d", g.pinLength)).Bold().Grow(1)
-					oneui.Button(c, "缩短 PIN", oneui.ButtonOutline).Disabled(g.pinLength <= 3).OnClick(func() {
-						if g.pinLength > 3 {
-							g.pinLength--
-							a.regenerateGenerator()
-						}
-					})
-					oneui.Button(c, "加长 PIN", oneui.ButtonOutline).Disabled(g.pinLength >= 12).OnClick(func() {
-						if g.pinLength < 12 {
-							g.pinLength++
-							a.regenerateGenerator()
-						}
-					})
-				})
-			default:
-				ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-					oneui.Text(c, fmt.Sprintf("密码长度：%d", g.length)).Bold().Grow(1)
-					oneui.Button(c, "缩短长度", oneui.ButtonOutline).Disabled(g.length <= 8).OnClick(func() {
-						if g.length > 8 {
-							g.length--
-							a.regenerateGenerator()
-						}
-					})
-					oneui.Button(c, "加长长度", oneui.ButtonOutline).Disabled(g.length >= 64).OnClick(func() {
-						if g.length < 64 {
-							g.length++
-							a.regenerateGenerator()
-						}
-					})
-				})
-				ui.Row(c).FillWidth().Wrap().Gap(t.Space(3)).Children(func() {
-					oneui.Checkbox(c, &g.digits, "包含数字").OnChange(a.regenerateGenerator)
-					oneui.Checkbox(c, &g.symbols, "包含符号").OnChange(a.regenerateGenerator)
-				})
-			}
-		})
+			})
 
-		// Action bar
-		ui.Row(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
-			Padding(t.Space(2.5), t.Space(3)).Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
-			oneui.Button(c, "重新生成", oneui.ButtonSecondary).OnClick(a.regenerateGenerator)
-			oneui.Button(c, "复制密码", oneui.ButtonSecondary).OnClick(a.copyGeneratorPassword)
-			if a.v2.draft != nil {
-				oneui.Button(c, "填入当前条目", oneui.ButtonPrimary).OnClick(a.useGenerator)
-			}
-			ui.Spacer(c)
-			oneui.Button(c, "关闭生成器", oneui.ButtonOutline).OnClick(a.closeGenerator)
+			// Mode parameters
+			onevraSettingsGroup(c, "生成参数", func(row func(string, string, func())) {
+				switch g.mode {
+				case pwgen.ModeMemorable:
+					row("词数", "短语中包含的单词数量（3–15）", func() {
+						a.onevraStepper(c, fmt.Sprintf("%d 个词", g.wordCount), &g.wordCount, 3, 15)
+					})
+					row("分隔符", "单词之间的分隔符类型", func() {
+						sep := oneui.TextBox(c, &g.separator, oneui.TextBoxOptions{}).Label("分隔符").
+							Placeholder("hyphens, spaces, periods").Width(180)
+						if sep.Changed() {
+							a.regenerateGenerator()
+						}
+					})
+					row("首字母大写", "", func() {
+						if v, changed := onevraSwitch(c, "首字母大写", g.capitalize); changed {
+							g.capitalize = v
+							a.regenerateGenerator()
+						}
+					})
+				case pwgen.ModePIN:
+					row("PIN 长度", "数字位数（3–12）", func() {
+						a.onevraStepper(c, fmt.Sprintf("%d 位", g.pinLength), &g.pinLength, 3, 12)
+					})
+				default:
+					row("密码长度", "总字符长度（8–64）", func() {
+						a.onevraStepper(c, fmt.Sprintf("%d 位", g.length), &g.length, 8, 64)
+					})
+					row("包含数字", "", func() {
+						if v, changed := onevraSwitch(c, "包含数字", g.digits); changed {
+							g.digits = v
+							a.regenerateGenerator()
+						}
+					})
+					row("包含符号", "", func() {
+						if v, changed := onevraSwitch(c, "包含符号", g.symbols); changed {
+							g.symbols = v
+							a.regenerateGenerator()
+						}
+					})
+				}
+			})
+
+			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+				oneui.Button(c, "重新生成", oneui.ButtonOutline).OnClick(a.regenerateGenerator)
+				oneui.Button(c, "复制密码", oneui.ButtonSecondary).OnClick(a.copyGeneratorPassword)
+				if a.v2.draft != nil {
+					oneui.Button(c, "填入当前条目", oneui.ButtonPrimary).OnClick(a.useGenerator)
+				}
+				ui.Spacer(c)
+				oneui.Button(c, "关闭生成器", oneui.ButtonGhost).OnClick(a.closeGenerator)
+			})
 		})
 	})
 }

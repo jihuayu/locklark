@@ -13,6 +13,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if code, handled := runUpdaterStartupHelperMain(); handled {
+		os.Exit(code)
+	}
 	if os.Getenv("LOCKLARK_NATIVE_SMOKE") != "1" {
 		os.Exit(m.Run())
 	}

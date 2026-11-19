@@ -27,6 +27,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from browserrelease import prebuilt as browserrelease_prebuilt
+
 ROOT = Path(__file__).resolve().parent.parent
 EXTENSION_DIR = ROOT / "browser-extension"
 BUILD_SCRIPT = EXTENSION_DIR / "build.js"
@@ -616,14 +618,61 @@ def _atomic_write(path: Path, data: bytes) -> None:
                 pass
 
 
-def package(product: str, output: str) -> dict:
+def _prebuilt_bundle(
+    product: str, prepared_dir: str, dist_dir: str
+) -> tuple[dict[str, bytes], bytes]:
+    """Strictly consume a verified v2 pair without rebuilding or re-reading it."""
+    try:
+        _summary, files, zip_bytes = browserrelease_prebuilt.verify_prebuilt_bytes(
+            product,
+            Path(prepared_dir),
+            Path(dist_dir),
+            root=ROOT,
+        )
+    except Exception:
+        _fail("prebuilt browser extension input rejected")
+    if not isinstance(files, dict) or set(files) != set(ZIP_ENTRIES):
+        _fail("prebuilt browser extension input rejected")
+    for name in ZIP_ENTRIES:
+        if not isinstance(files[name], bytes):
+            _fail("prebuilt browser extension input rejected")
+    with tempfile.TemporaryDirectory(prefix="locklark-prebuilt-") as temporary:
+        directory = Path(temporary)
+        os.chmod(directory, 0o700)
+        for name in ZIP_ENTRIES:
+            target = directory / name
+            target.write_bytes(files[name])
+            os.chmod(target, 0o600)
+        legacy_files = read_bundle(directory, product)
+    legacy_zip = build_zip(legacy_files)
+    if legacy_zip != zip_bytes:
+        _fail("prebuilt browser extension input rejected")
+    return legacy_files, legacy_zip
+
+
+def package(
+    product: str,
+    output: str,
+    prepared_dir: str | None = None,
+    dist_dir: str | None = None,
+) -> dict:
     if product not in PRODUCTS:
         _fail("unsupported product")
+    if (prepared_dir is None) != (dist_dir is None):
+        _fail("--prepared-dir and --dist must be provided together")
+    prebuilt_files = prebuilt_zip = None
+    if prepared_dir is not None:
+        prebuilt_files, prebuilt_zip = _prebuilt_bundle(
+            product, prepared_dir, dist_dir
+        )
     output_dir = prepare_output(output, product)
-    _preflight_source()
-    _run_build(product)
-    files = read_bundle(EXTENSION_DIR / "dist" / product, product)
-    zip_bytes = build_zip(files)
+    if prepared_dir is None:
+        _preflight_source()
+        _run_build(product)
+        files = read_bundle(EXTENSION_DIR / "dist" / product, product)
+        zip_bytes = build_zip(files)
+    else:
+        files, zip_bytes = prebuilt_files, prebuilt_zip
     artifact_name = f"locklark-browser-extension-{product}-unsigned.zip"
     receipt_name = f"locklark-browser-extension-{product}-unsigned.receipt.json"
     receipt = _receipt(product, files, zip_bytes, artifact_name)
@@ -652,9 +701,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--product", required=True, choices=PRODUCTS)
     parser.add_argument("--output", required=True, help="existing parent; absolute directory")
+    parser.add_argument("--prepared-dir", help="verified browserrelease v2 prepared pair")
+    parser.add_argument("--dist", help="verified unpacked product dist for the pair")
     args = parser.parse_args(argv)
     try:
-        summary = package(args.product, args.output)
+        summary = package(
+            args.product, args.output, args.prepared_dir, args.dist
+        )
     except PackagingError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1

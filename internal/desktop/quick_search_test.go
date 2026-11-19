@@ -10,6 +10,7 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 )
 
 func quickSearchDisclosureAction(action string) bool {
@@ -432,4 +433,92 @@ func TestQuickSearchFailuresReleaseSlotWithoutLeakingErrorDetails(t *testing.T) 
 		t.Fatal("failed query did not release slot")
 	}
 	a.closeQuickSearch()
+}
+
+// V2 renders from a.v2, so a Quick Search selection must move the V2 selection
+// instead of silently leaving the previously selected item in place.
+func TestQuickSearchSelectionUpdatesV2Workspace(t *testing.T) {
+	a := dailyAppFixture(t)
+	first, e := a.session.AddLogin("V2 first account", "synthetic-user", "synthetic-value")
+	if e != nil {
+		t.Fatal(e)
+	}
+	second, e := a.session.AddLogin("V2 target account", "synthetic-target", "synthetic-target-value")
+	if e != nil {
+		t.Fatal(e)
+	}
+	a.EnableV2()
+	a.launch = func(f func()) { f() }
+	a.reloadV2(false)
+	if a.v2.selectedID != "" {
+		t.Fatal("fixture started with a V2 selection")
+	}
+	a.openQuickSearch()
+	a.quick.query = "target"
+	a.searchQuick()
+	if len(a.quick.rows) != 1 || a.quick.rows[0].ID != second {
+		t.Fatal("quick search did not narrow to the synthetic target")
+	}
+	target := a.quick.rows[0]
+	a.chooseQuickResult(a.quick.generation, a.quick.sequence, target)
+	if a.quick.open || a.v2.selectedID != second || a.v2.selectedRevision != target.Revision || a.v2.detail == nil || a.v2.detail.ID != second {
+		t.Fatal("V2 quick-search selection did not select the chosen item")
+	}
+	if a.page != "vault" || a.v2.nav != navAllItems || a.scope != "active" {
+		t.Fatal("V2 quick-search selection did not return to the active all-items list")
+	}
+	if a.v2.detailPlain != nil || a.v2.detail.Kind != "login" || len(a.v2.revealed) != 0 || a.display != "" || a.otpDisplay != "" {
+		t.Fatal("quick-search selection disclosed values")
+	}
+	// Selecting the other login afterwards keeps the panel consistent.
+	a.openQuickSearch()
+	a.quick.query = "first"
+	a.searchQuick()
+	other := a.quick.rows[0]
+	if other.ID != first {
+		t.Fatal("second quick search returned the wrong row")
+	}
+	a.chooseQuickResult(a.quick.generation, a.quick.sequence, other)
+	if a.v2.selectedID != first || a.v2.detail == nil || a.v2.detail.ID != first {
+		t.Fatal("second V2 quick-search selection did not move the selection")
+	}
+	events, e := a.session.Audit()
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, ev := range events {
+		if quickSearchDisclosureAction(ev.Action) {
+			t.Fatal("V2 quick-search selection created disclosure intent")
+		}
+	}
+}
+
+func TestQuickSearchProjectionExcludesNonLoginV2Items(t *testing.T) {
+	a := dailyAppFixture(t)
+	// One gate owns one native mutation, so each kind is added with its own
+	// registered gate against the real temporary vault.
+	notes, cards := personal.NewMutationGate(time.Now().Add(time.Minute)), personal.NewMutationGate(time.Now().Add(time.Minute))
+	if e := a.session.RegisterMutation(notes); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e := a.session.AddItem(vault.Item{Kind: "secure_note", Category: vault.CategorySecureNote, Title: "Quick note", Notes: "synthetic-note"}, notes); e != nil {
+		t.Fatal(e)
+	}
+	if e := a.session.RegisterMutation(cards); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e := a.session.AddItem(vault.Item{Kind: "credit_card", Category: vault.CategoryCreditCard, Title: "Quick card", CreditCard: &vault.CreditCardDetails{CardholderName: "Card Holder", Type: "visa", Number: "4242424242424242", Verification: "123", ExpiryDate: "2028-12"}}, cards); e != nil {
+		t.Fatal(e)
+	}
+	login, e := a.session.AddLogin("Quick login", "synthetic-user", "synthetic-value")
+	if e != nil {
+		t.Fatal(e)
+	}
+	a.launch = func(f func()) { f() }
+	a.openQuickSearch()
+	a.quick.query = "Quick"
+	a.searchQuick()
+	if len(a.quick.rows) != 1 || a.quick.rows[0].ID != login {
+		t.Fatal("quick search exposed non-login V2 items to legacy login controls")
+	}
 }

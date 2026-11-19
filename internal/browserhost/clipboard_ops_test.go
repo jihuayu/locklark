@@ -2,6 +2,8 @@ package browserhost
 
 import (
 	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -152,21 +154,30 @@ func clipboardRequest(c *Connection, id int, kind string) Request {
 	return Request{V: 1, ID: reqID(id), Type: kind, Capability: c.capability}
 }
 
+// clipboardHandle runs one request and returns only the response whose ID
+// matches it. Async work for other request IDs may append its response first,
+// so the last newly observed frame is not necessarily the requested reply.
 func clipboardHandle(t *testing.T, c *Connection, out *memoryPipe, r Request) Response {
 	t.Helper()
-	before := len(out.responses(t))
 	if e := c.Handle(r); e != nil {
 		t.Fatalf("handle %s: %v", r.Type, e)
 	}
+	return clipboardReply(t, out, r.ID)
+}
+
+// clipboardReply waits up to one second for the response carrying id.
+func clipboardReply(t *testing.T, out *memoryPipe, id string) Response {
+	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		all := out.responses(t)
-		if len(all) > before {
-			return all[len(all)-1]
+		for _, resp := range out.responses(t) {
+			if resp.ID == id {
+				return resp
+			}
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("no response for %s", r.Type)
+	t.Fatalf("no response for request id")
 	return Response{}
 }
 
@@ -582,8 +593,48 @@ func TestClipboardGenericCancelDropsQueuedJob(t *testing.T) {
 	if !fake.runNext() {
 		t.Fatal("cancelled job did not dispatch")
 	}
+	if fake.runNext() {
+		t.Fatal("cancelled job or later work dispatched again")
+	}
 	if writes, _ := fake.count(); writes != 0 {
 		t.Fatalf("cancelled queued job wrote natively: %d", writes)
+	}
+	if clipboardOfferPending(clipboardManager(c)) {
+		t.Fatal("cancelled queued job left a pending offer")
+	}
+}
+
+// TestClipboardGenericCancelIgnoresInterleavedResponse pins request-ID
+// correlation on the wire. A cancelled response for the cancel request is
+// followed by an unrelated asynchronous redacted copy-result, as async work for
+// another request can append after it; the selector must return the frame whose
+// ID equals the cancel request, not the last frame.
+func TestClipboardGenericCancelIgnoresInterleavedResponse(t *testing.T) {
+	out := &memoryPipe{}
+	cancelID, asyncID := reqID(90), reqID(91)
+	writeResponse(t, out, Response{ID: cancelID, Type: "cancelled"})
+	writeResponse(t, out, Response{ID: asyncID, Type: "copy-result", CopyMode: "native", State: "refused"})
+
+	cancel := Request{V: 1, ID: cancelID, Type: "cancel"}
+	if got := clipboardReply(t, out, cancel.ID); got.ID != cancel.ID || got.Type != "cancelled" {
+		t.Fatalf("cancel reply id match=%t type=%q", got.ID == cancel.ID, got.Type)
+	}
+	if got := clipboardReply(t, out, asyncID); got.ID != asyncID || got.Type != "copy-result" || got.State != "refused" || got.Copied {
+		t.Fatalf("async reply id match=%t type=%q state=%q", got.ID == asyncID, got.Type, got.State)
+	}
+}
+
+// writeResponse appends one framed response to out using the wire encoding
+// memoryPipe records. It carries only the metadata supplied by the caller.
+func writeResponse(t *testing.T, out *memoryPipe, r Response) {
+	t.Helper()
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := binary.NativeEndian.AppendUint32(nil, uint32(len(raw)))
+	if _, err := out.Write(append(frame, raw...)); err != nil {
+		t.Fatal(err)
 	}
 }
 

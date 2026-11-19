@@ -13,19 +13,21 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
-func TestLegacyMobileLoginProjectionExcludesSSHKeys(t *testing.T) {
-	rows := rowsResult([]personal.Row{{Kind: "login", ID: "login"}, {Kind: "ssh-key", ID: "ssh"}, {Kind: "document", ID: "document"}})
-	if rows.Count() != 2 {
-		t.Fatal("SSH key leaked into legacy mobile login controls")
+func TestLegacyMobileLoginProjectionExcludesNonLoginItems(t *testing.T) {
+	rows := rowsResult([]personal.Row{
+		{Kind: "login", ID: "login"}, {Kind: "ssh-key", ID: "ssh"}, {Kind: "document", ID: "document"},
+		{Kind: "credit_card", ID: "card"}, {Kind: "identity", ID: "identity"}, {Kind: "secure_note", ID: "note"},
+	})
+	if rows.Count() != 1 {
+		t.Fatal("non-login item leaked into legacy mobile login controls")
 	}
-	for i := 0; i < rows.Count(); i++ {
-		r, e := rows.At(i)
-		if e != nil || r.ID == "ssh" {
-			t.Fatal("SSH projection was not excluded")
-		}
+	r, e := rows.At(0)
+	if e != nil || r.ID != "login" {
+		t.Fatal("login projection was not the only retained row")
 	}
 }
 
@@ -271,4 +273,54 @@ func TestMobileLoginEditsPreserveActualEncryptedSSHKey(t *testing.T) {
 		t.Fatal("mixed login regenerated value was not usable")
 	}
 	f.verifyStoredSSHKey(t)
+}
+
+// Non-login V2 items persisted in a real temporary vault must never appear in
+// the legacy mobile login list or search: acting on such a row would be
+// refused as invalid and lock the session.
+func TestMobileTemporaryVaultHidesNonLoginV2Items(t *testing.T) {
+	f := mixedMobileSSHFixture(t)
+	session, err := personal.UnlockSession(f.path, []byte("mobile-fixture"), bytes.Clone(f.accountKey), time.Minute)
+	if err != nil {
+		t.Fatal("mixed personal unlock failed")
+	}
+	gate := personal.NewMutationGate(time.Now().Add(30 * time.Second))
+	defer gate.Cancel()
+	defer session.ReleaseMutation(gate)
+	if session.RegisterMutation(gate) != nil {
+		t.Fatal("mixed note gate failed")
+	}
+	if _, _, err := session.AddItem(vault.Item{Kind: "secure_note", Category: vault.CategorySecureNote, Title: "Mixed boundary note", Notes: "synthetic-note"}, gate); err != nil {
+		t.Fatal("mixed note creation failed")
+	}
+	all, err := session.List("all")
+	if err != nil || len(all) != 3 {
+		t.Fatal("mixed vault fixture did not persist all item kinds")
+	}
+	session.Lock()
+	for _, state := range []string{"active", "all"} {
+		rows, err := f.vault.List(state)
+		if err != nil || rows.Count() != 1 {
+			t.Fatal("mobile list exposed a non-login item or lost the login")
+		}
+		row, err := rows.At(0)
+		if err != nil || row.ID != f.login.ID {
+			t.Fatal("mobile list returned a non-login target")
+		}
+		rows, err = f.vault.Search("Mixed boundary", state)
+		if err != nil || rows.Count() != 1 {
+			t.Fatal("mobile search exposed a non-login item or lost the login")
+		}
+		row, err = rows.At(0)
+		if err != nil || row.ID != f.login.ID {
+			t.Fatal("mobile search returned a non-login target")
+		}
+		rows, err = f.vault.Search("Mixed boundary note", state)
+		if err != nil || rows.Count() != 0 {
+			t.Fatal("note-only search exposed a mobile row")
+		}
+	}
+	if !f.vault.IsUnlocked() {
+		t.Fatal("metadata listing changed the session lock state")
+	}
 }

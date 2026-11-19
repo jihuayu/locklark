@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/preview"
 	"github.com/jihuayu/locklark/internal/teambootstrapcli"
 )
@@ -62,6 +63,10 @@ PERSONAL VAULT (locklark personal <action> --file PATH ...)
     personal passkey-export                           --file PATH --invitation FILE --target-pin HEX64 --selection PRIVATE_JSON --out NEW_PACKET
     personal passkey-plan                             --file PATH --invitation FILE --packet FILE --source-pin HEX64
     personal passkey-import                           --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
+
+  OneDrive OAuth (OS credential store, refresh token only)
+    personal onedrive login|refresh                   --client-id ID --tenant TENANT --scopes SCOPE_LIST
+    personal onedrive status|logout                   --client-id ID --tenant TENANT
 
 CLI WRAPPERS (locklark cli <command> ...)
   cli profiles
@@ -117,6 +122,7 @@ SYNTHETIC GATEWAY PREVIEW & MCP BRIDGE
 
 NOTES
   - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
+  - onedrive login|status|logout store only a OneDrive refresh token, in the OS credential store, never a plaintext fallback.
   - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
   - The metadata request command accepts only ` + preview.FixtureRef + `.
   - request records a pending request. It cannot release any credential.
@@ -263,6 +269,17 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	return json.NewEncoder(out).Encode(result)
 }
+
+// cliErrorText gives capacity refusals a fixed, user-safe message instead of
+// the internal personal error. The vault stays unlocked and unchanged;
+// malformed snapshot and verification errors keep their own text.
+func cliErrorText(err error) string {
+	if errors.Is(err, personal.ErrSnapshotCapacity) || errors.Is(err, personal.ErrImportCapacity) {
+		return "金库容量不足：此操作加密后将超过金库存储上限，未保存，原金库保持不变。请删除或缩小大型条目或附件后重试"
+	}
+	return err.Error()
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -272,7 +289,7 @@ func main() {
 		if errors.As(err, &child) {
 			os.Exit(child.code)
 		}
-		fmt.Fprintln(os.Stderr, "locklark:", err)
+		fmt.Fprintln(os.Stderr, "locklark:", cliErrorText(err))
 		os.Exit(teambootstrapcli.ExitCode(err))
 	}
 }

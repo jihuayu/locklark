@@ -212,6 +212,8 @@ function makeHarness(options = {}) {
   const documentListeners = {};
   const windowListeners = {};
   const timers = [];
+  const mutationObservers = [];
+  const detections = { count: 0 };
   let timerSerial = 0;
 
   const body = new Element("body");
@@ -225,7 +227,8 @@ function makeHarness(options = {}) {
     visibilityState: "visible",
     documentElement,
     body,
-    baseURI: ORIGIN + "/settings/2fa",
+    title: options.title ?? "",
+    baseURI: ORIGIN + (options.pathname ?? "/settings/2fa"),
     activeElement: null,
     _listeners: documentListeners,
     createElement(tag) {
@@ -338,6 +341,7 @@ function makeHarness(options = {}) {
       this.formats = init?.formats || [];
     }
     async detect(node) {
+      detections.count++;
       if (!node || typeof node._qr !== "string") return [];
       return [{ rawValue: node._qr }];
     }
@@ -350,9 +354,12 @@ function makeHarness(options = {}) {
       origin: ORIGIN,
       protocol: "https:",
       hostname: "example.test",
-      href: ORIGIN + "/settings/2fa",
-      pathname: "/settings/2fa",
-      search: "",
+      href:
+        ORIGIN +
+        (options.pathname ?? "/settings/2fa") +
+        (options.search ?? ""),
+      pathname: options.pathname ?? "/settings/2fa",
+      search: options.search ?? "",
     },
     isSecureContext: true,
     Element,
@@ -360,8 +367,20 @@ function makeHarness(options = {}) {
     HTMLTextAreaElement,
     HTMLSelectElement,
     MutationObserver: class {
-      observe() {}
-      disconnect() {}
+      constructor(callback) {
+        this.callback = callback;
+        this.target = null;
+        this.config = null;
+        this.disconnected = false;
+        mutationObservers.push(this);
+      }
+      observe(target, config) {
+        this.target = target;
+        this.config = config;
+      }
+      disconnect() {
+        this.disconnected = true;
+      }
     },
     BarcodeDetector,
     navigator: {},
@@ -403,6 +422,21 @@ function makeHarness(options = {}) {
   const harness = {
     document,
     sent,
+    detections: () => detections.count,
+    otpObserver: () =>
+      mutationObservers.find(
+        (observer) =>
+          observer.config?.childList === true &&
+          observer.config?.subtree === true &&
+          observer.config?.attributes !== true,
+      ),
+    triggerOTPMutation() {
+      for (const observer of mutationObservers) {
+        if (observer.disconnected) continue;
+        if (observer.config?.attributes === true) continue;
+        observer.callback([], observer);
+      }
+    },
     image(qr, attributes = {}) {
       const node = new Element("img");
       for (const [name, value] of Object.entries(attributes))
@@ -695,4 +729,85 @@ test("a failed save leaves the panel open with a status", async () => {
   await h.click("保存到 Example login");
   assert.match(h.panelText(), /保存失败/);
   assert.ok(h.panel(), "the panel stays open so the user can retry");
+});
+
+test("a page without a QR-sized candidate never reads innerText", async () => {
+  const h = makeHarness({ pathname: "/dashboard" });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "Scan this QR code with your authenticator app";
+    },
+  });
+  await h.runTimers();
+  assert.equal(reads, 0, "candidate discovery must run before page text");
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+});
+
+test("layout-free heading and title text still recognizes a setup page", async () => {
+  const h = makeHarness({ pathname: "/dashboard" });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "";
+    },
+  });
+  const heading = h.document.createElement("h1");
+  heading.textContent = "Scan this QR code with your authenticator app";
+  h.document.documentElement.append(heading);
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.match(h.panelText(), /保存两步验证/);
+  assert.equal(reads, 0, "relevance must not force a layout flush");
+});
+
+test("body-only text is not used as a whole-page relevance signal", async () => {
+  const h = makeHarness({
+    pathname: "/dashboard",
+    bodyText: "Scan this QR code with your authenticator app",
+  });
+  let reads = 0;
+  Object.defineProperty(h.document.body, "innerText", {
+    configurable: true,
+    get() {
+      reads++;
+      return "";
+    },
+  });
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.equal(h.panel(), null);
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-otp-capture"),
+    false,
+  );
+  assert.equal(reads, 0);
+});
+
+test("the OTP MutationObserver disconnects at the scan limit", async () => {
+  const h = makeHarness();
+  for (let index = 0; index < 24; index++)
+    h.image("https://example.test/not-a-totp/" + index);
+  await h.runTimers();
+  assert.ok(h.detections() > 0, "the first batch was scanned");
+  assert.equal(h.otpObserver()?.disconnected, false);
+
+  h.triggerOTPMutation();
+  await h.runTimers();
+  h.triggerOTPMutation();
+  await h.runTimers();
+
+  assert.equal(h.otpObserver()?.disconnected, true);
+  const scanned = h.detections();
+  assert.equal(scanned, 24, "each candidate is decoded at most once");
+  h.triggerOTPMutation();
+  await h.runTimers();
+  assert.equal(h.detections(), scanned, "no decode after the scan limit");
 });

@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const root = path.join(__dirname, "..");
@@ -19,12 +20,47 @@ function ids(html) {
     [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]),
   );
 }
-function build(mode) {
-  execFileSync(process.execPath, [path.join(root, "build.js"), mode], {
-    cwd: path.join(root, ".."),
+const BUILD_SOURCE_FILES = [
+  "build.js",
+  "release-version.json",
+  "core.js",
+  "content.js",
+  "webauthn.js",
+  "background.js",
+  "popup.html",
+  "popup.css",
+  "popup.js",
+  "options.html",
+  "options.css",
+  "options.js",
+];
+
+function createBuildFixture() {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "locklark-popup-build-"));
+  const buildRoot = path.join(fixture, "browser-extension");
+  try {
+    fs.mkdirSync(buildRoot, { mode: 0o700 });
+    for (const name of BUILD_SOURCE_FILES) {
+      fs.copyFileSync(path.join(root, name), path.join(buildRoot, name));
+    }
+  } catch (error) {
+    fs.rmSync(fixture, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    buildRoot,
+    cleanup() {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    },
+  };
+}
+
+function build(mode, buildRoot) {
+  execFileSync(process.execPath, [path.join(buildRoot, "build.js"), mode], {
+    cwd: path.dirname(buildRoot),
     stdio: "pipe",
   });
-  const out = path.join(root, "dist", mode);
+  const out = path.join(buildRoot, "dist", mode);
   return {
     out,
     manifest: JSON.parse(
@@ -156,7 +192,9 @@ test("background implements shortcut and options storage synchronization", () =>
   assert.match(backgroundJS, /"open-and-fill"/);
 });
 
-test("build emits options UI, autofill/lock commands, and compatible manifests", () => {
+test("build emits options UI, autofill/lock commands, and compatible manifests", (t) => {
+  const fixture = createBuildFixture();
+  t.after(fixture.cleanup);
   assert.match(buildJS, /options_ui/);
   assert.match(buildJS, /\bautofill\s*:/);
   assert.match(buildJS, /\block\s*:/);
@@ -164,7 +202,7 @@ test("build emits options UI, autofill/lock commands, and compatible manifests",
   assert.match(buildJS, /"options\.css"/);
   assert.match(buildJS, /"options\.js"/);
 
-  const chromium = build("chromium");
+  const chromium = build("chromium", fixture.buildRoot);
   assert.deepEqual(chromium.manifest.options_ui, {
     page: "options.html",
     open_in_tab: true,
@@ -181,7 +219,7 @@ test("build emits options UI, autofill/lock commands, and compatible manifests",
   for (const name of ["options.html", "options.css", "options.js"])
     assert.ok(fs.existsSync(path.join(chromium.out, name)), name);
 
-  const firefox = build("firefox");
+  const firefox = build("firefox", fixture.buildRoot);
   assert.deepEqual(firefox.manifest.options_ui, {
     page: "options.html",
     open_in_tab: true,

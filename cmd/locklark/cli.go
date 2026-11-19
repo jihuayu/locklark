@@ -1050,6 +1050,7 @@ func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec clipro
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
+		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), args...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,
@@ -1082,6 +1083,7 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
+		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), childArgs...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,
@@ -1093,7 +1095,156 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	if err := request.Validate(targets); err != nil {
 		return cliUsage
 	}
-	controlInput, controlOutput, err := openRunCLIConsole()
+	return executeCLIAuthenticatedWithBroker(context.Background(), tool, binding, targets, request)
+}
+
+// cliRunBrokerSignals is the cancellation channel source for one brokered run.
+// It is a seam for tests only; production subscribes to the same
+// Interrupt/SIGTERM/SIGHUP set the local-factor path listens for.
+var cliRunBrokerSignals = func(c chan<- os.Signal) {
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+}
+
+// cliRunBrokerWatch is the broker's signal registration for one brokered
+// attempt. stop unsubscribes this channel, closes and joins the watcher, and
+// drains the one signal still buffered; it is idempotent, so the handoff and
+// the deferred cleanup can neither stop twice nor report one signal twice.
+type cliRunBrokerWatch struct {
+	signals chan os.Signal
+	stopFn  func(chan<- os.Signal) // signal.Stop; a seam for tests
+	closed  chan struct{}
+	done    chan struct{}
+
+	stopOnce sync.Once
+	stopped  os.Signal // the drained signal, set inside stopOnce
+	consumed bool      // the watcher took a signal; set before close(done)
+}
+
+// newCLIRunBrokerWatch subscribes the broker signal channel and starts the
+// watcher that cancels ctx on the first signal.
+func newCLIRunBrokerWatch(ctx context.Context, cancel context.CancelFunc, notify func(chan<- os.Signal)) *cliRunBrokerWatch {
+	w := &cliRunBrokerWatch{signals: make(chan os.Signal, 1), stopFn: func(c chan<- os.Signal) { signal.Stop(c) }, closed: make(chan struct{}), done: make(chan struct{})}
+	notify(w.signals)
+	go func() {
+		defer close(w.done)
+		select {
+		case <-w.signals:
+			w.consumed = true
+			cancel()
+		case <-ctx.Done():
+		case <-w.closed:
+		}
+	}()
+	return w
+}
+
+// stop unsubscribes only the broker channel, closes and joins the watcher, and
+// drains the signal still buffered, once. A signal arriving after signal.Stop
+// is no longer accepted by the broker channel: it belongs to the local path's
+// own subscription, or to the default process action.
+func (w *cliRunBrokerWatch) stop() (sig os.Signal, consumed bool) {
+	w.stopOnce.Do(func() {
+		w.stopFn(w.signals)
+		close(w.closed)
+		<-w.done
+		select {
+		case w.stopped = <-w.signals:
+		default:
+		}
+	})
+	return w.stopped, w.consumed
+}
+
+// cliRunBrokerHandled is the outcome of the handoff.
+type cliRunBrokerHandled int
+
+const (
+	// cliRunBrokerNoSignal: no signal and no cancellation was pending.
+	cliRunBrokerNoSignal cliRunBrokerHandled = iota
+	// cliRunBrokerSignal: a buffered signal was drained. It is terminal.
+	cliRunBrokerSignal
+	// cliRunBrokerCancelled: a signal the watcher consumed or the parent
+	// cancelled the derived context. It is terminal.
+	cliRunBrokerCancelled
+)
+
+// handoffBrokerSignal decides, after the broker registration is stopped and
+// joined and its queue drained, whether the local-factor path may run. It is
+// pure:
+//   - a signal the watcher consumed already cancelled the derived context; it
+//     is terminal and is not handled again;
+//   - a still-buffered signal was pending at the handoff; it is terminal;
+//   - a cancelled parent or derived context is terminal.
+//
+// Only an empty queue with live contexts is cliRunBrokerNoSignal, the only
+// outcome that lets the fallback run.
+func handoffBrokerSignal(pending os.Signal, consumed bool, parent, ctx context.Context) cliRunBrokerHandled {
+	if consumed {
+		return cliRunBrokerCancelled
+	}
+	if pending != nil {
+		return cliRunBrokerSignal
+	}
+	if parent.Err() != nil || ctx.Err() != nil {
+		return cliRunBrokerCancelled
+	}
+	return cliRunBrokerNoSignal
+}
+
+// executeCLIAuthenticatedWithBroker attempts the audited desktop broker path
+// on Darwin only. The existing local-factor path runs exactly once and only
+// after the exact browserhost.ErrBrokerUnavailable outcome; every other broker
+// outcome is returned without falling back.
+//
+// The broker request and the child it prepares share one signal-aware context:
+// Interrupt, SIGTERM, or SIGHUP cancels both, exactly as the local factor path
+// cancels its child. A cancelled broker request is terminal and never selects
+// the fallback, even if the transport reports absence while it unwinds.
+//
+// Before the fallback is chosen the broker's signal registration is stopped,
+// its channel closed, and its watcher joined, and the signal still buffered
+// and the parent and derived contexts are checked: any of them is terminal
+// cancellation and never opens the local console. Signals arriving after the
+// broker unsubscribed reach the process as before: the local path's own
+// subscription, or the default action.
+func executeCLIAuthenticatedWithBroker(parent context.Context, tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
+	if cliRunBrokerEnabled() {
+		ctx, cancel := context.WithCancel(parent)
+		defer cancel()
+		watch := newCLIRunBrokerWatch(ctx, cancel, cliRunBrokerSignals)
+		// Every path stops and joins the same watch; stop is idempotent, so
+		// the handoff and the deferred cleanup cannot double-unsubscribe or
+		// drain two signals.
+		defer watch.stop()
+		receipt, err := cliRunBrokerCall{Binding: binding, Targets: targets, Request: request}.run(ctx)
+		if err = cliRunBrokerFailure(err); err != errCLIRunBrokerAbsent {
+			if err != nil {
+				return err
+			}
+			if receipt.ExitCode != 0 {
+				return &childExitStatus{code: receipt.ExitCode}
+			}
+			return nil
+		}
+		pending, consumed := watch.stop()
+		switch handoffBrokerSignal(pending, consumed, parent, ctx) {
+		case cliRunBrokerCancelled:
+			cause := parent.Err()
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			return cliRunBrokerFailedError{cause: cause}
+		case cliRunBrokerSignal:
+			return cliRunBrokerFailedError{cause: context.Canceled}
+		}
+	}
+	return executeCLILocalAuthenticated(tool, binding, targets, request)
+}
+
+// executeCLILocalAuthenticated is the existing local-factor path: it prompts
+// on the controlling terminal, records the local intent, and runs the child.
+func executeCLILocalAuthenticated(tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
+	controlInput, controlOutput, err := cliLocalConsoleOpen()
 	if err != nil {
 		return errRunCLIConsole
 	}

@@ -639,13 +639,22 @@ def parser():
     return result
 
 
+# Fixed sentinel for "the main flow completed" when a secondary stage alone
+# fails. It cannot collide with a real STAGES failure value or a stage name.
+NO_PRIMARY_FAILURE = "none"
+
+
 def main():
     args = parser().parse_args()
     os.umask(0o077)
     acceptance = None
     success = False
+    faulted = False
     failure = "prerequisites"
     diagnostic = {}
+    cleanup_failed = False
+    scan_failed = False
+    stage = "prerequisites"
     try:
         require(args.authorize_device_pin_setup and bool(re.fullmatch(r"emulator-[0-9]+",args.serial)))
         require(10 <= args.timeout <= 180)
@@ -658,22 +667,52 @@ def main():
         require(hashlib.sha256(private_file(acceptance.source / "expected-private.json")).hexdigest() == acceptance.source_hash)
         success = True
     except (Exception,KeyboardInterrupt):
+        # Any caught main-flow fault, including an interrupt, wins: a later
+        # cleanup or scan cannot make this run succeed.
+        faulted = True
         failure = acceptance.stage if acceptance else "prerequisites"
         if acceptance:
             diagnostic = acceptance.failure_metadata()
     finally:
+        # Own the primary outcome before cleanup: a cleanup fault must never
+        # overwrite the original stage or its sanitized diagnosis. Only an
+        # uncaught main flow yields the no-primary sentinel; a caught fault
+        # keeps its real stage ("prerequisites" before acceptance exists).
+        original_failure = failure if faulted else NO_PRIMARY_FAILURE
+        diagnostic = diagnostic.copy()
         if acceptance:
-            try: acceptance.cleanup_pin()
-            except Exception: success=False; failure="pin-cleanup"
+            # Clean main only: a caught fault is never primary success.
+            primary_success = success and not faulted
+            try:
+                acceptance.cleanup_pin()
+            except Exception:
+                # Only fixed fields; never exception text, arguments or output.
+                cleanup_failed = True
             try: acceptance.close(); acceptance.scan()
-            except Exception: success=False; failure="private-canary-scan"
-            acceptance.write_private("result.json",{"success":success,"stage":"complete" if success else failure,
+            except Exception: success=False; scan_failed=True
+            if primary_success and not cleanup_failed and not scan_failed:
+                stage = "complete"
+            elif cleanup_failed:
+                stage = "pin-cleanup"
+            elif scan_failed:
+                stage = "private-canary-scan"
+            else:
+                stage = original_failure
+            success = primary_success and not cleanup_failed and not scan_failed
+            acceptance.write_private("result.json",{"success":success,"stage":stage,
+                "original_failure_stage":original_failure,"cleanup_failed":cleanup_failed,"scan_failed":scan_failed,
                 "checks":acceptance.checks,"reported_key_security_level":acceptance.key_level,
                 "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic})
             print("Private Android OS credential evidence: " + str(acceptance.root))
     if not success:
-        print("FAIL: Android OS credential acceptance at " + failure)
+        print("FAIL: Android OS credential acceptance at " + (stage if acceptance else original_failure))
         print("Android OS credential diagnostic: " + json.dumps(diagnostic, sort_keys=True))
+        # Fixed enum only: a real stage, "prerequisites", or the sentinel.
+        print("Android OS credential primary failure stage: " + original_failure)
+        if cleanup_failed:
+            print("FAIL: Android OS credential acceptance at pin-cleanup")
+        if scan_failed:
+            print("FAIL: Android OS credential acceptance at private-canary-scan")
     else: print("PASS: native OS credential opt-in, quick unlock, cancellation and nontransferable device key; private canary scan")
     return 0 if success else 1
 

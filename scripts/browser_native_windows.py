@@ -12,6 +12,7 @@ module imports and unit-tests on Linux without any Windows library present.
 """
 import ctypes
 import ctypes.wintypes as wt
+import math
 
 import native_acceptance_contract as contract
 
@@ -168,7 +169,7 @@ class UiaReader:
                 or not fields or [name for name, _ in fields] != ["x", "y"]
                 or any(ctypes.sizeof(field) != 4 for _, field in fields)):
             raise contract.ContractError("a11y-unavailable")
-        return point_type(int(x), int(y))
+        return point_type(screen_int(x), screen_int(y))
 
     def _element_at(self, x, y):
         """ElementFromPoint at the click point; failures never look like a hit."""
@@ -240,6 +241,25 @@ class UiaReader:
         """
         target = self._selected(handle, label, rect)
         return self._hit_reaches(self._element_at(x, y), target)
+
+
+def screen_int(value):
+    """An integral screen coordinate as a plain int, or ``control-offscreen``.
+
+    The contract may carry fractional macOS geometry, but Win32 ``POINT`` and
+    the ctypes input structures accept integers only: an integral int/float is
+    converted here, explicitly and before the call, and a fractional or
+    non-finite point is never silently truncated into a different location.
+    """
+    if type(value) is float and math.isfinite(value) and value == int(value):
+        value = int(value)
+    elif isinstance(value, int) and type(value) is not bool:
+        value = int.__int__(value)  # a genuine int subclass, never an override
+    else:
+        raise contract.ContractError("control-offscreen")
+    if not -2 ** 31 <= value < 2 ** 31:
+        raise contract.ContractError("control-offscreen")
+    return value
 
 
 class Win32Api:
@@ -439,7 +459,10 @@ class Win32Api:
 
     def root_at(self, identifier, x, y):
         """Top-level window owning screen point (x, y), via WindowFromPoint."""
-        point = wt.POINT(int(x), int(y))
+        try:  # Win32 POINT takes integers only; conversion precedes the call
+            point = wt.POINT(screen_int(x), screen_int(y))
+        except contract.ContractError:  # fractional/non-finite: never a hit
+            return False
         hwnd = self.user32.WindowFromPoint(point)
         if not hwnd:
             return False
@@ -484,6 +507,11 @@ class Win32Api:
         return event
 
     def click(self, x, y):
+        # MOUSEINPUT is a 32-bit integer structure: validate and convert the
+        # coordinates to integers before the screen is read or any Win32 input
+        # structure is built.
+        x = screen_int(x)
+        y = screen_int(y)
         screen = self.screen_bounds()
         if (screen["width"] <= 0 or screen["height"] <= 0 or
                 not (screen["x"] <= x < screen["x"] + screen["width"] and

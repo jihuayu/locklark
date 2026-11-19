@@ -195,6 +195,12 @@ func (a *App) chooseQuickResult(panel, sequence uint64, target personal.Row) {
 	a.selected = &target
 	a.title, a.website, a.username, a.value = "", "", "", ""
 	a.regenerate = nil
+	if a.v2Mode {
+		// The V2 workspace renders from a.v2, so the legacy fields alone would
+		// leave the previously selected item visible. selectItem loads only
+		// metadata; concealed values stay behind the explicit reveal controls.
+		a.selectItem(target.ID, target.Revision)
+	}
 }
 
 func (a *App) quickSearchView(c *ui.Context) {

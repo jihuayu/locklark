@@ -181,6 +181,36 @@ process.stdout.write("refused=" + refused + ",auto=" + auto);
     assert "refused=4" in out, out
 
 
+def _t2_f2_06_failure_diagnostic(probe) -> str:
+    """Derive fixed, bounded failure fields without exposing probe payloads."""
+
+    timed_out = probe.timed_out
+    timeout_flag = timed_out if type(timed_out) is bool else False
+    if timeout_flag:
+        exit_state = "TIMEOUT"
+    else:
+        returncode = probe.returncode
+        if type(returncode) is int:
+            if returncode == 0:
+                exit_state = "EXIT_OK"
+            elif returncode > 0:
+                exit_state = "EXIT_NONZERO"
+            else:
+                exit_state = "EXIT_SIGNALED"
+        else:
+            exit_state = "EXIT_UNKNOWN"
+
+    frames = probe.frames
+    if type(frames) is list:
+        response_count = min(len(frames), 16)
+    else:
+        response_count = "unknown"
+    return (
+        f"timed_out={timeout_flag}, exitState={exit_state}, "
+        f"responseCount={response_count}"
+    )
+
+
 @e2e_test("T2_F2_06", 2, ["F2"], "Oversized passkey options are refused without producing a credential")
 def t2_f2_06(ctx):
     request_id = "7" * 32
@@ -195,9 +225,11 @@ def t2_f2_06(ctx):
         "options": "x" * 40000,
     }
     probe = native_probe(ctx, request, timeout=8.0)
-    assert not probe.timed_out, "oversized passkey options must be refused before GUI approval"
-    assert not native_has_credential(probe), probe.frames
-    assert not any(frame.get("type") == "passkey-result" for frame in probe.frames)
+    assert not probe.timed_out, _t2_f2_06_failure_diagnostic(probe)
+    assert not native_has_credential(probe), _t2_f2_06_failure_diagnostic(probe)
+    assert not any(
+        frame.get("type") == "passkey-result" for frame in probe.frames
+    ), _t2_f2_06_failure_diagnostic(probe)
 
 
 @e2e_test(

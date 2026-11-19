@@ -27,12 +27,15 @@ func lifecycleFixture(t *testing.T) (*syncFixture, *server) {
 }
 
 func lifecycleRequest(f *syncFixture, p *publication) *http.Request {
+	return signedLifecycleRequest(f, p, strings.Repeat("c", 64))
+}
+func signedLifecycleRequest(f *syncFixture, p *publication, nonce string) *http.Request {
 	action, path := "read", ReadPath
 	if p != nil {
 		action, path = "publish", PublishPath
 	}
 	q := request{Publication: p, Proof: requestProof{Protocol: protocol, Scope: f.cfg.Genesis().Scope, Action: action,
-		Kind: "owner", ID: publicKey(f.owner), Nonce: strings.Repeat("c", 64), Anchor: f.first.Checkpoint(), BodyDigest: digest("payload", p)}}
+		Kind: "owner", ID: publicKey(f.owner), Nonce: nonce, Anchor: f.first.Checkpoint(), BodyDigest: digest("payload", p)}}
 	q.Proof.Signature = ed25519.Sign(f.owner, q.Proof.signingBytes())
 	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(encode(q)))
 	r.TLS = &tls.ConnectionState{Version: tls.VersionTLS13}
@@ -109,6 +112,20 @@ func TestManagedHandlerCloseDuringBlockedDirectoryRead(t *testing.T) {
 		t.Fatal("directory read did not block on the owned DB lock")
 	case <-time.After(30 * time.Millisecond):
 	}
+	// Nothing has been signed yet: the full response is prepared within the
+	// critical section that Close now waits on.
+	if n := signed.Load(); n != 0 {
+		t.Fatal("worker signed a response before its directory read")
+	}
+	// s.mu is held from before the blocked read through anchor advance, so the
+	// worker below cannot claim the lock until the blocked request finishes.
+	blocked := make(chan struct{})
+	go func() { s.mu.Lock(); s.mu.Unlock(); close(blocked) }()
+	select {
+	case <-blocked:
+		t.Fatal("response preflight left the read's critical section")
+	case <-time.After(10 * time.Millisecond):
+	}
 	promptClose(t, s)
 	select {
 	case <-done:
@@ -119,8 +136,8 @@ func TestManagedHandlerCloseDuringBlockedDirectoryRead(t *testing.T) {
 		t.Fatal("cannot release owned directory lock")
 	}
 	lifecycleWait(t, done)
-	if signed.Load() != 0 || w.used.Load() != 0 || w.wrote.Load() != 0 {
-		t.Fatal("worker signed or granted output after Close won")
+	if w.used.Load() != 0 || w.wrote.Load() != 0 {
+		t.Fatal("worker granted output after Close won")
 	}
 }
 
@@ -130,7 +147,8 @@ func TestManagedHandlerCloseWinsBeforeResponseSignatureOrWriteGrant(t *testing.T
 			f, s := lifecycleFixture(t)
 			entered, release := make(chan struct{}), make(chan struct{})
 			var signed atomic.Int32
-			barrier := func() { close(entered); <-release }
+			var once sync.Once
+			barrier := func() { once.Do(func() { close(entered) }); <-release }
 			s.hooks = &serverLifecycleHooks{afterSign: func() { signed.Add(1) }}
 			if stage == "signature" {
 				s.hooks.beforeSign = barrier
@@ -143,6 +161,7 @@ func TestManagedHandlerCloseWinsBeforeResponseSignatureOrWriteGrant(t *testing.T
 			promptClose(t, s)
 			close(release)
 			lifecycleWait(t, done)
+			// A read signs only its full response, inside the critical section.
 			if w.used.Load() != 0 || w.wrote.Load() != 0 || stage == "signature" && signed.Load() != 0 || stage == "write" && signed.Load() != 1 {
 				t.Fatal("Close did not arbitrate the exact signature/output grant")
 			}

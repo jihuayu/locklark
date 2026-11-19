@@ -142,5 +142,38 @@ class InstalledToolPathTests(unittest.TestCase):
         self.assertIn("--tools-dir", result.stderr)
 
 
+class EntryPointCommandTests(unittest.TestCase):
+    def test_normal_entrypoints_bind_installed_tools_without_init(self):
+        repo = SCRIPT.parents[3]
+        entrypoints = {
+            "android": SCRIPT.with_name("bind-android.sh"),
+            "ios": repo / "mobile/ios/scripts/build-core.sh",
+        }
+        for platform, path in entrypoints.items():
+            with self.subTest(platform=platform):
+                syntax = subprocess.run(
+                    ["bash", "-n", str(path)], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+                self.assertEqual(syntax.returncode, 0, syntax.stderr)
+                text = path.read_text().replace("\\\n", " ")
+                commands = []
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    try:
+                        commands.append(shlex.split(line, comments=True))
+                    except ValueError:
+                        self.fail("unparsable command in " + str(path))
+                tool_commands = [command for command in commands
+                                 if command and pathlib.PurePosixPath(command[0]).name == "gomobile"]
+                self.assertFalse([command for command in tool_commands if command[1:2] == ["init"]],
+                                 "gomobile init would install unpinned gobind@latest")
+                self.assertEqual([command[1:2] for command in tool_commands], [["bind"]],
+                                 "bind must invoke the installed gomobile directly")
+                self.assertLess(text.index("--check-tool-paths"), text.index('" bind -target='))
+                self.assertNotIn("@latest", text)
+
+
 if __name__ == "__main__":
     unittest.main()

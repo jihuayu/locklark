@@ -461,6 +461,7 @@ def t1_f5_01(ctx):
     if not desktop_runtime_available(ctx):
         gate(ctx, "F5", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
+    # Locked-desktop startup smoke; settings cannot select or unlock the vault.
     assert desktop_binary_starts(ctx, vault["path"])
     text = desktop_sources(ctx)
     assert "clipboardTimer = time.AfterFunc" in text
@@ -475,6 +476,7 @@ def t1_f5_02(ctx):
     if not desktop_runtime_available(ctx):
         gate(ctx, "F5", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
+    # Locked-desktop startup smoke; settings cannot select or unlock the vault.
     assert desktop_binary_starts(ctx, vault["path"])
     assert "displayTimer = time.AfterFunc" in text
     assert "idleTimer = time.AfterFunc" in text
@@ -1341,6 +1343,7 @@ def t1_f7_01(ctx):
     if not desktop_runtime_available(ctx):
         gate(ctx, "F7", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
+    # Locked-desktop startup smoke; settings cannot select or unlock the vault.
     assert desktop_binary_starts(ctx, vault["path"])
     text = desktop_sources(ctx)
     assert "此窗口与浏览器共享已解锁的金库会话" in text
@@ -1390,6 +1393,7 @@ def t1_f8_01(ctx):
     if not desktop_runtime_available(ctx):
         gate(ctx, "F8", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Jira", "Runbook"])
+    # Locked-desktop startup smoke; settings cannot select or unlock the vault.
     assert desktop_binary_starts(ctx, vault["path"])
     text = desktop_sources(ctx)
     assert all(marker in text for marker in ("navFavorites", "navAllItems", "navRecentlyDelete"))

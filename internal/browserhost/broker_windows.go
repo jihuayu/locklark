@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net"
 	"os"
 	"runtime"
@@ -74,17 +75,41 @@ func listenLocal(path string) (net.Listener, error) {
 }
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
-	timeout := 300 * time.Millisecond
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-	conn, e := winio.DialPipe(endpoint, &timeout)
+	ctx, cancel := dialBudget(ctx)
+	defer cancel()
+	// Identification is the least privilege that still lets the broker's
+	// OpenThreadToken(TOKEN_QUERY) read the client SID. go-winio's other
+	// DialPipe paths open with SECURITY_ANONYMOUS, which cannot be queried.
+	conn, e := winio.DialPipeAccessImpLevel(ctx, endpoint, windows.GENERIC_READ|windows.GENERIC_WRITE, winio.PipeImpLevelIdentification)
 	if e != nil {
-		return nil, ErrBrokerUnavailable
+		// Keep the platform error so the CLI-run client can distinguish an
+		// absent pipe from busy, access-denied, timeout or unknown failures.
+		return nil, &dialLocalError{err: e}
 	}
 	return conn, nil
+}
+
+// dialBudget bounds a local dial to 300ms and inherits any shorter or already
+// canceled caller context.
+func dialBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, 300*time.Millisecond)
+}
+
+// dialLocalError preserves the original platform dial error (via Unwrap) and
+// never echoes the endpoint in its own text.
+type dialLocalError struct{ err error }
+
+func (e *dialLocalError) Error() string { return "desktop browser broker dial failed" }
+func (e *dialLocalError) Unwrap() error { return e.err }
+
+// dialAbsent reports whether e is unambiguous evidence that no broker pipe
+// exists. A busy pipe, access denial, timeout or unknown failure is not
+// absence: the broker may be running without having accepted the client.
+func dialAbsent(e error) bool {
+	return errors.Is(e, windows.ERROR_FILE_NOT_FOUND) || errors.Is(e, windows.ERROR_PATH_NOT_FOUND)
 }
 
 func authenticatedPeer(conn net.Conn) (Peer, error) {

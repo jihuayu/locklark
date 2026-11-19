@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/autofill_auth_presentation"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@color/ll_surface_muted"
+    android:gravity="center"
+    android:maxLines="2"
+    android:padding="12dp"
+    android:text="@string/autofill_auth_presentation"
+    android:textColor="@color/ll_text_primary"
+    android:textSize="15sp" />

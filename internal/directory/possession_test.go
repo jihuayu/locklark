@@ -94,7 +94,7 @@ func TestPossessionNewDeviceAtomicAdmissionAndHistory(t *testing.T) {
 			}
 			return injected
 		})
-	}, f.cfg, f.sequencer, p, s, false)
+	}, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes)
 	db.Close()
 	if e != ErrStorage || !reflect.DeepEqual(r, Receipt{}) {
 		t.Fatal("failed commit receipt", e)

@@ -463,7 +463,7 @@ func signalConnectionFixture(t *testing.T) (*Connection, *memoryPipe, *personal.
 	if err := c.Handle(Request{V: 1, ID: reqID(1), Type: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ApprovePair(s); err != nil {
+	if err := c.ApproveQuickPair(s); err != nil {
 		t.Fatal(err)
 	}
 	capability := out.responses(t)[0].Capability
