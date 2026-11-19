@@ -32,6 +32,11 @@ type vaultFileReadDeliveryClaimState struct {
 	consumed bool
 	invalid  bool
 	closeErr error
+
+	// custody is non-nil only when this exact claim was bound to one custody
+	// seal state. Ordinary Consume refuses such a claim; only the bound seal's
+	// Take may perform the final arbitration and detach the outputs.
+	custody *vaultFileBackupCustodySealState
 }
 
 // String, GoString, MarshalJSON and Format are fixed redactions. The value
@@ -156,27 +161,19 @@ func (c *VaultFileReadDeliveryClaim) CloseChild(s *Session) error {
 	return err
 }
 
-// Consume is the final short arbitration with RequestLock. It samples time
-// while owning saveMu, checks the current parent idle/active/revocation state
-// with the exact captured child deadlines and context, and consumes once. An
-// observed parent failure is frozen under saveMu, then drained with the
-// existing parent-lock cleanup only after saveMu and the claim lock are
-// released. Child-only expiry and cancellation leave the parent and siblings
-// authorized. A refusal leaves the claim invalid.
-func (c *VaultFileReadDeliveryClaim) Consume(ctx context.Context, s *Session) error {
-	if c == nil || c.state == nil || s == nil || ctx == nil {
-		return ErrVaultFileScopedChild
-	}
-	state := c.state
-	state.mu.Lock()
-	if state.session != s || !state.sealed || state.consumed || state.invalid || state.closeErr != nil {
-		state.mu.Unlock()
-		return ErrVaultFileScopedChild
-	}
+type vaultFileReadDeliveryDecision struct {
+	valid         bool
+	parentInvalid bool
+	childExpired  bool
+	ctxErr        error
+}
 
-	s.mu.Lock()
-	s.saveMu.Lock()
-	now := vaultFileReadDeliveryClaimSample()
+// arbitrateLocked is the single shared final sample. The caller holds
+// claim.state.mu, Session.mu and saveMu in that order. It marks the claim
+// consumed or invalid exactly once and freezes parent failures under the same
+// arbiter RequestLock uses.
+func vaultFileReadDeliveryArbitrateLocked(state *vaultFileReadDeliveryClaimState,
+	s *Session, ctx context.Context, now time.Time) vaultFileReadDeliveryDecision {
 	revoked := s.lockRequested.Load() || s.vaultFileRevoked.Load()
 	unavailable := len(s.material) == 0
 	parentIdle := s.idleExpired(now)
@@ -184,42 +181,98 @@ func (c *VaultFileReadDeliveryClaim) Consume(ctx context.Context, s *Session) er
 		(!state.idleDeadline.IsZero() && !now.Before(state.idleDeadline))
 	ctxErr := ctx.Err()
 	parentInvalid := revoked || unavailable || parentIdle
-	valid := !parentInvalid && !childExpired && ctxErr == nil
-	if valid {
+	decision := vaultFileReadDeliveryDecision{
+		valid:         !parentInvalid && !childExpired && ctxErr == nil,
+		parentInvalid: parentInvalid, childExpired: childExpired, ctxErr: ctxErr,
+	}
+	if decision.valid {
 		state.consumed = true
 	} else {
 		state.invalid = true
 		if parentInvalid {
-			// Freeze the observed parent failure under the same arbiter that
-			// RequestLock uses. This prevents a later activity touch from
-			// resurrecting the parent before the cleanup below, without doing
-			// cleanup while holding saveMu.
 			s.lockRequested.Store(true)
 			s.vaultFileRevoked.Store(true)
 		}
 	}
-	s.saveMu.Unlock()
-	s.mu.Unlock()
-	state.mu.Unlock()
+	return decision
+}
 
-	if valid {
+// finishDecision applies the existing post-arbitration cleanup protocol after
+// claim.state.mu, Session.mu and saveMu have all been released.
+func finishVaultFileReadDeliveryDecision(s *Session, decision vaultFileReadDeliveryDecision) error {
+	if decision.valid {
 		return nil
 	}
-	if parentInvalid {
-		// Existing parent-lock semantics: serialize under Session.mu, drain
-		// every child and clear the parent material. Every arbitration and
-		// claim lock has already been released here.
+	if decision.parentInvalid {
 		s.lockVaultFileParent()
-		if ctxErr != nil {
-			return ctxErr
+		if decision.ctxErr != nil {
+			return decision.ctxErr
 		}
 		return ErrSessionLocked
 	}
-	if ctxErr != nil {
-		return ctxErr
-	}
-	if childExpired {
-		return ErrVaultFileScopedChild
+	if decision.ctxErr != nil {
+		return decision.ctxErr
 	}
 	return ErrVaultFileScopedChild
+}
+
+// validateCustodyBinding checks the exact armed claim before and during a
+// custody bind without changing it. The caller holds state.mu.
+func validateVaultFileReadDeliveryCustodyBinding(state *vaultFileReadDeliveryClaimState,
+	s *Session, token VaultFileChildToken) error {
+	if state == nil || s == nil || state.session != s || state.token != token ||
+		!state.armed || state.closing || state.sealed || state.consumed ||
+		state.invalid || state.closeErr != nil || state.custody != nil {
+		return ErrVaultFileScopedChild
+	}
+	return nil
+}
+
+// bindCustody atomically attaches one custody seal to this exact armed claim.
+// A second bind, a foreign Session/token or any already-closed/invalid claim is
+// refused.
+func (c *VaultFileReadDeliveryClaim) bindCustody(s *Session, token VaultFileChildToken,
+	seal *vaultFileBackupCustodySealState) error {
+	if c == nil || c.state == nil || seal == nil || s == nil {
+		return ErrVaultFileScopedChild
+	}
+	state := c.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if err := validateVaultFileReadDeliveryCustodyBinding(state, s, token); err != nil {
+		return err
+	}
+	state.custody = seal
+	seal.claim = state
+	return nil
+}
+
+// Consume is the final short arbitration with RequestLock for ordinary read
+// delivery. A custody-bound claim is refused here; its exact seal's Take owns
+// the one final arbitration and output detach. It samples time while owning
+// saveMu, checks the current parent idle/active/revocation state with the exact
+// captured child deadlines and context, and consumes once. An observed parent
+// failure is frozen under saveMu, then drained with the existing parent-lock
+// cleanup only after saveMu and the claim lock are released. Child-only expiry
+// and cancellation leave the parent and siblings authorized. A refusal leaves
+// the claim invalid.
+func (c *VaultFileReadDeliveryClaim) Consume(ctx context.Context, s *Session) error {
+	if c == nil || c.state == nil || s == nil || ctx == nil {
+		return ErrVaultFileScopedChild
+	}
+	state := c.state
+	state.mu.Lock()
+	if state.session != s || state.custody != nil || !state.sealed ||
+		state.consumed || state.invalid || state.closeErr != nil {
+		state.mu.Unlock()
+		return ErrVaultFileScopedChild
+	}
+
+	s.mu.Lock()
+	s.saveMu.Lock()
+	decision := vaultFileReadDeliveryArbitrateLocked(state, s, ctx, vaultFileReadDeliveryClaimSample())
+	s.saveMu.Unlock()
+	s.mu.Unlock()
+	state.mu.Unlock()
+	return finishVaultFileReadDeliveryDecision(s, decision)
 }

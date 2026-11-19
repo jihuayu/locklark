@@ -97,6 +97,14 @@ func OpenLocalGenesisSessionForJournal(s *personal.Session, configPath, workspac
 }
 
 func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, false)
+}
+
+func openLocalGenesisSessionForCustody(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, true)
+}
+
+func openLocalGenesisSessionMode(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte, custody bool) (*LocalGenesisSession, LocalGenesisBaseline, error) {
 	empty := LocalGenesisBaseline{}
 	if s == nil || !s.Unlocked() || configPath == "" || workspaceRoot == "" || vaultID == "" {
 		return nil, empty, ErrLocalReview
@@ -121,11 +129,22 @@ func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vau
 			BackendName: verified.successor.backendName,
 			Pin:         cloneLocalGenesisGenesisPin(verified.successor.pin),
 		}
-		token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChild(
-			manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		if custody {
+			token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChildForCustody(
+				manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		} else {
+			token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChild(
+				manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		}
 		clear(target.Pin.Root.OwnerRootPublicKey)
 	} else {
-		token, initial, err = s.OpenOwnedVaultFileChild(manifest.Journal, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		if custody {
+			token, initial, err = s.OpenOwnedVaultFileChildForCustody(manifest.Journal,
+				manifest.BackendRoot, manifest.Name, verified.checkpoint, password, key,
+				personal.VaultFileChildOptions{})
+		} else {
+			token, initial, err = s.OpenOwnedVaultFileChild(manifest.Journal, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+		}
 	}
 	if err != nil {
 		return nil, empty, err

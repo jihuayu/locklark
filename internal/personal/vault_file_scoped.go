@@ -16,6 +16,7 @@ import (
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 	bolt "go.etcd.io/bbolt"
 )
@@ -128,6 +129,14 @@ type vaultFileChild struct {
 	// backend bytes. Read and revalidation re-read the typed journal and the
 	// named local object through this binding.
 	successor *vaultFileOwnedSuccessorBinding
+
+	// custody marks the exact child opened for single-vault backup sealing.
+	// Only this marker admits the custody preparation method; a generic or
+	// ordinary owned read token can never be promoted after registration.
+	custody     bool
+	custodyUsed bool
+	backendRoot string
+	backendName string
 
 	// journal baseline: exact state identity, never the bytes themselves.
 	journalGeneration uint64
@@ -244,6 +253,35 @@ func (s *Session) OpenOwnedVaultFileChild(journalPath string, checkpoint *vaultf
 	return s.openVaultFileChild(journalPath, checkpoint, password, key, options, vaultFileChildOpenMode{owned: true})
 }
 
+// OpenOwnedVaultFileChildForCustody is the narrow pristine-generation open for
+// one single-vault backup sealing operation. It binds the exact named local
+// backend locator into the owned child; the custody preparation method later
+// reads that object itself and requires its bytes and opaque revision to equal
+// the still-current journal baseline. The locator is not authority by itself.
+func (s *Session) OpenOwnedVaultFileChildForCustody(journalPath, backendRoot, backendName string, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions) (VaultFileChildToken, []VaultFileBaselineItem, error) {
+	if !validVaultFileGenesisPath(backendRoot) || !vaultfilebackend.ValidName(backendName) {
+		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+	}
+	return s.openVaultFileChild(journalPath, checkpoint, password, key, options, vaultFileChildOpenMode{
+		owned: true, custodyBackend: &vaultFileChildCustodyBackend{root: backendRoot, name: backendName},
+	})
+}
+
+// OpenOwnedFirstSuccessorVaultFileChildForCustody is the settled-successor
+// custody open. The target already carries the exact verified backend locator
+// and origin pin; the child is marked as a custody child for the same reason.
+func (s *Session) OpenOwnedFirstSuccessorVaultFileChildForCustody(journalPath string, target OwnedVaultFileFirstSuccessorTarget, checkpoint *vaultfile.PolicyCheckpoint, password, key []byte, options VaultFileChildOptions) (VaultFileChildToken, []VaultFileBaselineItem, error) {
+	if journalPath == "" || !validOwnedVaultFileFirstSuccessorTarget(target) ||
+		!ownedVaultFileFirstSuccessorMatchesCheckpoint(target, checkpoint) {
+		return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
+	}
+	target = cloneOwnedVaultFileFirstSuccessorTarget(target)
+	return s.openVaultFileChild(journalPath, checkpoint, password, key, options, vaultFileChildOpenMode{
+		owned: true, successor: &target,
+		custodyBackend: &vaultFileChildCustodyBackend{root: target.BackendRoot, name: target.BackendName},
+	})
+}
+
 type vaultFileChildOpenMode struct {
 	owned bool
 	// successor selects the settled owned first-successor read path. Its pin,
@@ -253,6 +291,14 @@ type vaultFileChildOpenMode struct {
 	// custody projections for one unpublished initial fan-out operation. It is
 	// nil for every existing single-target API.
 	batch *vaultFileOwnedBatchAuth
+	// custodyBackend is set only by the custody open methods. Its exact root
+	// and name are stored on the child for the later independent backend read.
+	custodyBackend *vaultFileChildCustodyBackend
+}
+
+type vaultFileChildCustodyBackend struct {
+	root string
+	name string
 }
 
 type vaultFileOwnedBatchAuth struct {
@@ -641,12 +687,19 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		closeDone:          make(chan struct{}),
 		checkpoint:         cloneVaultFileCheckpoint(checkpoint),
 		successor:          successorBinding,
+		custody:            mode.custodyBackend != nil,
+		backendRoot:        "",
+		backendName:        "",
 		journalGeneration:  baseline.generation,
 		remoteRevision:     baseline.remoteRevision,
 		baseHash:           baseline.baseHash,
 		workingHash:        baseline.workingHash,
 		pending:            baseline.pending,
 		fullFactorDeadline: fullFactorDeadline,
+	}
+	if mode.custodyBackend != nil {
+		child.backendRoot = mode.custodyBackend.root
+		child.backendName = mode.custodyBackend.name
 	}
 	if hasIdle {
 		child.idleDeadline = idleDeadline

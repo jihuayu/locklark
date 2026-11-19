@@ -122,11 +122,18 @@ func verifyOwnedVaultFileSuccessorRead(result vaultfilebackend.ReadResult, readE
 // by one verification operation. The bytes and opaque revision must both name
 // the exact acknowledged journal successor that the caller already verified.
 func readOwnedVaultFileSuccessorBackend(target OwnedVaultFileFirstSuccessorTarget, expected []byte, expectedRevision vaultfilebackend.Revision) error {
+	return readOwnedVaultFileSuccessorBackendContext(context.Background(), target, expected, expectedRevision)
+}
+
+func readOwnedVaultFileSuccessorBackendContext(ctx context.Context, target OwnedVaultFileFirstSuccessorTarget, expected []byte, expectedRevision vaultfilebackend.Revision) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	backend, err := vaultfilebackend.OpenExistingDir(target.BackendRoot)
 	if err != nil {
 		return ErrVaultFileBaselineJournal
 	}
-	result, readErr := backend.Read(context.Background(), target.BackendName)
+	result, readErr := backend.Read(ctx, target.BackendName)
 	return verifyOwnedVaultFileSuccessorRead(result, readErr, backend.Close(), expected, expectedRevision)
 }
 
@@ -208,36 +215,53 @@ func loadOwnedFirstSuccessor(journalPath string, target OwnedVaultFileFirstSucce
 // returns the fresh successor bytes. A replaced, advanced, pending, missing or
 // ambiguous state fails closed without exposing the previous observation.
 func verifyOwnedFirstSuccessorBinding(binding *vaultFileOwnedSuccessorBinding, checkpoint *vaultfile.PolicyCheckpoint) ([]byte, error) {
+	genesis, successor, _, _, err := readVerifiedOwnedFirstSuccessor(context.Background(), binding, checkpoint)
+	clear(genesis)
+	if err != nil {
+		clear(successor)
+		return nil, err
+	}
+	return successor, nil
+}
+
+// readVerifiedOwnedFirstSuccessor is the shared settled-source read used by
+// both the existing successor child path and backup custody. It re-reads the
+// exact typed journal and the named backend object, requires both the recorded
+// bytes and opaque revisions, and returns the authenticated genesis and
+// successor ciphertext. It never returns private material.
+func readVerifiedOwnedFirstSuccessor(ctx context.Context, binding *vaultFileOwnedSuccessorBinding,
+	checkpoint *vaultfile.PolicyCheckpoint) (genesis, successor []byte,
+	genesisRevision, successorRevision vaultfilebackend.Revision, err error) {
 	if binding == nil || checkpoint == nil ||
 		!ownedVaultFileFirstSuccessorMatchesCheckpoint(OwnedVaultFileFirstSuccessorTarget{
 			BackendRoot: binding.backendRoot, BackendName: binding.backendName, Pin: binding.pin,
 		}, checkpoint) {
-		return nil, ErrVaultFileBaselineVerification
+		return nil, nil, "", "", ErrVaultFileBaselineVerification
 	}
 	record, err := vaultfilejournal.ReadOwnedFirstSuccessor(binding.journalPath, binding.pin)
 	if err != nil {
-		return nil, ErrVaultFileBaselineJournal
+		return nil, nil, "", "", ErrVaultFileBaselineJournal
 	}
-	genesis, successor := record.GenesisBytes, record.SuccessorBytes
+	genesis, successor = record.GenesisBytes, record.SuccessorBytes
 	record.GenesisBytes, record.SuccessorBytes = nil, nil
+	genesisRevision, successorRevision = record.GenesisRevision, record.SuccessorRevision
 	ok := false
 	defer func() {
-		clear(genesis)
 		if !ok {
+			clear(genesis)
 			clear(successor)
 		}
 	}()
-
 	if sha256.Sum256(genesis) != binding.genesisHash ||
-		record.GenesisRevision != binding.genesisRevision ||
+		genesisRevision != binding.genesisRevision ||
 		sha256.Sum256(successor) != binding.successorHash ||
-		record.SuccessorRevision != binding.successorRevision {
-		return nil, ErrVaultFileBaselineJournal
+		successorRevision != binding.successorRevision {
+		return nil, nil, "", "", ErrVaultFileBaselineJournal
 	}
 	origin, err := vaultfile.VerifyGenesis(genesis, &binding.pin.Root)
 	if err != nil || !sameVaultFilePolicyCheckpoint(origin, checkpoint) {
 		clearVaultFilePolicyCheckpoint(origin)
-		return nil, ErrVaultFileBaselineVerification
+		return nil, nil, "", "", ErrVaultFileBaselineVerification
 	}
 	clearVaultFilePolicyCheckpoint(origin)
 
@@ -246,16 +270,16 @@ func verifyOwnedFirstSuccessorBinding(binding *vaultFileOwnedSuccessorBinding, c
 		successorFile.Header.VaultID != checkpoint.VaultID ||
 		successorFile.Header.PolicySeq != checkpoint.PolicySeq ||
 		!bytes.Equal(successorFile.Header.PolicyDigest, checkpoint.PolicyDigest) {
-		return nil, ErrVaultFileBaselineVerification
+		return nil, nil, "", "", ErrVaultFileBaselineVerification
 	}
 	target := OwnedVaultFileFirstSuccessorTarget{
 		BackendRoot: binding.backendRoot, BackendName: binding.backendName, Pin: binding.pin,
 	}
-	if err := readOwnedVaultFileSuccessorBackend(target, successor, binding.successorRevision); err != nil {
-		return nil, err
+	if err := readOwnedVaultFileSuccessorBackendContext(ctx, target, successor, binding.successorRevision); err != nil {
+		return nil, nil, "", "", err
 	}
 	ok = true
-	return successor, nil
+	return genesis, successor, genesisRevision, successorRevision, nil
 }
 
 // OpenOwnedFirstSuccessorVaultFileChild is the settled-v2 companion of
