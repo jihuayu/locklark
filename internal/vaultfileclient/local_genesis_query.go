@@ -1,12 +1,16 @@
 package vaultfileclient
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"slices"
 	"weak"
 
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 )
 
 const (
@@ -150,6 +154,49 @@ func (l *LocalGenesisSession) ValidateExactQueryHit(result LocalGenesisExactQuer
 	return ErrLocalReview
 }
 
+// verifyPristineBackend performs the one fresh named-backend observation for a
+// pristine generation-zero child. It is a no-op for a settled successor, whose
+// personal child already checks exact successor bytes and revision. The
+// comparison binds the backend bytes to the companion's custody-pinned genesis
+// SHA-256 and the exact opaque revision returned by the freshly revalidated
+// journal. It returns only ErrLocalReview and never echoes provider data.
+func (s *localGenesisSessionState) verifyPristineBackend() error {
+	if s == nil {
+		return ErrLocalReview
+	}
+	s.mu.Lock()
+	closed := s.closed
+	successor := s.successor != nil
+	backendRoot := s.manifest.BackendRoot
+	backendName := s.manifest.Name
+	expectedGenesisSHA256 := s.companion.GenesisSHA256
+	expectedRevision := s.revision
+	s.mu.Unlock()
+	if successor {
+		return nil
+	}
+	if closed || backendRoot == "" || backendName == "" ||
+		expectedGenesisSHA256 == "" || expectedRevision == "" {
+		return ErrLocalReview
+	}
+	backend, err := vaultfilebackend.OpenExistingDir(backendRoot)
+	if err != nil {
+		return ErrLocalReview
+	}
+	result, readErr := backend.Read(context.Background(), backendName)
+	closeErr := backend.Close()
+	defer clear(result.Bytes)
+	if readErr != nil || closeErr != nil {
+		return ErrLocalReview
+	}
+	sum := sha256.Sum256(result.Bytes)
+	if hex.EncodeToString(sum[:]) != expectedGenesisSHA256 ||
+		string(result.Revision) != expectedRevision {
+		return ErrLocalReview
+	}
+	return nil
+}
+
 func (s *localGenesisSessionState) queryExactTitle(query LocalGenesisExactQuery) (LocalGenesisExactQueryResult, error) {
 	empty := LocalGenesisExactQueryResult{}
 	if query.Title == "" || len([]byte(query.Title)) > LocalGenesisExactQueryTitleBytesMax ||
@@ -228,6 +275,17 @@ func (s *localGenesisSessionState) readExactQueryItems() (LocalGenesisExactQuery
 		return empty, nil, err
 	}
 	if err := parent.RevalidateVaultFileChildOwnership(token); err != nil {
+		clearLocalGenesisItems(items)
+		_ = s.close()
+		return empty, nil, err
+	}
+	// A pristine child is backed by the generation-zero journal. The named
+	// backend object is the only authoritative current-byte observation for
+	// that journal, so it must still carry the custody-pinned genesis bytes at
+	// the exact opaque journal revision. This fresh read is as close to final
+	// delivery as the child/ownership proof allows. The successor path performs
+	// its own backend read inside the personal child.
+	if err := s.verifyPristineBackend(); err != nil {
 		clearLocalGenesisItems(items)
 		_ = s.close()
 		return empty, nil, err

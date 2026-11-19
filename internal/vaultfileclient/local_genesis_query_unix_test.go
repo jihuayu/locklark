@@ -3,6 +3,7 @@
 package vaultfileclient
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -32,6 +33,106 @@ func TestLocalGenesisExactQueryRealEmptyChild(t *testing.T) {
 	}
 	if len(got.Hits) != 0 || got.Truncated {
 		t.Fatal("empty real child returned a hit")
+	}
+}
+
+func TestLocalGenesisExactQueryPristineBackendObservation(t *testing.T) {
+	f := newLocalGenesisTwoVaultFixture(t)
+	a, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	t.Cleanup(func() { _ = a.Close() })
+	b, _ := f.open(t, f.secondConfig, f.secondVaultID)
+	t.Cleanup(func() { _ = b.Close() })
+
+	manifestA, exists, err := ReadManifest(f.firstConfig)
+	if err != nil || !exists {
+		t.Fatal("PRISTINE_BACKEND_A_MANIFEST_FAILED")
+	}
+	manifestB, exists, err := ReadManifest(f.secondConfig)
+	if err != nil || !exists {
+		t.Fatal("PRISTINE_BACKEND_B_MANIFEST_FAILED")
+	}
+
+	emptyA, err := a.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4})
+	if err != nil {
+		t.Fatal("PRISTINE_BACKEND_EMPTY_QUERY_FAILED")
+	}
+	if len(emptyA.Hits) != 0 || emptyA.Truncated || emptyA.JournalRevision == "" {
+		t.Fatal("PRISTINE_BACKEND_EMPTY_RESULT_INVALID")
+	}
+
+	journal, err := vaultfilejournal.OpenExisting(manifestA.Journal)
+	if err != nil {
+		t.Fatal("PRISTINE_BACKEND_JOURNAL_OPEN_FAILED")
+	}
+	state, loadErr := journal.LoadGenesisBaseline()
+	closeErr := journal.Close()
+	if loadErr != nil || closeErr != nil {
+		t.Fatal("PRISTINE_BACKEND_JOURNAL_STATE_FAILED")
+	}
+	defer clear(state.BaseBytes)
+	defer clear(state.WorkingBytes)
+
+	backendBytes, backendRevision := localFirstReadBackend(t, manifestA)
+	defer clear(backendBytes)
+	if !bytes.Equal(backendBytes, state.BaseBytes) ||
+		string(backendRevision) != string(state.RemoteRevision) ||
+		emptyA.JournalRevision != string(backendRevision) {
+		t.Fatal("PRISTINE_BACKEND_INITIAL_BINDING_FAILED")
+	}
+
+	// Commit the genuinely same genesis ciphertext through the provider's
+	// exact CAS, changing only its opaque revision.
+	updated := localFirstRewriteBackend(t, manifestA, backendBytes)
+	if updated == backendRevision {
+		t.Fatal("PRISTINE_BACKEND_REVISION_NOT_CHANGED")
+	}
+	beforeA := localFirstObserveScope(t, manifestA)
+	defer beforeA.clear()
+	beforeB := localFirstObserveScope(t, manifestB)
+	defer beforeB.clear()
+
+	if stale, err := a.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4}); err == nil || len(stale.Hits) != 0 {
+		t.Fatal("PRISTINE_BACKEND_SAME_BYTES_NEW_REVISION_ACCEPTED")
+	}
+	if _, err := a.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4}); err == nil {
+		t.Fatal("PRISTINE_BACKEND_FAILED_CHILD_REVIVED")
+	}
+
+	fresh, _ := f.open(t, f.firstConfig, f.firstVaultID)
+	t.Cleanup(func() { _ = fresh.Close() })
+	if drifted, err := fresh.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4}); err == nil || len(drifted.Hits) != 0 {
+		t.Fatal("PRISTINE_BACKEND_DRIFT_ACCEPTED_ON_FRESH_OPEN")
+	}
+	localFirstAssertScopeUnchanged(t, beforeA, manifestA, "PRISTINE_BACKEND_QUERY_WROTE_A")
+	localFirstAssertScopeUnchanged(t, beforeB, manifestB, "PRISTINE_BACKEND_QUERY_WROTE_B")
+	if !f.session.Unlocked() {
+		t.Fatal("PRISTINE_BACKEND_REFUSAL_LOCKED_PARENT")
+	}
+
+	emptyB, err := b.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4})
+	if err != nil || len(emptyB.Hits) != 0 || emptyB.Truncated ||
+		emptyB.JournalRevision == "" || emptyB.VaultID != f.secondVaultID {
+		t.Fatal("PRISTINE_BACKEND_SIBLING_LOST")
+	}
+
+	// A different backend byte sequence under a valid new revision must also
+	// refuse, both on the existing child and on a fresh wrapper.
+	bBackendBytes, bRevision := localFirstReadBackend(t, manifestB)
+	defer clear(bBackendBytes)
+	wrong := append([]byte(nil), bBackendBytes...)
+	wrong[0] ^= 0xff
+	wrongRevision := localFirstRewriteBackend(t, manifestB, wrong)
+	clear(wrong)
+	if wrongRevision == bRevision {
+		t.Fatal("PRISTINE_BACKEND_WRONG_BYTES_REVISION_NOT_CHANGED")
+	}
+	if wrongResult, err := b.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4}); err == nil || len(wrongResult.Hits) != 0 {
+		t.Fatal("PRISTINE_BACKEND_WRONG_BYTES_ACCEPTED")
+	}
+	freshB, _ := f.open(t, f.secondConfig, f.secondVaultID)
+	t.Cleanup(func() { _ = freshB.Close() })
+	if wrongResult, err := freshB.QueryExactTitle(LocalGenesisExactQuery{Title: "pristine-empty", Limit: 4}); err == nil || len(wrongResult.Hits) != 0 {
+		t.Fatal("PRISTINE_BACKEND_WRONG_BYTES_ACCEPTED_ON_FRESH_OPEN")
 	}
 }
 
@@ -326,7 +427,21 @@ func TestLocalGenesisExactQueryActivationStaleBinding(t *testing.T) {
 	}
 	defer clear(state.BaseBytes)
 	defer clear(state.WorkingBytes)
-	state.RemoteRevision += state.RemoteRevision[:1]
+	configManifest, exists, err := ReadManifest(f.firstConfig)
+	if err != nil || !exists || configManifest.Journal != before.JournalPath {
+		t.Fatal("JOURNAL_BACKEND_MANIFEST_FAILED")
+	}
+	backendBytes, backendRevision := localFirstReadBackend(t, configManifest)
+	defer clear(backendBytes)
+	if string(backendRevision) != string(state.RemoteRevision) ||
+		!bytes.Equal(backendBytes, state.BaseBytes) {
+		t.Fatal("JOURNAL_BACKEND_PRISTINE_BINDING_FAILED")
+	}
+	nextRevision := localFirstRewriteBackend(t, configManifest, backendBytes)
+	if nextRevision == backendRevision {
+		t.Fatal("JOURNAL_BACKEND_REVISION_NOT_CHANGED")
+	}
+	state.RemoteRevision = nextRevision
 	nextPath := before.JournalPath + ".next"
 	next, err := vaultfilejournal.Open(nextPath)
 	if err != nil {
@@ -343,7 +458,8 @@ func TestLocalGenesisExactQueryActivationStaleBinding(t *testing.T) {
 	updated, _ := f.open(t, f.firstConfig, f.firstVaultID)
 	defer updated.Close()
 	after := mustLocalGenesisActivationQuery(t, updated, hit.Title)
-	if after.JournalRevision == before.JournalRevision || after.ManifestSHA256 != before.ManifestSHA256 {
+	if after.JournalRevision != string(nextRevision) ||
+		after.ManifestSHA256 != before.ManifestSHA256 {
 		t.Fatal("JOURNAL_REVISION_CHANGE_UNVERIFIED")
 	}
 	if err := updated.ValidateExactQueryHit(after, hit.ID, hit.Title); err != nil {

@@ -36,6 +36,7 @@ ParseSecretKey(text string) ([]byte, error)
 (*Vault).Close()       // permanently close wrapper and clear session
 (*Vault).List(state string) (*Rows, error)
 (*Vault).Search(query, state string) (*Rows, error) // title-only
+(*Vault).SearchOwnedLocalExact(workspaceRoot, configPath, vaultID, journalPath, title string, limit int, password, secretKey []byte) (*OwnedLocalExactResult, error)
 (*Vault).CreateLogin(title, url string, username, password []byte) (*Receipt, error)
 (*Vault).GenerateLogin(title, url string, username []byte, length int) (*Receipt, error)
 (*Vault).EditField(id, revision, field string, value []byte) (*Receipt, error)
@@ -49,6 +50,10 @@ ParseSecretKey(text string) ([]byte, error)
 (*Rows).Count() int
 (*Rows).At(index int) (*Row, error)
 // Row exported metadata fields: ID, Revision, Title, State.
+(*OwnedLocalExactResult).Count() int
+(*OwnedLocalExactResult).At(index int) (*OwnedLocalExactHit, error)
+// OwnedLocalExactResult exported metadata fields: VaultID, BackendRevision, Truncated.
+// OwnedLocalExactHit exported metadata fields: ID, Title.
 // Receipt exported metadata fields: ID, Revision, Length, EntropyBits.
 (*SecretValue).Take() ([]byte, error) // explicit, one-use disclosure
 (*SecretValue).UntilUnixMilli() int64 // display deadline; read AFTER Take
@@ -65,6 +70,25 @@ type SystemUnlockStore interface {
 Field edits accept existing fields `title`, `url`, `username`, `password`, `otp`,
 `notes`. Reads accept `username`, `password`, `notes`; OTP seed has no read API.
 Search/list/receipts contain no username, password, notes, seed, or OTP code.
+SearchOwnedLocalExact is read-only and acts only on one explicit owned local
+independent vault in the already active personal account. workspaceRoot,
+configPath and journalPath must be absolute, clean, native-app-owned paths;
+vaultID must match that config. title is exact, non-empty and at most 512 UTF-8
+bytes; limit is 1..64, at most 64 hits are returned, and Truncated reports
+additional matches. The call requires fresh complete password and Secret Key
+slices. The existing owned-child constructor authenticates those factors
+against the current account, and Go consumes and clears both slices on every
+path, including locked, stale, invalid receiver/argument, wrong-account,
+wrong-factor, mismatched-locator and backend-drift failures. Each call opens one
+transient target-only owned child, runs QueryExactTitle over the authenticated
+current bytes and opaque backend revision, then closes that exact child before
+the final epoch grant. The parent and siblings remain active, and no
+authoritative read occurs after the grant. BackendRevision is an opaque equality
+token only, never an item revision, monotonic version or ordering. Results
+contain VaultID, BackendRevision, Truncated and bounded ID/Title hits; no path,
+key, token, proof or raw value is exposed. Stale owned backend bytes/revision
+are refused with no fallback to journal cache. The call performs no create,
+write, repair, move, replace or sharing operation.
 Revision checks are mandatory. Edit UI begins blank; disclosure is a separate
 explicit action. Native UI must match its own captured generation before calling
 Take, clear secret buffers and visible text on selection/background/lock, and
