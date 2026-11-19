@@ -110,13 +110,49 @@ func TestMobileOfflineTwoFactorsGeneratedEditAndDisclosure(t *testing.T) {
 	}
 }
 
+type mobileOTPPhase string
+
+const (
+	mobileOTPPhaseTake   mobileOTPPhase = "take"
+	mobileOTPPhaseLength mobileOTPPhase = "code-length"
+	mobileOTPPhaseLower  mobileOTPPhase = "bounds-lower"
+	mobileOTPPhaseUpper  mobileOTPPhase = "bounds-upper"
+)
+
+func requireMobileOTPPhase(t *testing.T, phase mobileOTPPhase, ok bool, detail string) {
+	t.Helper()
+	if ok {
+		return
+	}
+	if detail == "" {
+		t.Fatalf("positive OTP path refused at phase %s", phase)
+	}
+	t.Fatalf("positive OTP path refused at phase %s: %s", phase, detail)
+}
+
+// mobileSafeOTPConfig selects a genuine TOTP period whose current step has
+// enough remaining time for the positive disclosure. Production still rechecks
+// the real clock and clips delivery at the step boundary; dedicated expiry and
+// rollback tests remain responsible for those fail-closed paths.
+func mobileSafeOTPConfig(t *testing.T, minRemaining int64) []byte {
+	t.Helper()
+	now := time.Now().Unix()
+	for period := int64(3600); period > minRemaining; period-- {
+		if period-now%period > minRemaining {
+			return []byte(fmt.Sprintf("otpauth://totp/Mobile?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&period=%d", period))
+		}
+	}
+	t.Fatalf("no positive-path OTP period with %ds remaining", minRemaining)
+	return nil
+}
+
 func TestMobileBoundedOTPAndAudit(t *testing.T) {
 	v, path, key := mobileFixture(t)
 	r, e := v.CreateLogin("OTP", "", []byte("account-canary"), []byte("password-canary"))
 	if e != nil {
 		t.Fatal("create login failed")
 	}
-	r, e = v.EditField(r.ID, r.Revision, "otp", []byte("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"))
+	r, e = v.EditField(r.ID, r.Revision, "otp", mobileSafeOTPConfig(t, 120))
 	if e != nil {
 		t.Fatal("configure OTP failed")
 	}
@@ -126,9 +162,11 @@ func TestMobileBoundedOTPAndAudit(t *testing.T) {
 	}
 	code, e := otp.Take()
 	defer clear(code)
-	if e != nil || len(code) != 6 || otp.UntilUnixMilli() <= time.Now().UnixMilli() || otp.UntilUnixMilli() > time.Now().Add(15*time.Second).UnixMilli() {
-		t.Fatal("OTP bounds invalid")
-	}
+	requireMobileOTPPhase(t, mobileOTPPhaseTake, e == nil, fmt.Sprint(e))
+	requireMobileOTPPhase(t, mobileOTPPhaseLength, len(code) == 6, "")
+	until, now := otp.UntilUnixMilli(), time.Now()
+	requireMobileOTPPhase(t, mobileOTPPhaseLower, until > now.UnixMilli(), "")
+	requireMobileOTPPhase(t, mobileOTPPhaseUpper, until <= now.Add(15*time.Second).UnixMilli(), "")
 	if _, e = v.RevealField(r.ID, r.Revision, "otp"); e == nil {
 		t.Fatal("OTP seed disclosed")
 	}
