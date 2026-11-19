@@ -23,7 +23,9 @@ var (
 // These private seams are nil in production. They receive no factor, key,
 // token, capability, ciphertext or secret. Tests use them to place a real
 // interleaving only after the durable preparation or after the one CAS write,
-// so the public entry point still owns every decision.
+// so the public entry point still owns every decision. The publish seam also
+// fires once a recovery call has observed an already-applied candidate and is
+// about to acknowledge it, which models a lock before that direct ack.
 var (
 	localOwnedFirstWriteAfterPrepareForTest func()
 	localOwnedFirstWriteAfterPublishForTest func()
@@ -171,13 +173,20 @@ func localOwnedFirstWriteFailed(writeErr error) error {
 
 func acknowledgeLocalOwnedFirstWrite(ctx context.Context, j *vaultfilejournal.Journal, manifest Manifest,
 	pin vaultfilejournal.OwnedGenesisPin, origin vaultfilejournal.State, proposal vaultfilejournal.Proposal,
-	data []byte, revision vaultfilebackend.Revision, checkpoint *vaultfile.PolicyCheckpoint, authorDeviceID string) (LocalOwnedFirstWriteResult, error) {
+	data []byte, revision vaultfilebackend.Revision, checkpoint *vaultfile.PolicyCheckpoint, authorDeviceID string,
+	boundary func([]byte, vaultfilebackend.Revision) error) (LocalOwnedFirstWriteResult, error) {
 	empty := LocalOwnedFirstWriteResult{}
 	if err := verifyLocalOwnedFirstProposal(pin, origin, proposal, checkpoint, authorDeviceID); err != nil {
 		return empty, fmt.Errorf("%w: %w", ErrLocalOwnedFirstWriteConflict, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return empty, fmt.Errorf("%w: %w", ErrLocalOwnedFirstWriteIndeterminate, err)
+	}
+	if boundary != nil {
+		if err := boundary(data, revision); err != nil {
+			return empty, fmt.Errorf("%w: acknowledgement boundary: %w",
+				ErrLocalOwnedFirstWriteIndeterminate, err)
+		}
 	}
 	if err := j.AckOwnedFirstSuccessor(origin, pin, proposal, data, revision); err != nil {
 		return empty, fmt.Errorf("%w: %w", ErrLocalOwnedFirstWriteIndeterminate, err)
@@ -197,7 +206,7 @@ func acknowledgeLocalOwnedFirstWrite(ctx context.Context, j *vaultfilejournal.Jo
 // every non-acknowledged outcome.
 func finishLocalOwnedFirstWrite(ctx context.Context, j *vaultfilejournal.Journal, backend vaultfilepublish.ReadBackend,
 	pristine *localGenesisPristine, origin vaultfilejournal.State, proposal vaultfilejournal.Proposal,
-	authorDeviceID string, writeErr error) (LocalOwnedFirstWriteResult, error) {
+	authorDeviceID string, writeErr error, boundary func([]byte, vaultfilebackend.Revision) error) (LocalOwnedFirstWriteResult, error) {
 	empty := LocalOwnedFirstWriteResult{}
 	if pristine == nil || pristine.checkpoint == nil {
 		return empty, fmt.Errorf("%w: missing authorization", ErrLocalOwnedFirstWriteIndeterminate)
@@ -216,7 +225,7 @@ func finishLocalOwnedFirstWrite(ctx context.Context, j *vaultfilejournal.Journal
 			return empty, localOwnedFirstIndeterminate(writeErr, err)
 		}
 		return acknowledgeLocalOwnedFirstWrite(ctx, j, pristine.manifest, pristine.pin, origin, proposal,
-			data, revision, pristine.checkpoint, authorDeviceID)
+			data, revision, pristine.checkpoint, authorDeviceID, boundary)
 	case bytes.Equal(data, origin.BaseBytes):
 		if revision != origin.RemoteRevision {
 			if errors.Is(writeErr, vaultfilebackend.ErrUnknown) {

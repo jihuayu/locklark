@@ -334,7 +334,7 @@ func WriteLocalGenesisFirstItem(ctx context.Context, s *personal.Session, config
 		localOwnedFirstWriteAfterPublishForTest()
 	}
 	return finishLocalOwnedFirstWrite(ctx, j, backend, pristine, origin, proposal,
-		sealed.AuthorDeviceID, writeErr)
+		sealed.AuthorDeviceID, writeErr, nil)
 }
 
 // WriteFirstItem is the normal entry for a caller that already holds the
@@ -477,7 +477,7 @@ func ResumeLocalGenesisFirstItem(ctx context.Context, s *personal.Session, confi
 	switch {
 	case bytes.Equal(data, proof.Prepared.Proposal.Bytes):
 		return acknowledgeLocalOwnedFirstWrite(ctx, j, manifest, pin, proof.Origin,
-			proof.Prepared.Proposal, data, revision, genesisCheckpoint, proof.AuthorDeviceID)
+			proof.Prepared.Proposal, data, revision, genesisCheckpoint, proof.AuthorDeviceID, nil)
 	case bytes.Equal(data, proof.Origin.BaseBytes):
 		if revision != proof.Origin.RemoteRevision {
 			return empty, fmt.Errorf("%w: original bytes at a new revision", ErrLocalOwnedFirstWriteConflict)
@@ -495,7 +495,7 @@ func ResumeLocalGenesisFirstItem(ctx context.Context, s *personal.Session, confi
 		}
 		return finishLocalOwnedFirstWrite(ctx, j, backend, &localGenesisPristine{
 			manifest: manifest, pin: pin, checkpoint: genesisCheckpoint,
-		}, proof.Origin, proposal, proof.AuthorDeviceID, writeErr)
+		}, proof.Origin, proposal, proof.AuthorDeviceID, writeErr, nil)
 	default:
 		return empty, fmt.Errorf("%w: different backend successor", ErrLocalOwnedFirstWriteConflict)
 	}

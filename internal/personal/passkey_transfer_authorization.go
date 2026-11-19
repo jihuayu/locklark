@@ -49,11 +49,17 @@ const passkeyTransferFullFactorWindow = 15 * time.Minute
 // released, and again immediately before winning the commit gate so a long
 // transaction cannot commit after the proof expired.
 func (s *Session) requireFreshFullFactor() error {
-	if s == nil || s.fullUnlock.IsZero() {
+	return s.freshFullFactorAt(time.Now())
+}
+
+// freshFullFactorAt is the same fail-closed predicate sampled at an explicit
+// instant. Callers must hold Session.mu. A zero, future or at-least-window-old
+// full unlock is refused.
+func (s *Session) freshFullFactorAt(now time.Time) error {
+	if s == nil || s.fullUnlock.IsZero() || now.Before(s.fullUnlock) {
 		return ErrFullFactorRequired
 	}
-	age := time.Since(s.fullUnlock)
-	if age < 0 || age >= passkeyTransferFullFactorWindow {
+	if now.Sub(s.fullUnlock) >= passkeyTransferFullFactorWindow {
 		return ErrFullFactorRequired
 	}
 	return nil
