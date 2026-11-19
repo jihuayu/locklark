@@ -369,49 +369,14 @@ func verifyLegacyPartitionGenesisBaseline(journalPath string, target OwnedVaultF
 		}
 	}()
 
-	if !bytes.Equal(state.BaseBytes, expectedGenesis) ||
-		sha256.Sum256(state.BaseBytes) != target.Pin.SealedSHA256 {
+	if !bytes.Equal(state.BaseBytes, expectedGenesis) {
 		return state, "", "", ErrVaultFileBaselineVerification
 	}
-	genesisCheckpoint, err := vaultfile.VerifyGenesis(state.BaseBytes, &target.Pin.Root)
-	if err != nil || !sameVaultFilePolicyCheckpoint(genesisCheckpoint, checkpoint) {
-		clearVaultFilePolicyCheckpoint(genesisCheckpoint)
-		return state, "", "", ErrVaultFileBaselineVerification
-	}
-	clearVaultFilePolicyCheckpoint(genesisCheckpoint)
-
-	base, err := vaultfile.ParseFile(state.BaseBytes)
-	if err != nil || len(base.SignedPolicyProofs) == 0 ||
-		base.Header.OpID != target.Pin.OperationID ||
-		base.Header.VaultID != checkpoint.VaultID ||
-		base.Header.ContentSeq != 0 {
-		return state, "", "", ErrVaultFileBaselineVerification
-	}
-	policy := &base.SignedPolicyProofs[len(base.SignedPolicyProofs)-1].Policy
-	if policy.PolicySeq != base.Header.PolicySeq ||
-		!bytes.Equal(vaultfile.PolicyDigest(policy), base.Header.PolicyDigest) {
-		return state, "", "", ErrVaultFileBaselineVerification
-	}
-	writerID, writerOK := localVaultFileWriterDevice(policy, scope.recipient, scope.signerPublic)
-	readerID, readerOK := localVaultFileReaderDevice(policy, scope.recipient, scope.signerPublic)
-	if !writerOK || !readerOK || writerID != readerID {
-		return state, "", "", ErrVaultFileBaselineVerification
-	}
-	principal, principalOK := ownedVaultFileDevicePrincipal(policy, writerID)
-	if !principalOK {
-		return state, "", "", ErrVaultFileBaselineVerification
-	}
-
-	_, metadata, current, err := vault.OpenAuthenticatedItems(state.BaseBytes, checkpoint, writerID, scope.ageIdentity)
+	deviceID, principal, err := verifyLegacyPartitionGenesisRecord(state.BaseBytes, target, checkpoint, scope)
 	if err != nil {
-		return state, "", "", ErrVaultFileBaselineVerification
+		return state, "", "", err
 	}
-	defer clear(metadata)
-	defer clearAuthenticatedItems(current)
-	if len(metadata) != 0 || len(current) != 0 {
-		return state, "", "", ErrVaultFileEditReview
-	}
-	return state, writerID, principal, nil
+	return state, deviceID, principal, nil
 }
 
 // verifyLegacyPartitionJournalUnchanged re-reads the exact pristine baseline
