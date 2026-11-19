@@ -83,52 +83,23 @@ func (v *Vault) SearchOwnedLocalExact(workspaceRoot, configPath, vaultID, journa
 		return nil, errCancelled
 	}
 
-	child, _, e := vaultfileclient.OpenLocalGenesisSessionForJournal(
-		s, configPath, workspaceRoot, vaultID, journalPath, password, secretKey)
-	if e != nil {
-		return nil, sanitizedOwnedLocalExact(e)
-	}
-	if child == nil {
-		return nil, errUnavailable
-	}
-
-	closed := false
-	defer func() {
-		if !closed {
-			_ = child.Close()
-		}
-	}()
-
-	raw, queryErr := child.QueryExactTitle(vaultfileclient.LocalGenesisExactQuery{Title: title, Limit: limit})
-	// The exact child must be closed before the delivery gate, including when
-	// the query failed. Siblings and the parent Session are not locked here.
-	closed = true
-	closeErr := child.Close()
-	if queryErr != nil {
-		return nil, sanitizedOwnedLocalExact(queryErr)
+	read, targetErr, closeErr := readOwnedLocalExactTarget(
+		s, workspaceRoot, configPath, vaultID, journalPath, title, limit, false, password, secretKey)
+	if targetErr != nil {
+		return nil, targetErr
 	}
 	if closeErr != nil {
-		return nil, sanitized(closeErr)
+		return nil, closeErr
 	}
-
-	if raw.VaultID != vaultID || raw.JournalRevision == "" ||
-		len(raw.Hits) > limit ||
-		len(raw.Hits) > vaultfileclient.LocalGenesisExactQueryHitsMax {
-		return nil, errInvalid
+	if read == nil {
+		return nil, errUnavailable
 	}
 	out := &OwnedLocalExactResult{
-		VaultID:         raw.VaultID,
-		BackendRevision: raw.JournalRevision,
-		Truncated:       raw.Truncated,
-		hits:            make([]OwnedLocalExactHit, 0, len(raw.Hits)),
+		VaultID:         read.vaultID,
+		BackendRevision: read.backendRevision,
+		Truncated:       read.truncated,
+		hits:            read.hits,
 	}
-	for _, hit := range raw.Hits {
-		if hit.ID == "" || hit.Title != title {
-			return nil, errInvalid
-		}
-		out.hits = append(out.hits, OwnedLocalExactHit{ID: hit.ID, Title: hit.Title})
-	}
-	clearOwnedLocalRawHits(raw.Hits)
 
 	// No authoritative read occurs after this short final grant. RequestLock
 	// shares this mutex, so a stale captured view cannot reveal this result.
@@ -139,6 +110,84 @@ func (v *Vault) SearchOwnedLocalExact(workspaceRoot, configPath, vaultID, journa
 		return nil, errLocked
 	}
 	return out, nil
+}
+
+// ownedLocalExactRead is the bounded, closed result of one target query. It
+// carries no child, token, path, factor or capability.
+type ownedLocalExactRead struct {
+	vaultID         string
+	backendRevision string
+	truncated       bool
+	hits            []OwnedLocalExactHit
+}
+
+// readOwnedLocalExactTarget is the shared one-target sub-operation. It opens
+// exactly one transient owned child through the pinned constructor, queries its
+// authenticated current bytes and opaque backend revision, then closes that
+// exact child before returning. exclusive selects the aggregate query's
+// fail-closed open, which refuses instead of replacing an already registered
+// child for the same journal. targetErr is the existing sanitized target error;
+// closeErr is a sanitized close failure and is reported separately so a batch
+// can withhold every result when a child close cannot be confirmed. The single
+// method keeps its existing target-error precedence.
+func readOwnedLocalExactTarget(s *personal.Session, workspaceRoot, configPath, vaultID, journalPath, title string, limit int, exclusive bool, password, secretKey []byte) (*ownedLocalExactRead, error, error) {
+	var child *vaultfileclient.LocalGenesisSession
+	var e error
+	if exclusive {
+		child, _, e = vaultfileclient.OpenLocalGenesisSessionForJournalExclusive(
+			s, configPath, workspaceRoot, vaultID, journalPath, password, secretKey)
+	} else {
+		child, _, e = vaultfileclient.OpenLocalGenesisSessionForJournal(
+			s, configPath, workspaceRoot, vaultID, journalPath, password, secretKey)
+	}
+	if e != nil {
+		return nil, sanitizedOwnedLocalExact(e), nil
+	}
+	if child == nil {
+		return nil, errUnavailable, nil
+	}
+
+	closed := false
+	defer func() {
+		if !closed {
+			_ = child.Close()
+		}
+	}()
+
+	raw, queryErr := child.QueryExactTitle(vaultfileclient.LocalGenesisExactQuery{Title: title, Limit: limit})
+	// The exact child must be closed before any delivery gate, including when
+	// the query failed. Siblings and the parent Session are not locked here.
+	closed = true
+	closeErr := child.Close()
+	if closeErr != nil {
+		closeErr = sanitized(closeErr)
+	}
+	if queryErr != nil {
+		return nil, sanitizedOwnedLocalExact(queryErr), closeErr
+	}
+	if closeErr != nil {
+		return nil, nil, closeErr
+	}
+
+	defer clearOwnedLocalRawHits(raw.Hits)
+	if raw.VaultID != vaultID || raw.JournalRevision == "" ||
+		len(raw.Hits) > limit ||
+		len(raw.Hits) > vaultfileclient.LocalGenesisExactQueryHitsMax {
+		return nil, errInvalid, nil
+	}
+	read := &ownedLocalExactRead{
+		vaultID:         raw.VaultID,
+		backendRevision: raw.JournalRevision,
+		truncated:       raw.Truncated,
+		hits:            make([]OwnedLocalExactHit, 0, len(raw.Hits)),
+	}
+	for _, hit := range raw.Hits {
+		if hit.ID == "" || hit.Title != title {
+			return nil, errInvalid, nil
+		}
+		read.hits = append(read.hits, OwnedLocalExactHit{ID: hit.ID, Title: hit.Title})
+	}
+	return read, nil, nil
 }
 
 // ownedLocalBeforeGrantForTest is nil in production. Tests use it to stop one

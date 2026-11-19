@@ -37,6 +37,10 @@ ParseSecretKey(text string) ([]byte, error)
 (*Vault).List(state string) (*Rows, error)
 (*Vault).Search(query, state string) (*Rows, error) // title-only
 (*Vault).SearchOwnedLocalExact(workspaceRoot, configPath, vaultID, journalPath, title string, limit int, password, secretKey []byte) (*OwnedLocalExactResult, error)
+(*Vault).SearchOwnedLocalExactBatch(workspaceRoot, title string, limit int, targets *OwnedLocalExactTargets, password, secretKey []byte) (*OwnedLocalExactBatchResult, error)
+NewOwnedLocalExactTargets() *OwnedLocalExactTargets
+(*OwnedLocalExactTargets).Add(configPath, vaultID, journalPath string) error
+(*OwnedLocalExactTargets).Count() int
 (*Vault).CreateLogin(title, url string, username, password []byte) (*Receipt, error)
 (*Vault).GenerateLogin(title, url string, username []byte, length int) (*Receipt, error)
 (*Vault).EditField(id, revision, field string, value []byte) (*Receipt, error)
@@ -54,6 +58,12 @@ ParseSecretKey(text string) ([]byte, error)
 (*OwnedLocalExactResult).At(index int) (*OwnedLocalExactHit, error)
 // OwnedLocalExactResult exported metadata fields: VaultID, BackendRevision, Truncated.
 // OwnedLocalExactHit exported metadata fields: ID, Title.
+(*OwnedLocalExactBatchResult).Count() int
+(*OwnedLocalExactBatchResult).At(index int) (*OwnedLocalExactBatchEntry, error)
+(*OwnedLocalExactBatchEntry).Count() int
+(*OwnedLocalExactBatchEntry).At(index int) (*OwnedLocalExactHit, error)
+// OwnedLocalExactBatchEntry exported metadata fields: VaultID, Status, BackendRevision, Truncated.
+// Status is the bounded literal "ok", "refused" or "unavailable".
 // Receipt exported metadata fields: ID, Revision, Length, EntropyBits.
 (*SecretValue).Take() ([]byte, error) // explicit, one-use disclosure
 (*SecretValue).UntilUnixMilli() int64 // display deadline; read AFTER Take
@@ -89,6 +99,34 @@ contain VaultID, BackendRevision, Truncated and bounded ID/Title hits; no path,
 key, token, proof or raw value is exposed. Stale owned backend bytes/revision
 are refused with no fallback to journal cache. The call performs no create,
 write, repair, move, replace or sharing operation.
+SearchOwnedLocalExactBatch is the bounded aggregate form inside one active
+mobile Vault operation. Its targets all use the one supplied absolute clean
+workspaceRoot; Add requires absolute clean config/journal paths and a non-empty
+vault ID, caps paths at 4096 bytes, vault IDs at 128 bytes and the list at 64
+targets, and rejects malformed or over-capacity additions without partial
+append. The call snapshots the list in original order. Exact duplicate locators
+collapse to one read but keep one result entry per original index. Differing
+locators that share a config path, journal path or vault ID are conflicts and
+report `refused` for every involved entry without opening a child; they are
+never silently aliased. Other target-local failures report only `refused` or
+`unavailable`, open and close only their own child, and do not prevent a valid
+sibling from returning its own independent metadata. `ok` with Count zero is a
+successful zero-hit target, distinct from any failure status. Every target
+reuses the current account/session/epoch and the same pinned locator, manifest,
+companion, journal, factor and named-backend verification as
+SearchOwnedLocalExact; there is no second account unlock, pathless search or
+vault-ID-only authority. Each target's child is opened, queried and closed
+before the next target. A target whose exact journal already has a child
+registered under this Session is refused and that existing child is left
+untouched; the aggregate never replaces or closes it. Per-target entries are
+withheld until every opened child has closed and the same account/epoch passes
+the one final grant. A
+RequestLock/account disappearance, cancellation, or unconfirmed child close
+returns no aggregate and no child capability. Each entry's BackendRevision is
+an independently observed opaque equality token; the aggregate is never an
+atomically consistent cross-backend snapshot. The call is read-only and exposes
+no path, key, token, factor, proof or raw item value; both factor slices are
+consumed and cleared on every path.
 Revision checks are mandatory. Edit UI begins blank; disclosure is a separate
 explicit action. Native UI must match its own captured generation before calling
 Take, clear secret buffers and visible text on selection/background/lock, and

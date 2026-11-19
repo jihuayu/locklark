@@ -27,19 +27,20 @@ const (
 )
 
 type mobileOwnedLocalFixture struct {
-	configA   string
-	configB   string
-	configC   string
-	manifestA vaultfileclient.Manifest
-	manifestB vaultfileclient.Manifest
-	manifestC vaultfileclient.Manifest
-	itemA     vaultfileclient.LocalGenesisFirstItem
-	itemB     vaultfileclient.LocalGenesisFirstItem
-	revisionA string
-	revisionB string
-	password  []byte
-	key       []byte
-	vault     *Vault
+	accountPath string
+	configA     string
+	configB     string
+	configC     string
+	manifestA   vaultfileclient.Manifest
+	manifestB   vaultfileclient.Manifest
+	manifestC   vaultfileclient.Manifest
+	itemA       vaultfileclient.LocalGenesisFirstItem
+	itemB       vaultfileclient.LocalGenesisFirstItem
+	revisionA   string
+	revisionB   string
+	password    []byte
+	key         []byte
+	vault       *Vault
 }
 
 // newMobileOwnedLocalFixture provisions one real encrypted personal account
@@ -140,7 +141,8 @@ func newMobileOwnedLocalFixture(t *testing.T) *mobileOwnedLocalFixture {
 	t.Cleanup(vault.Close)
 
 	return &mobileOwnedLocalFixture{
-		configA: configA, configB: configB, configC: configC,
+		accountPath: accountPath,
+		configA:     configA, configB: configB, configC: configC,
 		manifestA: manifestA, manifestB: manifestB, manifestC: manifestC,
 		itemA: itemA, itemB: itemB, revisionA: resultA.Revision,
 		revisionB: resultB.Revision, password: password, key: key, vault: vault,

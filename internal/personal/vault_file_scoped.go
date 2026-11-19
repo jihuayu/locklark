@@ -74,6 +74,19 @@ var errVaultFileChildFinalHandoff = errors.New("vault-file child final handoff r
 // opaque item selector, not key material.
 type VaultFileChildOptions struct {
 	IncludeItemIDs bool
+	// RefuseExistingChild makes an owned open fail closed instead of replacing
+	// any child already registered for the exact journal path. It is used by
+	// bounded aggregate queries that must leave an existing legitimate child
+	// untouched. The zero value preserves every existing replacement behavior.
+	RefuseExistingChild bool
+}
+
+// vaultFileChildOpenLocked reports only whether any child generation is
+// currently registered for the exact journal path. The caller holds Session.mu.
+func (s *Session) vaultFileChildOpenLocked(journalPath string) bool {
+	s.vaultFileMu.Lock()
+	defer s.vaultFileMu.Unlock()
+	return s.vaultFileChildren[journalPath] != nil
 }
 
 // vaultFileChildOwner is the per-Session identity marker carried opaquely by
@@ -373,6 +386,10 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 			s.mu.Unlock()
 			return VaultFileChildToken{}, nil, ErrSessionLocked
 		}
+		if options.RefuseExistingChild && s.vaultFileChildOpenLocked(journalPath) {
+			s.mu.Unlock()
+			return VaultFileChildToken{}, nil, ErrVaultFileScopedChild
+		}
 		parentMaterial = bytes.Clone(s.material)
 		ownsMaterial = true
 		parentSlot = s.slotDigest
@@ -662,6 +679,19 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 		return VaultFileChildToken{}, nil, ErrSessionLocked
 	}
 	s.vaultFileMu.Lock()
+	if options.RefuseExistingChild && s.vaultFileChildren[journalPath] != nil {
+		s.vaultFileMu.Unlock()
+		s.saveMu.Unlock()
+		s.mu.Unlock()
+		closeErr := parentCheck.close()
+		_ = handle.Close()
+		clearVaultFileChildItems(initialItems)
+		if closeErr != nil {
+			s.lockVaultFileParent()
+			return VaultFileChildToken{}, nil, ErrSessionLocked
+		}
+		return VaultFileChildToken{}, nil, ErrVaultFileScopedChild
+	}
 	if s.vaultFileChildren == nil {
 		s.vaultFileChildren = make(map[string]*vaultFileChild)
 	}

@@ -96,15 +96,26 @@ func OpenLocalGenesisSessionForJournal(s *personal.Session, configPath, workspac
 	return openLocalGenesisSession(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key)
 }
 
+// OpenLocalGenesisSessionForJournalExclusive is the bounded aggregate-query
+// variant. It performs the same pinned locator/journal/factor/ownership work,
+// but fails closed with ErrLocalReview rather than replacing any child already
+// registered for the target journal path. It never closes that existing child.
+func OpenLocalGenesisSessionForJournalExclusive(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+	if !teamfiles.ValidPath(expectedJournal) {
+		return nil, LocalGenesisBaseline{}, ErrLocalReview
+	}
+	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, false, true)
+}
+
 func openLocalGenesisSession(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
-	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, false)
+	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, false, false)
 }
 
 func openLocalGenesisSessionForCustody(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte) (*LocalGenesisSession, LocalGenesisBaseline, error) {
-	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, true)
+	return openLocalGenesisSessionMode(s, configPath, workspaceRoot, vaultID, expectedJournal, password, key, true, false)
 }
 
-func openLocalGenesisSessionMode(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte, custody bool) (*LocalGenesisSession, LocalGenesisBaseline, error) {
+func openLocalGenesisSessionMode(s *personal.Session, configPath, workspaceRoot, vaultID, expectedJournal string, password, key []byte, custody, exclusive bool) (*LocalGenesisSession, LocalGenesisBaseline, error) {
 	empty := LocalGenesisBaseline{}
 	if s == nil || !s.Unlocked() || configPath == "" || workspaceRoot == "" || vaultID == "" {
 		return nil, empty, ErrLocalReview
@@ -123,6 +134,7 @@ func openLocalGenesisSessionMode(s *personal.Session, configPath, workspaceRoot,
 	defer clearLocalGenesisVerified(&verified)
 	var token personal.VaultFileChildToken
 	var initial []personal.VaultFileBaselineItem
+	options := personal.VaultFileChildOptions{RefuseExistingChild: exclusive}
 	if verified.successor != nil {
 		target := personal.OwnedVaultFileFirstSuccessorTarget{
 			BackendRoot: verified.successor.backendRoot,
@@ -131,19 +143,18 @@ func openLocalGenesisSessionMode(s *personal.Session, configPath, workspaceRoot,
 		}
 		if custody {
 			token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChildForCustody(
-				manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+				manifest.Journal, target, verified.checkpoint, password, key, options)
 		} else {
 			token, initial, err = s.OpenOwnedFirstSuccessorVaultFileChild(
-				manifest.Journal, target, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+				manifest.Journal, target, verified.checkpoint, password, key, options)
 		}
 		clear(target.Pin.Root.OwnerRootPublicKey)
 	} else {
 		if custody {
 			token, initial, err = s.OpenOwnedVaultFileChildForCustody(manifest.Journal,
-				manifest.BackendRoot, manifest.Name, verified.checkpoint, password, key,
-				personal.VaultFileChildOptions{})
+				manifest.BackendRoot, manifest.Name, verified.checkpoint, password, key, options)
 		} else {
-			token, initial, err = s.OpenOwnedVaultFileChild(manifest.Journal, verified.checkpoint, password, key, personal.VaultFileChildOptions{})
+			token, initial, err = s.OpenOwnedVaultFileChild(manifest.Journal, verified.checkpoint, password, key, options)
 		}
 	}
 	if err != nil {
