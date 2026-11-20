@@ -1100,12 +1100,45 @@ def _read_browserhost_passkey_phase(marker: Path) -> int:
     return -1
 
 
+_BROWSERHOST_PASSKEY_ENTRY_ENV = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+_BROWSERHOST_PASSKEY_ENTRY_LINE = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+_GO_TEST_START_PREFIX = "=== RUN   "
+# The in-binary line is written from TestMain after package init.  A selected
+# test start frame is written by the test binary immediately before the testing
+# package invokes that test function.  cmd/go's `-json` "start" action is not
+# used: it is emitted before cmd/go execs the test binary.
+
+
+def _go_timeout_witnesses(
+    exc: subprocess.TimeoutExpired,
+    selected_tests: Sequence[str],
+) -> tuple[bool, bool]:
+    """Return (test-binary entry, selected test start) from partial stdout."""
+
+    output = getattr(exc, "stdout", None)
+    if isinstance(output, bytes):
+        text = output.decode("utf-8", "replace")
+    elif isinstance(output, str):
+        text = output
+    else:
+        return False, False
+    lines = text.splitlines()
+    entry = _BROWSERHOST_PASSKEY_ENTRY_LINE in lines
+    expected = {f"{_GO_TEST_START_PREFIX}{name}" for name in selected_tests}
+    started = any(line in expected for line in lines)
+    return entry or started, started
+
+
 @contextmanager
-def _browserhost_passkey_timeout_marker(temp_dir: Path):
+def _browserhost_passkey_timeout_marker(
+    temp_dir: Path,
+    selected_tests: Sequence[str],
+):
     with ExitStack() as cleanup:
         marker = None
-        env_key = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
-        env = {env_key: ""}
+        phase_env_key = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
+        # The stdout witness is enabled independently of phase-marker creation.
+        env = {phase_env_key: "", _BROWSERHOST_PASSKEY_ENTRY_ENV: "1"}
         try:
             directory = cleanup.enter_context(
                 tempfile.TemporaryDirectory(dir=temp_dir, ignore_cleanup_errors=True)
@@ -1114,15 +1147,23 @@ def _browserhost_passkey_timeout_marker(temp_dir: Path):
             candidate.touch(mode=0o600, exist_ok=False)
             candidate.write_bytes(b"0")
             marker = candidate
-            env[env_key] = str(marker)
+            env[phase_env_key] = str(marker)
         except OSError:
             pass
         try:
             yield env
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             phase = _read_browserhost_passkey_phase(marker) if marker is not None else -1
+            entry, started = _go_timeout_witnesses(exc, selected_tests)
+            facts = (
+                f"go_test_entry={'TestMain' if entry else 'unknown'} "
+                f"go_test_start={'observed' if started else 'unknown'}"
+            )
             with suppress(OSError, ValueError):
-                print(f"BrowserHost passkey timeout phase {phase}", file=sys.stderr)
+                print(
+                    f"BrowserHost passkey timeout phase {phase} {facts}",
+                    file=sys.stderr,
+                )
             raise
 
 
@@ -1134,6 +1175,7 @@ def go_package_test(
     min_passed: int = 1,
     timeout: float = 180.0,
     observe_browserhost_passkey_timeout: bool = False,
+    observed_test_names: Sequence[str] = (),
 ) -> dict[str, int]:
     """Execute existing Go package tests for a native service contract.
 
@@ -1149,7 +1191,7 @@ def go_package_test(
         )
     args = ["test", package, "-run", run, "-count=1", "-v"]
     if observe_browserhost_passkey_timeout:
-        with _browserhost_passkey_timeout_marker(ctx.temp_dir) as env:
+        with _browserhost_passkey_timeout_marker(ctx.temp_dir, observed_test_names) as env:
             result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root, env=env)
     else:
         result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)

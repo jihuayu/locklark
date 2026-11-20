@@ -199,11 +199,29 @@ class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
         self.ctx.repo_root = ROOT
         self.go = self.ctx.temp_dir / "fake-go"
 
-    def run_go_helper(self, *, observe=True):
+    def run_go_helper(self, *, observe=True, observed_test_names=("TestOne", "TestTwo")):
         return support.go_package_test(
             self.ctx, "./internal/browserhost", "TestOne|TestTwo",
-            min_passed=2, observe_browserhost_passkey_timeout=observe,
+            min_passed=2,
+            observe_browserhost_passkey_timeout=observe,
+            observed_test_names=observed_test_names,
         )
+
+    def assert_observed_command(self, command, env, cwd, timeout):
+        self.assertEqual(
+            command,
+            [str(self.go), "test", "./internal/browserhost", "-run",
+             "TestOne|TestTwo", "-count=1", "-v"],
+        )
+        self.assertEqual(cwd, str(ROOT))
+        self.assertEqual(timeout, 180)
+        self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"], "1")
+        phase = Path(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"])
+        self.assertEqual(phase.parent.parent, self.ctx.temp_dir)
+        self.assertEqual(phase.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(phase.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(phase.read_bytes(), b"0")
+        return phase
 
     def test_timeout_reports_one_fixed_phase_and_reraises_original_exception(self):
         fifo = object()
@@ -219,18 +237,7 @@ class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
                 )
 
                 def time_out(command, *, env, cwd, timeout, **kwargs):
-                    self.assertEqual(
-                        command,
-                        [str(self.go), "test", "./internal/browserhost", "-run",
-                         "TestOne|TestTwo", "-count=1", "-v"],
-                    )
-                    self.assertEqual(cwd, str(ROOT))
-                    self.assertEqual(timeout, 180)
-                    marker = Path(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"])
-                    self.assertEqual(marker.parent.parent, self.ctx.temp_dir)
-                    self.assertEqual(marker.parent.stat().st_mode & 0o777, 0o700)
-                    self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
-                    self.assertEqual(marker.read_bytes(), b"0")
+                    marker = self.assert_observed_command(command, env, cwd, timeout)
                     if payload is None:
                         marker.unlink()
                     elif payload is fifo:
@@ -249,8 +256,126 @@ class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
                     self.run_go_helper()
 
                 self.assertIs(caught.exception, expired)
-                self.assertEqual(stderr.getvalue(), f"BrowserHost passkey timeout phase {phase}\n")
+                self.assertEqual(
+                    stderr.getvalue(),
+                    f"BrowserHost passkey timeout phase {phase} "
+                    "go_test_entry=unknown go_test_start=unknown\n",
+                )
                 self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_fixed_stdout_witnesses_are_independent_of_phase_marker(self):
+        cases = (
+            (b"0", b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n", "TestMain", "unknown"),
+            (b"0", b"=== RUN   TestOne\n", "TestMain", "observed"),
+            (b"4", b"=== RUN   TestTwo\n", "TestMain", "observed"),
+            (b"0", b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n=== RUN   TestOne\n",
+             "TestMain", "observed"),
+            (b"0", b"build output only\n", "unknown", "unknown"),
+            (b"4", b"", "unknown", "unknown"),
+        )
+        for phase_payload, output, entry, started in cases:
+            with self.subTest(
+                phase=phase_payload, output=output, entry=entry, started=started,
+            ):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=output, stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    marker = self.assert_observed_command(command, env, cwd, timeout)
+                    marker.write_bytes(phase_payload)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    f"BrowserHost passkey timeout phase {int(phase_payload.decode())} "
+                    f"go_test_entry={entry} go_test_start={started}\n",
+                )
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_unrelated_or_malformed_stdout_witnesses_stay_unknown(self):
+        cases = (
+            b"=== RUN   TestOther\n",
+            b"=== RUN   TestOneExtra\n",
+            b"=== RUN TestOne\n",
+            b"prefix LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n",
+            b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY_EXTRA\n",
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=output, stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    self.assert_observed_command(command, env, cwd, timeout)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    "BrowserHost passkey timeout phase 0 "
+                    "go_test_entry=unknown go_test_start=unknown\n",
+                )
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_entry_witness_is_enabled_without_phase_marker(self):
+        stderr = io.StringIO()
+        expired = subprocess.TimeoutExpired(
+            [str(self.go)], 180,
+            output=b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n",
+            stderr=b"untrusted stderr",
+        )
+
+        def time_out(command, *, env, cwd, timeout, **kwargs):
+            self.assertEqual(
+                command,
+                [str(self.go), "test", "./internal/browserhost", "-run",
+                 "TestOne|TestTwo", "-count=1", "-v"],
+            )
+            self.assertEqual(cwd, str(ROOT))
+            self.assertEqual(timeout, 180)
+            self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"], "1")
+            self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"], "")
+            raise expired
+
+        with (
+            mock.patch.object(support, "go_tool", return_value=self.go),
+            mock.patch.object(
+                support.tempfile, "TemporaryDirectory", side_effect=OSError("unavailable")
+            ),
+            mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(subprocess.TimeoutExpired) as caught,
+        ):
+            self.run_go_helper()
+
+        self.assertIs(caught.exception, expired)
+        self.assertEqual(
+            stderr.getvalue(),
+            "BrowserHost passkey timeout phase -1 "
+            "go_test_entry=TestMain go_test_start=unknown\n",
+        )
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
 
     def test_opted_out_timeout_keeps_original_behavior(self):
         expired = subprocess.TimeoutExpired([str(self.go)], 180)
@@ -265,7 +390,13 @@ class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
             self.run_go_helper(observe=False)
 
         self.assertIs(caught.exception, expired)
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(self.go), "test", "./internal/browserhost", "-run",
+             "TestOne|TestTwo", "-count=1", "-v"],
+        )
         self.assertNotIn("LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE", run.call_args.kwargs["env"])
+        self.assertNotIn("LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY", run.call_args.kwargs["env"])
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
 
