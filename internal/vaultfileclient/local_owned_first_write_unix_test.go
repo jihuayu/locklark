@@ -47,9 +47,18 @@ func newLocalFirstWriteFixture(t *testing.T) *localFirstWriteFixture {
 	return newLocalFirstWriteFixtureFor(t, f, f.firstConfig, f.firstVaultID)
 }
 
+// newLocalFirstWriteSingleVaultFixture is the explicit one-child variant for
+// tests whose first-write path and helpers never touch, enumerate or compare
+// the sibling scope.
+func newLocalFirstWriteSingleVaultFixture(t *testing.T) *localFirstWriteFixture {
+	t.Helper()
+	f := newLocalGenesisSingleVaultFixture(t)
+	return newLocalFirstWriteFixtureFor(t, f, f.firstConfig, f.firstVaultID)
+}
+
 // newLocalFirstWriteFixtureFor binds one write fixture to an already-created
-// two-vault account. Both vaults come from the same real temporary account and
-// retain independent manifest, companion, named backend and journal scopes.
+// account. The account may carry one or two real child scopes; every child
+// keeps its own manifest, companion, named backend and journal.
 func newLocalFirstWriteFixtureFor(t *testing.T, f *localGenesisTwoVaultFixture, config, vaultID string) *localFirstWriteFixture {
 	t.Helper()
 	manifest, exists, err := ReadManifest(config)
@@ -298,7 +307,7 @@ func TestOwnedFirstWriteLocalPublishesAndReopens(t *testing.T) {
 }
 
 func TestOwnedFirstWriteLocalScopedChildRetiresOnSuccess(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	wrapper, summary, err := OpenLocalGenesisSessionForJournal(fx.f.session, fx.f.firstConfig,
 		fx.manifest.BackendRoot, fx.manifest.VaultID, fx.manifest.Journal,
 		[]byte(fx.f.f.password), fx.f.f.key)
@@ -324,7 +333,7 @@ func TestOwnedFirstWriteLocalScopedChildRetiresOnSuccess(t *testing.T) {
 
 func TestOwnedFirstWriteLocalRejectsBeforePublication(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		if _, err := fx.write(ctx); !errors.Is(err, ErrLocalOwnedFirstWriteCanceled) {
@@ -339,7 +348,7 @@ func TestOwnedFirstWriteLocalRejectsBeforePublication(t *testing.T) {
 	})
 
 	t.Run("locked-account", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		fx.f.session.Lock()
 		if _, err := fx.write(context.Background()); !errors.Is(err, ErrLocalOwnedFirstWriteReview) {
 			t.Fatal("LOCAL_FIRST_WRITE_LOCKED_ACCEPTED")
@@ -348,7 +357,7 @@ func TestOwnedFirstWriteLocalRejectsBeforePublication(t *testing.T) {
 	})
 
 	t.Run("stale-backend-revision", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		updated := localFirstRewriteBackend(t, fx.manifest, fx.genesis)
 		if updated == fx.bootstrapRevision {
 			t.Fatal("LOCAL_FIRST_WRITE_STALE_REVISION_UNCHANGED")
@@ -365,7 +374,7 @@ func TestOwnedFirstWriteLocalRejectsBeforePublication(t *testing.T) {
 	})
 
 	t.Run("advanced-owned-successor", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		settled := settleLocalOwnedSuccessor(t, fx.f, fx.f.firstConfig, fx.f.firstVaultID, "")
 		if _, err := fx.write(context.Background()); !errors.Is(err, ErrLocalOwnedFirstWriteConflict) {
 			t.Fatal("LOCAL_FIRST_WRITE_ADVANCED_ACCEPTED")
@@ -418,7 +427,7 @@ func TestOwnedFirstWriteLocalRejectsBeforePublication(t *testing.T) {
 }
 
 func TestOwnedFirstWriteLocalConflictPreservesPreparationAndDoesNotClobber(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	foreign := []byte("foreign writer successor")
 	var foreignRevision vaultfilebackend.Revision
 	var hookErr error
@@ -492,7 +501,7 @@ func TestOwnedFirstWriteLocalConflictPreservesPreparationAndDoesNotClobber(t *te
 }
 
 func TestOwnedFirstWriteLocalResumeAfterInterruptedBeforePublication(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	localOwnedFirstWriteAfterPrepareForTest = cancel
 	t.Cleanup(func() { localOwnedFirstWriteAfterPrepareForTest = nil })
@@ -560,7 +569,7 @@ func TestOwnedFirstWriteLocalResumeAfterInterruptedBeforePublication(t *testing.
 }
 
 func TestOwnedFirstWriteLocalResumeAfterInterruptedAcknowledgement(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	localOwnedFirstWriteAfterPublishForTest = cancel
 	t.Cleanup(func() { localOwnedFirstWriteAfterPublishForTest = nil })
@@ -629,7 +638,7 @@ func TestOwnedFirstWriteLocalResumeAfterInterruptedAcknowledgement(t *testing.T)
 }
 
 func TestOwnedFirstWriteLocalResultAndErrorsRetainNoSecrets(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	result, err := fx.write(context.Background())
 	if err != nil {
 		t.Fatalf("WriteLocalGenesisFirstItem: %v", err)
@@ -648,7 +657,7 @@ func TestOwnedFirstWriteLocalResultAndErrorsRetainNoSecrets(t *testing.T) {
 		}
 	}
 
-	bad := newLocalFirstWriteFixture(t)
+	bad := newLocalFirstWriteSingleVaultFixture(t)
 	if _, err := WriteLocalGenesisFirstItem(context.Background(), bad.f.session,
 		bad.f.firstConfig, bad.manifest.BackendRoot, bad.manifest.VaultID, bad.manifest.Journal,
 		[]byte("wrong-factor"), bad.f.f.key, bad.item); err == nil {
