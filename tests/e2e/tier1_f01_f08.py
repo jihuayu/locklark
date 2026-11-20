@@ -345,6 +345,10 @@ def t1_f2_07(ctx):
         r"^TestPasskey(ManagementMetadataSearchAndStrictWire|FilterRunsBeforeFiveHundredCap)$",
         min_passed=2,
         observe_browserhost_passkey_timeout=True,
+        observed_test_names=(
+            "TestPasskeyManagementMetadataSearchAndStrictWire",
+            "TestPasskeyFilterRunsBeforeFiveHundredCap",
+        ),
     )
     node_test_pattern(
         ctx, "browser-extension/test/background.test.js",

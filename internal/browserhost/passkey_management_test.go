@@ -27,6 +27,22 @@ const (
 
 const passkeyTimeoutPhaseFileEnv = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
 
+const (
+	passkeyTimeoutEntryEnv  = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+	passkeyTimeoutEntryLine = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+)
+
+// TestMain is the standard test-binary entry point.  The fixed line below is
+// opt-in only and is written after package init, before m.Run: it establishes
+// that this test binary reached TestMain, not that either selected test body
+// started.
+func TestMain(m *testing.M) {
+	if os.Getenv(passkeyTimeoutEntryEnv) == "1" {
+		fmt.Fprintln(os.Stdout, passkeyTimeoutEntryLine)
+	}
+	os.Exit(m.Run())
+}
+
 var passkeyTimeoutPhaseMu sync.Mutex
 
 func markPasskeyTimeoutPhase(phase byte) {
