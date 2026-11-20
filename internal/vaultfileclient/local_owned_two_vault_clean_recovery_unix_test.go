@@ -130,17 +130,19 @@ func localCleanRecoveryCloseSource(t *testing.T, fx *localCustodyFileFixture) {
 }
 
 // localCleanRecoveryPrepareTarget independently admits the transferred artifact
-// against its exact selected target, then creates the one dedicated
-// generation-zero journal that the existing managed-successor publish path
-// requires. The journal is constructed with the existing vaultfilejournal API
-// from the exact R0 bytes and opaque revision just authenticated by the product
-// admission path. There is no clean-machine product entry point that installs a
-// baseline journal/config, so this is the smallest explicit predecessor step;
-// it is not a second journal contract, and the existing publish path re-reads
-// and verifies the same base before its single CAS.
+// against its exact selected target, then uses the normal product initializer to
+// create the one dedicated generation-zero journal that the existing
+// managed-successor publish path requires. The destination is the same
+// already-restored full-factor account, and the initializer re-authenticates the
+// exact admitted target and the owner scope for this vault before its O_EXCL
+// create. The returned result and a fresh local journal read must both carry the
+// independently authenticated sealed R0, opaque revision, owner root and
+// generation zero; the existing publish path still re-reads and verifies the
+// same base before its single CAS.
 func localCleanRecoveryPrepareTarget(t *testing.T, label string, fx *localCustodyFileFixture,
 	transfer *localRestorePreflightFixture, artifact, sourceTarget []byte,
-	sourceRevision vaultfilebackend.Revision, destRoot string) *localCleanRecoveryVault {
+	sourceRevision vaultfilebackend.Revision, destRoot string,
+	destination *personal.Session) *localCleanRecoveryVault {
 	t.Helper()
 	localCleanRecoveryAssertArtifact(t, transfer.path, artifact)
 
@@ -184,15 +186,25 @@ func localCleanRecoveryPrepareTarget(t *testing.T, label string, fx *localCustod
 		t.Fatal("LOCAL_TWO_VAULT_CLEAN_RECOVERY_JOURNAL_DIR_FAILED")
 	}
 	journal := filepath.Join(dir, "managed-successor.journal")
-	if err := vaultfilejournal.CreateNewState(journal, vaultfilejournal.State{
-		BaseBytes:      bytes.Clone(r0),
-		RemoteRevision: revision,
-		WorkingBytes:   bytes.Clone(r0),
-		Generation:     0,
-	}); err != nil {
+	initialization, err := InitializeTransferredLocalOwnedBackupManagedJournal(
+		context.Background(), transfer.path, transfer.pin, transfer.expected,
+		fx.factor, transfer.locator, destination, journal)
+	if err != nil {
 		clear(r0)
-		t.Fatal("LOCAL_TWO_VAULT_CLEAN_RECOVERY_JOURNAL_CREATE_FAILED")
+		t.Fatalf("LOCAL_TWO_VAULT_CLEAN_RECOVERY_JOURNAL_INIT_FAILED: %v", err)
 	}
+	if initialization.VaultID != admission.VaultID ||
+		initialization.OwnerRootKeyID != transfer.expected.OwnerRootKeyID ||
+		initialization.Generation != 0 ||
+		initialization.BaseSHA256 != sha256.Sum256(r0) ||
+		initialization.BackendRevision != revision {
+		clear(r0)
+		t.Fatal("LOCAL_TWO_VAULT_CLEAN_RECOVERY_JOURNAL_INIT_BINDING_FAILED")
+	}
+	// A stable local read of the newly initialized file must independently show
+	// exactly the authenticated sealed R0, opaque revision and generation zero,
+	// with no prepared, audit or managed-successor record yet.
+	localManagedJournalExpectPristine(t, journal, r0, revision)
 
 	v := &localCleanRecoveryVault{
 		fx: fx, transfer: transfer,
@@ -473,9 +485,9 @@ func TestLocalOwnedTwoVaultCleanRecoveryReopensIndependentChildren(t *testing.T)
 	}
 
 	vaultA := localCleanRecoveryPrepareTarget(t, "a", fxA, transferA,
-		artifactA, sourceTargetA, sourceRevisionA, dest.root)
+		artifactA, sourceTargetA, sourceRevisionA, dest.root, destination)
 	vaultB := localCleanRecoveryPrepareTarget(t, "b", fxB, transferB,
-		artifactB, sourceTargetB, sourceRevisionB, dest.root)
+		artifactB, sourceTargetB, sourceRevisionB, dest.root, destination)
 	if vaultA.journal == vaultB.journal ||
 		vaultA.pin.BackendRevision == vaultB.pin.BackendRevision ||
 		vaultA.pin.SealedSHA256 == vaultB.pin.SealedSHA256 {
