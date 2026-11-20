@@ -163,6 +163,24 @@ func cloneVaultFileManagedDeviceSuccessorPin(pin VaultFileManagedDeviceSuccessor
 	return pin
 }
 
+func cloneOwnedVaultFileManagedSuccessorTarget(target OwnedVaultFileManagedSuccessorTarget) OwnedVaultFileManagedSuccessorTarget {
+	target.Pin = cloneVaultFileManagedDeviceSuccessorPin(target.Pin)
+	return target
+}
+
+func sameOwnedVaultFileManagedSuccessorTarget(a, b *OwnedVaultFileManagedSuccessorTarget) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.JournalPath == b.JournalPath &&
+		a.BackendRoot == b.BackendRoot && a.BackendName == b.BackendName &&
+		a.OperationID == b.OperationID && a.SuccessorRev == b.SuccessorRev &&
+		a.Pin.KeyEpoch == b.Pin.KeyEpoch && a.Pin.ContentSeq == b.Pin.ContentSeq &&
+		a.Pin.SealedSHA256 == b.Pin.SealedSHA256 &&
+		a.Pin.BackendRevision == b.Pin.BackendRevision &&
+		sameVaultFilePolicyCheckpoint(&a.Pin.Checkpoint, &b.Pin.Checkpoint)
+}
+
 func cloneVaultFilePolicyCheckpoint(c *vaultfile.PolicyCheckpoint) *vaultfile.PolicyCheckpoint {
 	if c == nil {
 		return &vaultfile.PolicyCheckpoint{}
@@ -644,17 +662,20 @@ func settledManagedSuccessorBinding(js *managedSuccessorJournalState,
 	return binding, nil
 }
 
-func loadSettledManagedSuccessor(ctx context.Context, journalPath string,
-	target VaultFileManagedDeviceSuccessorTarget, pin VaultFileManagedDeviceSuccessorPin,
+func loadSettledManagedSuccessor(ctx context.Context,
+	target OwnedVaultFileManagedSuccessorTarget,
 	recipient string, signing ed25519.PublicKey) (*vaultFileManagedSuccessorBinding, []byte, error) {
+	if !target.valid() {
+		return nil, nil, managedSuccessorPathError("target")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	j, err := openManagedSuccessorJournal(journalPath)
+	j, err := openManagedSuccessorJournal(target.JournalPath)
 	if err != nil {
 		return nil, nil, err
 	}
-	js, classifyErr := classifyManagedSuccessorJournal(j, pin)
+	js, classifyErr := classifyManagedSuccessorJournal(j, target.Pin)
 	closeErr := j.Close()
 	defer js.clear()
 	if classifyErr != nil {
@@ -666,19 +687,18 @@ func loadSettledManagedSuccessor(ctx context.Context, journalPath string,
 	if js.kind != managedSuccessorJournalSettled {
 		return nil, nil, managedSuccessorReopenError("not settled")
 	}
-	owned := OwnedVaultFileManagedSuccessorTarget{
-		JournalPath: journalPath, BackendRoot: target.Root, BackendName: target.Name, Pin: pin,
-	}
-	binding, err := settledManagedSuccessorBinding(&js, owned, recipient, signing)
+	binding, err := settledManagedSuccessorBinding(&js, target, recipient, signing)
 	if err != nil {
 		return nil, nil, err
 	}
-	backend, err := verifyManagedSuccessorTargetIdentity(target, js.binding.TargetDigest)
+	backend, err := verifyManagedSuccessorTargetIdentity(VaultFileManagedDeviceSuccessorTarget{
+		Root: target.BackendRoot, Name: target.BackendName,
+	}, js.binding.TargetDigest)
 	if err != nil {
 		binding.clear()
 		return nil, nil, err
 	}
-	successor, readErr := readManagedSuccessorBackendExactWith(ctx, backend, target.Name,
+	successor, readErr := readManagedSuccessorBackendExactWith(ctx, backend, target.BackendName,
 		js.state.BaseBytes, js.state.RemoteRevision)
 	backendCloseErr := backend.Close()
 	if readErr != nil {
@@ -691,6 +711,17 @@ func loadSettledManagedSuccessor(ctx context.Context, journalPath string,
 		return nil, nil, managedSuccessorPathError("backend close")
 	}
 	return binding, successor, nil
+}
+
+// ownedVaultFileManagedSuccessorSelector builds the internal typed selector for
+// legacy single-open callers, which supply no expected settled operation or
+// revision. Batch callers pass their fully populated selector directly.
+func ownedVaultFileManagedSuccessorSelector(journalPath string,
+	target VaultFileManagedDeviceSuccessorTarget,
+	pin VaultFileManagedDeviceSuccessorPin) OwnedVaultFileManagedSuccessorTarget {
+	return OwnedVaultFileManagedSuccessorTarget{
+		JournalPath: journalPath, BackendRoot: target.Root, BackendName: target.Name, Pin: pin,
+	}
 }
 
 // verifyManagedSuccessorBinding re-reads the exact settled record and named
@@ -934,7 +965,8 @@ func (s *Session) PublishVaultFileManagedDeviceSuccessor(ctx context.Context, jo
 		if closeErr != nil {
 			return receipt, managedSuccessorUnconfirmedError("close")
 		}
-		binding, successor, err := loadSettledManagedSuccessor(ctx, journalPath, target, expected, recipient, signing)
+		binding, successor, err := loadSettledManagedSuccessor(ctx,
+			ownedVaultFileManagedSuccessorSelector(journalPath, target, expected), recipient, signing)
 		if err != nil {
 			return receipt, err
 		}
@@ -1100,7 +1132,8 @@ func (s *Session) PublishVaultFileManagedDeviceSuccessor(ctx context.Context, jo
 		return receipt, managedSuccessorUnconfirmedError("context")
 	}
 
-	binding, successor, err := loadSettledManagedSuccessor(ctx, journalPath, target, expected, recipient, signing)
+	binding, successor, err := loadSettledManagedSuccessor(ctx,
+		ownedVaultFileManagedSuccessorSelector(journalPath, target, expected), recipient, signing)
 	if err != nil {
 		return receipt, managedSuccessorUnconfirmedError("readback")
 	}
@@ -1186,7 +1219,8 @@ func (s *Session) ResumeVaultFileManagedDeviceSuccessor(ctx context.Context, jou
 		if err := j.Close(); err != nil {
 			return receipt, managedSuccessorUnconfirmedError("close")
 		}
-		binding, successor, err := loadSettledManagedSuccessor(ctx, journalPath, target, expected, recipient, signing)
+		binding, successor, err := loadSettledManagedSuccessor(ctx,
+			ownedVaultFileManagedSuccessorSelector(journalPath, target, expected), recipient, signing)
 		if err != nil {
 			return receipt, err
 		}
@@ -1290,7 +1324,8 @@ func (s *Session) ResumeVaultFileManagedDeviceSuccessor(ctx context.Context, jou
 	if err := ctx.Err(); err != nil {
 		return receipt, managedSuccessorUnconfirmedError("context")
 	}
-	binding, successor, err := loadSettledManagedSuccessor(ctx, journalPath, target, expected, recipient, signing)
+	binding, successor, err := loadSettledManagedSuccessor(ctx,
+		ownedVaultFileManagedSuccessorSelector(journalPath, target, expected), recipient, signing)
 	if err != nil {
 		return receipt, managedSuccessorUnconfirmedError("readback")
 	}

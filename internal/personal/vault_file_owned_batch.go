@@ -32,6 +32,30 @@ type OwnedVaultFileTarget struct {
 	// target adopts exactly one settled owned first successor from this local
 	// backend object; it never makes the target a write authority.
 	Successor *OwnedVaultFileFirstSuccessorTarget
+	// Managed selects exactly one settled managed successor through an explicit
+	// externally trusted selector. It is mutually exclusive with Successor and
+	// requires the caller's expected settled OperationID and opaque
+	// SuccessorRev. It is a read selector only; the typed journal reader, the
+	// pinned base and the current Session establish every trust fact.
+	Managed *OwnedVaultFileManagedSuccessorTarget
+}
+
+// validOwnedVaultFileManagedSuccessorBatchTarget requires the explicit settled
+// identity that a batch response claims. The single-open compatibility adapter
+// may pass an empty selector internally, but batch input must bind both the
+// operation and the exact opaque successor revision and must agree with the
+// separate batch journal/checkpoint.
+func validOwnedVaultFileManagedSuccessorBatchTarget(
+	target *OwnedVaultFileManagedSuccessorTarget,
+	journalPath string,
+	checkpoint *vaultfile.PolicyCheckpoint,
+) bool {
+	return target != nil && target.valid() &&
+		target.JournalPath == journalPath &&
+		target.OperationID != "" &&
+		target.SuccessorRev != "" &&
+		target.Pin.SealedSHA256 != ([sha256.Size]byte{}) &&
+		sameVaultFilePolicyCheckpoint(&target.Pin.Checkpoint, checkpoint)
 }
 
 // OwnedVaultFileChildResult reports one original target index. A nil Err means
@@ -49,6 +73,7 @@ type ownedVaultFileBatchRequest struct {
 	checkpoint  vaultfile.PolicyCheckpoint
 	options     VaultFileChildOptions
 	successor   *OwnedVaultFileFirstSuccessorTarget
+	managed     *OwnedVaultFileManagedSuccessorTarget
 	indices     []int
 }
 
@@ -72,11 +97,18 @@ func clearOwnedVaultFileBatchResults(results []OwnedVaultFileChildResult) {
 
 func validOwnedVaultFileTarget(target OwnedVaultFileTarget) bool {
 	checkpoint := target.Checkpoint
+	if target.Successor != nil && target.Managed != nil {
+		return false
+	}
 	if target.Successor != nil &&
 		(!validOwnedVaultFileFirstSuccessorTarget(*target.Successor) ||
 			target.Successor.Pin.Root.VaultID != checkpoint.VaultID ||
 			target.Successor.Pin.Root.OwnerRootKeyID != checkpoint.OwnerRootKeyID ||
 			!bytes.Equal(target.Successor.Pin.Root.OwnerRootPublicKey, checkpoint.OwnerRootPublicKey)) {
+		return false
+	}
+	if target.Managed != nil &&
+		!validOwnedVaultFileManagedSuccessorBatchTarget(target.Managed, target.JournalPath, &checkpoint) {
 		return false
 	}
 	return target.JournalPath != "" && len(target.JournalPath) <= maxOwnedVaultFileBatchPath &&
@@ -87,7 +119,8 @@ func validOwnedVaultFileTarget(target OwnedVaultFileTarget) bool {
 }
 
 func sameOwnedVaultFileBatchRequest(a, b ownedVaultFileBatchRequest) bool {
-	if !sameOwnedVaultFileFirstSuccessorTarget(a.successor, b.successor) {
+	if !sameOwnedVaultFileFirstSuccessorTarget(a.successor, b.successor) ||
+		!sameOwnedVaultFileManagedSuccessorTarget(a.managed, b.managed) {
 		return false
 	}
 	return a.journalPath == b.journalPath && a.options == b.options &&
@@ -120,6 +153,10 @@ func prepareOwnedVaultFileBatch(targets []OwnedVaultFileTarget) ([]ownedVaultFil
 		if target.Successor != nil {
 			successor := cloneOwnedVaultFileFirstSuccessorTarget(*target.Successor)
 			request.successor = &successor
+		}
+		if target.Managed != nil {
+			managed := cloneOwnedVaultFileManagedSuccessorTarget(*target.Managed)
+			request.managed = &managed
 		}
 		found := false
 		for i := range out {
@@ -195,7 +232,12 @@ func ownedBatchTargetErrorLocal(err error) bool {
 	case errors.Is(err, ErrVaultFileOwnership),
 		errors.Is(err, ErrVaultFileBaselineJournal),
 		errors.Is(err, ErrVaultFileBaselineVerification),
-		errors.Is(err, ErrVaultFileScopedChild):
+		errors.Is(err, ErrVaultFileScopedChild),
+		errors.Is(err, ErrVaultFileManagedDeviceSuccessorPath),
+		errors.Is(err, ErrVaultFileManagedDeviceSuccessorConflict),
+		errors.Is(err, ErrVaultFileManagedDeviceSuccessorReopen):
+		// A stale or malformed exact managed journal, target, pin or settled
+		// identity is owned by that target, not by the authenticated account.
 		return true
 	default:
 		return false
@@ -319,7 +361,7 @@ func UnlockSessionWithOwnedVaultFileChildren(ctx context.Context, path string, p
 			return drain(context.DeadlineExceeded)
 		}
 		token, items, openErr := parent.openVaultFileChild(request.journalPath, &request.checkpoint, nil, nil, request.options,
-			vaultFileChildOpenMode{owned: true, batch: batch, successor: request.successor})
+			vaultFileChildOpenMode{owned: true, batch: batch, successor: request.successor, managed: request.managed})
 		if err := ctx.Err(); err != nil {
 			return drainWith(items, err)
 		}
