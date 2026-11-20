@@ -41,6 +41,7 @@ package vaultfilejournal
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -136,6 +137,13 @@ type Journal struct {
 	mu     sync.Mutex
 	db     *bolt.DB
 	closed bool
+
+	// existingPath and existingInfo bind an existing-only open to the exact
+	// regular file whose descriptor bbolt locked. Open does not populate them.
+	// They let a caller revalidate the configured path without opening a second
+	// journal handle or acquiring the lock again.
+	existingPath string
+	existingInfo os.FileInfo
 
 	// afterPut, when non-nil, runs inside the Save transaction after the
 	// bucket Put and before commit. It exists only for fault-injection tests.

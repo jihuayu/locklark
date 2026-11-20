@@ -119,6 +119,13 @@ func verifyLocalGenesisState(journalPath, vaultID string, companion Companion, r
 	if loadErr != nil || closeErr != nil {
 		return nil, "", ErrLocalReview
 	}
+	return verifyLocalGenesisBaselineState(vaultID, companion, root, state)
+}
+
+// verifyLocalGenesisBaselineState applies the existing pristine-state checks to
+// an already loaded generation-zero state. The caller owns and clears state.
+func verifyLocalGenesisBaselineState(vaultID string, companion Companion, root []byte,
+	state vaultfilejournal.State) (*vaultfile.PolicyCheckpoint, string, error) {
 	gHash := sha256.Sum256(state.BaseBytes)
 	if hex.EncodeToString(gHash[:]) != companion.GenesisSHA256 {
 		return nil, "", ErrLocalReview

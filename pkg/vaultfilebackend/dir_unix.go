@@ -7,37 +7,75 @@ import (
 	"io"
 	"os"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// openLockFile opens or creates the dedicated lock file without following a
-// symlink and without blocking on a FIFO or device planted in the directory. It
-// refuses a non-regular, symlinked, multiply-linked or group/world-writable
-// file: every process shares only this inode for locking, so it must never be
-// swapped. Creation is exclusive: when two processes initialize the same store
-// at once, exactly one creates the inode and the other opens the winner, never
-// a half-linked file.
+// openLockFile is the test-facing convenience wrapper around
+// openLockFileOwned. A validation rejection returns a descriptor still owned by
+// the opener, so the wrapper closes it only through the identity-aware
+// rejection path; a descriptor whose identity cannot be determined is retained
+// by the bounded quarantine instead of being closed blindly.
 func openLockFile(path string) (*os.File, error) {
+	f, info, err := openLockFileOwned(path)
+	if err != nil {
+		closeRejectedLockFile(f, info, time.Now())
+		return nil, err
+	}
+	return f, nil
+}
+
+// openLockFileOwned opens or creates the dedicated lock file without following
+// a symlink and without blocking on a FIFO or device planted in the directory.
+// A successfully opened descriptor and the identity obtained from it are
+// returned even when validation rejects the file: the caller owns the
+// descriptor and must close it through closeRejectedLockFile, under its actual
+// identity semaphore. The returned info is nil when f.Stat itself failed; in
+// that case the descriptor has already been retained by the bounded unknown
+// identity quarantine and must not be closed.
+func openLockFileOwned(path string) (*os.File, os.FileInfo, error) {
+	if err := reserveLockFileOpen(); err != nil {
+		return nil, nil, err
+	}
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
 	if errors.Is(err, unix.EEXIST) {
-		return openExistingLockFile(path)
+		releaseLockFileOpen()
+		return openExistingLockFileOwned(path)
 	}
 	if err != nil {
-		return nil, lockOpenError(path, err)
+		releaseLockFileOpen()
+		return nil, nil, lockOpenError(path, err)
 	}
 	return lockFileFromFD(path, fd)
 }
 
-// openExistingLockFile opens a lock file that must already exist. It never
-// creates one, so a lock file removed after OpenDir is refused rather than
-// silently recreated as a different inode.
-func openExistingLockFile(path string) (*os.File, error) {
+// openExistingLockFileOwned is the existing-only form of openLockFileOwned. It
+// never creates a lock file, so a lock file removed after OpenDir is refused
+// rather than silently recreated as a different inode. Its descriptor and
+// validation-rejection ownership contract is the same as openLockFileOwned.
+func openExistingLockFileOwned(path string) (*os.File, os.FileInfo, error) {
+	if err := reserveLockFileOpen(); err != nil {
+		return nil, nil, err
+	}
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, lockOpenError(path, err)
+		releaseLockFileOpen()
+		return nil, nil, lockOpenError(path, err)
 	}
 	return lockFileFromFD(path, fd)
+}
+
+// openExistingLockFile is the test-facing convenience wrapper around
+// openExistingLockFileOwned, with the same rejection ownership policy as
+// openLockFile.
+func openExistingLockFile(path string) (*os.File, error) {
+	f, info, err := openExistingLockFileOwned(path)
+	if err != nil {
+		closeRejectedLockFile(f, info, time.Now())
+		return nil, err
+	}
+	return f, nil
 }
 
 // lockOpenError classifies a failed lock open with the same refusals as a
@@ -55,17 +93,42 @@ func lockOpenError(path string, err error) error {
 	return deniedMsg(err, "open lock file")
 }
 
+// lockFileRejected is a test-only deterministic point after an opened lock
+// descriptor failed validation and before its owner can close it. Production
+// builds leave it nil.
+var lockFileRejected func(path string)
+
 // lockFileFromFD wraps an opened descriptor after checking it is a private
 // regular file. Its identity is taken from the descriptor itself, never from a
-// later pathname stat, so it describes exactly the inode that was opened.
-func lockFileFromFD(path string, fd int) (*os.File, error) {
+// later pathname stat, so it describes exactly the inode that was opened. The
+// descriptor is not closed on a validation rejection: closing it there could
+// release a POSIX record lock another operation of this process holds on the
+// same inode. The caller closes a rejected descriptor only after acquiring the
+// semaphore for the identity returned here.
+func lockFileFromFD(path string, fd int) (*os.File, os.FileInfo, error) {
 	f := os.NewFile(uintptr(fd), path)
-	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || !privateFile(st) {
-		f.Close()
-		return nil, deniedMsg(nil, "lock file is not a private regular file")
+	if f == nil {
+		_ = unix.Close(fd)
+		releaseLockFileOpen()
+		return nil, nil, deniedMsg(nil, "lock file descriptor is invalid")
 	}
-	return f, nil
+	st, err := f.Stat()
+	if err != nil {
+		// The descriptor is valid enough to exist but its identity cannot be
+		// determined. Retaining it keeps a possible shared lock descriptor open
+		// rather than risking an unchecked close; the bounded quarantine refuses
+		// further opens rather than accumulating without limit.
+		retainUnknownLockFile(f)
+		return f, nil, deniedMsg(err, "lock file")
+	}
+	releaseLockFileOpen()
+	if !st.Mode().IsRegular() || !privateFile(st) {
+		if lockFileRejected != nil {
+			lockFileRejected(path)
+		}
+		return f, st, deniedMsg(nil, "lock file is not a private regular file")
+	}
+	return f, st, nil
 }
 
 // tryLock takes a whole-file OS advisory record lock without blocking and
@@ -103,6 +166,20 @@ func writeLockFile(f *os.File, b []byte) error {
 		return err
 	}
 	return f.Truncate(int64(len(b)))
+}
+
+// lockInodeKey reduces a Stat to the stable platform identity of the inode.
+// It is the key for process-local lock coordination: unlike a pathname, it is
+// shared by every alias that reaches the same lock inode.
+func lockInodeKey(info os.FileInfo) (inProcKey, bool) {
+	if info == nil {
+		return inProcKey{}, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return inProcKey{}, false
+	}
+	return inProcKey{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}, true
 }
 
 // privateFile reports whether the file is a regular file owned by the current

@@ -163,16 +163,21 @@ func ownedFirstSuccessorBucket(tx *bolt.Tx, preparing bool) (*bolt.Bucket, error
 	return b, nil
 }
 
+func loadOwnedFirstSuccessorTx(tx *bolt.Tx) (OwnedFirstSuccessor, error) {
+	b, err := ownedFirstSuccessorBucket(tx, false)
+	if err != nil {
+		return OwnedFirstSuccessor{}, err
+	}
+	return decodeOwnedFirstSuccessor(b.Get([]byte(stateKey)))
+}
+
 // ReadOwnedFirstSuccessor opens an existing journal and returns its sole
 // settled owned successor after authenticating both endpoints against pin.
 func ReadOwnedFirstSuccessor(path string, pin OwnedGenesisPin) (OwnedFirstSuccessor, error) {
 	var record OwnedFirstSuccessor
 	j, err := openExisting(path, func(tx *bolt.Tx) error {
-		b, err := ownedFirstSuccessorBucket(tx, false)
-		if err != nil {
-			return err
-		}
-		record, err = decodeOwnedFirstSuccessor(b.Get([]byte(stateKey)))
+		var err error
+		record, err = loadOwnedFirstSuccessorTx(tx)
 		return err
 	})
 	if err != nil {
@@ -182,6 +187,35 @@ func ReadOwnedFirstSuccessor(path string, pin OwnedGenesisPin) (OwnedFirstSucces
 		return OwnedFirstSuccessor{}, err
 	}
 	if _, err := verifyOwnedFirstSuccessor(record, pin); err != nil {
+		return OwnedFirstSuccessor{}, err
+	}
+	return record, nil
+}
+
+// LoadOwnedFirstSuccessor returns the sole settled owned successor from this
+// already-open journal and authenticates both endpoints against pin. It reuses
+// the existing exclusive lock and handle: it never opens, creates, locks or
+// closes another journal path.
+func (j *Journal) LoadOwnedFirstSuccessor(pin OwnedGenesisPin) (OwnedFirstSuccessor, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return OwnedFirstSuccessor{}, ErrClosed
+	}
+	var record OwnedFirstSuccessor
+	err := j.db.View(func(tx *bolt.Tx) error {
+		var err error
+		record, err = loadOwnedFirstSuccessorTx(tx)
+		return err
+	})
+	if err != nil {
+		clear(record.GenesisBytes)
+		clear(record.SuccessorBytes)
+		return OwnedFirstSuccessor{}, err
+	}
+	if _, err := verifyOwnedFirstSuccessor(record, pin); err != nil {
+		clear(record.GenesisBytes)
+		clear(record.SuccessorBytes)
 		return OwnedFirstSuccessor{}, err
 	}
 	return record, nil

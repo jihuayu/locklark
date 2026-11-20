@@ -139,6 +139,105 @@ func TestOpenExistingDoesNotRepairFreelist(t *testing.T) {
 	}
 }
 
+func TestOpenExistingSettledShapeRefusesDecodableUnsettledState(t *testing.T) {
+	cases := []struct {
+		name  string
+		build func(*testing.T, string)
+	}{
+		{
+			name: "NONZERO_GENERATION",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+				j, err := Open(path)
+				if err != nil {
+					t.Fatal("UNSETTLED_OPEN_FAILED")
+				}
+				s := State{
+					BaseBytes:      opaque(65, 41),
+					WorkingBytes:   opaque(65, 41),
+					RemoteRevision: "a5-revision",
+				}
+				if err := j.InitializeState(s); err != nil {
+					_ = j.Close()
+					t.Fatal("UNSETTLED_INIT_FAILED")
+				}
+				if err := j.UpdateWorking(0, append([]byte(nil), s.BaseBytes...)); err != nil {
+					_ = j.Close()
+					t.Fatal("UNSETTLED_UPDATE_FAILED")
+				}
+				if err := j.Close(); err != nil {
+					t.Fatal("UNSETTLED_CLOSE_FAILED")
+				}
+			},
+		},
+		{
+			name: "UNEQUAL_BASE_WORKING",
+			build: func(t *testing.T, path string) {
+				t.Helper()
+				j, err := Open(path)
+				if err != nil {
+					t.Fatal("UNSETTLED_OPEN_FAILED")
+				}
+				s := State{
+					BaseBytes:      opaque(65, 41),
+					WorkingBytes:   opaque(83, 42),
+					RemoteRevision: "a5-revision",
+				}
+				if err := j.InitializeState(s); err != nil {
+					_ = j.Close()
+					t.Fatal("UNSETTLED_INIT_FAILED")
+				}
+				if err := j.Close(); err != nil {
+					t.Fatal("UNSETTLED_CLOSE_FAILED")
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(privateDir(t), "journal.db")
+			test.build(t, path)
+			before := existingBytes(t, path)
+
+			// The ordinary strict opener and state reader must accept the file.
+			j, err := OpenExisting(path)
+			if err != nil {
+				t.Fatal("UNSETTLED_ORDINARY_OPEN_FAILED")
+			}
+			state, err := j.LoadState()
+			if err != nil {
+				_ = j.Close()
+				t.Fatal("UNSETTLED_ORDINARY_STATE_FAILED")
+			}
+			if err := j.Close(); err != nil {
+				t.Fatal("UNSETTLED_ORDINARY_CLOSE_FAILED")
+			}
+
+			opened, probeErr := OpenExistingSettledShape(path)
+			if opened != nil {
+				_ = opened.Close()
+				t.Fatal("UNSETTLED_SHAPE_ACCEPTED")
+			}
+			if !errors.Is(probeErr, ErrCorrupt) || errors.Is(probeErr, ErrLocked) {
+				t.Fatal("UNSETTLED_SHAPE_NOT_EXACT_CORRUPT")
+			}
+			if !bytes.Equal(before, existingBytes(t, path)) {
+				t.Fatal("UNSETTLED_SHAPE_CHANGED_FILE")
+			}
+
+			j, err = OpenExisting(path)
+			if err != nil {
+				t.Fatal("UNSETTLED_REOPEN_FAILED")
+			}
+			again, err := j.LoadState()
+			closeErr := j.Close()
+			if err != nil || closeErr != nil || !sameState(state, again) {
+				t.Fatal("UNSETTLED_SHAPE_CHANGED_STATE")
+			}
+		})
+	}
+}
+
 func TestOpenExistingRefusesMissingEmptyCorrupt(t *testing.T) {
 	t.Run("MISSING", func(t *testing.T) {
 		path := filepath.Join(privateDir(t), "missing.db")

@@ -2231,6 +2231,276 @@ func TestDirOpenDirDoesNotReleaseHeldLock(t *testing.T) {
 	after.kill()
 }
 
+// sameInodeAlias returns a second pathname that names the same directory as
+// root. A case-insensitive file system exposes one without privileges: the only
+// difference is the case of the final component, which leaves a distinct path
+// string that resolves to the same inode. The caller skips when the file system
+// is case-sensitive. (Bind-mount aliases would work as well but need privilege.)
+func sameInodeAlias(t *testing.T, root string) (string, bool) {
+	t.Helper()
+	dir, base := filepath.Split(root)
+	aliasBase := strings.ToUpper(base)
+	if aliasBase == base {
+		aliasBase = strings.ToLower(base)
+	}
+	if aliasBase == base {
+		return "", false
+	}
+	alias := filepath.Join(dir, aliasBase)
+	want, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(alias)
+	if err != nil || !os.SameFile(want, got) {
+		return "", false
+	}
+	return alias, true
+}
+
+// Two paths that reach the same lock inode must select the same process
+// semaphore, so closing a duplicate descriptor through the alias cannot release
+// the OS lock held through the original path. The regression needs a real
+// second pathname: a case alias supplies one on a case-insensitive file system.
+//
+// The operation and constructor paths are both exercised while the original
+// instance holds its lock. An independent process must still see the lock as
+// busy, and both alias calls must stay blocked until the holder releases. Before
+// identity keying, the alias used a second semaphore, opened/closed a duplicate
+// descriptor, and the child could take the lock.
+func TestDirAliasLockInodeSerializesProcessDescriptors(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "backend-root")
+	a := openAt(t, root).(*Dir)
+	alias, ok := sameInodeAlias(t, root)
+	if !ok {
+		t.Skip("file system has no unprivileged same-inode distinct-path alias")
+	}
+	c := openAt(t, alias).(*Dir)
+	if a.inProc != c.inProc {
+		t.Fatal("alias instances selected different process semaphores for one lock inode")
+	}
+	if a.lockKey != c.lockKey {
+		t.Fatal("alias instances captured different lock inode identities")
+	}
+	if err := a.CreateIfAbsent(ctx, "seed", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.Read(ctx, "seed"); err != nil || string(got.Bytes) != "v1" {
+		t.Fatalf("alias read through the same store = %q %v", got.Bytes, err)
+	}
+
+	_, release, err := a.lockHandle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := true
+	defer func() {
+		if held {
+			release()
+		}
+	}()
+
+	child := startTryLockHelper(t, root)
+	if line := child.lineWithin(t, 5*time.Second); line != "busy" {
+		t.Fatalf("child lock attempt while the original holds = %q, want busy", line)
+	}
+
+	// An operation through the alias path must block on the same semaphore.
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.CreateIfAbsent(ctx, "alias-written", []byte("v2")) }()
+	// A fresh OpenDir through the alias path must block before it opens and
+	// closes the shared lock descriptor.
+	openDone := make(chan error, 1)
+	go func() {
+		d, err := OpenDir(alias)
+		if d != nil {
+			_ = d.Close()
+		}
+		openDone <- err
+	}()
+	select {
+	case err := <-writeDone:
+		t.Fatalf("alias write returned while the original held the lock: %v", err)
+	case err := <-openDone:
+		t.Fatalf("alias OpenDir returned while the original held the lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The independent process must still be locked out after both alias
+	// attempts opened their descriptors. This is the release-the-holder check:
+	// before identity keying the alias close dropped the original OS lock.
+	child2 := startTryLockHelper(t, root)
+	if line := child2.lineWithin(t, 5*time.Second); line != "busy" {
+		t.Fatalf("child lock attempt after alias opens = %q, want busy", line)
+	}
+
+	child.kill()
+	release()
+	held = false
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("alias write after release = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("alias write did not proceed after the holder released")
+	}
+	select {
+	case err := <-openDone:
+		if err != nil {
+			t.Fatalf("alias OpenDir after release = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("alias OpenDir did not proceed after the holder released")
+	}
+	child2.kill()
+
+	// Outside locking and cleanup are normal after the alias operations.
+	after := startTryLockHelper(t, root)
+	if line := after.lineWithin(t, 5*time.Second); line != "locked" {
+		t.Fatalf("child lock attempt after release = %q, want locked", line)
+	}
+	after.kill()
+	if got, err := a.Read(ctx, "alias-written"); err != nil || string(got.Bytes) != "v2" {
+		t.Fatalf("alias write not visible through the original = %q %v", got.Bytes, err)
+	}
+	if st, err := os.Stat(filepath.Join(a.root, lockName)); err != nil || st.Size() != 0 {
+		t.Fatalf("lock ticket left after alias operations = %v %v", st, err)
+	}
+}
+
+// Hard links are the cheapest same-inode distinct-path fixture, but the lock
+// file validation deliberately refuses a multiply-linked lock. This exercises
+// the identity key itself: both link paths and both alias roots must reduce to
+// one process semaphore, independently of the pathname spelling.
+func TestDirLockSemaphoreIdentityFollowsHardLink(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "lock-a")
+	alias := filepath.Join(dir, "lock-b")
+	if err := os.WriteFile(original, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(original, alias); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.Lstat(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.Lstat(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(first, second) {
+		t.Fatal("fixture links do not name the same inode")
+	}
+	k1, ok1 := lockInodeKey(first)
+	k2, ok2 := lockInodeKey(second)
+	if !ok1 || !ok2 || k1 != k2 {
+		t.Fatalf("hard-link identities = %+v %v and %+v %v, want one identity", k1, ok1, k2, ok2)
+	}
+	if inProcForKey(k1) != inProcForKey(k2) {
+		t.Fatal("same lock inode selected different process semaphores")
+	}
+}
+
+// A rejected descriptor must not be closed inside the opener. This regression
+// creates a hard-link alias to an actively held lock inode (unprivileged on
+// both supported platforms) and drives the validation-rejection path through
+// createLockFile's existing-file fallback. The seam reports that the alias
+// descriptor has been opened and rejected but not yet closed. An independent
+// child must still see the source lock as busy; if the opener closed the alias
+// descriptor before acquiring the source inode's semaphore, the source POSIX
+// lock would already be gone and the child would win immediately.
+func TestDirRejectedAliasDescriptorKeepsHeldLock(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "source-root")
+	source := openAt(t, root).(*Dir)
+	if err := source.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, release, err := source.lockHandle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := true
+	defer func() {
+		if held {
+			release()
+		}
+	}()
+
+	// A hard link is the same inode under a second path and is invalid as a
+	// lock file because it is no longer single-link. The source descriptor is
+	// already open and locked, so the added link does not disturb its lock.
+	alias := filepath.Join(source.root, "invalid-alias-lock")
+	if err := os.Link(source.lock, alias); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(alias)
+
+	rejected := make(chan struct{}, 1)
+	lockFileRejected = func(path string) {
+		if path == alias {
+			select {
+			case rejected <- struct{}{}:
+			default:
+			}
+		}
+	}
+	defer func() { lockFileRejected = nil }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := createLockFile(alias, time.Now().Add(5*time.Second))
+		done <- err
+	}()
+	select {
+	case <-rejected:
+	case err := <-done:
+		t.Fatalf("alias rejection returned before the seam: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("alias rejection did not reach the opened-descriptor seam")
+	}
+
+	// Restore the source lock's single-link status so the ordinary helper can
+	// OpenDir it. The candidate still owns the alias descriptor; removing the
+	// pathname does not close it.
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	child := startTryLockHelper(t, root)
+	if line := child.lineWithin(t, 5*time.Second); line != "busy" {
+		t.Fatalf("child lock attempt after alias rejection = %q, want busy", line)
+	}
+
+	// Releasing the source lets the rejected descriptor close under its own
+	// inode semaphore. It must never have been closed underneath the source.
+	release()
+	held = false
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrDenied) {
+			t.Fatalf("invalid alias rejection = %v, want ErrDenied", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rejected alias descriptor did not close after the source released")
+	}
+	child.kill()
+
+	after := startTryLockHelper(t, root)
+	if line := after.lineWithin(t, 5*time.Second); line != "locked" {
+		t.Fatalf("child lock attempt after release = %q, want locked", line)
+	}
+	after.kill()
+
+	if got := mustRead(t, source, "n"); string(got.Bytes) != "v1" {
+		t.Fatalf("source value after rejected alias = %q, want v1", got.Bytes)
+	}
+}
+
 // The lock timeout covers the OS lock wait of another process: a waiter
 // blocked by a live holder fails with a definite ErrConflict (never
 // ErrUnknown) and writes nothing.

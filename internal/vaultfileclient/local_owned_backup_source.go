@@ -396,17 +396,39 @@ func localOwnedBackupSettledSnapshot(manifest Manifest, companion Companion,
 
 func localOwnedBackupPristineSnapshot(manifest Manifest, companion Companion,
 	pin vaultfilejournal.OwnedGenesisPin, root []byte, state vaultfilejournal.State) (*localOwnedBackupSnapshot, error) {
-	if sha256.Sum256(state.BaseBytes) != pin.SealedSHA256 ||
-		state.RemoteRevision == "" || !bytes.Equal(state.BaseBytes, state.WorkingBytes) {
-		return nil, localOwnedBackupError(ErrLocalOwnedBackupConflict, "pristine")
-	}
 	checkpoint, revision, err := verifyLocalGenesisState(manifest.Journal, manifest.VaultID, companion, root)
 	if err != nil || checkpoint == nil ||
 		!localGenesisCheckpointMatchesCompanion(checkpoint, companion.Resume.Checkpoint) {
 		clearLocalGenesisCheckpoint(checkpoint)
 		return nil, localOwnedBackupError(ErrLocalOwnedBackupReview, "pristine proof")
 	}
-	if revision == "" || revision != string(state.RemoteRevision) {
+	return localOwnedBackupPristineSnapshotVerified(manifest, pin, state, checkpoint, revision)
+}
+
+// localOwnedBackupPristineSnapshotFromState applies the same pristine snapshot
+// verification to a state already read from the retained journal handle. It
+// never reopens the journal path.
+func localOwnedBackupPristineSnapshotFromState(manifest Manifest, companion Companion,
+	pin vaultfilejournal.OwnedGenesisPin, root []byte,
+	state vaultfilejournal.State) (*localOwnedBackupSnapshot, error) {
+	checkpoint, revision, err := verifyLocalGenesisBaselineState(manifest.VaultID, companion, root, state)
+	if err != nil || checkpoint == nil ||
+		!localGenesisCheckpointMatchesCompanion(checkpoint, companion.Resume.Checkpoint) {
+		clearLocalGenesisCheckpoint(checkpoint)
+		return nil, localOwnedBackupError(ErrLocalOwnedBackupReview, "pristine proof")
+	}
+	return localOwnedBackupPristineSnapshotVerified(manifest, pin, state, checkpoint, revision)
+}
+
+func localOwnedBackupPristineSnapshotVerified(manifest Manifest,
+	pin vaultfilejournal.OwnedGenesisPin, state vaultfilejournal.State,
+	checkpoint *vaultfile.PolicyCheckpoint, revision string) (*localOwnedBackupSnapshot, error) {
+	if sha256.Sum256(state.BaseBytes) != pin.SealedSHA256 ||
+		state.RemoteRevision == "" || !bytes.Equal(state.BaseBytes, state.WorkingBytes) {
+		clearLocalGenesisCheckpoint(checkpoint)
+		return nil, localOwnedBackupError(ErrLocalOwnedBackupConflict, "pristine")
+	}
+	if checkpoint == nil || revision == "" || revision != string(state.RemoteRevision) {
 		clearLocalGenesisCheckpoint(checkpoint)
 		return nil, localOwnedBackupError(ErrLocalOwnedBackupConflict, "pristine revision")
 	}
