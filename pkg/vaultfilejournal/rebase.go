@@ -322,11 +322,11 @@ func auditCorrupt(what string) error {
 	return fmt.Errorf("%w: %s", ErrCorrupt, what)
 }
 
-// checkNoPendingRecords refuses a legacy proposal or prepared proposal record,
-// whether stored as a value or as a nested bucket. It never reads a value's
-// contents, so the bytes stay untouched.
+// checkNoPendingRecords refuses a legacy proposal, prepared proposal or managed
+// successor binding record, whether stored as a value or as a nested bucket. It
+// never reads a value's contents, so the bytes stay untouched.
 func checkNoPendingRecords(tb *bolt.Bucket) error {
-	for _, key := range []string{recordKey, preparedKey} {
+	for _, key := range []string{recordKey, preparedKey, managedBindingKey} {
 		if tb.Bucket([]byte(key)) != nil || tb.Get([]byte(key)) != nil {
 			return fmt.Errorf("%w: %s record is present", ErrPendingRecords, key)
 		}
@@ -423,17 +423,17 @@ func (j *Journal) LoadRebaseAudit(newGeneration uint64) (RebaseAudit, error) {
 // surfaced, so do not claim success or failure; reopen and compare the state,
 // prepared record and audit exactly.
 func (j *Journal) RebaseAndPrepare(expected State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal Proposal) error {
-	return j.rebaseAndPrepare(expected, remoteBase, remoteRevision, proposal, nil)
+	return j.rebaseAndPrepare(expected, remoteBase, remoteRevision, proposal, nil, nil)
 }
 
 // rebaseAndPrepareWithHook is RebaseAndPrepare with a fault-injection hook that
 // runs after the audit, state and prepared Puts and before the Bolt commit
 // (tests only).
 func (j *Journal) rebaseAndPrepareWithHook(expected State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal Proposal, hook func() error) error {
-	return j.rebaseAndPrepare(expected, remoteBase, remoteRevision, proposal, hook)
+	return j.rebaseAndPrepare(expected, remoteBase, remoteRevision, proposal, nil, hook)
 }
 
-func (j *Journal) rebaseAndPrepare(expected State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal Proposal, hook func() error) error {
+func (j *Journal) rebaseAndPrepare(expected State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal Proposal, binding *ManagedSuccessorBinding, hook func() error) error {
 	if !validStateGeneration(expected) {
 		return fmt.Errorf("%w: malformed expected state", ErrInvalid)
 	}
@@ -448,6 +448,14 @@ func (j *Journal) rebaseAndPrepare(expected State, remoteBase []byte, remoteRevi
 	}
 	if proposal.ExpectedRevision != remoteRevision {
 		return fmt.Errorf("%w: proposal expected revision does not match remote revision", ErrInvalid)
+	}
+	if binding != nil {
+		if !validManagedSuccessorBinding(*binding) ||
+			binding.OperationID != proposal.OperationID ||
+			expected.Generation == math.MaxUint64 ||
+			binding.Generation != expected.Generation+1 {
+			return fmt.Errorf("%w: malformed managed successor binding", ErrInvalid)
+		}
 	}
 	// Own every source byte before the transaction starts, so neither the
 	// encoded records nor the stored state can alias a caller slice.
@@ -534,6 +542,11 @@ func (j *Journal) rebaseAndPrepare(expected State, remoteBase []byte, remoteRevi
 			Proposal:          proposal,
 		})); err != nil {
 			return err
+		}
+		if binding != nil {
+			if err := tb.Put([]byte(managedBindingKey), encodeManagedSuccessorBinding(*binding)); err != nil {
+				return err
+			}
 		}
 		if hook != nil {
 			return hook()

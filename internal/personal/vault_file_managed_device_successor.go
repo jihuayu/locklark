@@ -305,6 +305,24 @@ func (s *Session) loadVaultFileManagedDeviceSuccessorOwner(expected vaultfile.Po
 func (s *Session) PrepareVaultFileManagedDeviceSuccessor(ctx context.Context,
 	target VaultFileManagedDeviceSuccessorTarget,
 	expected VaultFileManagedDeviceSuccessorPin) (out VaultFileManagedDeviceSuccessor, retErr error) {
+	if s == nil {
+		return out, ErrSessionLocked
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prepareVaultFileManagedDeviceSuccessorLocked(ctx, target, expected)
+}
+
+// prepareVaultFileManagedDeviceSuccessorLocked is the explicit publish path's
+// in-lock preparation step. The caller holds Session.mu and has already checked
+// activity and the fresh full factor. It performs exactly the same checks and
+// sealing as the public Prepare entry point and never locks Session.mu itself.
+func (s *Session) prepareVaultFileManagedDeviceSuccessorLocked(ctx context.Context,
+	target VaultFileManagedDeviceSuccessorTarget,
+	expected VaultFileManagedDeviceSuccessorPin) (out VaultFileManagedDeviceSuccessor, retErr error) {
 	defer func() {
 		if retErr != nil {
 			out.Clear()
@@ -319,8 +337,6 @@ func (s *Session) PrepareVaultFileManagedDeviceSuccessor(ctx context.Context,
 	if !target.valid() || !validVaultFileManagedDeviceSuccessorPin(expected) {
 		return out, vaultFileManagedDeviceSuccessorError("request")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.active(true); err != nil {
 		return out, err
 	}

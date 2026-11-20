@@ -17,16 +17,18 @@ import (
 const ownerRecoveryImportTargetName = "owned-recovery-import"
 
 type ownerRecoveryImportFixture struct {
-	destSession *Session
-	destPath    string
-	destDevice  VaultFileDevicePublic
-	owner       vaultFileOwnerRecord
-	public      VaultFileOwnershipPublic
-	expected    vaultfile.PolicyCheckpoint
-	artifact    []byte
-	factor      *VaultFileBackupRecoveryFactor
-	binding     VaultFileBackupCustodyRestoreSourceBinding
-	target      VaultFileBackupCustodyRestoreTarget
+	destSession  *Session
+	destPath     string
+	destPassword []byte
+	destKey      []byte
+	destDevice   VaultFileDevicePublic
+	owner        vaultFileOwnerRecord
+	public       VaultFileOwnershipPublic
+	expected     vaultfile.PolicyCheckpoint
+	artifact     []byte
+	factor       *VaultFileBackupRecoveryFactor
+	binding      VaultFileBackupCustodyRestoreSourceBinding
+	target       VaultFileBackupCustodyRestoreTarget
 }
 
 func newOwnerRecoveryImportFixture(t *testing.T, label string) *ownerRecoveryImportFixture {
@@ -93,6 +95,8 @@ func newOwnerRecoveryImportFixture(t *testing.T, label string) *ownerRecoveryImp
 	if err != nil {
 		t.Fatal("OWNER_RECOVERY_IMPORT_DEST_UNLOCK_FAILED")
 	}
+	keptPassword := bytes.Clone(destPassword)
+	keptKey := bytes.Clone(destKey)
 	clear(destPassword)
 	clear(destKey)
 	destDevice, err := destSession.VaultFileDevicePublic()
@@ -104,6 +108,7 @@ func newOwnerRecoveryImportFixture(t *testing.T, label string) *ownerRecoveryImp
 	}
 	f := &ownerRecoveryImportFixture{
 		destSession: destSession, destPath: destPath,
+		destPassword: keptPassword, destKey: keptKey,
 		destDevice: destDevice, owner: owner, public: public,
 		expected: pin, artifact: artifact, factor: factor, binding: binding,
 		target: VaultFileBackupCustodyRestoreTarget{Root: root, Name: ownerRecoveryImportTargetName},
@@ -119,6 +124,8 @@ func (f *ownerRecoveryImportFixture) clear() {
 	if f.destSession != nil {
 		f.destSession.Lock()
 	}
+	clear(f.destPassword)
+	clear(f.destKey)
 	clear(f.artifact)
 	clear(f.expected.OwnerRootPublicKey)
 	clear(f.expected.PolicyDigest)
