@@ -468,6 +468,7 @@ def terminate_process_group(
     *,
     grace: float = 3.0,
     owned_group: int | None = None,
+    reap_leader: bool = False,
 ) -> int | None:
     """Terminate the session/process group this harness launched.
 
@@ -479,6 +480,11 @@ def terminate_process_group(
 
     The wrapper may exit while descendants remain, and a descendant may ignore
     SIGTERM, so the wait/escalation targets the *group*, not just the wrapper.
+
+    ``reap_leader`` is a scoped opt-in for callers that need prompt teardown:
+    after SIGTERM the direct child is reaped before probing the group.  A
+    zombie leader is itself a group member, so without this the normal
+    SIGTERM path always burned the whole grace/escalation window.
     """
 
     own_group = os.getpgid(0)
@@ -496,6 +502,11 @@ def terminate_process_group(
             os.killpg(group, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             group = None
+    if group is not None and reap_leader:
+        try:
+            proc.wait(timeout=min(max(grace, 0.0), 0.5))
+        except subprocess.TimeoutExpired:
+            pass
     if group is None:
         if proc.poll() is None:
             try:
