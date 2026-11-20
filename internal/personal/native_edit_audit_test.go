@@ -17,7 +17,7 @@ func nativeEditGate(t *testing.T, s *Session) *MutationGate {
 }
 
 func TestNativeFieldEditUsesExactRevisionAndRefusalAudit(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal("native edit unlock failed")

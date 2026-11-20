@@ -70,7 +70,7 @@ func TestRunEnvChild(t *testing.T) {
 }
 
 func TestRunEnvIntentPrecedesProcess(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	request := runRequest(t)
 	prepare := func(r *RunRequest) (result, error) {
 		return command(path, "fixture", key, "item.run.password", vault.Item{}, &Edit{ID: target.ID, Revision: target.Revision, Field: target.Field}, commandOption{run: r})
@@ -138,7 +138,7 @@ func TestRunEnvIntentPrecedesProcess(t *testing.T) {
 }
 
 func TestRunEnvFailuresAndBinding(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	request := runRequest(t)
 	called := 0
 	execute := func(context.Context, RunRequest, []byte) (int, error) {
@@ -274,7 +274,7 @@ func TestRunEnvProcessAndValidation(t *testing.T) {
 }
 
 func TestRunEnvUsernameIntent(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	target.Field = "username"
 	request := runRequest(t)
 	receipt, e := runEnv(context.Background(), target, request, func(r *RunRequest) (result, error) {

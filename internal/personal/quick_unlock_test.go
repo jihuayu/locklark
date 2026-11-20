@@ -29,7 +29,7 @@ func (s *testSystemStore) Load(id string) ([]byte, error) {
 }
 func (s *testSystemStore) Delete(id string) error { delete(s.values, id); return nil }
 func TestSystemUnlockLifecycle(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	store := &testSystemStore{values: map[string][]byte{}}
 	if _, e := UnlockWithSystem(path, store, time.Minute); e == nil {
 		t.Fatal("unenrolled unlock")
@@ -67,7 +67,7 @@ func TestSystemUnlockLifecycle(t *testing.T) {
 }
 
 func TestSystemUnlockExpiryAndBinding(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	store := &testSystemStore{values: map[string][]byte{}}
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
@@ -122,7 +122,7 @@ func TestSystemUnlockExpiryAndBinding(t *testing.T) {
 // must be able to tell the user to sign the app, enable the keychain, or
 // perform a fresh full unlock instead of pointlessly asking to unlock again.
 func TestSystemUnlockFailuresAreClassified(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal(e)
@@ -171,7 +171,7 @@ func (s *waitingSystemStore) Store(id string, b []byte) error {
 	return s.testSystemStore.Store(id, b)
 }
 func TestLockDoesNotWaitForSystemPrompt(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal(e)
@@ -210,7 +210,7 @@ func (s *waitingLoadStore) Load(id string) ([]byte, error) {
 	return s.testSystemStore.Load(id)
 }
 func TestCancelledSystemUnlockDoesNotCommit(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal(e)

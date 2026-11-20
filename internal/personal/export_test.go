@@ -12,7 +12,7 @@ import (
 )
 
 func TestKDBXExportIntentBeforePublish(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	dest := filepath.Join(t.TempDir(), "export.kdbx")
 	r, err := exportKDBX(path, "fixture", key, "synthetic-export-password", dest, func(raw []byte, dest string) error {
 		events, err := Audit(path, "fixture", key)
@@ -68,7 +68,7 @@ func TestKDBXExportIntentBeforePublish(t *testing.T) {
 }
 
 func TestKDBXExportRollbackAndRecovery(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	db, err := existing(path)
 	if err != nil {
 		t.Fatal(err)

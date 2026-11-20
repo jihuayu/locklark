@@ -13,7 +13,7 @@ import (
 )
 
 func TestArchiveLifecycle(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	old := target.Revision
 	revision, err := SetArchived(path, "fixture", key, target.ID, old, true)
 	if err != nil || revision == old {
@@ -83,7 +83,7 @@ func TestArchiveLifecycle(t *testing.T) {
 }
 
 func TestArchiveConcurrentAndAmbiguousReferences(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	rows, err := List(path, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestArchiveConcurrentAndAmbiguousReferences(t *testing.T) {
 }
 
 func TestArchiveRollbackAndEventSchema(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	db, err := existing(path)
 	if err != nil {
 		t.Fatal(err)

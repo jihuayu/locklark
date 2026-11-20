@@ -10,7 +10,7 @@ import (
 func TestTrashRestoresPriorState(t *testing.T) {
 	for _, archived := range []bool{false, true} {
 		t.Run(map[bool]string{false: "active", true: "archived"}[archived], func(t *testing.T) {
-			path, key, target := revealFixture(t)
+			path, key, target := revealFixtureReusable(t)
 			rev := target.Revision
 			var err error
 			if archived {
@@ -61,7 +61,7 @@ func TestTrashRestoresPriorState(t *testing.T) {
 }
 
 func TestTrashEventSchema(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	if _, err := SetTrashed(path, "fixture", key, target.ID, target.Revision, true); err != nil {
 		t.Fatal(err)
 	}

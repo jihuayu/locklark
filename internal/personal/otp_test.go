@@ -21,7 +21,7 @@ const otpFixtureURI = "otpauth://totp/fixture?secret=" + otpFixtureSeed + "&digi
 
 func otpFixture(t *testing.T) (string, []byte, RevealTarget) {
 	t.Helper()
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	revision, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: otpFixtureURI})
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +309,7 @@ func TestOTPIntentBeforeCalculationAndOutput(t *testing.T) {
 }
 
 func TestOTPMissingStaleAndInvalidConfiguration(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var out bytes.Buffer
 	if _, err := RevealOTP(path, "fixture", key, target.ID, target.Revision, &out); !errors.Is(err, ErrOTPNotConfigured) || out.Len() != 0 {
 		t.Fatal("missing OTP not rejected", err)

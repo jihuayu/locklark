@@ -7,7 +7,7 @@ import (
 
 func exportTestSource(t *testing.T) (*Session, PasskeyTarget, string, []byte) {
 	t.Helper()
-	path, key, fill := revealFixture(t)
+	path, key, fill := revealFixtureReusable(t)
 	revision, err := EditLogin(path, "fixture", key, Edit{ID: fill.ID, Revision: fill.Revision, Field: "url", Value: "https://example.test/login"})
 	if err != nil {
 		t.Fatal(err)

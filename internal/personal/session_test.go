@@ -8,7 +8,7 @@ import (
 )
 
 func TestDesktopSessionLockAndRevision(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal(e)
@@ -73,7 +73,7 @@ func TestDesktopSessionLockAndRevision(t *testing.T) {
 	}
 }
 func TestDesktopSessionIdleAndNoFactorRetention(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	pw := []byte("fixture")
 	s, e := UnlockSession(path, pw, key, time.Minute)
 	if e != nil {

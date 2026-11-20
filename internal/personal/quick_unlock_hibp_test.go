@@ -12,7 +12,7 @@ import (
 // Opt-in HIBP checks must work after a system quick unlock exactly as after a
 // password unlock: the session starts with the production client installed.
 func TestSystemUnlockInitializesHIBPClient(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	store := &testSystemStore{values: map[string][]byte{}}
 	full, err := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if err != nil {
