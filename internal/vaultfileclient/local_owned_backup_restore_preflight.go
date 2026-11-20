@@ -24,6 +24,13 @@ import (
 // is the authenticated exact-current version. Authorized install, a new local
 // identity, remote providers and account-level recovery remain outstanding.
 
+// errLocalOwnedBackupAdmissionTarget tags the one admission refusal that means
+// the authenticated source and the exact named target disagreed, as distinct
+// from a malformed request or a wrong artifact/factor/pin. It stays private so
+// existing admission readers keep their public ErrLocalOwnedBackupReview
+// classification and error text.
+var errLocalOwnedBackupAdmissionTarget = errors.New("target")
+
 // LocalOwnedBackupRestoreSourcePin is the independently transported source pin
 // for one custody artifact. It deliberately has no path field: the transferred
 // artifact's new destination path is a separate local argument, while the
@@ -224,7 +231,8 @@ func AdmitTransferredLocalOwnedBackupForRestore(ctx context.Context, custodyPath
 	// same properties, so the target is deliberately not parsed a second time.
 	if read.Revision != opened.Source.BackendRevision ||
 		!bytes.Equal(read.Bytes, opened.Source.Current) {
-		return empty, localOwnedBackupError(ErrLocalOwnedBackupReview, "target")
+		return empty, fmt.Errorf("%w: %w", ErrLocalOwnedBackupReview,
+			errLocalOwnedBackupAdmissionTarget)
 	}
 	if err := ctx.Err(); err != nil {
 		return empty, localOwnedBackupError(ErrLocalOwnedBackupCanceled, "context")
