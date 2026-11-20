@@ -36,6 +36,7 @@ from .harness import (
     prebuilt_env_configured,
     FeatureNotImplementedError,
     PTYResult,
+    legacy_child_env,
     owned_gui_command,
     session_bus_usable,
     terminate_process_group,
@@ -1078,7 +1079,11 @@ def go_tool() -> str | None:
             continue
         try:
             probe = subprocess.run(
-                [candidate, "version"], capture_output=True, text=True, timeout=20
+                [candidate, "version"],
+                env=legacy_child_env(),
+                capture_output=True,
+                text=True,
+                timeout=20,
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -1279,6 +1284,7 @@ def _run_owned_stage(
     deadline: float,
     cwd: Path | str,
     env: Mapping[str, str],
+    inherit_vm_default_goproxy: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run one split stage in a private POSIX session and reap only it.
 
@@ -1287,6 +1293,11 @@ def _run_owned_stage(
     child that outlives a direct binary) remains owned by the recorded group
     id.  Timeout and every other exit path signal that group alone; our own
     group and unrelated/inherited sessions are never signalled.
+
+    ``inherit_vm_default_goproxy`` is false only for the one T1 compile stage:
+    that child copies the caller environment without the legacy VM default so
+    Go's own GOENV/default module policy applies.  Global ``os.environ`` is
+    never modified, and the direct test-binary stage keeps the legacy default.
     """
 
     if os.name == "nt" or not hasattr(os, "killpg"):
@@ -1296,7 +1307,10 @@ def _run_owned_stage(
     proc = subprocess.Popen(
         launched,
         cwd=str(cwd),
-        env=ctx._child_env(dict(env)),
+        env=ctx._child_env(
+            dict(env),
+            inherit_vm_default_goproxy=inherit_vm_default_goproxy,
+        ),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1456,6 +1470,9 @@ def _go_package_test_build_then_run(
                     deadline=deadline,
                     cwd=ctx.repo_root,
                     env=env,
+                    # The T1 compile inherits the caller env exactly; the run
+                    # stage below and every other path keep the legacy default.
+                    inherit_vm_default_goproxy=False,
                 )
             except subprocess.TimeoutExpired as exc:
                 stopped = getattr(exc, "stop_monotonic", None)
