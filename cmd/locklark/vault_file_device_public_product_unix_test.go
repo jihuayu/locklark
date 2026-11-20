@@ -228,3 +228,44 @@ func TestVaultFileDevicePublicPTYDisclosureClassifier(t *testing.T) {
 		})
 	}
 }
+
+// The drain regression drives a real owned PTY child with one-byte reads and
+// waits for the direct child to exit before collecting its residual bytes. A
+// leaked factor written before that earlier exit must still be detected, and an
+// exact public or refusal transcript produced the same way must still classify.
+func TestVaultFileDevicePublicPTYDrainRegression(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("PTY_DRAIN_REGRESSION_PYTHON_UNAVAILABLE")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, "-I", "-B", filepath.Join("testdata", "vault_file_device_public_pty.py"), "selftest")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil || ctx.Err() != nil || stderr.Len() != 0 {
+		t.Fatal("PTY_DRAIN_REGRESSION_EXEC_FAILED")
+	}
+	var result struct {
+		LeakRefused           bool `json:"leak_refused"`
+		LeakAfterExit         bool `json:"leak_after_exit"`
+		PublicExact           bool `json:"public_exact"`
+		PublicAfterExit       bool `json:"public_after_exit"`
+		RefusalExact          bool `json:"refusal_exact"`
+		RefusalAfterExit      bool `json:"refusal_after_exit"`
+		LateCompletionRefused bool `json:"late_completion_refused"`
+	}
+	decoder := json.NewDecoder(&stdout)
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF {
+		t.Fatal("PTY_DRAIN_REGRESSION_VERDICT_INVALID")
+	}
+	if !result.LeakRefused || !result.LeakAfterExit || !result.PublicExact ||
+		!result.PublicAfterExit || !result.RefusalExact || !result.RefusalAfterExit ||
+		!result.LateCompletionRefused {
+		t.Fatalf("PTY_DRAIN_REGRESSION_FAILED leak=%t leak_after_exit=%t public=%t public_after_exit=%t refusal=%t refusal_after_exit=%t late_completion=%t",
+			result.LeakRefused, result.LeakAfterExit, result.PublicExact,
+			result.PublicAfterExit, result.RefusalExact, result.RefusalAfterExit,
+			result.LateCompletionRefused)
+	}
+}
