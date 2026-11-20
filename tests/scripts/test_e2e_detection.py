@@ -497,8 +497,20 @@ class BrowserHostPasskeyBuildRunTests(unittest.TestCase):
         )
         return subprocess.CompletedProcess(command, 0, output, "")
 
-    def _fake_run(self, ctx, command, *, deadline, cwd, env):
-        env = ctx._child_env(dict(env))
+    def _fake_run(
+        self,
+        ctx,
+        command,
+        *,
+        deadline,
+        cwd,
+        env,
+        inherit_vm_default_goproxy=True,
+    ):
+        env = ctx._child_env(
+            dict(env),
+            inherit_vm_default_goproxy=inherit_vm_default_goproxy,
+        )
         cwd = str(cwd)
         timeout = deadline - self._clock()
         if command[0] == str(self.go):
@@ -887,6 +899,222 @@ class BrowserHostPasskeyBuildRunTests(unittest.TestCase):
                 )
                 self.assertNotIn(str(target), message)
                 self.assertNotIn(str(self.ctx.temp_dir), message)
+
+
+class VMGOPROXYPolicyTests(unittest.TestCase):
+    """The VM default belongs to child construction, never ambient state.
+
+    A1 recorded the injected string ``direct`` globally, so a later explicit
+    caller assignment ``os.environ["GOPROXY"] = "direct"`` was mistaken for
+    the recipe default and stripped from the T1 compile.  The default is now
+    applied only while copying a legacy child environment; the T1 compile opts
+    out so Go sees the caller environment exactly.
+    """
+
+    NAMES = ("TestOne", "TestTwo")
+    PATTERN = r"^Test(One|Two)$"
+    VALUES = ("direct", "off", "https://proxy.invalid/direct", "")
+
+    def setUp(self):
+        if os.name == "nt" or not hasattr(os, "killpg"):
+            self.skipTest("owned split stages require POSIX process groups")
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.ctx = object.__new__(harness.E2EContext)
+        self.ctx.temp_dir = self.root / "ctx"
+        self.ctx.temp_dir.mkdir()
+        self.ctx.repo_root = ROOT
+        self.build_witness = self.root / "build-env.json"
+        self.run_witness = self.root / "run-env.json"
+        self.fake_go = self.root / "fake-go"
+        self._write_fake_go()
+
+    def _write_fake_go(self) -> None:
+        python = sys.executable
+        run_witness = repr(str(self.run_witness))
+        run_binary = (
+            f"#!{python}\n"
+            "import json, os, pathlib\n"
+            f"pathlib.Path({run_witness}).write_text("
+            "json.dumps(dict(os.environ)), encoding='utf-8')\n"
+            'print("LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY")\n'
+            'print("=== RUN   TestOne")\n'
+            'print("--- PASS: TestOne (0.00s)")\n'
+            'print("=== RUN   TestTwo")\n'
+            'print("--- PASS: TestTwo (0.00s)")\n'
+            'print("PASS")\n'
+        )
+        build_witness = repr(str(self.build_witness))
+        fake_go = (
+            f"#!{python}\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) != 5 or args[:3] != ['test', '-c', '-o']:\n"
+            "    raise SystemExit(2)\n"
+            f"pathlib.Path({build_witness}).write_text("
+            "json.dumps(dict(os.environ)), encoding='utf-8')\n"
+            "binary = pathlib.Path(args[3])\n"
+            f"binary.write_text({run_binary!r}, encoding='utf-8')\n"
+            "binary.chmod(0o755)\n"
+        )
+        self.fake_go.write_text(fake_go, encoding="utf-8")
+        self.fake_go.chmod(0o755)
+
+    @contextlib.contextmanager
+    def isolated_env(self, **values: str):
+        base = {
+            "HOME": str(self.home),
+            "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+            "GOTOOLCHAIN": "local",
+        }
+        base.update(values)
+        with mock.patch.dict(os.environ, base, clear=True):
+            yield
+
+    def run_split(self) -> dict[str, int]:
+        with mock.patch.object(support, "go_tool", return_value=str(self.fake_go)):
+            return support.go_package_test(
+                self.ctx,
+                "./internal/browserhost",
+                self.PATTERN,
+                min_passed=len(self.NAMES),
+                observe_browserhost_passkey_timeout=True,
+                observed_test_names=self.NAMES,
+                split_build_run=True,
+            )
+
+    def load_env(self, path: Path) -> dict[str, str]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def goenv_goproxy(self, env: dict[str, str], go: str) -> str:
+        completed = subprocess.run(
+            [go, "env", "GOPROXY"],
+            cwd=str(self.root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip()
+
+    def test_explicit_same_value_direct_after_setup_is_kept_for_t1_compile(self):
+        with self.isolated_env():
+            harness.ensure_vm_temp_root()
+            # Same string the old recipe inserted, but now a caller assignment.
+            os.environ["GOPROXY"] = "direct"
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertEqual(build_env.get("GOPROXY"), "direct")
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+
+    def test_repeated_setup_leaves_ambient_absent_and_legacy_child_gets_default(self):
+        with self.isolated_env():
+            for _ in range(3):
+                harness.ensure_vm_temp_root()
+            self.assertNotIn("GOPROXY", os.environ)
+            legacy_env = self.ctx._child_env(None)
+            self.assertEqual(legacy_env.get("GOPROXY"), "direct")
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertNotIn("GOPROXY", build_env)
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+
+    def test_early_ambient_caller_values_are_kept_for_build_and_legacy(self):
+        for value in self.VALUES:
+            with self.subTest(value=value):
+                with self.isolated_env(GOPROXY=value):
+                    harness.ensure_vm_temp_root()
+                    self.assertEqual(os.environ.get("GOPROXY"), value)
+                    legacy_env = self.ctx._child_env(None)
+                    self.assertEqual(legacy_env.get("GOPROXY"), value)
+                    self.assertEqual(self.run_split(), {"pass": 2})
+                    build_env = self.load_env(self.build_witness)
+                    run_env = self.load_env(self.run_witness)
+
+                self.assertEqual(build_env.get("GOPROXY"), value)
+                self.assertEqual(run_env.get("GOPROXY"), value)
+
+    def test_context_env_values_are_kept_for_legacy_and_t1_opt_out(self):
+        for value in self.VALUES:
+            with self.subTest(value=value):
+                with self.isolated_env():
+                    harness.ensure_vm_temp_root()
+                    legacy_env = self.ctx._child_env({"GOPROXY": value})
+                    t1_env = self.ctx._child_env(
+                        {"GOPROXY": value},
+                        inherit_vm_default_goproxy=False,
+                    )
+
+                self.assertEqual(legacy_env.get("GOPROXY"), value)
+                self.assertEqual(t1_env.get("GOPROXY"), value)
+
+    def test_legacy_child_env_helper_uses_setdefault_only(self):
+        with self.isolated_env():
+            harness.ensure_vm_temp_root()
+            self.assertEqual(
+                harness.legacy_child_env().get("GOPROXY"), "direct"
+            )
+            self.assertEqual(
+                harness.legacy_child_env({"GOPROXY": "off"}).get("GOPROXY"),
+                "off",
+            )
+        with self.isolated_env(GOPROXY="custom://proxy"):
+            harness.ensure_vm_temp_root()
+            self.assertEqual(
+                harness.legacy_child_env().get("GOPROXY"), "custom://proxy"
+            )
+
+    def test_private_goenv_default_is_restored_for_build_but_not_legacy_child(self):
+        go = shutil.which("go")
+        if go is None:
+            self.skipTest("go toolchain unavailable for the GOENV policy check")
+        goenv = self.root / "goenv"
+        goenv.write_text("GOPROXY=https://goenv.invalid,direct\n", encoding="utf-8")
+
+        with self.isolated_env(GOENV=str(goenv)):
+            harness.ensure_vm_temp_root()
+            self.assertNotIn("GOPROXY", os.environ)
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        # The direct built-binary stage keeps the pre-existing policy.
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+        self.assertEqual(self.goenv_goproxy(run_env, go), "direct")
+        # The compile stage must fall back to the caller's GOENV value.
+        self.assertNotIn("GOPROXY", build_env)
+        self.assertEqual(build_env.get("GOENV"), str(goenv))
+        self.assertEqual(
+            self.goenv_goproxy(build_env, go),
+            "https://goenv.invalid,direct",
+        )
+
+    def test_same_value_direct_after_setup_wins_over_private_goenv_for_t1(self):
+        go = shutil.which("go")
+        if go is None:
+            self.skipTest("go toolchain unavailable for the GOENV policy check")
+        goenv = self.root / "goenv-explicit"
+        goenv.write_text("GOPROXY=https://goenv.invalid,direct\n", encoding="utf-8")
+
+        with self.isolated_env(GOENV=str(goenv)):
+            harness.ensure_vm_temp_root()
+            # Identical text to the old default, but this is a caller value.
+            os.environ["GOPROXY"] = "direct"
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertEqual(build_env.get("GOPROXY"), "direct")
+        self.assertEqual(self.goenv_goproxy(build_env, go), "direct")
+        self.assertEqual(self.goenv_goproxy(run_env, go), "direct")
 
 
 class PasskeyManagementDetectionTests(unittest.TestCase):

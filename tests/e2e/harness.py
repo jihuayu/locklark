@@ -249,6 +249,13 @@ def read_native_frame(stream: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# The E2E VM recipe historically supplied GOPROXY=direct.  It is now applied
+# only while constructing a legacy child environment, never to os.environ:
+# ambient state must not make a later explicit caller value (even "direct")
+# indistinguishable from the recipe default.
+_VM_GOPROXY_DEFAULT = "direct"
+
+
 def ensure_vm_temp_root() -> Path:
     """Prepare the private VM temporary root required by the test recipe."""
 
@@ -257,8 +264,23 @@ def ensure_vm_temp_root() -> Path:
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     os.environ["TMPDIR"] = str(root)
-    os.environ.setdefault("GOPROXY", "direct")
     return root
+
+
+def legacy_child_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy the caller environment with the old VM proxy default if absent.
+
+    ``setdefault`` runs against a fresh child mapping only.  A caller value in
+    ``os.environ`` or in the explicit mapping wins, including an empty string.
+    The one split T1 compile does not call this and inherits the caller
+    environment exactly.
+    """
+
+    proc_env = dict(os.environ)
+    if env:
+        proc_env.update({str(key): str(value) for key, value in env.items()})
+    proc_env.setdefault("GOPROXY", _VM_GOPROXY_DEFAULT)
+    return proc_env
 
 
 # Cache keyed by (repository, binary directory) so one runner process does not
@@ -684,10 +706,22 @@ class E2EContext:
 
     # -- environment helpers ----------------------------------------------
 
-    def _child_env(self, env: dict[str, str] | None) -> dict[str, str]:
-        proc_env = dict(os.environ)
-        if env:
-            proc_env.update({str(key): str(value) for key, value in env.items()})
+    def _child_env(
+        self,
+        env: dict[str, str] | None,
+        *,
+        inherit_vm_default_goproxy: bool = True,
+    ) -> dict[str, str]:
+        if inherit_vm_default_goproxy:
+            proc_env = legacy_child_env(env)
+        else:
+            # T1's compile inherits the caller environment exactly: no ambient
+            # default is synthesized, so Go's own GOENV/default policy applies.
+            proc_env = dict(os.environ)
+            if env:
+                proc_env.update(
+                    {str(key): str(value) for key, value in env.items()}
+                )
         # A caller-supplied TMPDIR is an explicit override; otherwise the test
         # gets its own private directory beneath the shared 0700 root.
         if not env or "TMPDIR" not in env:
