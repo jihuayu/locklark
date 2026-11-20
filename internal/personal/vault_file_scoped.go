@@ -535,12 +535,8 @@ func (s *Session) openVaultFileChild(journalPath string, checkpoint *vaultfile.P
 			return VaultFileChildToken{}, nil, ErrVaultFileBaselineVerification
 		}
 		binding, readBytes, loadErr := loadSettledManagedSuccessor(
-			context.Background(), mode.managed.JournalPath,
-			VaultFileManagedDeviceSuccessorTarget{
-				Root: mode.managed.BackendRoot, Name: mode.managed.BackendName,
-			},
-			mode.managed.Pin, localAge.Recipient().String(),
-			signer.Public().(ed25519.PublicKey))
+			context.Background(), *mode.managed,
+			localAge.Recipient().String(), signer.Public().(ed25519.PublicKey))
 		if loadErr != nil {
 			return VaultFileChildToken{}, nil, loadErr
 		}
