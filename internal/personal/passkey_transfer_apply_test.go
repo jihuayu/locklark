@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/passkey"
@@ -454,11 +455,23 @@ func TestPasskeyTransferApplyRevokedOrExpiredInvitationRefused(t *testing.T) {
 		})
 	})
 	t.Run("expired", func(t *testing.T) {
-		_, receiver, invite, export, plan, _, _, _ := transferApplyPlanFixture(t, 2*time.Second)
-		time.Sleep(2100 * time.Millisecond)
-		mapping := transferApplyNewMapping(plan, "Expired Import", "")
-		transferApplyMustRefuse(t, receiver, func() (PasskeyTransferApplyReceipt, error) {
-			return receiver.ApplyPasskeyTransfer(invite.Raw, export.Raw, export.SourceFingerprint, plan.Digest, []PasskeyTransferMapping{mapping}, dailyGate(t, receiver))
+		// The fixture's live plan proves the invitation was accepted before
+		// expiry. Advance the same two-second TTL by the existing 2.1s in
+		// virtual time, then require Apply's production expiry check to refuse
+		// without consuming the invitation.
+		synctest.Test(t, func(t *testing.T) {
+			_, receiver, invite, export, plan, _, _, _ := transferApplyPlanFixture(t, 2*time.Second)
+			if !plan.ExpiresAt.After(time.Now()) {
+				t.Fatal("fixture plan was already expired")
+			}
+			time.Sleep(2100 * time.Millisecond)
+			if time.Now().Unix() < plan.ExpiresAt.Unix() {
+				t.Fatal("virtual clock did not reach invitation expiry")
+			}
+			mapping := transferApplyNewMapping(plan, "Expired Import", "")
+			transferApplyMustRefuse(t, receiver, func() (PasskeyTransferApplyReceipt, error) {
+				return receiver.ApplyPasskeyTransfer(invite.Raw, export.Raw, export.SourceFingerprint, plan.Digest, []PasskeyTransferMapping{mapping}, dailyGate(t, receiver))
+			})
 		})
 	})
 }
