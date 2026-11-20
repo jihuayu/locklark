@@ -84,7 +84,7 @@ func (s *localStagedLegacyPartitionSource) request() personal.LegacyVaultPartiti
 }
 
 func TestLocalOwnedLegacyPartitionStagesAndVerifiesAcrossReopen(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	source := newLocalStagedLegacyPartitionSource(t)
 	sourceDigest := sha256.Sum256(source.archive)
 
@@ -233,7 +233,7 @@ func TestLocalOwnedLegacyPartitionStagesAndVerifiesAcrossReopen(t *testing.T) {
 }
 
 func TestLocalOwnedLegacyPartitionReturnsRecoveryPinAfterPostWriteCancel(t *testing.T) {
-	fx := newLocalFirstWriteFixture(t)
+	fx := newLocalFirstWriteSingleVaultFixture(t)
 	source := newLocalStagedLegacyPartitionSource(t)
 	sourceDigest := sha256.Sum256(source.archive)
 
