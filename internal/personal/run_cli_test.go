@@ -81,7 +81,7 @@ func TestRunCLIChild(t *testing.T) {
 }
 
 func TestRunCLIIntentStdioAndCleanup(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	request := cliRequest(t)
 	if _, e := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "password", Value: "private-cli-value"}); e != nil {
 		t.Fatal("fixture edit failed")

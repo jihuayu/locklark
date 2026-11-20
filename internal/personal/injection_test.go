@@ -16,7 +16,7 @@ import (
 )
 
 func TestInjectionJSONPermissionAuditAndNoOverwrite(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	dest := filepath.Join(t.TempDir(), "config.json")
 	receipt, e := InjectJSON(path, "fixture", key, target, "TOKEN", dest)
 	if e != nil {
@@ -73,7 +73,7 @@ func TestInjectionJSONPermissionAuditAndNoOverwrite(t *testing.T) {
 }
 
 func TestInjectionRefusalsAndRollbackNeverPublish(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	dest := filepath.Join(t.TempDir(), "config.json")
 	target.Revision = strings.Repeat("0", 64)
 	if _, e := InjectJSON(path, "fixture", key, target, "TOKEN", dest); !errors.Is(e, ErrConflict) {

@@ -110,9 +110,9 @@ func (s *verificationStore) capsule(t *testing.T, id string) []byte {
 	return bytes.Clone(s.values[id])
 }
 
-func systemVerificationFixture(t *testing.T) (*Session, *verificationStore, string, []byte) {
+func systemVerificationFixtureWith(t *testing.T, fixture func(*testing.T) (string, []byte, RevealTarget)) (*Session, *verificationStore, string, []byte) {
 	t.Helper()
-	path, key, _ := revealFixture(t)
+	path, key, _ := fixture(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal(e)
@@ -123,6 +123,18 @@ func systemVerificationFixture(t *testing.T) (*Session, *verificationStore, stri
 		t.Fatal(e)
 	}
 	return s, store, path, key
+}
+
+func systemVerificationFixture(t *testing.T) (*Session, *verificationStore, string, []byte) {
+	t.Helper()
+	return systemVerificationFixtureWith(t, revealFixtureReusable)
+}
+
+// systemVerificationFixtureFresh keeps a case on distinct fresh identities when
+// it compares capsules across more than one vault.
+func systemVerificationFixtureFresh(t *testing.T) (*Session, *verificationStore, string, []byte) {
+	t.Helper()
+	return systemVerificationFixtureWith(t, revealFixture)
 }
 
 // TestSystemPasskeyVerificationIsFreshPerApproval proves that a prior successful
@@ -158,7 +170,8 @@ func TestSystemPasskeyVerificationIsFreshPerApproval(t *testing.T) {
 }
 
 func TestSystemPasskeyVerificationRejectsMissingOrOddCapsules(t *testing.T) {
-	s, store, path, _ := systemVerificationFixture(t)
+	// This case crosses vault identities, so every fixture is genuinely fresh.
+	s, store, path, _ := systemVerificationFixtureFresh(t)
 	defer s.Lock()
 	id, _, e := systemStoreID(path)
 	if e != nil {
@@ -244,6 +257,7 @@ func TestSystemPasskeyVerificationRejectsMissingOrOddCapsules(t *testing.T) {
 		}
 	})
 	t.Run("wrong-vault", func(t *testing.T) {
+		// A distinct fresh vault/account identity is the property under test.
 		other, otherKey, _ := revealFixture(t)
 		stranger, e := UnlockSession(other, []byte("fixture"), otherKey, time.Minute)
 		if e != nil {
@@ -261,6 +275,7 @@ func TestSystemPasskeyVerificationRejectsMissingOrOddCapsules(t *testing.T) {
 		}
 	})
 	t.Run("locked-session", func(t *testing.T) {
+		// Keep the second vault in this cross-identity case independent too.
 		locked, lockedKey, _ := revealFixture(t)
 		other, e := UnlockSession(locked, []byte("fixture"), lockedKey, time.Minute)
 		if e != nil {

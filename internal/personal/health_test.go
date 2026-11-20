@@ -59,7 +59,7 @@ func TestHealthLocalRulesAndPrivacy(t *testing.T) {
 }
 
 func TestHealthAuthenticatedAuditAndRollback(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	before, err := List(path, "fixture", key)
 	if err != nil {
 		t.Fatal(err)

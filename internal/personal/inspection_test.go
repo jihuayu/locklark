@@ -82,7 +82,7 @@ func TestInspectionSourceAndCloseFailures(t *testing.T) {
 }
 
 func TestInspectionDamagedJournalDoesNotReadSource(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	db, err := existing(path)
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +119,7 @@ func inspectionArchive(t *testing.T) []byte {
 }
 
 func TestInspectionReceiptAuditAndRecovery(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	source := filepath.Join(t.TempDir(), "private-source.1pux")
 	raw := inspectionArchive(t)
 	if err := os.WriteFile(source, raw, 0600); err != nil {
@@ -189,7 +189,7 @@ func TestInspectionReceiptAuditAndRecovery(t *testing.T) {
 }
 
 func TestInspectionAuthenticationRollbackAndRefusals(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	calls := 0
 	request := &inspectionRequest{read: func() ([]byte, error) { calls++; return inspectionArchive(t), nil }}
 	option := commandOption{inspection: request}

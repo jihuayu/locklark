@@ -36,7 +36,7 @@ func signedTransferEvent(t *testing.T, s *Session, action string) Event {
 }
 
 func TestPasskeyTransferKnownActionWhitelistStaysFixed(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, err := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestPasskeyTransferKnownActionWhitelistStaysFixed(t *testing.T) {
 }
 
 func TestPasskeyTransferAuditTamperFailsClosed(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, err := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if err != nil {
 		t.Fatal(err)

@@ -68,7 +68,7 @@ func TestGenerateSavedLoginAndAudit(t *testing.T) {
 }
 
 func TestGenerationAuthorizationAndRollback(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	option, err := generationOption(24)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestGenerationEventProfileValidation(t *testing.T) {
 }
 
 func TestGenerationHistoryRecovery(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	r, err := RegeneratePassword(path, "fixture", key, target.ID, target.Revision, 22)
 	if err != nil {
 		t.Fatal(err)
@@ -262,7 +262,7 @@ func TestGenerationHistoryRecovery(t *testing.T) {
 }
 
 func TestRegenerateConcurrentAndRejectedPolicies(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var wg sync.WaitGroup
 	type result struct {
 		receipt GenerationReceipt
