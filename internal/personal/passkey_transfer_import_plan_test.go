@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/passkey"
@@ -226,11 +227,26 @@ func TestPasskeyTransferPlanRefusals(t *testing.T) {
 		}
 	})
 	t.Run("expired", func(t *testing.T) {
-		_, receiver, invite, _, export, _, _, _ := passkeyTransferPlanFixture(t, 2*time.Second)
-		time.Sleep(2100 * time.Millisecond)
-		if _, err := receiver.PlanPasskeyTransfer(invite.Raw, export.Raw, export.SourceFingerprint); err == nil {
-			t.Fatal("expired invitation planned")
-		}
+		// The production check compares the invitation's ExpiresAt against
+		// time.Now. Keep the same two-second TTL and 2.1s wait, but drive them
+		// in virtual time so the live-then-expired boundary is examined
+		// directly instead of after a real sleep.
+		synctest.Test(t, func(t *testing.T) {
+			_, receiver, invite, _, export, _, _, _ := passkeyTransferPlanFixture(t, 2*time.Second)
+			if !invite.ExpiresAt.After(time.Now()) {
+				t.Fatal("fixture invitation was already expired")
+			}
+			if _, err := receiver.PlanPasskeyTransfer(invite.Raw, export.Raw, export.SourceFingerprint); err != nil {
+				t.Fatalf("live invitation refused: %v", err)
+			}
+			time.Sleep(2100 * time.Millisecond)
+			if time.Now().Unix() < invite.ExpiresAt.Unix() {
+				t.Fatal("virtual clock did not reach invitation expiry")
+			}
+			if _, err := receiver.PlanPasskeyTransfer(invite.Raw, export.Raw, export.SourceFingerprint); err == nil {
+				t.Fatal("expired invitation planned")
+			}
+		})
 	})
 }
 
