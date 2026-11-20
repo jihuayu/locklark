@@ -142,8 +142,9 @@ func (*LocalOwnedWorkspaceBackupSet) Format(w fmt.State, _ rune) {
 var localOwnedWorkspaceBackupSetBeforeFinalProofForTest func()
 
 // localOwnedWorkspaceBackupSetBeforeDeliveryForTest is nil in production. A
-// test may remove or replace one already-verified custody file after the final
-// source-set gate and before the delivery recheck. It cannot inject success.
+// test may remove or replace one already-verified custody file, or replace a
+// captured source directory, after the final source-set gate and before the
+// delivery recheck/gate. It cannot inject success.
 var localOwnedWorkspaceBackupSetBeforeDeliveryForTest func()
 
 // localOwnedWorkspaceBackupArtifactRequest is one private value snapshot of a
@@ -260,53 +261,98 @@ func VerifyLocalOwnedWorkspaceBackupSet(ctx context.Context, s *personal.Session
 	if err != nil {
 		return empty, err
 	}
-	if len(request) != len(first.Vaults) {
-		return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "artifact set")
-	}
-
-	index, err := localOwnedWorkspaceBackupArtifactIndex(ctx, first, request)
+	prep, err := localOwnedWorkspaceBackupPrepare(ctx, s, profileDir, backendRoot, first, request)
 	if err != nil {
 		return empty, err
+	}
+	return localOwnedWorkspaceBackupFinalize(ctx, s, profileDir, backendRoot, request, prep,
+		localOwnedWorkspaceBackupSetBeforeFinalProofForTest,
+		localOwnedWorkspaceBackupSetBeforeDeliveryForTest,
+		nil,
+		func(ctx context.Context) (LocalOwnedWorkspacePreflight, error) {
+			return PreflightLocalOwnedWorkspaceSource(ctx, s, profileDir, backendRoot)
+		})
+}
+
+// localOwnedWorkspaceBackupPreparation is the expensive, artifact-authenticated
+// part of a backup-set verification. Its proof is the exact source observation
+// the remaining final validation and delivery must match.
+type localOwnedWorkspaceBackupPreparation struct {
+	proof  LocalOwnedWorkspacePreflight
+	vaults []LocalOwnedWorkspaceBackupVault
+}
+
+// localOwnedWorkspaceBackupPrepare authenticates the artifact set and its exact
+// source bindings without making the final delivery decision. It is the same
+// work VerifyLocalOwnedWorkspaceBackupSet performs before its final source
+// gate, reused by the maintenance-fence entry outside the provider lock.
+func localOwnedWorkspaceBackupPrepare(ctx context.Context, s *personal.Session,
+	profileDir, backendRoot string, first LocalOwnedWorkspacePreflight,
+	request []localOwnedWorkspaceBackupArtifactRequest) (prep localOwnedWorkspaceBackupPreparation, retErr error) {
+	if len(request) != len(first.Vaults) {
+		return prep, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "artifact set")
+	}
+	index, err := localOwnedWorkspaceBackupArtifactIndex(ctx, first, request)
+	if err != nil {
+		return prep, err
 	}
 	bindings, err := localOwnedWorkspaceBackupBindings(ctx, s, profileDir, backendRoot, first)
 	if err != nil {
-		return empty, err
+		return prep, err
 	}
 	defer clearLocalOwnedWorkspaceBackupBindings(bindings)
 
 	vaults := make([]LocalOwnedWorkspaceBackupVault, 0, len(first.Vaults))
 	for _, proofVault := range first.Vaults {
 		if err := ctx.Err(); err != nil {
-			return empty, localOwnedWorkspaceCanceled(err, "context")
+			return prep, localOwnedWorkspaceCanceled(err, "context")
 		}
 		binding, ok := bindings[proofVault.VaultID]
 		if !ok {
-			return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "artifact binding")
+			return prep, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "artifact binding")
 		}
 		entry, err := localOwnedWorkspaceBackupVault(ctx, proofVault, binding,
 			request[index[proofVault.VaultID]])
 		if err != nil {
-			return empty, err
+			return prep, err
 		}
 		vaults = append(vaults, entry)
 	}
 	if err := ctx.Err(); err != nil {
+		return prep, localOwnedWorkspaceCanceled(err, "context")
+	}
+	prep.proof = first
+	prep.vaults = vaults
+	return prep, nil
+}
+
+// localOwnedWorkspaceBackupFinalize performs the final source gate, artifact
+// recheck and delivery decision. finalProof is the only source observation
+// used here; the maintenance-fence entry supplies a view-backed proof so the
+// whole gate runs under the already-held provider lock. On any failure the zero
+// aggregate is returned and no partial proof escapes.
+func localOwnedWorkspaceBackupFinalize(ctx context.Context, s *personal.Session,
+	profileDir, backendRoot string, request []localOwnedWorkspaceBackupArtifactRequest,
+	prep localOwnedWorkspaceBackupPreparation,
+	beforeFinalProof, beforeDelivery func(), finalGate func() error,
+	finalProof func(context.Context) (LocalOwnedWorkspacePreflight, error)) (set LocalOwnedWorkspaceBackupSet, retErr error) {
+	empty := LocalOwnedWorkspaceBackupSet{}
+	if err := ctx.Err(); err != nil {
 		return empty, localOwnedWorkspaceCanceled(err, "context")
 	}
-
-	if localOwnedWorkspaceBackupSetBeforeFinalProofForTest != nil {
-		localOwnedWorkspaceBackupSetBeforeFinalProofForTest()
+	if beforeFinalProof != nil {
+		beforeFinalProof()
 	}
-	final, err := PreflightLocalOwnedWorkspaceSource(ctx, s, profileDir, backendRoot)
+	final, err := finalProof(ctx)
 	if err != nil {
 		return empty, err
 	}
-	if !sameLocalOwnedWorkspaceBackupProof(first, final) {
+	if !sameLocalOwnedWorkspaceBackupProof(prep.proof, final) {
 		return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "source drift")
 	}
 
-	if localOwnedWorkspaceBackupSetBeforeDeliveryForTest != nil {
-		localOwnedWorkspaceBackupSetBeforeDeliveryForTest()
+	if beforeDelivery != nil {
+		beforeDelivery()
 	}
 	if err := recheckLocalOwnedWorkspaceBackupArtifacts(ctx, s, request); err != nil {
 		return empty, err
@@ -325,11 +371,40 @@ func VerifyLocalOwnedWorkspaceBackupSet(ctx context.Context, s *personal.Session
 	if accountPath == "" {
 		return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceCanceled, "session")
 	}
-	if localOwnedWorkspacePathDigest("account", accountPath) != first.AccountDigest {
+	if localOwnedWorkspacePathDigest("account", accountPath) != prep.proof.AccountDigest {
 		return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "active scope")
 	}
+	// finalGate is the fenced caller's last identity check. It runs after the
+	// final artifact and account rechecks and immediately before the aggregate
+	// is built, so a same-path directory replacement during those rechecks
+	// yields the zero aggregate instead of authoritative new identities.
+	if finalGate != nil {
+		if err := finalGate(); err != nil {
+			return empty, err
+		}
+		// The gate itself can take a bounded but real amount of time. Recheck
+		// cancellation, the live session and the exact account path after it so
+		// a late lock or context loss still yields no result.
+		if err := ctx.Err(); err != nil {
+			return empty, localOwnedWorkspaceCanceled(err, "context")
+		}
+		if s == nil || !s.Unlocked() {
+			return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceCanceled, "session")
+		}
+		accountPath = s.VaultPath()
+		if accountPath == "" {
+			return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceCanceled, "session")
+		}
+		if localOwnedWorkspacePathDigest("account", accountPath) != prep.proof.AccountDigest {
+			return empty, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "active scope")
+		}
+	}
+	return localOwnedWorkspaceBackupSetFrom(prep.proof, prep.vaults), nil
+}
 
-	set = LocalOwnedWorkspaceBackupSet{
+func localOwnedWorkspaceBackupSetFrom(first LocalOwnedWorkspacePreflight,
+	vaults []LocalOwnedWorkspaceBackupVault) LocalOwnedWorkspaceBackupSet {
+	set := LocalOwnedWorkspaceBackupSet{
 		AccountDigest:                first.AccountDigest,
 		ProfileDigest:                first.ProfileDigest,
 		BackendDigest:                first.BackendDigest,
@@ -344,7 +419,7 @@ func VerifyLocalOwnedWorkspaceBackupSet(ctx context.Context, s *personal.Session
 		CompleteWorkspaceOutstanding: true,
 	}
 	set.BackupSetDigest = localOwnedWorkspaceBackupSetDigest(set)
-	return set, nil
+	return set
 }
 
 // localOwnedWorkspaceBackupArtifactIndex validates the 1:1 coverage and all
@@ -510,6 +585,15 @@ func readLocalOwnedWorkspaceBackupTarget(ctx context.Context, manifest Manifest,
 	if closeErr != nil {
 		return "", digest, mapLocalOwnedBackupTargetError(closeErr)
 	}
+	return validateLocalOwnedWorkspaceBackupTargetRead(read, expected, wantRevision)
+}
+
+// validateLocalOwnedWorkspaceBackupTargetRead applies the same exact
+// bytes/revision, size and error mapping to a result read either through a fresh
+// existing-only Dir or through the already-held protected view.
+func validateLocalOwnedWorkspaceBackupTargetRead(read vaultfilebackend.ReadResult,
+	expected []byte, wantRevision vaultfilebackend.Revision,
+) (revision vaultfilebackend.Revision, digest [sha256.Size]byte, retErr error) {
 	if len(read.Bytes) == 0 || len(read.Bytes) > vaultfilepublish.MaxPulledBytes ||
 		len(read.Revision) == 0 || len(read.Revision) > vaultfilepublish.MaxPulledRevisionSize {
 		return "", digest, mapLocalOwnedBackupTargetError(

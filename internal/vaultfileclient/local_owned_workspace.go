@@ -119,6 +119,41 @@ func (*LocalOwnedWorkspacePreflight) Format(w fmt.State, _ rune) {
 	_, _ = w.Write([]byte("[local owned workspace preflight]"))
 }
 
+// localOwnedWorkspaceSourceScope selects how the preflight reaches the named
+// backend object. The default scope opens the existing local Dir for the exact
+// manifest-named object. The maintenance-fence entry supplies a reader backed
+// only by the already-held ProtectedReadView and disables the separate Dir open,
+// so it cannot acquire a nested provider lock.
+type localOwnedWorkspaceSourceScope struct {
+	readTarget           func(context.Context, Manifest, []byte, vaultfilebackend.Revision) (vaultfilebackend.Revision, error)
+	requireBackendExists bool
+	// expectedProfileBinding/expectedBackendBinding are set only by the
+	// maintenance-fence entry. They carry the exact directory identities
+	// captured before the expensive preparation into the fenced preflight. A
+	// same-path replacement with otherwise matching bytes is a conflict, not a
+	// new authoritative identity.
+	expectedProfileBinding *localOwnedWorkspaceDirectoryBinding
+	expectedBackendBinding *localOwnedWorkspaceDirectoryBinding
+	// journals is set only by the maintenance-fence entry. It supplies the
+	// already-locked, stable-order journal handles the final preflight must use;
+	// the fenced path never reopens a journal by path.
+	journals *localOwnedWorkspaceJournalSet
+}
+
+func localOwnedWorkspaceDefaultSourceScope() localOwnedWorkspaceSourceScope {
+	return localOwnedWorkspaceSourceScope{
+		readTarget: func(ctx context.Context, manifest Manifest, expected []byte,
+			wantRevision vaultfilebackend.Revision) (vaultfilebackend.Revision, error) {
+			pulled, err := readLocalOwnedBackupTarget(ctx, manifest, expected, wantRevision)
+			if err != nil {
+				return "", err
+			}
+			return pulled.Revision(), nil
+		},
+		requireBackendExists: true,
+	}
+}
+
 // PreflightLocalOwnedWorkspaceSource performs one bounded, read-only preflight
 // of the currently supported account-owned local source. The caller supplies
 // the exact protected profile directory, one explicit local backend root and a
@@ -143,6 +178,13 @@ func (*LocalOwnedWorkspacePreflight) Format(w fmt.State, _ rune) {
 // for any later migration step.
 func PreflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session,
 	profileDir, backendRoot string) (proof LocalOwnedWorkspacePreflight, retErr error) {
+	return preflightLocalOwnedWorkspaceSource(ctx, s, profileDir, backendRoot,
+		localOwnedWorkspaceDefaultSourceScope())
+}
+
+func preflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session,
+	profileDir, backendRoot string,
+	scope localOwnedWorkspaceSourceScope) (proof LocalOwnedWorkspacePreflight, retErr error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -186,6 +228,24 @@ func PreflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session
 	if err != nil {
 		return proof, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "backend")
 	}
+	// A fenced caller supplies the exact identities captured before expensive
+	// preparation. Requiring the freshly captured leaf and resolved target to
+	// equal those values prevents a same-path replacement with byte-identical
+	// configs/journals from becoming authoritative inside the fence. The
+	// retained expected value, not the replacement, is then used by every later
+	// StillBound check in this preflight.
+	if scope.expectedProfileBinding != nil {
+		if !sameLocalOwnedWorkspaceDirectoryBinding(*scope.expectedProfileBinding, profileBinding) {
+			return proof, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "profile replaced")
+		}
+		profileBinding = *scope.expectedProfileBinding
+	}
+	if scope.expectedBackendBinding != nil {
+		if !sameLocalOwnedWorkspaceDirectoryBinding(*scope.expectedBackendBinding, backendBinding) {
+			return proof, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "backend replaced")
+		}
+		backendBinding = *scope.expectedBackendBinding
+	}
 	// Lexical separation is not enough when an already existing ancestor is a
 	// symlink. Bind both real directories now and reject a resolved target that
 	// is the same directory or nested either way.
@@ -193,20 +253,22 @@ func PreflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session
 		os.SameFile(profileBinding.info, backendBinding.info) {
 		return proof, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceReviewRequired, "resolved scopes")
 	}
-	if err := localOwnedWorkspaceBackendExisting(backendRoot); err != nil {
-		return proof, localOwnedWorkspaceMapReview(err, "backend")
+	if scope.requireBackendExists {
+		if err := localOwnedWorkspaceBackendExisting(backendRoot); err != nil {
+			return proof, localOwnedWorkspaceMapReview(err, "backend")
+		}
 	}
 
-	firstRoster, firstVaults, err := localOwnedWorkspaceReadSet(ctx, s, accountPath, profileDir, backendRoot)
+	firstRoster, firstVaults, err := localOwnedWorkspaceReadSet(ctx, s, accountPath, profileDir, backendRoot, scope)
 	if err != nil {
 		return proof, err
 	}
 	if err := localOwnedWorkspaceStillBound(ctx, s, accountPath, profileDir, backendRoot,
-		profileBinding, backendBinding); err != nil {
+		profileBinding, backendBinding, scope); err != nil {
 		return proof, err
 	}
 
-	secondRoster, secondVaults, err := localOwnedWorkspaceReadSet(ctx, s, accountPath, profileDir, backendRoot)
+	secondRoster, secondVaults, err := localOwnedWorkspaceReadSet(ctx, s, accountPath, profileDir, backendRoot, scope)
 	if err != nil {
 		return proof, err
 	}
@@ -223,7 +285,7 @@ func PreflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session
 		return proof, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "roster drift")
 	}
 	if err := localOwnedWorkspaceStillBound(ctx, s, accountPath, profileDir, backendRoot,
-		profileBinding, backendBinding); err != nil {
+		profileBinding, backendBinding, scope); err != nil {
 		return proof, err
 	}
 
@@ -244,7 +306,8 @@ func PreflightLocalOwnedWorkspaceSource(ctx context.Context, s *personal.Session
 }
 
 func localOwnedWorkspaceReadSet(ctx context.Context, s *personal.Session, accountPath,
-	profileDir, backendRoot string) ([]personal.VaultFileOwnershipPublic,
+	profileDir, backendRoot string,
+	scope localOwnedWorkspaceSourceScope) ([]personal.VaultFileOwnershipPublic,
 	[]LocalOwnedWorkspaceVault, error) {
 	roster, err := localOwnedWorkspaceReadRoster(ctx, s, accountPath)
 	if err != nil {
@@ -362,7 +425,8 @@ func localOwnedWorkspaceReadSet(ctx context.Context, s *personal.Session, accoun
 		if err := ctx.Err(); err != nil {
 			return nil, nil, localOwnedWorkspaceCanceled(err, "context")
 		}
-		entry, err := localOwnedWorkspaceReadVault(ctx, accountPath, backendRoot, owners[manifests[index].VaultID], config, manifests[index])
+		entry, err := localOwnedWorkspaceReadVault(ctx, accountPath, backendRoot,
+			owners[manifests[index].VaultID], config, manifests[index], scope)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -389,7 +453,8 @@ func localOwnedWorkspaceReadSet(ctx context.Context, s *personal.Session, accoun
 }
 
 func localOwnedWorkspaceReadVault(ctx context.Context, accountPath, backendRoot string,
-	owner personal.VaultFileOwnershipPublic, config string, manifest Manifest) (entry LocalOwnedWorkspaceVault, retErr error) {
+	owner personal.VaultFileOwnershipPublic, config string, manifest Manifest,
+	scope localOwnedWorkspaceSourceScope) (entry LocalOwnedWorkspaceVault, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return entry, localOwnedWorkspaceCanceled(err, "context")
 	}
@@ -428,16 +493,14 @@ func localOwnedWorkspaceReadVault(ctx context.Context, accountPath, backendRoot 
 
 	// The established snapshot reader owns the pending/missing/corrupt
 	// classification. Run it before the duplicate companion verifier so a
-	// pending journal is reported as a conflict, not a generic review.
-	snapshot, err := readLocalOwnedBackupSnapshot(manifest, companion)
+	// pending journal is reported as a conflict, not a generic review. The
+	// maintenance-fence scope supplies the already-locked journal handle, so
+	// this read does not reopen the path.
+	snapshot, verified, err := localOwnedWorkspaceReadVaultJournalState(ctx, scope, manifest, companion)
 	if err != nil {
-		return entry, localOwnedWorkspaceMapBackup(err)
+		return entry, err
 	}
 	defer snapshot.clear()
-	verified, err := verifyLocalGenesisCompanion(manifest, companion)
-	if err != nil {
-		return entry, localOwnedWorkspaceMapReview(err, "journal")
-	}
 	defer clearLocalGenesisVerified(&verified)
 	if verified.checkpoint == nil || snapshot.checkpoint == nil ||
 		localOwnedBackupCheckpointDigest(*verified.checkpoint) != localOwnedBackupCheckpointDigest(*snapshot.checkpoint) {
@@ -450,11 +513,11 @@ func localOwnedWorkspaceReadVault(ctx context.Context, accountPath, backendRoot 
 		return entry, localOwnedWorkspaceCanceled(err, "context")
 	}
 
-	pulled, err := readLocalOwnedBackupTarget(ctx, manifest, snapshot.current, snapshot.journalRevision)
+	backendRevision, err := scope.readTarget(ctx, manifest, snapshot.current, snapshot.journalRevision)
 	if err != nil {
 		return entry, localOwnedWorkspaceMapBackup(err)
 	}
-	if pulled.Revision() != snapshot.journalRevision {
+	if backendRevision != snapshot.journalRevision {
 		return entry, localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "backend revision")
 	}
 
@@ -468,7 +531,7 @@ func localOwnedWorkspaceReadVault(ctx context.Context, accountPath, backendRoot 
 		Current:         snapshot.current,
 		Origin:          snapshot.origin,
 		JournalRevision: snapshot.journalRevision,
-		BackendRevision: pulled.Revision(),
+		BackendRevision: backendRevision,
 		OriginRevision:  snapshot.originRevision,
 		ContentSeq:      snapshot.contentSeq,
 		Checkpoint:      *snapshot.checkpoint,
@@ -568,7 +631,8 @@ func localOwnedWorkspaceProfileConfigs(profileDir string) ([]string, []string, e
 }
 
 func localOwnedWorkspaceStillBound(ctx context.Context, s *personal.Session, accountPath,
-	profileDir, backendRoot string, profileBinding, backendBinding localOwnedWorkspaceDirectoryBinding) error {
+	profileDir, backendRoot string, profileBinding, backendBinding localOwnedWorkspaceDirectoryBinding,
+	scope localOwnedWorkspaceSourceScope) error {
 	if err := ctx.Err(); err != nil {
 		return localOwnedWorkspaceCanceled(err, "context")
 	}
@@ -597,8 +661,10 @@ func localOwnedWorkspaceStillBound(ctx context.Context, s *personal.Session, acc
 		os.SameFile(profileNow.info, backendNow.info) {
 		return localOwnedWorkspaceError(ErrLocalOwnedWorkspaceConflict, "path replaced")
 	}
-	if err := localOwnedWorkspaceBackendExisting(backendRoot); err != nil {
-		return localOwnedWorkspaceMapReview(err, "backend")
+	if scope.requireBackendExists {
+		if err := localOwnedWorkspaceBackendExisting(backendRoot); err != nil {
+			return localOwnedWorkspaceMapReview(err, "backend")
+		}
 	}
 	return nil
 }
@@ -606,6 +672,14 @@ func localOwnedWorkspaceStillBound(ctx context.Context, s *personal.Session, acc
 type localOwnedWorkspaceDirectoryBinding struct {
 	info     os.FileInfo
 	resolved string
+}
+
+// sameLocalOwnedWorkspaceDirectoryBinding requires both the exact leaf
+// identity and the resolved target to match. A same-path replacement with the
+// same permissions and contents still has a different identity, so it cannot
+// silently become the directory the caller bound earlier.
+func sameLocalOwnedWorkspaceDirectoryBinding(a, b localOwnedWorkspaceDirectoryBinding) bool {
+	return a.resolved == b.resolved && os.SameFile(a.info, b.info)
 }
 
 // localOwnedWorkspaceDirectory captures the exact caller path's real leaf and
