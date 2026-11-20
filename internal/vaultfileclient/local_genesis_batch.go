@@ -24,11 +24,18 @@ const (
 // WorkspaceRoot, VaultID and JournalPath are copied before any disk read; a
 // caller mutation after the call cannot change the batch. The expected journal
 // is part of this locator, not a routing hint.
+//
+// Managed is nil for the unchanged strict profile path. When non-nil, ConfigPath
+// must be empty: a recovered managed successor has no ordinary create
+// manifest/companion and this adapter neither requires nor manufactures one.
+// The managed selector supplies the exact external target and is validated
+// against the candidate's account/workspace/vault/journal before authentication.
 type LocalGenesisBatchCandidate struct {
 	ConfigPath    string
 	WorkspaceRoot string
 	VaultID       string
 	JournalPath   string
+	Managed       *LocalManagedRecoverySelector
 }
 
 // LocalGenesisBatchResult is one original-index delivery slot. A nil Err means
@@ -51,16 +58,23 @@ type localGenesisBatchLocator struct {
 }
 
 type localGenesisBatchGroup struct {
-	locator        localGenesisBatchLocator
-	indices        []int
-	manifest       Manifest
-	digest         string
-	companion      Companion
-	revision       string
-	successor      *localGenesisSuccessorLocator
-	checkpoint     *vaultfile.PolicyCheckpoint
-	targetPosition int
-	err            error
+	locator   localGenesisBatchLocator
+	indices   []int
+	manifest  Manifest
+	digest    string
+	companion Companion
+	revision  string
+	successor *localGenesisSuccessorLocator
+	managed   *LocalManagedRecoverySelector
+	// managedIdentity is the pre-auth stable identity of the exact existing
+	// backend instance. managedIdentitySet distinguishes it from the zero
+	// value. It is opaque and never delivered.
+	managedIdentity    localManagedPhysicalIdentity
+	managedIdentitySet bool
+	checkpoint         *vaultfile.PolicyCheckpoint
+	targetPosition     int
+	conflict           bool
+	err                error
 }
 
 // These test seams are nil in production. They carry no factor, key, identity,
@@ -75,7 +89,14 @@ var (
 	localGenesisBatchCleanupForTest        func(closedWrappers, summaryBuffers int, summariesCleared bool)
 )
 
-func validLocalGenesisBatchCandidate(candidate LocalGenesisBatchCandidate) bool {
+func validLocalGenesisBatchCandidate(candidate LocalGenesisBatchCandidate, accountPath string) bool {
+	if candidate.Managed != nil {
+		return !(candidate.ConfigPath != "" || candidate.WorkspaceRoot == "" ||
+			len(candidate.WorkspaceRoot) > maxLocalGenesisBatchPath ||
+			candidate.VaultID == "" || len(candidate.VaultID) > maxLocalGenesisBatchVaultID ||
+			candidate.JournalPath == "" || len(candidate.JournalPath) > maxLocalGenesisBatchPath) &&
+			validLocalManagedRecoverySelector(candidate.Managed, candidate, accountPath)
+	}
 	return candidate.ConfigPath != "" && len(candidate.ConfigPath) <= maxLocalGenesisBatchPath &&
 		candidate.WorkspaceRoot != "" && len(candidate.WorkspaceRoot) <= maxLocalGenesisBatchPath &&
 		candidate.VaultID != "" && len(candidate.VaultID) <= maxLocalGenesisBatchVaultID &&
@@ -123,7 +144,7 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 	groups := make([]*localGenesisBatchGroup, 0, len(candidates))
 	byLocator := make(map[localGenesisBatchLocator]*localGenesisBatchGroup)
 	for index, candidate := range candidates {
-		if !validLocalGenesisBatchCandidate(candidate) {
+		if !validLocalGenesisBatchCandidate(candidate, accountPath) {
 			results[index].Err = ErrLocalReview
 			continue
 		}
@@ -131,23 +152,34 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 			configPath: candidate.ConfigPath, workspaceRoot: candidate.WorkspaceRoot,
 			vaultID: candidate.VaultID, journalPath: candidate.JournalPath,
 		}
+		managed := cloneLocalManagedRecoverySelector(candidate.Managed)
 		group := byLocator[locator]
 		if group == nil {
-			group = &localGenesisBatchGroup{locator: locator}
+			group = &localGenesisBatchGroup{locator: locator, managed: managed}
 			byLocator[locator] = group
 			groups = append(groups, group)
+		} else if !sameLocalManagedRecoverySelector(group.managed, managed) {
+			// The same journal locator with a different managed selector is
+			// an alias conflict, not a second independently revivable child.
+			group.conflict = true
+			clearLocalManagedRecoverySelector(managed)
+		} else {
+			clearLocalManagedRecoverySelector(managed)
 		}
 		group.indices = append(group.indices, index)
 	}
 
 	// A child is identified by its journal path. Different descriptors for the
-	// same config or journal are rejected as conflicts before authentication;
-	// exact duplicates were collapsed above and remain one group.
+	// same config, journal or exact managed backend target are rejected as
+	// conflicts before authentication; exact duplicates were collapsed above
+	// and remain one group.
 	conflicts := make(map[*localGenesisBatchGroup]bool)
 	byConfig := make(map[string][]*localGenesisBatchGroup)
 	byJournal := make(map[string][]*localGenesisBatchGroup)
 	for _, group := range groups {
-		byConfig[group.locator.configPath] = append(byConfig[group.locator.configPath], group)
+		if group.locator.configPath != "" {
+			byConfig[group.locator.configPath] = append(byConfig[group.locator.configPath], group)
+		}
 		byJournal[group.locator.journalPath] = append(byJournal[group.locator.journalPath], group)
 	}
 	for _, list := range byConfig {
@@ -164,9 +196,41 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 			}
 		}
 	}
-
 	for _, group := range groups {
-		if conflicts[group] {
+		if group.managed != nil {
+			// Identity/alias preflight still runs for an already conflicted
+			// managed group. Otherwise an intentionally conflicting duplicate
+			// could hide another selector for the same physical object.
+			selector := cloneLocalManagedRecoverySelector(group.managed)
+			if !validLocalManagedRecoverySelector(selector, LocalGenesisBatchCandidate{
+				WorkspaceRoot: group.locator.workspaceRoot, VaultID: group.locator.vaultID,
+				JournalPath: group.locator.journalPath, Managed: selector,
+			}, accountPath) {
+				clearLocalManagedRecoverySelector(selector)
+				group.err = ErrLocalReview
+				continue
+			}
+			identity, identityErr := localManagedBackendIdentity(selector.WorkspaceRoot)
+			if identityErr != nil {
+				clearLocalManagedRecoverySelector(selector)
+				group.err = ErrLocalReview
+				continue
+			}
+			// No create manifest/companion is synthesized for a recovered
+			// managed selector. group.managed carries the exact public scope,
+			// and the opaque physical identity is retained for the posterior
+			// handoff check.
+			group.managedIdentity = identity
+			group.managedIdentitySet = true
+			group.revision = string(selector.SuccessorRev)
+			group.checkpoint = cloneLocalManagedCheckpoint(&selector.Pin.Checkpoint)
+			clearLocalManagedRecoverySelector(selector)
+			if group.conflict || conflicts[group] {
+				group.err = ErrLocalReview
+			}
+			continue
+		}
+		if group.conflict || conflicts[group] {
 			group.err = ErrLocalReview
 			continue
 		}
@@ -190,6 +254,33 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 		group.successor = cloneLocalGenesisSuccessor(verified.successor)
 		clearLocalGenesisSuccessor(verified.successor)
 		group.checkpoint = verified.checkpoint
+	}
+
+	// Two distinct selectors for one exact existing named backend object are
+	// an alias, even when their lexical roots differ or an ancestor symlink
+	// makes both paths address the same directory. Identity is established by
+	// the real existing-only backend open, never by a normalized pathname. A
+	// different object name in the same root remains a different target.
+	byManagedPhysicalTarget := make(map[localManagedPhysicalTarget][]*localGenesisBatchGroup)
+	for _, group := range groups {
+		if group.managed == nil || !group.managedIdentitySet {
+			continue
+		}
+		key := localManagedPhysicalTarget{
+			identity: group.managedIdentity,
+			name:     group.managed.BackendName,
+		}
+		byManagedPhysicalTarget[key] = append(byManagedPhysicalTarget[key], group)
+	}
+	for _, list := range byManagedPhysicalTarget {
+		if len(list) < 2 {
+			continue
+		}
+		for _, group := range list {
+			clearLocalGenesisCheckpoint(group.checkpoint)
+			group.checkpoint = nil
+			group.err = ErrLocalReview
+		}
 	}
 
 	targets := make([]personal.OwnedVaultFileTarget, 0, len(groups))
@@ -222,12 +313,16 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 				Pin:         cloneLocalGenesisGenesisPin(group.successor.pin),
 			}
 		}
+		if group.managed != nil {
+			target.Managed = group.managed.target()
+		}
 		targets = append(targets, target)
 	}
 	defer func() {
 		for _, group := range groups {
 			clearLocalGenesisCheckpoint(group.checkpoint)
 			clearLocalGenesisSuccessor(group.successor)
+			clearLocalManagedRecoverySelector(group.managed)
 		}
 	}()
 
@@ -359,45 +454,75 @@ func OpenLocalGenesisSessionsForAccount(ctx context.Context, accountPath string,
 		if _, exists := wrappedTokens[result.Token]; exists {
 			return cleanup(ErrLocalReview)
 		}
-
-		manifest, digest, companion, locatorErr := readLocalGenesisLocatorForAccount(
-			accountPath, group.locator.configPath, group.locator.workspaceRoot,
-			group.locator.vaultID, group.locator.journalPath)
-		if locatorErr != nil || manifest != group.manifest || digest != group.digest ||
-			!SameCompanion(companion, group.companion) {
-			_ = parent.LockVaultFileChild(result.Token)
-			consumed[position] = true
-			clearLocalGenesisItems(result.Items)
-			childResults[position] = personal.OwnedVaultFileChildResult{}
-			localError(group.indices)
-			continue
+		if group.managed != nil {
+			// Re-open the exact existing backend after the account/owner batch
+			// and any test-controlled post-auth boundary. A path that now
+			// addresses a different physical instance must not inherit the
+			// pre-auth grouping identity. Nothing is created or written.
+			identity, identityErr := localManagedBackendIdentity(group.managed.WorkspaceRoot)
+			if identityErr != nil || !group.managedIdentitySet ||
+				identity != group.managedIdentity {
+				_ = parent.LockVaultFileChild(result.Token)
+				consumed[position] = true
+				clearLocalGenesisItems(result.Items)
+				childResults[position] = personal.OwnedVaultFileChildResult{}
+				localError(group.indices)
+				continue
+			}
 		}
-		verified, verifyErr := verifyLocalGenesisCompanion(manifest, companion)
-		if verifyErr != nil || verified.revision != group.revision ||
-			!sameLocalGenesisSuccessor(verified.successor, group.successor) {
+
+		var state *localGenesisSessionState
+		if group.managed != nil {
+			// A managed recovery has no create manifest/companion. The typed
+			// managed production reader owns the exact owner/policy/backend,
+			// byte and opaque-revision proof; the wrapper freezes the external
+			// selector and revalidates it through the same child path below.
+			state = &localGenesisSessionState{
+				parent: parent, configPath: "",
+				revision:  group.revision,
+				managed:   cloneLocalManagedRecoverySelector(group.managed),
+				token:     result.Token,
+				closeDone: make(chan struct{}),
+			}
+		} else {
+			manifest, digest, companion, locatorErr := readLocalGenesisLocatorForAccount(
+				accountPath, group.locator.configPath, group.locator.workspaceRoot,
+				group.locator.vaultID, group.locator.journalPath)
+			if locatorErr != nil || manifest != group.manifest || digest != group.digest ||
+				!SameCompanion(companion, group.companion) {
+				_ = parent.LockVaultFileChild(result.Token)
+				consumed[position] = true
+				clearLocalGenesisItems(result.Items)
+				childResults[position] = personal.OwnedVaultFileChildResult{}
+				localError(group.indices)
+				continue
+			}
+			verified, verifyErr := verifyLocalGenesisCompanion(manifest, companion)
+			if verifyErr != nil || verified.revision != group.revision ||
+				!sameLocalGenesisSuccessor(verified.successor, group.successor) {
+				clearLocalGenesisVerified(&verified)
+				_ = parent.LockVaultFileChild(result.Token)
+				consumed[position] = true
+				clearLocalGenesisItems(result.Items)
+				childResults[position] = personal.OwnedVaultFileChildResult{}
+				localError(group.indices)
+				continue
+			}
 			clearLocalGenesisVerified(&verified)
-			_ = parent.LockVaultFileChild(result.Token)
-			consumed[position] = true
-			clearLocalGenesisItems(result.Items)
-			childResults[position] = personal.OwnedVaultFileChildResult{}
-			localError(group.indices)
-			continue
-		}
-		clearLocalGenesisVerified(&verified)
-
-		state := &localGenesisSessionState{
-			parent: parent, configPath: group.locator.configPath,
-			manifest: group.manifest, manifestSHA256: group.digest,
-			companion: cloneLocalGenesisCompanion(group.companion),
-			revision:  group.revision, successor: cloneLocalGenesisSuccessor(group.successor),
-			token:     result.Token,
-			closeDone: make(chan struct{}),
+			state = &localGenesisSessionState{
+				parent: parent, configPath: group.locator.configPath,
+				manifest: group.manifest, manifestSHA256: group.digest,
+				companion: cloneLocalGenesisCompanion(group.companion),
+				revision:  group.revision, successor: cloneLocalGenesisSuccessor(group.successor),
+				token:     result.Token,
+				closeDone: make(chan struct{}),
+			}
 		}
 		wrapper := &LocalGenesisSession{state: state}
 		summary, summaryErr := state.initialSummary(result.Items)
 		consumed[position] = true
 		childResults[position] = personal.OwnedVaultFileChildResult{}
-		if summaryErr != nil || summary.VaultID != group.manifest.VaultID {
+		if summaryErr != nil || summary.VaultID != group.locator.vaultID {
 			_ = state.close()
 			localError(group.indices)
 			continue

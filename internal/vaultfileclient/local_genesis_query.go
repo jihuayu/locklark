@@ -44,9 +44,12 @@ type LocalGenesisExactQuery struct {
 // LocalGenesisExactQueryResult binds matching item summaries to the exact
 // frozen local child scope that produced them. ConfigPath, WorkspaceRoot,
 // VaultID, JournalPath, ManifestSHA256 and JournalRevision let the caller
-// dispatch by exact scope rather than by name. Hits contain only the existing
-// public baseline fields, including the item selector when present. No key,
-// token, handle or account material is exposed.
+// dispatch by exact scope rather than by name. Managed is non-nil for a
+// recovered managed selector and carries its exact public scope identity;
+// ConfigPath and ManifestSHA256 are empty on that route because a recovered
+// managed successor has no create manifest/companion. Hits contain only the
+// existing public baseline fields, including the item selector when present. No
+// key, token, handle or account material is exposed.
 type LocalGenesisExactQueryResult struct {
 	ConfigPath      string
 	WorkspaceRoot   string
@@ -54,6 +57,7 @@ type LocalGenesisExactQueryResult struct {
 	JournalPath     string
 	ManifestSHA256  string
 	JournalRevision string
+	Managed         *LocalManagedRecoveryScope
 	Hits            []personal.VaultFileBaselineItem
 	Truncated       bool
 
@@ -61,6 +65,8 @@ type LocalGenesisExactQueryResult struct {
 }
 
 // localGenesisExactQueryBinding is the locator and vault version at query time.
+// The managed fields are value copies so the immutable activation proof does
+// not alias the caller-visible result.
 type localGenesisExactQueryBinding struct {
 	configPath      string
 	workspaceRoot   string
@@ -68,10 +74,12 @@ type localGenesisExactQueryBinding struct {
 	journalPath     string
 	manifestSHA256  string
 	journalRevision string
+	managed         bool
+	managedScope    LocalManagedRecoveryScope
 }
 
 func (r LocalGenesisExactQueryResult) binding() localGenesisExactQueryBinding {
-	return localGenesisExactQueryBinding{
+	binding := localGenesisExactQueryBinding{
 		configPath:      r.ConfigPath,
 		workspaceRoot:   r.WorkspaceRoot,
 		vaultID:         r.VaultID,
@@ -79,6 +87,11 @@ func (r LocalGenesisExactQueryResult) binding() localGenesisExactQueryBinding {
 		manifestSHA256:  r.ManifestSHA256,
 		journalRevision: r.JournalRevision,
 	}
+	if r.Managed != nil {
+		binding.managed = true
+		binding.managedScope = *r.Managed
+	}
+	return binding
 }
 
 type localGenesisExactQueryHit struct {
@@ -155,24 +168,27 @@ func (l *LocalGenesisSession) ValidateExactQueryHit(result LocalGenesisExactQuer
 }
 
 // verifyPristineBackend performs the one fresh named-backend observation for a
-// pristine generation-zero child. It is a no-op for a settled successor, whose
-// personal child already checks exact successor bytes and revision. The
-// comparison binds the backend bytes to the companion's custody-pinned genesis
-// SHA-256 and the exact opaque revision returned by the freshly revalidated
-// journal. It returns only ErrLocalReview and never echoes provider data.
+// pristine generation-zero child. It is a no-op for a settled successor or a
+// managed recovery: their personal child already revalidates the exact
+// successor/journal/backend bytes and opaque revision on every read and
+// posterior check. The pristine comparison binds the backend bytes to the
+// companion's custody-pinned genesis SHA-256 and the exact opaque revision
+// returned by the freshly revalidated journal. It returns only ErrLocalReview
+// and never echoes provider data.
 func (s *localGenesisSessionState) verifyPristineBackend() error {
 	if s == nil {
 		return ErrLocalReview
 	}
 	s.mu.Lock()
 	closed := s.closed
+	managed := s.managed != nil
 	successor := s.successor != nil
 	backendRoot := s.manifest.BackendRoot
 	backendName := s.manifest.Name
 	expectedGenesisSHA256 := s.companion.GenesisSHA256
 	expectedRevision := s.revision
 	s.mu.Unlock()
-	if successor {
+	if managed || successor {
 		return nil
 	}
 	if closed || backendRoot == "" || backendName == "" ||
@@ -237,13 +253,25 @@ func (s *localGenesisSessionState) readExactQueryItems() (LocalGenesisExactQuery
 	}
 	parent := s.parent
 	token := s.token
-	scope := LocalGenesisExactQueryResult{
-		ConfigPath:      s.configPath,
-		WorkspaceRoot:   s.manifest.BackendRoot,
-		VaultID:         s.manifest.VaultID,
-		JournalPath:     s.manifest.Journal,
-		ManifestSHA256:  s.manifestSHA256,
-		JournalRevision: s.revision,
+	var scope LocalGenesisExactQueryResult
+	if s.managed != nil {
+		managedScope := s.managed.scope()
+		scope = LocalGenesisExactQueryResult{
+			WorkspaceRoot:   s.managed.WorkspaceRoot,
+			VaultID:         s.managed.VaultID,
+			JournalPath:     s.managed.JournalPath,
+			JournalRevision: string(s.managed.SuccessorRev),
+			Managed:         &managedScope,
+		}
+	} else {
+		scope = LocalGenesisExactQueryResult{
+			ConfigPath:      s.configPath,
+			WorkspaceRoot:   s.manifest.BackendRoot,
+			VaultID:         s.manifest.VaultID,
+			JournalPath:     s.manifest.Journal,
+			ManifestSHA256:  s.manifestSHA256,
+			JournalRevision: s.revision,
+		}
 	}
 	s.mu.Unlock()
 
