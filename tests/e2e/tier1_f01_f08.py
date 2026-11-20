@@ -344,6 +344,14 @@ def t1_f2_07(ctx):
         ctx, "./internal/browserhost",
         r"^TestPasskey(ManagementMetadataSearchAndStrictWire|FilterRunsBeforeFiveHundredCap)$",
         min_passed=2,
+        observe_browserhost_passkey_timeout=True,
+        observed_test_names=(
+            "TestPasskeyManagementMetadataSearchAndStrictWire",
+            "TestPasskeyFilterRunsBeforeFiveHundredCap",
+        ),
+        # One 180s budget: compile into a fresh private directory, then run
+        # only that verified binary with whatever time remains.
+        split_build_run=True,
     )
     node_test_pattern(
         ctx, "browser-extension/test/background.test.js",

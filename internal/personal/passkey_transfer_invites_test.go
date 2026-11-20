@@ -116,7 +116,7 @@ func TestPasskeyTransferInvitationCreateRevokeBoundToCurrentChain(t *testing.T) 
 }
 
 func TestPasskeyTransferInvitationGateForeignIdentityAndBounds(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, err := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if err != nil {
 		t.Fatal(err)

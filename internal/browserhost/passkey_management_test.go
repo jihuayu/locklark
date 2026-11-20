@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,8 +17,95 @@ import (
 	"github.com/jihuayu/locklark/internal/vault"
 )
 
+// The one-shot E2E helper seeds the marker before launching the selected tests.
+const (
+	passkeyMetadataEntered        byte = '1'
+	passkeyFilterSetupEntered     byte = '2'
+	passkeyFilterMutationLoop     byte = '3'
+	passkeyFilterMutationLoopDone byte = '4'
+)
+
+const passkeyTimeoutPhaseFileEnv = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
+
+const (
+	passkeyTimeoutEntryEnv  = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+	passkeyTimeoutEntryLine = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+)
+
+// TestMain is the standard test-binary entry point.  The fixed line below is
+// opt-in only and is written after package init, before m.Run: it establishes
+// that this test binary reached TestMain, not that either selected test body
+// started.
+func TestMain(m *testing.M) {
+	if os.Getenv(passkeyTimeoutEntryEnv) == "1" {
+		fmt.Fprintln(os.Stdout, passkeyTimeoutEntryLine)
+	}
+	os.Exit(m.Run())
+}
+
+var passkeyTimeoutPhaseMu sync.Mutex
+
+func markPasskeyTimeoutPhase(phase byte) {
+	marker := os.Getenv(passkeyTimeoutPhaseFileEnv)
+	if marker == "" {
+		return
+	}
+	passkeyTimeoutPhaseMu.Lock()
+	defer passkeyTimeoutPhaseMu.Unlock()
+
+	temp, err := os.CreateTemp(filepath.Dir(marker), ".phase-")
+	if err != nil {
+		return
+	}
+	defer os.Remove(temp.Name())
+	_, writeErr := temp.Write([]byte{phase})
+	closeErr := temp.Close()
+	if writeErr == nil && closeErr == nil {
+		// A later selected test can publish an earlier phase.
+		_ = os.Rename(temp.Name(), marker)
+	}
+}
+
+func TestPasskeyTimeoutMarkerReportsLatestPhase(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "phase")
+	t.Setenv(passkeyTimeoutPhaseFileEnv, marker)
+
+	assertPhase := func(want byte) {
+		t.Helper()
+		got, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0] != want {
+			t.Fatal("phase marker did not contain exactly the expected byte")
+		}
+	}
+
+	for _, phase := range []byte{
+		passkeyMetadataEntered,
+		passkeyFilterSetupEntered,
+		passkeyFilterMutationLoop,
+		passkeyFilterMutationLoopDone,
+		passkeyMetadataEntered,
+		passkeyFilterSetupEntered,
+		passkeyFilterMutationLoop,
+		passkeyFilterMutationLoopDone,
+		passkeyFilterSetupEntered,
+	} {
+		markPasskeyTimeoutPhase(phase)
+		assertPhase(phase)
+	}
+
+	t.Setenv(passkeyTimeoutPhaseFileEnv, "")
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoop)
+	assertPhase(passkeyFilterSetupEntered)
+}
+
 func fixturePasskey(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string, string, string, string) {
 	t.Helper()
+	if t.Name() == "TestPasskeyFilterRunsBeforeFiveHundredCap" {
+		markPasskeyTimeoutPhase(passkeyFilterSetupEntered)
+	}
 	c, out, s, capability := v2Fixture(t)
 	create := Request{
 		V: 1, ID: reqID(30), Type: "passkey-create", Capability: capability,
@@ -67,6 +157,7 @@ func passkeyGetRequest(id, capability, credential string) Request {
 }
 
 func TestPasskeyManagementMetadataSearchAndStrictWire(t *testing.T) {
+	markPasskeyTimeoutPhase(passkeyMetadataEntered)
 	c, out, _, capability, itemID, revision, credential := fixturePasskey(t)
 	defer c.Close()
 	detail := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(40), "type": "item-get", "capability": capability, "item_id": itemID, "revision": revision})
@@ -403,6 +494,7 @@ func TestPasskeyFilterRunsBeforeFiveHundredCap(t *testing.T) {
 	searchResultLimit = 50
 	defer func() { searchResultLimit = previous }()
 	// The passkey item sorts after 51 filler items and must survive the cap.
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoop)
 	for i := 0; i < 51; i++ {
 		gate := personal.NewMutationGate(time.Now().Add(time.Minute))
 		if err := s.RegisterMutation(gate); err != nil {
@@ -412,6 +504,7 @@ func TestPasskeyFilterRunsBeforeFiveHundredCap(t *testing.T) {
 			t.Fatalf("filler %d: %v", i, err)
 		}
 	}
+	markPasskeyTimeoutPhase(passkeyFilterMutationLoopDone)
 	filtered := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(84), "type": "search", "capability": capability, "passkeys_only": true})
 	if filtered.Type != "items" || len(filtered.Items) != 1 || filtered.Items[0].ID != itemID {
 		t.Fatalf("passkeys-only filter after cap: %d %#v", len(filtered.Items), filtered.Items)

@@ -71,7 +71,7 @@ func TestBrowserOTPTransactionAndCloseFailureNeverYieldCode(t *testing.T) {
 }
 
 func TestBrowserOTPHistorySurvivesBackupRestore(t *testing.T) {
-	path, key, login := revealFixture(t)
+	path, key, login := revealFixtureReusable(t)
 	defer clear(key)
 	rev, err := EditLogin(path, "fixture", key, Edit{ID: login.ID, Revision: login.Revision, Field: "url", Value: "https://example.test/login"})
 	if err != nil {

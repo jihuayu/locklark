@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,9 @@ type disclosureWriter func([]byte) (int, error)
 
 func (f disclosureWriter) Write(p []byte) (int, error) { return f(p) }
 
+// revealFixture is the genuinely fresh constructor. Callers that need a
+// distinct vault/account/item identity, or that exercise creation itself, must
+// keep using it instead of revealFixtureReusable.
 func revealFixture(t *testing.T) (string, []byte, RevealTarget) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "owner.ll")
@@ -39,8 +43,177 @@ func revealFixture(t *testing.T) (string, []byte, RevealTarget) {
 	return path, key, RevealTarget{ID: rows[0].ID, Revision: rows[0].Revision, Field: "password"}
 }
 
+// revealFixtureImage holds the closed encrypted database at exactly the
+// post-List, pre-edit state produced by revealFixture, plus immutable target
+// metadata. It is built once per test process by the same real path. The
+// builder does not consult command seams; the only store-level seam
+// (itemDecryptObserver) is read-only and belongs to tests that never request a
+// reusable fixture. Each caller gets its own 0600 file and mutable key slice.
+var revealFixtureImage struct {
+	once   sync.Once
+	body   []byte
+	target RevealTarget
+	err    error
+}
+
+func buildRevealFixtureImage() ([]byte, RevealTarget, error) {
+	dir, err := os.MkdirTemp("", "locklark-reveal-fixture-*")
+	if err != nil {
+		return nil, RevealTarget{}, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "owner.ll")
+	key := bytes.Repeat([]byte{4}, 16)
+	defer clear(key)
+	if err = Create(path, "fixture", key); err != nil {
+		return nil, RevealTarget{}, err
+	}
+	if _, err = AddLogin(path, "fixture", key, "same", "fixture-user", "private-value\t\"quoted\"\n"); err != nil {
+		return nil, RevealTarget{}, err
+	}
+	if _, err = AddLogin(path, "fixture", key, "same", "other-user", "other-password"); err != nil {
+		return nil, RevealTarget{}, err
+	}
+	rows, err := List(path, "fixture", key)
+	if err != nil {
+		return nil, RevealTarget{}, err
+	}
+	if len(rows) != 2 || !idOK(rows[0].ID) || !digestOK(rows[0].Revision) {
+		return nil, RevealTarget{}, errors.New("reveal fixture image has invalid target metadata")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, RevealTarget{}, err
+	}
+	if len(body) == 0 {
+		return nil, RevealTarget{}, errors.New("reveal fixture image is empty")
+	}
+	return body, RevealTarget{ID: rows[0].ID, Revision: rows[0].Revision, Field: "password"}, nil
+}
+
+func revealFixtureReusable(t *testing.T) (string, []byte, RevealTarget) {
+	t.Helper()
+	revealFixtureImage.once.Do(func() {
+		revealFixtureImage.body, revealFixtureImage.target, revealFixtureImage.err = buildRevealFixtureImage()
+	})
+	if revealFixtureImage.err != nil {
+		t.Fatal(revealFixtureImage.err)
+	}
+	path := filepath.Join(t.TempDir(), "owner.ll")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = file.Write(revealFixtureImage.body); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err = file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path, bytes.Repeat([]byte{4}, 16), revealFixtureImage.target
+}
+
+func TestRevealFixtureReuseIsolationAndFreshIdentity(t *testing.T) {
+	firstPath, firstKey, firstTarget := revealFixtureReusable(t)
+	secondPath, secondKey, secondTarget := revealFixtureReusable(t)
+	if firstPath == secondPath {
+		t.Fatal("reusable fixture callers shared a path")
+	}
+	firstInfo, err := os.Stat(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInfo, err := os.Stat(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !firstInfo.Mode().IsRegular() || !secondInfo.Mode().IsRegular() || os.SameFile(firstInfo, secondInfo) {
+		t.Fatal("reusable fixture callers did not get separate files")
+	}
+	if runtime.GOOS != "windows" && (firstInfo.Mode().Perm() != 0600 || secondInfo.Mode().Perm() != 0600) {
+		t.Fatal("reusable fixture files are not private")
+	}
+	if firstTarget != secondTarget {
+		t.Fatal("immutable fixture metadata differed between clones")
+	}
+	expectedKey := bytes.Repeat([]byte{4}, 16)
+	if !bytes.Equal(firstKey, expectedKey) || !bytes.Equal(secondKey, expectedKey) {
+		t.Fatal("reusable fixture key was not the real fixture key")
+	}
+	secondBefore, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := EditLogin(firstPath, "fixture", firstKey, Edit{ID: firstTarget.ID, Revision: firstTarget.Revision, Field: "password", Value: "clone-one-secret"})
+	if err != nil || revision == firstTarget.Revision {
+		t.Fatal("mutating one reusable fixture failed", err)
+	}
+	secondAfter, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secondBefore, secondAfter) {
+		t.Fatal("mutating one reusable fixture changed the sibling ciphertext")
+	}
+	rows, err := List(secondPath, "fixture", secondKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == secondTarget.ID {
+			found = row.Revision == secondTarget.Revision
+		}
+	}
+	if !found {
+		t.Fatal("mutating one reusable fixture changed the sibling read projection")
+	}
+	var out bytes.Buffer
+	if _, err = RevealLogin(secondPath, "fixture", secondKey, secondTarget, &out); err != nil || out.String() != "\"private-value\\t\\\"quoted\\\"\\n\"\r\n" {
+		t.Fatal("sibling reusable fixture disclosed the wrong pre-edit value", err)
+	}
+	rows, err = List(firstPath, "fixture", firstKey)
+	if err != nil || rows[0].Revision != revision {
+		t.Fatal("mutated reusable fixture did not keep its own revision", err)
+	}
+
+	// Keys are independently mutable: clearing one must not affect the other.
+	firstKey[0] ^= 0xff
+	if bytes.Equal(firstKey, secondKey) || !bytes.Equal(secondKey, expectedKey) {
+		t.Fatal("reusable fixture callers shared a mutable key slice")
+	}
+
+	freshOnePath, freshOneKey, freshOneTarget := revealFixture(t)
+	freshTwoPath, freshTwoKey, freshTwoTarget := revealFixture(t)
+	if freshOnePath == freshTwoPath {
+		t.Fatal("fresh fixture constructor reused a path")
+	}
+	if !idOK(freshOneTarget.ID) || !digestOK(freshOneTarget.Revision) || !idOK(freshTwoTarget.ID) || !digestOK(freshTwoTarget.Revision) {
+		t.Fatal("fresh fixture constructor returned invalid target metadata")
+	}
+	if freshOneTarget.ID == freshTwoTarget.ID {
+		t.Fatal("fresh fixture constructor reused an item identity")
+	}
+	one, err := References(freshOnePath, "fixture", freshOneKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := References(freshTwoPath, "fixture", freshTwoKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !idOK(one.VaultID) || !idOK(two.VaultID) || one.VaultID == two.VaultID {
+		t.Fatal("fresh fixture constructor did not retain distinct vault identities")
+	}
+	freshOneKey[0] ^= 0xff
+	if bytes.Equal(freshOneKey, freshTwoKey) {
+		t.Fatal("fresh fixture constructor shared a mutable key slice")
+	}
+}
+
 func TestRevealRollbackNeverWrites(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	db, err := existing(path)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +248,7 @@ func TestRevealRollbackNeverWrites(t *testing.T) {
 }
 
 func TestRevealCorruptJournalNeverWrites(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	db, err := existing(path)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +265,7 @@ func TestRevealCorruptJournalNeverWrites(t *testing.T) {
 }
 
 func TestRevealEscapesUnicodeControls(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	value := "可见😀\u0085\u009b\u200b\u202e\u2066\U000e0001tail"
 	revision, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "password", Value: value})
 	if err != nil {
@@ -118,7 +291,7 @@ func TestRevealEscapesUnicodeControls(t *testing.T) {
 }
 
 func TestRevealConcurrentEditAndRecovery(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var output bytes.Buffer
 	var readErr, editErr error
 	var wg sync.WaitGroup
@@ -204,7 +377,7 @@ func TestRevealConcurrentEditAndRecovery(t *testing.T) {
 }
 
 func TestRevealIntentCommittedBeforeOutput(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var output bytes.Buffer
 	var intent Event
 	w := disclosureWriter(func(p []byte) (int, error) {
@@ -252,7 +425,7 @@ func TestRevealIntentCommittedBeforeOutput(t *testing.T) {
 }
 
 func TestRevealRefusalsAndOutputFailure(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var out bytes.Buffer
 	for _, wrong := range []struct {
 		pw  string

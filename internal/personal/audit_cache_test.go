@@ -66,7 +66,7 @@ func eventRawBytes(t *testing.T, path string) uint64 {
 }
 
 func TestAuditCacheWarmEquivalentAndMutableResults(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s := openTestSession(t, path, key)
 	defer s.Lock()
 
@@ -177,7 +177,7 @@ func TestAuditCacheMiddleAndShapeTampering(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path, key, _ := revealFixture(t)
+			path, key, _ := revealFixtureReusable(t)
 			s := openTestSession(t, path, key)
 			defer s.Lock()
 			if _, _, err := s.ReadAuthenticatedItems(false); err != nil {
@@ -246,7 +246,7 @@ func TestAuditCacheRestoredChainTampering(t *testing.T) {
 }
 
 func TestAuditCacheAnotherSessionTailUpdatesRevisions(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s1 := openTestSession(t, path, key)
 	defer s1.Lock()
 	items, _, err := s1.ReadAuthenticatedItems(false)
@@ -277,7 +277,7 @@ func TestAuditCacheAnotherSessionTailUpdatesRevisions(t *testing.T) {
 }
 
 func TestAuditCacheRollbackDoesNotPoison(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s := openTestSession(t, path, key)
 	defer s.Lock()
 	if _, _, err := s.ReadAuthenticatedItems(false); err != nil {
@@ -312,7 +312,7 @@ func TestAuditCacheRollbackDoesNotPoison(t *testing.T) {
 }
 
 func TestAuditCacheLockDropsAndLatePopulationRefused(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s := openTestSession(t, path, key)
 	if _, _, err := s.ReadAuthenticatedItems(false); err != nil {
 		t.Fatal(err)
@@ -376,7 +376,7 @@ func TestAuditCacheHoldsNoSecretMaterial(t *testing.T) {
 }
 
 func TestAuditCacheWarmReadStillHashesEveryStoredByte(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s := openTestSession(t, path, key)
 	defer s.Lock()
 	want := eventRawBytes(t, path)
@@ -395,7 +395,7 @@ func TestAuditCacheWarmReadStillHashesEveryStoredByte(t *testing.T) {
 }
 
 func TestAuditConsumersRetainCompleteHistory(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s := openTestSession(t, path, key)
 	defer s.Lock()
 	if _, _, err := s.ReadAuthenticatedItems(false); err != nil {

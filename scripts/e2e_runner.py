@@ -41,6 +41,7 @@ from tests.e2e.harness import (  # noqa: E402  (path setup must run first)
     ensure_binaries_built,
     ensure_vm_temp_root,
     get_registered_tests,
+    legacy_child_env,
 )
 
 # Set the VM recipe before discovery/builds/subprocesses.
@@ -397,7 +398,13 @@ def _run_self_test(bin_dir: Path) -> int:
         assert os.environ.get("TMPDIR") == str(root), (
             f"TMPDIR={os.environ.get('TMPDIR')!r} does not match {root}"
         )
-        assert "GOPROXY" in os.environ, "GOPROXY was not initialized"
+        legacy_env = legacy_child_env()
+        assert "GOPROXY" in legacy_env, (
+            "legacy child GOPROXY default was not applied"
+        )
+        assert legacy_env["GOPROXY"] == os.environ.get("GOPROXY", "direct"), (
+            "legacy child GOPROXY default overrode the caller value"
+        )
         for path in (
             bin_dir / "locklark",
             bin_dir / "locklark-browser-chromium",

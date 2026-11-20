@@ -19,7 +19,7 @@ func liveRequest() LivePullRequest {
 	return LivePullRequest{Repository: gateway.Repository{ID: "1445507532", Owner: "jihuayu", Name: "locklark"}, Number: 18, Address: "140.82.112.6"}
 }
 func TestLivePullIntentPrecedesUpstream(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	request := liveRequest()
 	prepare := func(r *LivePullRequest) (result, error) {
 		return command(path, "fixture", key, livePullAction, vault.Item{}, &Edit{ID: target.ID, Revision: target.Revision, Field: "password"}, commandOption{livePull: r})
@@ -88,7 +88,7 @@ func TestLivePullIntentPrecedesUpstream(t *testing.T) {
 }
 
 func TestLivePullFailureDoesNotSend(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	request := liveRequest()
 	calls := 0
 	send := func(context.Context, LivePullRequest, []byte) (gateway.PullResult, error) {

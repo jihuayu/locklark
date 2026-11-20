@@ -211,7 +211,7 @@ func localStagedPublishAssertSummary(t *testing.T, wrapper *LocalGenesisSession,
 
 func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T) {
 	t.Run("publishes-reopens-and-repeat-settled", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -342,7 +342,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("interrupt-before-cas-recovers-exact-proposal", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -414,7 +414,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("interrupt-after-cas-acknowledges-without-second-write", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -491,7 +491,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-after-prepare-before-cas-preserves-base", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -558,7 +558,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-after-cas-before-ack-retains-pending", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -625,7 +625,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-before-direct-applied-ack-retains-pending", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -682,7 +682,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-before-initial-prepare-claim-does-not-prepare", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -736,7 +736,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 			{"lock", func(s *personal.Session, _ context.CancelFunc) { s.RequestLock() }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				fx := newLocalFirstWriteFixture(t)
+				fx := newLocalFirstWriteSingleVaultFixture(t)
 				source := newLocalStagedPublishSource(t, 3)
 				archiveCopy := bytes.Clone(source.archive)
 				vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -807,7 +807,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-before-direct-applied-ack-claim-retains-pending", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -882,7 +882,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("durability-proof-failure-after-cas-retains-pending", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -959,7 +959,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("durability-proof-failure-on-direct-applied-ack-retains-pending", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1030,7 +1030,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 	})
 
 	t.Run("request-lock-before-deliver-claim-withdraws-old-success", func(t *testing.T) {
-		fx := newLocalFirstWriteFixture(t)
+		fx := newLocalFirstWriteSingleVaultFixture(t)
 		source := newLocalStagedPublishSource(t, 3)
 		archiveCopy := bytes.Clone(source.archive)
 		vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1094,7 +1094,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 
 	t.Run("wrong-digests-stale-and-foreign-advance-never-overwrite", func(t *testing.T) {
 		t.Run("wrong-source-digest", func(t *testing.T) {
-			fx := newLocalFirstWriteFixture(t)
+			fx := newLocalFirstWriteSingleVaultFixture(t)
 			source := newLocalStagedPublishSource(t, 3)
 			archiveCopy := bytes.Clone(source.archive)
 			vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1118,7 +1118,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 		})
 
 		t.Run("wrong-candidate-digest", func(t *testing.T) {
-			fx := newLocalFirstWriteFixture(t)
+			fx := newLocalFirstWriteSingleVaultFixture(t)
 			source := newLocalStagedPublishSource(t, 3)
 			archiveCopy := bytes.Clone(source.archive)
 			vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1142,7 +1142,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 		})
 
 		t.Run("stale-same-genesis-new-revision", func(t *testing.T) {
-			fx := newLocalFirstWriteFixture(t)
+			fx := newLocalFirstWriteSingleVaultFixture(t)
 			source := newLocalStagedPublishSource(t, 3)
 			archiveCopy := bytes.Clone(source.archive)
 			vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1181,7 +1181,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 		})
 
 		t.Run("foreign-advance", func(t *testing.T) {
-			fx := newLocalFirstWriteFixture(t)
+			fx := newLocalFirstWriteSingleVaultFixture(t)
 			source := newLocalStagedPublishSource(t, 3)
 			archiveCopy := bytes.Clone(source.archive)
 			vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")
@@ -1216,7 +1216,7 @@ func TestLocalOwnedLegacyPartitionPublishesAndReconcilesExactStage(t *testing.T)
 		})
 
 		t.Run("pending-foreign-advance", func(t *testing.T) {
-			fx := newLocalFirstWriteFixture(t)
+			fx := newLocalFirstWriteSingleVaultFixture(t)
 			source := newLocalStagedPublishSource(t, 3)
 			archiveCopy := bytes.Clone(source.archive)
 			vaultCopy := localStagedPublishReadFile(t, source.vaultPath, "STAGED_PUBLISH_SOURCE_VAULT_READ_FAILED")

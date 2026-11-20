@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import hashlib
 import http.client
 import os
 import shutil
 import ssl
+import stat
 import struct
 import subprocess
 import sys
@@ -186,6 +189,932 @@ class F16DetectionTests(unittest.TestCase):
     def test_missing_shell_init_is_real_absence(self):
         ctx = FakeContext({("help",): (0, "  cli profiles\n", "")})
         self.assertFalse(support.f16_cli_shell_ready(ctx))
+
+
+class BrowserHostPasskeyTimeoutPhaseTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.ctx = object.__new__(harness.E2EContext)
+        self.ctx.temp_dir = Path(temp.name)
+        self.ctx.repo_root = ROOT
+        self.go = self.ctx.temp_dir / "fake-go"
+
+    def run_go_helper(self, *, observe=True, observed_test_names=("TestOne", "TestTwo")):
+        return support.go_package_test(
+            self.ctx, "./internal/browserhost", "TestOne|TestTwo",
+            min_passed=2,
+            observe_browserhost_passkey_timeout=observe,
+            observed_test_names=observed_test_names,
+        )
+
+    def assert_observed_command(self, command, env, cwd, timeout):
+        self.assertEqual(
+            command,
+            [str(self.go), "test", "./internal/browserhost", "-run",
+             "TestOne|TestTwo", "-count=1", "-v"],
+        )
+        self.assertEqual(cwd, str(ROOT))
+        self.assertEqual(timeout, 180)
+        self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"], "1")
+        phase = Path(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"])
+        self.assertEqual(phase.parent.parent, self.ctx.temp_dir)
+        self.assertEqual(phase.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(phase.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(phase.read_bytes(), b"0")
+        return phase
+
+    def test_timeout_reports_one_fixed_phase_and_reraises_original_exception(self):
+        fifo = object()
+        cases = (
+            (b"0", 0), (b"1", 1), (b"2", 2), (b"3", 3), (b"4", 4),
+            (None, -1), (b"", -1), (b"5", -1), (b"4\nuntrusted payload", -1), (fifo, -1),
+        )
+        for payload, phase in cases:
+            with self.subTest(phase=phase):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=b"untrusted output", stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    marker = self.assert_observed_command(command, env, cwd, timeout)
+                    if payload is None:
+                        marker.unlink()
+                    elif payload is fifo:
+                        marker.unlink()
+                        os.mkfifo(marker)
+                    else:
+                        marker.write_bytes(payload)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    f"BrowserHost passkey timeout phase {phase} "
+                    "go_test_entry=unknown go_test_start=unknown\n",
+                )
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_fixed_stdout_witnesses_are_independent_of_phase_marker(self):
+        cases = (
+            (b"0", b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n", "TestMain", "unknown"),
+            (b"0", b"=== RUN   TestOne\n", "TestMain", "observed"),
+            (b"4", b"=== RUN   TestTwo\n", "TestMain", "observed"),
+            (b"0", b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n=== RUN   TestOne\n",
+             "TestMain", "observed"),
+            (b"0", b"build output only\n", "unknown", "unknown"),
+            (b"4", b"", "unknown", "unknown"),
+        )
+        for phase_payload, output, entry, started in cases:
+            with self.subTest(
+                phase=phase_payload, output=output, entry=entry, started=started,
+            ):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=output, stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    marker = self.assert_observed_command(command, env, cwd, timeout)
+                    marker.write_bytes(phase_payload)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    f"BrowserHost passkey timeout phase {int(phase_payload.decode())} "
+                    f"go_test_entry={entry} go_test_start={started}\n",
+                )
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_unrelated_or_malformed_stdout_witnesses_stay_unknown(self):
+        cases = (
+            b"=== RUN   TestOther\n",
+            b"=== RUN   TestOneExtra\n",
+            b"=== RUN TestOne\n",
+            b"prefix LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n",
+            b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY_EXTRA\n",
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                stderr = io.StringIO()
+                expired = subprocess.TimeoutExpired(
+                    [str(self.go)], 180, output=output, stderr=b"untrusted stderr",
+                )
+
+                def time_out(command, *, env, cwd, timeout, **kwargs):
+                    self.assert_observed_command(command, env, cwd, timeout)
+                    raise expired
+
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaises(subprocess.TimeoutExpired) as caught,
+                ):
+                    self.run_go_helper()
+
+                self.assertIs(caught.exception, expired)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    "BrowserHost passkey timeout phase 0 "
+                    "go_test_entry=unknown go_test_start=unknown\n",
+                )
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_entry_witness_is_enabled_without_phase_marker(self):
+        stderr = io.StringIO()
+        expired = subprocess.TimeoutExpired(
+            [str(self.go)], 180,
+            output=b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n",
+            stderr=b"untrusted stderr",
+        )
+
+        def time_out(command, *, env, cwd, timeout, **kwargs):
+            self.assertEqual(
+                command,
+                [str(self.go), "test", "./internal/browserhost", "-run",
+                 "TestOne|TestTwo", "-count=1", "-v"],
+            )
+            self.assertEqual(cwd, str(ROOT))
+            self.assertEqual(timeout, 180)
+            self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"], "1")
+            self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"], "")
+            raise expired
+
+        with (
+            mock.patch.object(support, "go_tool", return_value=self.go),
+            mock.patch.object(
+                support.tempfile, "TemporaryDirectory", side_effect=OSError("unavailable")
+            ),
+            mock.patch.object(harness.subprocess, "run", side_effect=time_out),
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(subprocess.TimeoutExpired) as caught,
+        ):
+            self.run_go_helper()
+
+        self.assertIs(caught.exception, expired)
+        self.assertEqual(
+            stderr.getvalue(),
+            "BrowserHost passkey timeout phase -1 "
+            "go_test_entry=TestMain go_test_start=unknown\n",
+        )
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_opted_out_timeout_keeps_original_behavior(self):
+        expired = subprocess.TimeoutExpired([str(self.go)], 180)
+        stderr = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(support, "go_tool", return_value=self.go),
+            mock.patch.object(harness.subprocess, "run", side_effect=expired) as run,
+            contextlib.redirect_stderr(stderr),
+            self.assertRaises(subprocess.TimeoutExpired) as caught,
+        ):
+            self.run_go_helper(observe=False)
+
+        self.assertIs(caught.exception, expired)
+        self.assertEqual(
+            run.call_args.args[0],
+            [str(self.go), "test", "./internal/browserhost", "-run",
+             "TestOne|TestTwo", "-count=1", "-v"],
+        )
+        self.assertNotIn("LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE", run.call_args.kwargs["env"])
+        self.assertNotIn("LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY", run.call_args.kwargs["env"])
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_completed_process_preserves_exit_and_pass_count_gates(self):
+        one_pass = "--- PASS: TestOne (0.00s)\n"
+        two_passes = one_pass + "--- PASS: TestTwo (0.00s)\n"
+        for returncode, output, passes in ((0, one_pass, False), (1, two_passes, False), (0, two_passes, True)):
+            with self.subTest(returncode=returncode, passes=passes):
+                stderr = io.StringIO()
+                completed = subprocess.CompletedProcess([str(self.go)], returncode, output, "")
+                with (
+                    mock.patch.object(support, "go_tool", return_value=self.go),
+                    mock.patch.object(harness.subprocess, "run", return_value=completed),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    if passes:
+                        self.run_go_helper()
+                    else:
+                        with self.assertRaises(AssertionError):
+                            self.run_go_helper()
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+
+class BrowserHostPasskeyBuildRunTests(unittest.TestCase):
+    PATTERN = r"^Test(One|Two)$"
+    NAMES = ("TestOne", "TestTwo")
+    BINARY_PAYLOAD = b"private synthetic browserhost test binary\n"
+    BINARY_SHA256 = hashlib.sha256(BINARY_PAYLOAD).hexdigest()
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.ctx = object.__new__(harness.E2EContext)
+        self.ctx.temp_dir = Path(temp.name)
+        self.ctx.repo_root = ROOT
+        self.go = self.ctx.temp_dir / "fake-go"
+        self.now = 1000.0
+        self.build_calls: list[tuple[list[str], dict[str, str], str, float]] = []
+        self.run_calls: list[tuple[list[str], dict[str, str], str, float]] = []
+        self.binary = None
+        self.phase = None
+        self.on_build = self._build_ok
+        self.on_run = self._run_ok
+
+    def _clock(self) -> float:
+        return self.now
+
+    def _assert_private_env(self, env: dict[str, str]) -> None:
+        self.assertEqual(env["TMPDIR"], str(self.ctx.temp_dir))
+        self.assertEqual(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"], "1")
+        self.phase = Path(env["LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"])
+        self.assertEqual(self.phase.parent.parent, self.ctx.temp_dir)
+        self.assertEqual(self.phase.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.phase.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.phase.read_bytes(), b"0")
+
+    def _build_ok(self, command, env, cwd, timeout):
+        self.assertEqual(command[:3], [str(self.go), "test", "-c"])
+        self.assertEqual(command[3], "-o")
+        self.assertEqual(len(command), 6)
+        self.assertEqual(command[5], "./internal/browserhost")
+        self.assertEqual(cwd, str(ROOT))
+        self.assertEqual(timeout, 180)
+        self._assert_private_env(env)
+        self.binary = Path(command[4])
+        self.assertEqual(self.binary.parent.parent, self.ctx.temp_dir)
+        self.assertEqual(self.binary.parent.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(self.binary.exists())
+        self.binary.write_bytes(self.BINARY_PAYLOAD)
+        self.binary.chmod(0o755)
+        self.now += 25.68
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def _run_ok(self, command, env, cwd, timeout):
+        info = os.lstat(self.binary)
+        self.assertTrue(stat.S_ISREG(info.st_mode))
+        self.assertFalse(stat.S_ISLNK(info.st_mode))
+        self.assertEqual(
+            [entry.name for entry in self.binary.parent.iterdir()],
+            [self.binary.name],
+        )
+        self.assertEqual(command[:2], [str(self.binary), "-test.v"])
+        self.assertEqual(command[2:], ["-test.count=1", "-test.run", self.PATTERN])
+        self.assertEqual(cwd, str(ROOT / "internal" / "browserhost"))
+        self.assertAlmostEqual(timeout, 180 - 25.68)
+        self._assert_private_env(env)
+        self.phase.write_bytes(b"4")
+        self.now += 5.0
+        output = (
+            "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n"
+            "=== RUN   TestOne\n"
+            "--- PASS: TestOne (0.00s)\n"
+            "=== RUN   TestTwo\n"
+            "--- PASS: TestTwo (0.00s)\n"
+            "PASS\n"
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    def _fake_run(
+        self,
+        ctx,
+        command,
+        *,
+        deadline,
+        cwd,
+        env,
+        inherit_vm_default_goproxy=True,
+    ):
+        env = ctx._child_env(
+            dict(env),
+            inherit_vm_default_goproxy=inherit_vm_default_goproxy,
+        )
+        cwd = str(cwd)
+        timeout = deadline - self._clock()
+        if command[0] == str(self.go):
+            self.build_calls.append((list(command), env, cwd, timeout))
+            return self.on_build(command, env, cwd, timeout)
+        self.run_calls.append((list(command), env, cwd, timeout))
+        return self.on_run(command, env, cwd, timeout)
+
+    def run_helper(self, *, timeout=180.0, names=None):
+        selected = tuple(names or self.NAMES)
+        with (
+            mock.patch.object(support, "go_tool", return_value=self.go),
+            mock.patch.object(support.time, "monotonic", side_effect=self._clock),
+            mock.patch.object(
+                support, "_owned_stage_runner", side_effect=self._fake_run
+            ),
+        ):
+            return support.go_package_test(
+                self.ctx,
+                "./internal/browserhost",
+                self.PATTERN,
+                min_passed=len(selected),
+                timeout=timeout,
+                observe_browserhost_passkey_timeout=True,
+                observed_test_names=selected,
+                split_build_run=True,
+            )
+
+    def test_success_runs_the_exact_fresh_binary_with_the_remaining_budget(self):
+        counts = self.run_helper()
+        self.assertEqual(counts, {"pass": 2})
+        self.assertEqual(len(self.build_calls), 1)
+        self.assertEqual(len(self.run_calls), 1)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_run_stopping_at_or_after_deadline_is_refused_despite_exact_passes(self):
+        output = (
+            "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n"
+            "=== RUN   TestOne\n"
+            "--- PASS: TestOne (0.00s)\n"
+            "=== RUN   TestTwo\n"
+            "--- PASS: TestTwo (0.00s)\n"
+            "PASS\n"
+        )
+
+        def run_at(command, env, cwd, timeout, stopped):
+            self.assertEqual(command[0], str(self.binary))
+            self.assertAlmostEqual(timeout, 180 - 25.68)
+            self._assert_private_env(env)
+            self.phase.write_bytes(b"4")
+            self.now = stopped
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        for label, stopped, expected_run_seconds in (
+            ("before", 1179.999, "154.319"),
+            ("at", 1180.0, "154.320"),
+            ("just_after", 1180.100, "154.420"),
+        ):
+            with self.subTest(label=label):
+                self.now = 1000.0
+                self.build_calls.clear()
+                self.run_calls.clear()
+                self.binary = None
+                self.on_run = (
+                    lambda command, env, cwd, timeout, stopped=stopped: run_at(
+                        command, env, cwd, timeout, stopped
+                    )
+                )
+                if label == "before":
+                    self.assertEqual(self.run_helper(), {"pass": 2})
+                else:
+                    with self.assertRaises(AssertionError) as caught:
+                        self.run_helper()
+                    self.assertEqual(
+                        str(caught.exception),
+                        "BrowserHost passkey stage=run build=complete "
+                        f"binary_sha256={self.BINARY_SHA256} "
+                        f"build_seconds=25.680 run_seconds={expected_run_seconds} "
+                        "phase=4 go_test_entry=TestMain go_test_start=observed",
+                    )
+                self.assertEqual(len(self.run_calls), 1)
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_build_timeout_is_build_stage_and_never_starts_run(self):
+        def build_timeout(command, env, cwd, timeout):
+            self.assertEqual(timeout, 180)
+            self._assert_private_env(env)
+            self.now = 1180.0
+            raise subprocess.TimeoutExpired(
+                command, timeout, output=b"hidden child stdout"
+            )
+
+        self.on_build = build_timeout
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper()
+        self.assertEqual(self.run_calls, [])
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            "BrowserHost passkey stage=build build=timeout binary_sha256=unknown "
+            "build_seconds=180.000 run_seconds=0.000 phase=0 "
+            "go_test_entry=unknown go_test_start=unknown",
+        )
+        self.assertNotIn("hidden child stdout", message)
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_owned_timeout_reaps_a_descendant_after_the_driver_exits(self):
+        if os.name == "nt" or not hasattr(os, "killpg"):
+            self.skipTest("owned POSIX process groups are unavailable")
+
+        scripts = tempfile.TemporaryDirectory()
+        self.addCleanup(scripts.cleanup)
+        script_dir = Path(scripts.name)
+        ready = script_dir / "descendant-ready"
+        witness = script_dir / "late-descendant-write"
+        fake_go = script_dir / "fake-go"
+        child_code = (
+            "import pathlib, time\n"
+            f"ready = pathlib.Path({str(ready)!r})\n"
+            f"witness = pathlib.Path({str(witness)!r})\n"
+            "ready.write_text('ready', encoding='utf-8')\n"
+            "time.sleep(0.8)\n"
+            "witness.write_text('late', encoding='utf-8')\n"
+        )
+        fake_go.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, subprocess, sys, time\n"
+            f"ready = pathlib.Path({str(ready)!r})\n"
+            "subprocess.Popen([sys.executable, '-c', "
+            f"{child_code!r}])\n"
+            "limit = time.monotonic() + 2.0\n"
+            "while not ready.exists() and time.monotonic() < limit:\n"
+            "    time.sleep(0.01)\n"
+            "raise SystemExit(0)\n",
+            encoding="utf-8",
+        )
+        fake_go.chmod(0o755)
+
+        started = time.monotonic()
+        with mock.patch.object(support, "go_tool", return_value=str(fake_go)):
+            with self.assertRaises(AssertionError) as caught:
+                support.go_package_test(
+                    self.ctx,
+                    "./internal/browserhost",
+                    self.PATTERN,
+                    min_passed=len(self.NAMES),
+                    timeout=0.6,
+                    observe_browserhost_passkey_timeout=True,
+                    observed_test_names=self.NAMES,
+                    split_build_run=True,
+                )
+        elapsed = time.monotonic() - started
+        message = str(caught.exception)
+
+        self.assertIn("stage=build build=timeout", message)
+        self.assertNotIn(str(script_dir), message)
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertTrue(ready.exists(), "descendant never acknowledged readiness")
+        self.assertLess(elapsed, 2.5, "owned timeout teardown was not timely")
+        # The descendant would write 0.8s after readiness (readiness itself is
+        # bounded by the 0.6s deadline); only a group teardown that includes it
+        # can keep this bounded wait witness-free.
+        witness_deadline = started + 1.6
+        while time.monotonic() < witness_deadline:
+            time.sleep(0.05)
+        self.assertFalse(witness.exists(), "descendant wrote after the deadline")
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_build_nonzero_exit_is_build_stage_and_never_starts_run(self):
+        def build_failed(command, env, cwd, timeout):
+            self._assert_private_env(env)
+            self.now += 1.0
+            return subprocess.CompletedProcess(
+                command, 1, "hidden build stdout", "hidden build stderr"
+            )
+
+        self.on_build = build_failed
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper()
+        self.assertEqual(self.run_calls, [])
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            "BrowserHost passkey stage=build build=failed binary_sha256=unknown "
+            "build_seconds=1.000 run_seconds=0.000 phase=0 "
+            "go_test_entry=unknown go_test_start=unknown",
+        )
+        self.assertNotIn("hidden build", message)
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_run_timeout_is_bounded_by_the_residual_budget(self):
+        def run_timeout(command, env, cwd, timeout):
+            self.assertEqual(command[0], str(self.binary))
+            self.assertAlmostEqual(timeout, 180 - 25.68)
+            self._assert_private_env(env)
+            self.phase.write_bytes(b"2")
+            self.now = 1180.0
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout,
+                output=(
+                    b"LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY\n"
+                    b"=== RUN   TestOne\n"
+                    b"hidden child stdout"
+                ),
+            )
+
+        self.on_run = run_timeout
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper()
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            "BrowserHost passkey stage=run build=complete "
+            f"binary_sha256={self.BINARY_SHA256} "
+            "build_seconds=25.680 run_seconds=154.320 phase=2 "
+            "go_test_entry=TestMain go_test_start=observed",
+        )
+        self.assertNotIn("hidden child stdout", message)
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_no_residual_budget_after_build_does_not_start_run(self):
+        def build_to_budget(command, env, cwd, timeout):
+            self.assertEqual(timeout, 180)
+            self._assert_private_env(env)
+            self.binary = Path(command[4])
+            self.binary.write_bytes(self.BINARY_PAYLOAD)
+            self.binary.chmod(0o755)
+            self.now = 1180.0
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        self.on_build = build_to_budget
+        self.on_run = lambda *args: self.fail("run must not start without residual budget")
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper()
+        self.assertEqual(self.run_calls, [])
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            "BrowserHost passkey stage=run build=complete "
+            f"binary_sha256={self.BINARY_SHA256} "
+            "build_seconds=180.000 run_seconds=0.000 phase=0 "
+            "go_test_entry=unknown go_test_start=unknown",
+        )
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_zero_budget_does_not_start_build(self):
+        self.on_build = lambda *args: self.fail("build must not start without budget")
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper(timeout=0)
+        self.assertEqual(self.build_calls, [])
+        self.assertEqual(self.run_calls, [])
+        message = str(caught.exception)
+        self.assertEqual(
+            message,
+            "BrowserHost passkey stage=build build=not_started binary_sha256=unknown "
+            "build_seconds=0.000 run_seconds=0.000 phase=0 "
+            "go_test_entry=unknown go_test_start=unknown",
+        )
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_exact_top_level_pass_contract_rejects_missing_duplicate_substitute_and_subtest(self):
+        cases = {
+            "missing": "--- PASS: TestOne (0.00s)\n",
+            "duplicate": (
+                "--- PASS: TestOne (0.00s)\n"
+                "--- PASS: TestOne (0.00s)\n"
+                "--- PASS: TestTwo (0.00s)\n"
+            ),
+            "substitute": (
+                "--- PASS: TestOne (0.00s)\n"
+                "--- PASS: TestThree (0.00s)\n"
+            ),
+            "subtest": (
+                "--- PASS: TestOne (0.00s)\n"
+                "    --- PASS: TestTwo/sub (0.00s)\n"
+            ),
+            "extra": (
+                "--- PASS: TestOne (0.00s)\n"
+                "--- PASS: TestTwo (0.00s)\n"
+                "--- PASS: TestThree (0.00s)\n"
+            ),
+        }
+        for label, output in cases.items():
+            with self.subTest(label=label):
+                self.now = 1000.0
+                self.build_calls.clear()
+                self.run_calls.clear()
+
+                def run_bad(command, env, cwd, timeout, output=output):
+                    self._assert_private_env(env)
+                    self.phase.write_bytes(b"4")
+                    self.now += 5.0
+                    return subprocess.CompletedProcess(command, 0, output, "")
+
+                self.on_run = run_bad
+                with self.assertRaises(AssertionError) as caught:
+                    self.run_helper()
+                self.assertEqual(len(self.build_calls), 1)
+                self.assertEqual(len(self.run_calls), 1)
+                message = str(caught.exception)
+                self.assertTrue(
+                    message.startswith(
+                        "BrowserHost passkey stage=run build=complete "
+                        f"binary_sha256={self.BINARY_SHA256} "
+                    )
+                )
+                self.assertIn(
+                    "phase=4 go_test_entry=unknown go_test_start=unknown", message
+                )
+                self.assertNotIn("TestOne", message)
+                self.assertNotIn("TestThree", message)
+                self.assertNotIn(str(self.ctx.temp_dir), message)
+                self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_nonzero_run_with_both_passes_is_still_rejected(self):
+        def run_failed(command, env, cwd, timeout):
+            self._assert_private_env(env)
+            self.phase.write_bytes(b"4")
+            self.now += 5.0
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                (
+                    "--- PASS: TestOne (0.00s)\n"
+                    "--- PASS: TestTwo (0.00s)\n"
+                ),
+                "hidden run stderr",
+            )
+
+        self.on_run = run_failed
+        with self.assertRaises(AssertionError) as caught:
+            self.run_helper()
+        message = str(caught.exception)
+        self.assertTrue(message.startswith("BrowserHost passkey stage=run build=complete "))
+        self.assertNotIn("hidden run stderr", message)
+        self.assertNotIn(str(self.ctx.temp_dir), message)
+        self.assertEqual(list(self.ctx.temp_dir.iterdir()), [])
+
+    def test_build_verification_rejects_symlink_and_extra_artifacts(self):
+        target = self.ctx.temp_dir / "outside-binary"
+        target.write_bytes(self.BINARY_PAYLOAD)
+        self.addCleanup(lambda: target.unlink(missing_ok=True))
+
+        def build_bad(command, env, cwd, timeout, kind):
+            self._assert_private_env(env)
+            binary = Path(command[4])
+            if kind == "symlink":
+                try:
+                    os.symlink(target, binary)
+                except OSError:
+                    raise unittest.SkipTest("symlinks are unavailable")
+            elif kind == "extra":
+                binary.write_bytes(self.BINARY_PAYLOAD)
+                binary.chmod(0o755)
+                (binary.parent / "extra").write_text("ambiguity", encoding="utf-8")
+            else:
+                binary.mkdir()
+            self.now += 1.0
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        for kind in ("symlink", "extra", "directory"):
+            with self.subTest(kind=kind):
+                self.now = 1000.0
+                self.build_calls.clear()
+                self.run_calls.clear()
+                self.on_build = (
+                    lambda command, env, cwd, timeout, kind=kind: build_bad(
+                        command, env, cwd, timeout, kind
+                    )
+                )
+                with self.assertRaises(AssertionError) as caught:
+                    self.run_helper()
+                self.assertEqual(self.run_calls, [])
+                message = str(caught.exception)
+                self.assertEqual(
+                    message,
+                    "BrowserHost passkey stage=build build=failed binary_sha256=unknown "
+                    "build_seconds=1.000 run_seconds=0.000 phase=0 "
+                    "go_test_entry=unknown go_test_start=unknown",
+                )
+                self.assertNotIn(str(target), message)
+                self.assertNotIn(str(self.ctx.temp_dir), message)
+
+
+class VMGOPROXYPolicyTests(unittest.TestCase):
+    """The VM default belongs to child construction, never ambient state.
+
+    A1 recorded the injected string ``direct`` globally, so a later explicit
+    caller assignment ``os.environ["GOPROXY"] = "direct"`` was mistaken for
+    the recipe default and stripped from the T1 compile.  The default is now
+    applied only while copying a legacy child environment; the T1 compile opts
+    out so Go sees the caller environment exactly.
+    """
+
+    NAMES = ("TestOne", "TestTwo")
+    PATTERN = r"^Test(One|Two)$"
+    VALUES = ("direct", "off", "https://proxy.invalid/direct", "")
+
+    def setUp(self):
+        if os.name == "nt" or not hasattr(os, "killpg"):
+            self.skipTest("owned split stages require POSIX process groups")
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.ctx = object.__new__(harness.E2EContext)
+        self.ctx.temp_dir = self.root / "ctx"
+        self.ctx.temp_dir.mkdir()
+        self.ctx.repo_root = ROOT
+        self.build_witness = self.root / "build-env.json"
+        self.run_witness = self.root / "run-env.json"
+        self.fake_go = self.root / "fake-go"
+        self._write_fake_go()
+
+    def _write_fake_go(self) -> None:
+        python = sys.executable
+        run_witness = repr(str(self.run_witness))
+        run_binary = (
+            f"#!{python}\n"
+            "import json, os, pathlib\n"
+            f"pathlib.Path({run_witness}).write_text("
+            "json.dumps(dict(os.environ)), encoding='utf-8')\n"
+            'print("LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY")\n'
+            'print("=== RUN   TestOne")\n'
+            'print("--- PASS: TestOne (0.00s)")\n'
+            'print("=== RUN   TestTwo")\n'
+            'print("--- PASS: TestTwo (0.00s)")\n'
+            'print("PASS")\n'
+        )
+        build_witness = repr(str(self.build_witness))
+        fake_go = (
+            f"#!{python}\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) != 5 or args[:3] != ['test', '-c', '-o']:\n"
+            "    raise SystemExit(2)\n"
+            f"pathlib.Path({build_witness}).write_text("
+            "json.dumps(dict(os.environ)), encoding='utf-8')\n"
+            "binary = pathlib.Path(args[3])\n"
+            f"binary.write_text({run_binary!r}, encoding='utf-8')\n"
+            "binary.chmod(0o755)\n"
+        )
+        self.fake_go.write_text(fake_go, encoding="utf-8")
+        self.fake_go.chmod(0o755)
+
+    @contextlib.contextmanager
+    def isolated_env(self, **values: str):
+        base = {
+            "HOME": str(self.home),
+            "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
+            "GOTOOLCHAIN": "local",
+        }
+        base.update(values)
+        with mock.patch.dict(os.environ, base, clear=True):
+            yield
+
+    def run_split(self) -> dict[str, int]:
+        with mock.patch.object(support, "go_tool", return_value=str(self.fake_go)):
+            return support.go_package_test(
+                self.ctx,
+                "./internal/browserhost",
+                self.PATTERN,
+                min_passed=len(self.NAMES),
+                observe_browserhost_passkey_timeout=True,
+                observed_test_names=self.NAMES,
+                split_build_run=True,
+            )
+
+    def load_env(self, path: Path) -> dict[str, str]:
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def goenv_goproxy(self, env: dict[str, str], go: str) -> str:
+        completed = subprocess.run(
+            [go, "env", "GOPROXY"],
+            cwd=str(self.root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip()
+
+    def test_explicit_same_value_direct_after_setup_is_kept_for_t1_compile(self):
+        with self.isolated_env():
+            harness.ensure_vm_temp_root()
+            # Same string the old recipe inserted, but now a caller assignment.
+            os.environ["GOPROXY"] = "direct"
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertEqual(build_env.get("GOPROXY"), "direct")
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+
+    def test_repeated_setup_leaves_ambient_absent_and_legacy_child_gets_default(self):
+        with self.isolated_env():
+            for _ in range(3):
+                harness.ensure_vm_temp_root()
+            self.assertNotIn("GOPROXY", os.environ)
+            legacy_env = self.ctx._child_env(None)
+            self.assertEqual(legacy_env.get("GOPROXY"), "direct")
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertNotIn("GOPROXY", build_env)
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+
+    def test_early_ambient_caller_values_are_kept_for_build_and_legacy(self):
+        for value in self.VALUES:
+            with self.subTest(value=value):
+                with self.isolated_env(GOPROXY=value):
+                    harness.ensure_vm_temp_root()
+                    self.assertEqual(os.environ.get("GOPROXY"), value)
+                    legacy_env = self.ctx._child_env(None)
+                    self.assertEqual(legacy_env.get("GOPROXY"), value)
+                    self.assertEqual(self.run_split(), {"pass": 2})
+                    build_env = self.load_env(self.build_witness)
+                    run_env = self.load_env(self.run_witness)
+
+                self.assertEqual(build_env.get("GOPROXY"), value)
+                self.assertEqual(run_env.get("GOPROXY"), value)
+
+    def test_context_env_values_are_kept_for_legacy_and_t1_opt_out(self):
+        for value in self.VALUES:
+            with self.subTest(value=value):
+                with self.isolated_env():
+                    harness.ensure_vm_temp_root()
+                    legacy_env = self.ctx._child_env({"GOPROXY": value})
+                    t1_env = self.ctx._child_env(
+                        {"GOPROXY": value},
+                        inherit_vm_default_goproxy=False,
+                    )
+
+                self.assertEqual(legacy_env.get("GOPROXY"), value)
+                self.assertEqual(t1_env.get("GOPROXY"), value)
+
+    def test_legacy_child_env_helper_uses_setdefault_only(self):
+        with self.isolated_env():
+            harness.ensure_vm_temp_root()
+            self.assertEqual(
+                harness.legacy_child_env().get("GOPROXY"), "direct"
+            )
+            self.assertEqual(
+                harness.legacy_child_env({"GOPROXY": "off"}).get("GOPROXY"),
+                "off",
+            )
+        with self.isolated_env(GOPROXY="custom://proxy"):
+            harness.ensure_vm_temp_root()
+            self.assertEqual(
+                harness.legacy_child_env().get("GOPROXY"), "custom://proxy"
+            )
+
+    def test_private_goenv_default_is_restored_for_build_but_not_legacy_child(self):
+        go = shutil.which("go")
+        if go is None:
+            self.skipTest("go toolchain unavailable for the GOENV policy check")
+        goenv = self.root / "goenv"
+        goenv.write_text("GOPROXY=https://goenv.invalid,direct\n", encoding="utf-8")
+
+        with self.isolated_env(GOENV=str(goenv)):
+            harness.ensure_vm_temp_root()
+            self.assertNotIn("GOPROXY", os.environ)
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        # The direct built-binary stage keeps the pre-existing policy.
+        self.assertEqual(run_env.get("GOPROXY"), "direct")
+        self.assertEqual(self.goenv_goproxy(run_env, go), "direct")
+        # The compile stage must fall back to the caller's GOENV value.
+        self.assertNotIn("GOPROXY", build_env)
+        self.assertEqual(build_env.get("GOENV"), str(goenv))
+        self.assertEqual(
+            self.goenv_goproxy(build_env, go),
+            "https://goenv.invalid,direct",
+        )
+
+    def test_same_value_direct_after_setup_wins_over_private_goenv_for_t1(self):
+        go = shutil.which("go")
+        if go is None:
+            self.skipTest("go toolchain unavailable for the GOENV policy check")
+        goenv = self.root / "goenv-explicit"
+        goenv.write_text("GOPROXY=https://goenv.invalid,direct\n", encoding="utf-8")
+
+        with self.isolated_env(GOENV=str(goenv)):
+            harness.ensure_vm_temp_root()
+            # Identical text to the old default, but this is a caller value.
+            os.environ["GOPROXY"] = "direct"
+            self.assertEqual(self.run_split(), {"pass": 2})
+            build_env = self.load_env(self.build_witness)
+            run_env = self.load_env(self.run_witness)
+
+        self.assertEqual(build_env.get("GOPROXY"), "direct")
+        self.assertEqual(self.goenv_goproxy(build_env, go), "direct")
+        self.assertEqual(self.goenv_goproxy(run_env, go), "direct")
 
 
 class PasskeyManagementDetectionTests(unittest.TestCase):

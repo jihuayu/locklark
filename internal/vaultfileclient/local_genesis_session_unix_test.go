@@ -15,6 +15,9 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
+// localGenesisTwoVaultFixture carries the two child scopes built by
+// newLocalGenesisTwoVaultFixture. The second scope fields stay empty when a
+// test uses the explicit single-vault constructor instead.
 type localGenesisTwoVaultFixture struct {
 	f *creationBoundaryFixture
 
@@ -26,11 +29,26 @@ type localGenesisTwoVaultFixture struct {
 	session *personal.Session
 }
 
+// newLocalGenesisSingleVaultFixture reuses the real creation boundary fixture
+// and its real backup publish/complete flow to build exactly one child scope.
+// The first vault still goes through personal.Create, OpenCreation, backup
+// publish, Complete and the full-factor parent unlock. Use this only when the
+// test and every helper it calls never read, enumerate or compare a sibling.
+func newLocalGenesisSingleVaultFixture(t *testing.T) *localGenesisTwoVaultFixture {
+	t.Helper()
+	return newLocalGenesisFixture(t, false)
+}
+
 // newLocalGenesisTwoVaultFixture reuses the real creation boundary fixture and
 // its real backup publish/complete flow. Both vaults share one personal parent
 // and one generation-zero create shape, but each create obtains its own real
 // owner root, so the two journals use different keys.
 func newLocalGenesisTwoVaultFixture(t *testing.T) *localGenesisTwoVaultFixture {
+	t.Helper()
+	return newLocalGenesisFixture(t, true)
+}
+
+func newLocalGenesisFixture(t *testing.T, withSecond bool) *localGenesisTwoVaultFixture {
 	t.Helper()
 	f := newCreationBoundaryFixture(t)
 	f.publishBackup(t)
@@ -44,60 +62,69 @@ func newLocalGenesisTwoVaultFixture(t *testing.T) *localGenesisTwoVaultFixture {
 	if err != nil || !exists {
 		t.Fatal("LOCAL_GENESIS_SESSION_FIRST_MANIFEST_FAILED")
 	}
-
-	secondConfig := filepath.Join(filepath.Dir(f.config), "second.json")
-	second := f.proposal
-	second.Name = "other-g"
-	second.Journal = filepath.Join(filepath.Dir(f.proposal.Journal), "second.journal")
-	second.Archive = filepath.Join(f.root, "second.llb")
-	create, err := OpenCreation(secondConfig, &second, f.password, f.secretInput)
-	if err != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_OPEN_FAILED")
-	}
-	backupRequired, err := create.Prepare(context.Background())
-	create.Close()
-	if err != nil || !backupRequired {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_REQUIRED_FAILED")
-	}
-	backup, err := personal.PrepareBackup(second.PersonalFile, second.Archive, string(f.password), f.key)
-	if err != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_FAILED")
-	}
-	kit := []byte(backup.Material())
-	defer clear(kit)
-	if backup.Publish() != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_PUBLISH_FAILED")
-	}
-	backup.Close()
-	create, err = OpenCreation(secondConfig, nil, f.password, f.secretInput)
-	if err != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_REOPEN_FAILED")
-	}
-	backupRequired, err = create.Prepare(context.Background())
-	if err != nil || backupRequired {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_PREPARE_FAILED")
-	}
-	if err := create.Complete(context.Background(), f.password, f.secretInput, kit); err != nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_CREATE_FAILED")
-	}
-	create.Close()
-	secondManifest, exists, err := ReadManifest(secondConfig)
-	if err != nil || !exists {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_MANIFEST_FAILED")
-	}
 	firstCompanion, ok, err := ReadCompanion(f.config, firstManifest)
 	if err != nil || !ok || firstCompanion.Resume.Checkpoint == nil {
 		t.Fatal("LOCAL_GENESIS_SESSION_FIRST_COMPANION_FAILED")
 	}
-	secondCompanion, ok, err := ReadCompanion(secondConfig, secondManifest)
-	if err != nil || !ok || secondCompanion.Resume.Checkpoint == nil {
-		t.Fatal("LOCAL_GENESIS_SESSION_SECOND_COMPANION_FAILED")
+	fixture := &localGenesisTwoVaultFixture{
+		f:            f,
+		firstConfig:  f.config,
+		firstVaultID: firstManifest.VaultID,
 	}
-	if firstManifest.VaultID == secondManifest.VaultID {
-		t.Fatal("LOCAL_GENESIS_SESSION_VAULT_IDS_NOT_DISTINCT")
-	}
-	if firstCompanion.Resume.Checkpoint.OwnerRootPublicKey == secondCompanion.Resume.Checkpoint.OwnerRootPublicKey {
-		t.Fatal("LOCAL_GENESIS_SESSION_OWNER_ROOTS_NOT_DISTINCT")
+
+	if withSecond {
+		secondConfig := filepath.Join(filepath.Dir(f.config), "second.json")
+		second := f.proposal
+		second.Name = "other-g"
+		second.Journal = filepath.Join(filepath.Dir(f.proposal.Journal), "second.journal")
+		second.Archive = filepath.Join(f.root, "second.llb")
+		create, err := OpenCreation(secondConfig, &second, f.password, f.secretInput)
+		if err != nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_OPEN_FAILED")
+		}
+		backupRequired, err := create.Prepare(context.Background())
+		create.Close()
+		if err != nil || !backupRequired {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_REQUIRED_FAILED")
+		}
+		backup, err := personal.PrepareBackup(second.PersonalFile, second.Archive, string(f.password), f.key)
+		if err != nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_FAILED")
+		}
+		kit := []byte(backup.Material())
+		defer clear(kit)
+		if backup.Publish() != nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_BACKUP_PUBLISH_FAILED")
+		}
+		backup.Close()
+		create, err = OpenCreation(secondConfig, nil, f.password, f.secretInput)
+		if err != nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_REOPEN_FAILED")
+		}
+		backupRequired, err = create.Prepare(context.Background())
+		if err != nil || backupRequired {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_PREPARE_FAILED")
+		}
+		if err := create.Complete(context.Background(), f.password, f.secretInput, kit); err != nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_CREATE_FAILED")
+		}
+		create.Close()
+		secondManifest, exists, err := ReadManifest(secondConfig)
+		if err != nil || !exists {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_MANIFEST_FAILED")
+		}
+		secondCompanion, ok, err := ReadCompanion(secondConfig, secondManifest)
+		if err != nil || !ok || secondCompanion.Resume.Checkpoint == nil {
+			t.Fatal("LOCAL_GENESIS_SESSION_SECOND_COMPANION_FAILED")
+		}
+		if firstManifest.VaultID == secondManifest.VaultID {
+			t.Fatal("LOCAL_GENESIS_SESSION_VAULT_IDS_NOT_DISTINCT")
+		}
+		if firstCompanion.Resume.Checkpoint.OwnerRootPublicKey == secondCompanion.Resume.Checkpoint.OwnerRootPublicKey {
+			t.Fatal("LOCAL_GENESIS_SESSION_OWNER_ROOTS_NOT_DISTINCT")
+		}
+		fixture.secondConfig = secondConfig
+		fixture.secondVaultID = secondManifest.VaultID
 	}
 
 	session, err := personal.UnlockSession(f.proposal.PersonalFile, f.password, f.key, time.Minute)
@@ -105,14 +132,8 @@ func newLocalGenesisTwoVaultFixture(t *testing.T) *localGenesisTwoVaultFixture {
 		t.Fatal("LOCAL_GENESIS_SESSION_PARENT_UNLOCK_FAILED")
 	}
 	t.Cleanup(session.Lock)
-	return &localGenesisTwoVaultFixture{
-		f:             f,
-		firstConfig:   f.config,
-		secondConfig:  secondConfig,
-		firstVaultID:  firstManifest.VaultID,
-		secondVaultID: secondManifest.VaultID,
-		session:       session,
-	}
+	fixture.session = session
+	return fixture
 }
 
 func (f *localGenesisTwoVaultFixture) open(t *testing.T, config, vaultID string) (*LocalGenesisSession, LocalGenesisBaseline) {
@@ -379,7 +400,7 @@ func TestLocalGenesisSessionStableReplacementIsTerminal(t *testing.T) {
 
 func TestLocalGenesisSessionPosteriorDoesNotDeliverLateSummary(t *testing.T) {
 	t.Run("parent-lock-during-open", func(t *testing.T) {
-		f := newLocalGenesisTwoVaultFixture(t)
+		f := newLocalGenesisSingleVaultFixture(t)
 		old := localGenesisCandidateReadyForTest
 		localGenesisCandidateReadyForTest = func() { f.session.RequestLock() }
 		t.Cleanup(func() { localGenesisCandidateReadyForTest = old })
@@ -392,7 +413,7 @@ func TestLocalGenesisSessionPosteriorDoesNotDeliverLateSummary(t *testing.T) {
 	})
 
 	t.Run("parent-lock-during-summary", func(t *testing.T) {
-		f := newLocalGenesisTwoVaultFixture(t)
+		f := newLocalGenesisSingleVaultFixture(t)
 		a, _ := f.open(t, f.firstConfig, f.firstVaultID)
 		old := localGenesisSummaryReadyForTest
 		localGenesisSummaryReadyForTest = func() { f.session.RequestLock() }

@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from contextlib import ExitStack, contextmanager, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -35,6 +36,7 @@ from .harness import (
     prebuilt_env_configured,
     FeatureNotImplementedError,
     PTYResult,
+    legacy_child_env,
     owned_gui_command,
     session_bus_usable,
     terminate_process_group,
@@ -1077,13 +1079,511 @@ def go_tool() -> str | None:
             continue
         try:
             probe = subprocess.run(
-                [candidate, "version"], capture_output=True, text=True, timeout=20
+                [candidate, "version"],
+                env=legacy_child_env(),
+                capture_output=True,
+                text=True,
+                timeout=20,
             )
         except (OSError, subprocess.SubprocessError):
             continue
         if probe.returncode == 0 and "go version" in (probe.stdout or ""):
             return candidate
     return None
+
+
+def _read_browserhost_passkey_phase(marker: Path) -> int:
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb", buffering=0) as phase_file:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                value = phase_file.read(2)
+                if value in (b"0", b"1", b"2", b"3", b"4"):
+                    return int(value)
+    except OSError:
+        pass
+    return -1
+
+
+_BROWSERHOST_PASSKEY_ENTRY_ENV = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+_BROWSERHOST_PASSKEY_ENTRY_LINE = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_ENTRY"
+_GO_TEST_START_PREFIX = "=== RUN   "
+# The in-binary line is written from TestMain after package init.  A selected
+# test start frame is written by the test binary immediately before the testing
+# package invokes that test function.  cmd/go's `-json` "start" action is not
+# used: it is emitted before cmd/go execs the test binary.
+
+
+def _go_output_witnesses(
+    output: Any,
+    selected_tests: Sequence[str],
+) -> tuple[bool, bool]:
+    """Return (test-binary entry, selected test start) from partial stdout."""
+
+    if isinstance(output, bytes):
+        text = output.decode("utf-8", "replace")
+    elif isinstance(output, str):
+        text = output
+    else:
+        return False, False
+    lines = text.splitlines()
+    entry = _BROWSERHOST_PASSKEY_ENTRY_LINE in lines
+    expected = {f"{_GO_TEST_START_PREFIX}{name}" for name in selected_tests}
+    started = any(line in expected for line in lines)
+    return entry or started, started
+
+
+def _go_timeout_witnesses(
+    exc: subprocess.TimeoutExpired,
+    selected_tests: Sequence[str],
+) -> tuple[bool, bool]:
+    return _go_output_witnesses(getattr(exc, "stdout", None), selected_tests)
+
+
+@contextmanager
+def _browserhost_passkey_marker_env(temp_dir: Path):
+    """Create the private phase marker and the test-binary witness environment."""
+
+    with ExitStack() as cleanup:
+        marker = None
+        phase_env_key = "LOCKLARK_TEST_BROWSERHOST_PASSKEY_PHASE_FILE"
+        # The stdout witness is enabled independently of phase-marker creation.
+        env = {phase_env_key: "", _BROWSERHOST_PASSKEY_ENTRY_ENV: "1"}
+        try:
+            directory = cleanup.enter_context(
+                tempfile.TemporaryDirectory(dir=temp_dir, ignore_cleanup_errors=True)
+            )
+            candidate = Path(directory) / "phase"
+            candidate.touch(mode=0o600, exist_ok=False)
+            candidate.write_bytes(b"0")
+            marker = candidate
+            env[phase_env_key] = str(marker)
+        except OSError:
+            pass
+        yield env, marker
+
+
+@contextmanager
+def _browserhost_passkey_timeout_marker(
+    temp_dir: Path,
+    selected_tests: Sequence[str],
+):
+    with _browserhost_passkey_marker_env(temp_dir) as (env, marker):
+        try:
+            yield env
+        except subprocess.TimeoutExpired as exc:
+            phase = _read_browserhost_passkey_phase(marker) if marker is not None else -1
+            entry, started = _go_timeout_witnesses(exc, selected_tests)
+            facts = (
+                f"go_test_entry={'TestMain' if entry else 'unknown'} "
+                f"go_test_start={'observed' if started else 'unknown'}"
+            )
+            with suppress(OSError, ValueError):
+                print(
+                    f"BrowserHost passkey timeout phase {phase} {facts}",
+                    file=sys.stderr,
+                )
+            raise
+
+
+_BROWSERHOST_TOP_LEVEL_PASS_RE = re.compile(
+    r"^--- PASS: ([^\s/]+) \([^)]*\)$", re.MULTILINE
+)
+
+
+def _browserhost_passkey_diagnostic(
+    *,
+    stage: str,
+    build: str,
+    binary_sha256: str,
+    build_seconds: float,
+    run_seconds: float,
+    marker: Path | None,
+    output: Any,
+    selected_tests: Sequence[str],
+) -> str:
+    """Return one bounded diagnostic from allowlisted facts only.
+
+    No child stdout/stderr, command line, binary path, or environment value is
+    included: phase and the TestMain/start witnesses are the only excerpts.
+    """
+
+    phase = _read_browserhost_passkey_phase(marker) if marker is not None else -1
+    entry, started = _go_output_witnesses(output, selected_tests)
+    return (
+        f"BrowserHost passkey stage={stage} build={build} "
+        f"binary_sha256={binary_sha256} build_seconds={build_seconds:.3f} "
+        f"run_seconds={run_seconds:.3f} phase={phase} "
+        f"go_test_entry={'TestMain' if entry else 'unknown'} "
+        f"go_test_start={'observed' if started else 'unknown'}"
+    )
+
+
+def _browserhost_fresh_test_binary(build_dir: Path, binary: Path) -> bool:
+    """Accept only the one new regular executable requested in a fresh directory."""
+
+    try:
+        entries = sorted(entry.name for entry in build_dir.iterdir())
+        info = os.lstat(binary)
+    except OSError:
+        return False
+    return (
+        entries == [binary.name]
+        and stat.S_ISREG(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and info.st_size > 0
+        and os.access(binary, os.X_OK)
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _browserhost_exact_passes(
+    output: str,
+    selected_tests: Sequence[str],
+    min_passed: int,
+) -> bool:
+    """Require exactly one top-level PASS for each selected test.
+
+    The expression is anchored at column zero and excludes ``/`` so a subtest
+    line cannot satisfy a parent test, and set equality rejects substitutes,
+    duplicates, and missing results.
+    """
+
+    expected = tuple(selected_tests)
+    if (
+        not expected
+        or len(set(expected)) != len(expected)
+        or len(expected) < min_passed
+    ):
+        return False
+    names = _BROWSERHOST_TOP_LEVEL_PASS_RE.findall(output or "")
+    return len(names) == len(expected) and set(names) == set(expected)
+
+
+def _owned_stage_output(value: Any) -> str:
+    """Decode one partial stream without trusting its contents."""
+
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def _run_owned_stage(
+    ctx: E2EContext,
+    command: Sequence[Any],
+    *,
+    deadline: float,
+    cwd: Path | str,
+    env: Mapping[str, str],
+    inherit_vm_default_goproxy: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run one split stage in a private POSIX session and reap only it.
+
+    ``start_new_session=True`` makes the launched driver the leader of a new
+    session/process group, so a compiler/linker child it leaves behind (or a
+    child that outlives a direct binary) remains owned by the recorded group
+    id.  Timeout and every other exit path signal that group alone; our own
+    group and unrelated/inherited sessions are never signalled.
+
+    ``inherit_vm_default_goproxy`` is false only for the one T1 compile stage:
+    that child copies the caller environment without the legacy VM default so
+    Go's own GOENV/default module policy applies.  Global ``os.environ`` is
+    never modified, and the direct test-binary stage keeps the legacy default.
+    """
+
+    if os.name == "nt" or not hasattr(os, "killpg"):
+        raise OSError("owned stage process groups are unavailable")
+
+    launched = [str(part) for part in command]
+    proc = subprocess.Popen(
+        launched,
+        cwd=str(cwd),
+        env=ctx._child_env(
+            dict(env),
+            inherit_vm_default_goproxy=inherit_vm_default_goproxy,
+        ),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+    timeout_exc: subprocess.TimeoutExpired | None = None
+    stopped: float | None = None
+    stdout_text = ""
+    stderr_text = ""
+
+    try:
+        # Recalculate the residual after launch: the one absolute deadline
+        # also owns interpreter/exec startup, not just communicate().
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stopped = time.monotonic()
+            timeout_exc = subprocess.TimeoutExpired(launched, 0)
+        else:
+            try:
+                stdout_text, stderr_text = proc.communicate(timeout=remaining)
+                stopped = time.monotonic()
+            except subprocess.TimeoutExpired as exc:
+                stopped = time.monotonic()
+                timeout_exc = exc
+    finally:
+        # Bounded teardown only: no stage work is admitted after this point.
+        terminate_process_group(
+            proc, grace=3.0, owned_group=proc.pid, reap_leader=True
+        )
+
+    # Reuse the existing ESRCH-only reaped proof: an unproven group is never
+    # reported as successful cleanup.
+    if proc.poll() is None or not desktop_group_reaped(proc):
+        raise OSError("owned stage process group could not be reaped")
+
+    if timeout_exc is not None:
+        # Retrying communicate() returns the output accumulated by the first
+        # attempt; it does not return only the remaining bytes.
+        try:
+            drained_out, drained_err = proc.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired as exc:
+            # A process outside the owned group can still hold the inherited
+            # pipes.  Keep only output already read and fail the stage below.
+            drained_out = _owned_stage_output(getattr(exc, "output", None))
+            drained_err = _owned_stage_output(getattr(exc, "stderr", None))
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    with suppress(OSError, ValueError):
+                        stream.close()
+        output = (
+            drained_out
+            if drained_out is not None
+            else _owned_stage_output(getattr(timeout_exc, "output", None))
+        )
+        errors = (
+            drained_err
+            if drained_err is not None
+            else _owned_stage_output(getattr(timeout_exc, "stderr", None))
+        )
+        expired = subprocess.TimeoutExpired(
+            launched,
+            getattr(timeout_exc, "timeout", 0) or 0,
+            output=output,
+            stderr=errors,
+        )
+        expired.stop_monotonic = stopped
+        raise expired
+
+    result = subprocess.CompletedProcess(
+        launched, proc.returncode, stdout_text, stderr_text
+    )
+    result.stop_monotonic = stopped
+    return result
+
+
+# Narrow injection seam: production always uses the owned-session runner above;
+# deterministic unit tests replace only this callable to model stage outcomes.
+_owned_stage_runner = _run_owned_stage
+
+
+def _go_package_test_build_then_run(
+    ctx: E2EContext,
+    go: str,
+    package: str,
+    run: str,
+    *,
+    min_passed: int,
+    timeout: float,
+    observed_test_names: Sequence[str],
+) -> dict[str, int]:
+    selected = tuple(observed_test_names)
+    if not selected:
+        raise AssertionError(
+            "split build/run requires the exact selected test names"
+        )
+
+    # One absolute budget owns both stages; the second stage gets only what is
+    # left and is never started after expiry.
+    deadline = time.monotonic() + timeout
+    with _browserhost_passkey_marker_env(ctx.temp_dir) as (env, marker):
+
+        def failure(
+            *,
+            stage: str,
+            build: str,
+            binary_sha256: str = "unknown",
+            build_seconds: float = 0.0,
+            run_seconds: float = 0.0,
+            output: Any = None,
+        ) -> AssertionError:
+            return AssertionError(
+                _browserhost_passkey_diagnostic(
+                    stage=stage,
+                    build=build,
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                    run_seconds=run_seconds,
+                    marker=marker,
+                    output=output,
+                    selected_tests=selected,
+                )
+            )
+
+        try:
+            build_context = tempfile.TemporaryDirectory(
+                dir=ctx.temp_dir,
+                prefix="browserhost-test-",
+                ignore_cleanup_errors=True,
+            )
+        except OSError:
+            raise failure(stage="build", build="failed") from None
+
+        with build_context as build_dir_name:
+            build_dir = Path(build_dir_name)
+            with suppress(OSError):
+                os.chmod(build_dir, 0o700)
+            suffix = ".exe" if os.name == "nt" else ""
+            binary = build_dir / f"browserhost.test{suffix}"
+
+            try:
+                fresh_directory = not any(build_dir.iterdir())
+            except OSError:
+                fresh_directory = False
+            build_started = time.monotonic()
+            remaining = deadline - build_started
+            if not fresh_directory:
+                raise failure(stage="build", build="failed")
+            if remaining <= 0:
+                raise failure(stage="build", build="not_started")
+
+            try:
+                result = _owned_stage_runner(
+                    ctx,
+                    [str(go), "test", "-c", "-o", str(binary), package],
+                    deadline=deadline,
+                    cwd=ctx.repo_root,
+                    env=env,
+                    # The T1 compile inherits the caller env exactly; the run
+                    # stage below and every other path keep the legacy default.
+                    inherit_vm_default_goproxy=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stopped = getattr(exc, "stop_monotonic", None)
+                if stopped is None:
+                    stopped = time.monotonic()
+                raise failure(
+                    stage="build",
+                    build="timeout",
+                    build_seconds=max(0.0, stopped - build_started),
+                    output=getattr(exc, "stdout", None),
+                ) from None
+            except OSError:
+                raise failure(
+                    stage="build",
+                    build="failed",
+                    build_seconds=max(0.0, time.monotonic() - build_started),
+                ) from None
+
+            stopped = getattr(result, "stop_monotonic", None)
+            if stopped is None:
+                stopped = time.monotonic()
+            build_seconds = max(0.0, stopped - build_started)
+            if result.returncode != 0 or not _browserhost_fresh_test_binary(
+                build_dir, binary
+            ):
+                raise failure(
+                    stage="build", build="failed", build_seconds=build_seconds
+                )
+
+            try:
+                binary_sha256 = _sha256_file(binary)
+            except OSError:
+                raise failure(
+                    stage="build", build="failed", build_seconds=build_seconds
+                ) from None
+
+            run_started = time.monotonic()
+            remaining = deadline - run_started
+            if remaining <= 0:
+                raise failure(
+                    stage="run",
+                    build="complete",
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                )
+
+            run_cwd = ctx.repo_root / package
+            try:
+                executed = _owned_stage_runner(
+                    ctx,
+                    [
+                        str(binary),
+                        "-test.v",
+                        "-test.count=1",
+                        "-test.run",
+                        run,
+                    ],
+                    deadline=deadline,
+                    cwd=run_cwd,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stopped = getattr(exc, "stop_monotonic", None)
+                if stopped is None:
+                    stopped = time.monotonic()
+                raise failure(
+                    stage="run",
+                    build="complete",
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                    run_seconds=max(0.0, stopped - run_started),
+                    output=getattr(exc, "stdout", None),
+                ) from None
+            except OSError:
+                raise failure(
+                    stage="run",
+                    build="complete",
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                    run_seconds=max(0.0, time.monotonic() - run_started),
+                ) from None
+
+            stopped = getattr(executed, "stop_monotonic", None)
+            if stopped is None:
+                stopped = time.monotonic()
+            run_seconds = max(0.0, stopped - run_started)
+            combined = (executed.stdout or "") + (executed.stderr or "")
+            # A child can exit with rc=0 and exact PASS lines after the
+            # communicate timeout has elapsed.  The observed stop time, not
+            # the absence of TimeoutExpired, owns the one absolute deadline.
+            if stopped >= deadline:
+                raise failure(
+                    stage="run",
+                    build="complete",
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                    run_seconds=run_seconds,
+                    output=combined,
+                )
+            if executed.returncode != 0 or not _browserhost_exact_passes(
+                combined, selected, min_passed
+            ):
+                raise failure(
+                    stage="run",
+                    build="complete",
+                    binary_sha256=binary_sha256,
+                    build_seconds=build_seconds,
+                    run_seconds=run_seconds,
+                    output=combined,
+                )
+            return {"pass": len(selected)}
 
 
 def go_package_test(
@@ -1093,12 +1593,23 @@ def go_package_test(
     *,
     min_passed: int = 1,
     timeout: float = 180.0,
+    observe_browserhost_passkey_timeout: bool = False,
+    observed_test_names: Sequence[str] = (),
+    split_build_run: bool = False,
 ) -> dict[str, int]:
     """Execute existing Go package tests for a native service contract.
 
     This is component-level evidence: it runs the shipped implementation with
     its own tests, but never claims a live network round trip.  A package test
     that fails is an implementation failure, not an absent feature.
+
+    ``split_build_run`` is scoped to the BrowserHost passkey contract: it first
+    compiles ``go test -c`` into a fresh private directory, verifies that exact
+    executable, and then runs it directly with the same one-shot budget.  This
+    keeps compilation and test execution as separate, labelled stages, and it
+    always supplies the TestMain/phase marker environment.  Both stages launch
+    in a private POSIX session so a timeout or failed stage reaps the owned
+    group (including compiler/linker descendants) before its temp scope closes.
     """
 
     go = go_tool()
@@ -1106,8 +1617,22 @@ def go_package_test(
         raise AssertionError(
             "validation blocked: go toolchain unavailable; native component tests not executed"
         )
+    if split_build_run:
+        return _go_package_test_build_then_run(
+            ctx,
+            go,
+            package,
+            run,
+            min_passed=min_passed,
+            timeout=timeout,
+            observed_test_names=observed_test_names,
+        )
     args = ["test", package, "-run", run, "-count=1", "-v"]
-    result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)
+    if observe_browserhost_passkey_timeout:
+        with _browserhost_passkey_timeout_marker(ctx.temp_dir, observed_test_names) as env:
+            result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root, env=env)
+    else:
+        result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)
     combined = (result.stdout or "") + (result.stderr or "")
     passed = len(re.findall(r"^--- PASS: ", combined, re.MULTILINE))
     if result.returncode != 0:

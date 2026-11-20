@@ -17,7 +17,7 @@ import (
 
 func sshFixture(t *testing.T) (*Session, []byte, SSHKeyRow) {
 	t.Helper()
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {
 		t.Fatal("SSH fixture unlock")

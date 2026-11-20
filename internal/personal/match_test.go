@@ -11,7 +11,7 @@ import (
 )
 
 func TestMatchLogins(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	revision, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "url", Value: "https://EXAMPLE.com:443/login"})
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestMatchLogins(t *testing.T) {
 }
 
 func TestMatchRollback(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	if _, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "url", Value: "https://example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestMatchRollback(t *testing.T) {
 }
 
 func TestMatchClearedWebsite(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	rev, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "url", Value: "https://example.com/login"})
 	if err != nil {
 		t.Fatal(err)

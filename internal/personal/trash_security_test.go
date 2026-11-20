@@ -15,7 +15,7 @@ import (
 )
 
 func TestTrashBlocksEveryUsePath(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	rev, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "url", Value: "https://example.com/login"})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestTrashBlocksEveryUsePath(t *testing.T) {
 }
 
 func TestTrashConcurrentAndRollback(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
 	for range 2 {
@@ -190,7 +190,7 @@ func TestTrashConcurrentAndRollback(t *testing.T) {
 }
 
 func TestTrashBackupRecovery(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	rev, err := SetArchived(path, "fixture", key, target.ID, target.Revision, true)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestTrashBackupRecovery(t *testing.T) {
 }
 
 func TestTrashAndRevisionPrecedeInvalidValues(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	rev, err := SetTrashed(path, "fixture", key, target.ID, target.Revision, true)
 	if err != nil {
 		t.Fatal(err)

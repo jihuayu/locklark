@@ -75,7 +75,7 @@ func TestTitleSearchUnicodeScopeAndJSON(t *testing.T) {
 }
 
 func TestTitleSearchAuditAndPrivateBinding(t *testing.T) {
-	path, key, target := revealFixture(t)
+	path, key, target := revealFixtureReusable(t)
 	// This search term is absent from titles; searching secrets must not return it.
 	receipt, e := Search(path, "fixture", key, "private-value", "all")
 	if e != nil || len(receipt.Rows) != 0 {
@@ -143,7 +143,7 @@ func TestTitleSearchAuditAndPrivateBinding(t *testing.T) {
 }
 
 func TestTitleSearchCommitAndCloseFailures(t *testing.T) {
-	path, key, _ := revealFixture(t)
+	path, key, _ := revealFixtureReusable(t)
 	db, e := existing(path)
 	if e != nil {
 		t.Fatal(e)

@@ -39,6 +39,12 @@ type localGenesisSessionState struct {
 	companion      Companion
 	revision       string
 	successor      *localGenesisSuccessorLocator
+	// managed is nil for the strict profile path. When non-nil it is the
+	// frozen, externally supplied managed recovery selector. It is a read
+	// selector only: the managed production child path owns the exact owner,
+	// policy, backend-byte, operation and opaque-revision proof, and every
+	// Summary/query posterior revalidates that same child.
+	managed *LocalManagedRecoverySelector
 
 	token personal.VaultFileChildToken
 
@@ -241,7 +247,7 @@ func (s *localGenesisSessionState) summary() (LocalGenesisBaseline, error) {
 		clearLocalGenesisItems(items)
 		return empty, ErrLocalReview
 	}
-	return LocalGenesisBaseline{VaultID: s.manifest.VaultID, Items: items}, nil
+	return LocalGenesisBaseline{VaultID: s.vaultID(), Items: items}, nil
 }
 
 // Close is idempotent. It marks this wrapper terminal before waiting for the
@@ -293,12 +299,15 @@ func (s *localGenesisSessionState) initialSummary(initial []personal.VaultFileBa
 		clearLocalGenesisItems(items)
 		return empty, err
 	}
-	return LocalGenesisBaseline{VaultID: s.manifest.VaultID, Items: items}, nil
+	return LocalGenesisBaseline{VaultID: s.vaultID(), Items: items}, nil
 }
 
 func (s *localGenesisSessionState) revalidateLocator() error {
 	if s == nil || s.parent == nil {
 		return ErrLocalReview
+	}
+	if s.managed != nil {
+		return s.revalidateManagedLocator()
 	}
 	if !s.parent.Unlocked() {
 		return personal.ErrSessionLocked
@@ -332,6 +341,44 @@ func (s *localGenesisSessionState) revalidateLocator() error {
 	defer clearLocalGenesisVerified(&verified)
 	if verified.revision != s.revision || !sameLocalGenesisSuccessor(verified.successor, s.successor) {
 		return ErrLocalReview
+	}
+	return nil
+}
+
+// vaultID returns the frozen public vault identity for either the strict
+// profile locator or the explicit managed selector. It never derives identity
+// from a summary, filename or caller-visible projection.
+func (s *localGenesisSessionState) vaultID() string {
+	if s.managed != nil {
+		return s.managed.VaultID
+	}
+	return s.manifest.VaultID
+}
+
+// revalidateManagedLocator keeps the managed wrapper's posterior checks on the
+// same production path as a managed child read. It binds the exact frozen
+// destination account and then asks the owning Session to revalidate the exact
+// registered managed child: target owner, settled managed journal, named
+// backend bytes and opaque revision, operation, device and current generation.
+// A nil result carries no bytes, token, summary or authority.
+func (s *localGenesisSessionState) revalidateManagedLocator() error {
+	s.mu.Lock()
+	closed := s.closed
+	parent := s.parent
+	managed := s.managed
+	token := s.token
+	s.mu.Unlock()
+	if closed || parent == nil || managed == nil || managed.AccountPath == "" {
+		return ErrLocalReview
+	}
+	if !parent.Unlocked() {
+		return personal.ErrSessionLocked
+	}
+	if account := parent.VaultPath(); account == "" || account != managed.AccountPath {
+		return ErrLocalReview
+	}
+	if err := parent.RevalidateVaultFileChildOwnership(token); err != nil {
+		return err
 	}
 	return nil
 }

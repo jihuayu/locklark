@@ -249,6 +249,13 @@ def read_native_frame(stream: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# The E2E VM recipe historically supplied GOPROXY=direct.  It is now applied
+# only while constructing a legacy child environment, never to os.environ:
+# ambient state must not make a later explicit caller value (even "direct")
+# indistinguishable from the recipe default.
+_VM_GOPROXY_DEFAULT = "direct"
+
+
 def ensure_vm_temp_root() -> Path:
     """Prepare the private VM temporary root required by the test recipe."""
 
@@ -257,8 +264,23 @@ def ensure_vm_temp_root() -> Path:
     root.mkdir(parents=True, exist_ok=True)
     os.chmod(root, 0o700)
     os.environ["TMPDIR"] = str(root)
-    os.environ.setdefault("GOPROXY", "direct")
     return root
+
+
+def legacy_child_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy the caller environment with the old VM proxy default if absent.
+
+    ``setdefault`` runs against a fresh child mapping only.  A caller value in
+    ``os.environ`` or in the explicit mapping wins, including an empty string.
+    The one split T1 compile does not call this and inherits the caller
+    environment exactly.
+    """
+
+    proc_env = dict(os.environ)
+    if env:
+        proc_env.update({str(key): str(value) for key, value in env.items()})
+    proc_env.setdefault("GOPROXY", _VM_GOPROXY_DEFAULT)
+    return proc_env
 
 
 # Cache keyed by (repository, binary directory) so one runner process does not
@@ -468,6 +490,7 @@ def terminate_process_group(
     *,
     grace: float = 3.0,
     owned_group: int | None = None,
+    reap_leader: bool = False,
 ) -> int | None:
     """Terminate the session/process group this harness launched.
 
@@ -479,6 +502,11 @@ def terminate_process_group(
 
     The wrapper may exit while descendants remain, and a descendant may ignore
     SIGTERM, so the wait/escalation targets the *group*, not just the wrapper.
+
+    ``reap_leader`` is a scoped opt-in for callers that need prompt teardown:
+    after SIGTERM the direct child is reaped before probing the group.  A
+    zombie leader is itself a group member, so without this the normal
+    SIGTERM path always burned the whole grace/escalation window.
     """
 
     own_group = os.getpgid(0)
@@ -496,6 +524,11 @@ def terminate_process_group(
             os.killpg(group, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             group = None
+    if group is not None and reap_leader:
+        try:
+            proc.wait(timeout=min(max(grace, 0.0), 0.5))
+        except subprocess.TimeoutExpired:
+            pass
     if group is None:
         if proc.poll() is None:
             try:
@@ -673,10 +706,22 @@ class E2EContext:
 
     # -- environment helpers ----------------------------------------------
 
-    def _child_env(self, env: dict[str, str] | None) -> dict[str, str]:
-        proc_env = dict(os.environ)
-        if env:
-            proc_env.update({str(key): str(value) for key, value in env.items()})
+    def _child_env(
+        self,
+        env: dict[str, str] | None,
+        *,
+        inherit_vm_default_goproxy: bool = True,
+    ) -> dict[str, str]:
+        if inherit_vm_default_goproxy:
+            proc_env = legacy_child_env(env)
+        else:
+            # T1's compile inherits the caller environment exactly: no ambient
+            # default is synthesized, so Go's own GOENV/default policy applies.
+            proc_env = dict(os.environ)
+            if env:
+                proc_env.update(
+                    {str(key): str(value) for key, value in env.items()}
+                )
         # A caller-supplied TMPDIR is an explicit override; otherwise the test
         # gets its own private directory beneath the shared 0700 root.
         if not env or "TMPDIR" not in env:
