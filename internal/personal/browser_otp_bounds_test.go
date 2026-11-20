@@ -13,23 +13,76 @@ import (
 )
 
 func TestBrowserOTPCapDeadlineClearsIndependentOfLongControl(t *testing.T) {
-	s, target := browserOTPFixture(t)
-	c := NewBrowserOTPControl(time.Now().Add(5 * time.Second))
-	p, err := s.PrepareBrowserOTP(target, dailyGate(t, s), c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.cap.mu.Lock()
-	deadline := p.cap.bounds.Deadline
-	p.cap.mu.Unlock()
-	<-time.After(time.Until(deadline) + 30*time.Millisecond)
-	p.cap.mu.Lock()
-	remaining := len(p.cap.code)
-	p.cap.mu.Unlock()
-	c.Cancel()
-	if remaining != 0 {
-		t.Fatal("short OTP holder outlived its own deadline")
-	}
+	// The holder expiry is owned by the production control timer, which
+	// PrepareBrowserOTP shortens to the capability deadline. A real-clock
+	// observation can lose the timer callback to scheduler ordering and then
+	// misreport an unusable holder as still usable. Drive the same production
+	// timer and callback in virtual time and quiesce the due work before
+	// inspecting the holder, while a distinct outer control stays on its exact
+	// longer deadline.
+	synctest.Test(t, func(t *testing.T) {
+		s, target := browserOTPFixture(t)
+		outerDeadline := time.Now().Add(5 * time.Second)
+		outer := NewBrowserOTPControl(outerDeadline)
+		defer outer.Cancel()
+		c := NewBrowserOTPControl(outerDeadline)
+		p, err := s.PrepareBrowserOTP(target, dailyGate(t, s), c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.DiscardBrowserOTP(p)
+		p.cap.mu.Lock()
+		shortDeadline := p.cap.bounds.Deadline
+		held := len(p.cap.code) != 0 && validBrowserOTPCode(p.cap.code)
+		p.cap.mu.Unlock()
+		if !held {
+			t.Fatal("holder had no meaningful prepared code")
+		}
+		if !shortDeadline.After(time.Now()) || !outerDeadline.After(shortDeadline) {
+			t.Fatal("holder and outer deadlines were not distinct and still pending")
+		}
+		if !c.Pending() || !c.Deadline().Equal(shortDeadline) {
+			t.Fatal("holder control was not shortened to the holder deadline")
+		}
+		if !outer.Pending() || !outer.Deadline().Equal(outerDeadline) {
+			t.Fatal("outer control left its exact deadline before holder expiry")
+		}
+		// Step only as far as the holder deadline; the outer control remains
+		// live and no explicit Cancel runs before the assertions below.
+		time.Sleep(time.Until(shortDeadline))
+		synctest.Wait()
+		if time.Now().Before(shortDeadline) || !time.Now().Before(outerDeadline) {
+			t.Fatal("virtual clock did not stop at the holder deadline")
+		}
+		p.cap.mu.Lock()
+		remaining, retired := len(p.cap.code), p.cap.used
+		p.cap.mu.Unlock()
+		if remaining != 0 {
+			t.Fatal("short OTP holder outlived its own deadline")
+		}
+		if !retired || c.Pending() || !outer.Pending() || !outer.Deadline().Equal(outerDeadline) {
+			t.Fatal("holder expiry disturbed lifecycle or the exact outer control")
+		}
+		retiredLifecycle := false
+		s.browserOTPControls.Range(func(key, _ any) bool {
+			if key == c.inner {
+				retiredLifecycle = true
+			}
+			return true
+		})
+		s.otpCaps.Range(func(key, _ any) bool {
+			if key == p.cap {
+				retiredLifecycle = true
+			}
+			return true
+		})
+		s.mu.Lock()
+		stillPrepared := s.browserOTPPrepared[p]
+		s.mu.Unlock()
+		if retiredLifecycle || stillPrepared {
+			t.Fatal("holder lifecycle survived its own deadline")
+		}
+	})
 }
 
 func TestBrowserOTPClockMarginAndFinalGrantBounds(t *testing.T) {
