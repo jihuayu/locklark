@@ -13,8 +13,16 @@ func openLockFile(string) (*os.File, error) {
 	return nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
 }
 
+func openLockFileOwned(string) (*os.File, os.FileInfo, error) {
+	return nil, nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
+}
+
 func openExistingLockFile(string) (*os.File, error) {
 	return nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
+}
+
+func openExistingLockFileOwned(string) (*os.File, os.FileInfo, error) {
+	return nil, nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
 }
 
 func readLockFile(*os.File, int) ([]byte, error) {
@@ -38,3 +46,5 @@ func privateDir(os.FileInfo) bool { return false }
 func ownedByEUID(os.FileInfo) bool { return false }
 
 func privateFile(os.FileInfo) bool { return false }
+
+func lockInodeKey(os.FileInfo) (inProcKey, bool) { return inProcKey{}, false }

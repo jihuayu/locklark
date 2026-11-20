@@ -36,6 +36,19 @@ import (
 // follows it; closing that gap needs directory-descriptor-relative operations,
 // which this driver does not use.
 //
+// In-process coordination is keyed by the lock inode's stable device/inode
+// identity, not by its pathname, so every alias that reaches the same lock
+// inode shares one semaphore and one close discipline. The pathname is still
+// used to reach the inode: a same-UID process that races replacement of the
+// lock path between the identity Lstat and the open is outside this threat
+// model, but the opened descriptor is revalidated and is never closed under a
+// different inode's semaphore. A descriptor that fails validation is returned
+// to its opener with the identity read from that descriptor, so it is closed
+// under the descriptor's own semaphore, never the candidate path's. If even
+// Stat fails, the identity is genuinely unknown: the descriptor is retained in
+// a bounded process quarantine and further lock opens fail closed instead of
+// being closed blindly or accumulated without limit.
+//
 // Crash handling. The lock inode carries the kernel lock plus an owner ticket
 // naming the temporary file of the write in progress. A dead holder releases
 // the kernel lock; its owner ticket remains, and the next writer removes the
@@ -94,6 +107,11 @@ type Dir struct {
 	// OpenDir opened. Every operation refuses a lock path that now names a
 	// different inode, so an instance never locks a replacement file.
 	lockID os.FileInfo
+	// lockKey is lockID reduced to the stable platform identity (device and
+	// inode) used to select the process-local semaphore. Two paths that reach
+	// the same lock inode, such as bind or case aliases, therefore share one
+	// semaphore even though their pathnames differ.
+	lockKey inProcKey
 	// identity holds the directory identity of each protected component as
 	// OpenDir validated it. dir compares every later Lstat against it, so a
 	// component replaced by another real directory is refused even when the
@@ -119,11 +137,153 @@ type inProcLock struct {
 	sem chan struct{}
 }
 
-var inProcRegistry sync.Map // resolved lock path -> *inProcLock
+// inProcKey is the stable platform identity of a lock inode. POSIX record
+// locks are associated with the inode, and closing any descriptor for that
+// inode releases the process's lock on it, so process-local coordination must
+// be keyed by this identity rather than by a pathname that can alias it.
+type inProcKey struct {
+	dev uint64
+	ino uint64
+}
 
-func inProcFor(path string) *inProcLock {
-	v, _ := inProcRegistry.LoadOrStore(path, &inProcLock{sem: make(chan struct{}, 1)})
+// lockGateKey identifies the creation/open gate for one lock name in one
+// directory inode. Directory identity, not the path, makes constructor opens
+// through aliases of the same directory share the gate.
+type lockGateKey struct {
+	dir  inProcKey
+	name string
+}
+
+var (
+	inProcRegistry   sync.Map // inProcKey -> *inProcLock
+	lockGateRegistry sync.Map // lockGateKey -> *inProcLock
+)
+
+func inProcForKey(key inProcKey) *inProcLock {
+	v, _ := inProcRegistry.LoadOrStore(key, &inProcLock{sem: make(chan struct{}, 1)})
 	return v.(*inProcLock)
+}
+
+// lockGateFor returns the creation/open gate for name in the directory dir.
+func lockGateFor(dir os.FileInfo, name string) (*inProcLock, bool) {
+	key, ok := lockInodeKey(dir)
+	if !ok {
+		return nil, false
+	}
+	v, _ := lockGateRegistry.LoadOrStore(lockGateKey{dir: key, name: name}, &inProcLock{sem: make(chan struct{}, 1)})
+	return v.(*inProcLock), true
+}
+
+// acquireInProc acquires the process semaphore for key on the operation's
+// deadline, mapping a timeout to ErrConflict and cancellation to ErrDenied.
+func acquireInProc(ctx context.Context, key inProcKey, deadline time.Time) (*inProcLock, error) {
+	l := inProcForKey(key)
+	if err := l.acquire(ctx, deadline); err != nil {
+		return nil, lockWaitError(err)
+	}
+	return l, nil
+}
+
+// deferCloseLockFile closes f after acquiring the semaphore for its inode.
+// Closing a descriptor without that semaphore could release a POSIX lock
+// another operation of this process holds on the same inode.
+func deferCloseLockFile(f *os.File, key inProcKey, deadline time.Time) {
+	l := inProcForKey(key)
+	if err := l.acquire(context.Background(), deadline); err != nil {
+		// The deadline is exhausted, so closing now could still race a held
+		// OS lock. Leave the descriptor open and close it once the semaphore
+		// can be acquired; the lock inode is not modified meanwhile.
+		go func() {
+			_ = l.acquire(context.Background(), time.Time{})
+			_ = f.Close()
+			l.release()
+		}()
+		return
+	}
+	_ = f.Close()
+	l.release()
+}
+
+// unknownLockFDQuota bounds the number of open lock descriptors whose inode
+// identity could not be determined. Such a descriptor cannot be closed safely,
+// because it might be a duplicate of an inode whose POSIX lock this process
+// holds. Reservations cover descriptors from open until Stat resolves their
+// identity, so the quota is a hard process-wide bound even under concurrent
+// opens. Reaching it makes further lock opens fail closed; ordinary successful
+// opens release their reservation as soon as Stat succeeds.
+const unknownLockFDQuota = 64
+
+var (
+	unknownLockFDMu       sync.Mutex
+	unknownLockFDPending  int
+	unknownLockFDRetained []*os.File
+)
+
+var errLockFDQuarantineFull = errors.New("lock descriptor identity quarantine is full")
+
+// reserveLockFileOpen reserves one identity slot before opening a lock file.
+func reserveLockFileOpen() error {
+	unknownLockFDMu.Lock()
+	defer unknownLockFDMu.Unlock()
+	if len(unknownLockFDRetained)+unknownLockFDPending >= unknownLockFDQuota {
+		return deniedMsg(errLockFDQuarantineFull, "lock file")
+	}
+	unknownLockFDPending++
+	return nil
+}
+
+// releaseLockFileOpen returns the reservation for a descriptor whose identity
+// was determined, or for an open that produced no descriptor.
+func releaseLockFileOpen() {
+	unknownLockFDMu.Lock()
+	if unknownLockFDPending > 0 {
+		unknownLockFDPending--
+	}
+	unknownLockFDMu.Unlock()
+}
+
+// retainUnknownLockFile moves a reserved descriptor into the process-lifetime
+// quarantine. The descriptor stays open: closing it without a known inode
+// could release a same-process POSIX record lock on an alias of that inode.
+func retainUnknownLockFile(f *os.File) {
+	unknownLockFDMu.Lock()
+	if unknownLockFDPending > 0 {
+		unknownLockFDPending--
+	}
+	if f != nil {
+		unknownLockFDRetained = append(unknownLockFDRetained, f)
+	}
+	unknownLockFDMu.Unlock()
+}
+
+// retainUnreservedLockFile is the impossible-invariant fallback for a
+// descriptor whose Stat succeeded but whose Stat_t carried no identity. It does
+// not consume another open's reservation.
+func retainUnreservedLockFile(f *os.File) {
+	unknownLockFDMu.Lock()
+	if f != nil {
+		unknownLockFDRetained = append(unknownLockFDRetained, f)
+	}
+	unknownLockFDMu.Unlock()
+}
+
+// closeRejectedLockFile disposes of a descriptor returned by the owned open
+// helpers after validation or identity checks reject it. A nil info means
+// f.Stat failed and the opener already moved the descriptor to the quarantine;
+// it must not be closed here. Otherwise the descriptor is closed only while
+// holding the semaphore for its actual inode, never the candidate path's.
+func closeRejectedLockFile(f *os.File, info os.FileInfo, deadline time.Time) {
+	if f == nil || info == nil {
+		return
+	}
+	key, ok := lockInodeKey(info)
+	if !ok {
+		// Every supported platform exposes device and inode through Stat_t.
+		// Retain rather than close if that invariant is ever broken.
+		retainUnreservedLockFile(f)
+		return
+	}
+	deferCloseLockFile(f, key, deadline)
 }
 
 // acquire takes the lock, waiting until deadline. A zero deadline waits
@@ -277,43 +437,122 @@ func openDir(root string, existingOnly bool) (*Dir, error) {
 		*c.out = st
 	}
 	lock := filepath.Join(base, lockName)
-	// POSIX record locks belong to the process, not to a descriptor, and
-	// closing any descriptor for the lock inode releases every lock the
-	// process holds on it. The descriptor opened here exists only to create
-	// and validate the lock file, so it is closed while holding the same
-	// in-process semaphore as operations: an in-flight operation of this
-	// process keeps owning its lock until it releases the semaphore, and the
-	// close can never drop that lock underneath it. The wait is bounded so an
-	// operation that is stuck does not hang OpenDir; a timeout is a definite
-	// ErrConflict, as for any other lock wait.
-	pl := inProcFor(lock)
-	deadline := time.Now().Add(DefaultLockTimeout)
-	if err := pl.acquire(context.Background(), deadline); err != nil {
-		return nil, lockWaitError(err)
-	}
-	var f *os.File
-	if existingOnly {
-		f, err = openExistingLockFile(lock)
-	} else {
-		f, err = openLockFile(lock)
-	}
+	lockID, lockKey, pl, err := prepareLockFile(lock, existingOnly, ids.v1, time.Now().Add(DefaultLockTimeout))
 	if err != nil {
-		pl.release()
 		return nil, err
 	}
-	// The identity comes from the opened descriptor, so it names exactly the
-	// inode this Dir is pinned to rather than whatever a later path lookup
-	// would find. The descriptor is then closed under the semaphore (see
-	// above) and later opens are compared against this identity.
-	var lockID os.FileInfo
-	if lockID, err = f.Stat(); err != nil {
-		f.Close()
+	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, lockID: lockID, lockKey: lockKey, identity: ids, timeout: DefaultLockTimeout, inProc: pl}, nil
+}
+
+// prepareLockFile opens and validates the shared lock file for OpenDir and
+// returns the identity and process semaphore the new Dir is pinned to.
+//
+// POSIX record locks belong to the process, not to a descriptor, and closing
+// any descriptor for the lock inode releases every lock the process holds on
+// it. A descriptor for that inode may therefore only be closed while holding
+// the process semaphore keyed by the inode's stable device/inode identity.
+//
+// The existence decision is made by a non-opening Lstat, and every path that
+// exists is opened only after the semaphore for its inode has been acquired;
+// the descriptor identity is checked again under that semaphore. A missing
+// lock is created under a process-local gate keyed by the parent directory's
+// identity and the lock name, so constructor opens through aliases of the same
+// directory serialize with the creator. The gate is per lock, not global, and
+// it is held while acquiring the created inode's own semaphore: no operation
+// ever waits for the gate while holding a lock semaphore, so the two cannot
+// deadlock.
+func prepareLockFile(lock string, existingOnly bool, dirID os.FileInfo, deadline time.Time) (os.FileInfo, inProcKey, *inProcLock, error) {
+	gate, ok := lockGateFor(dirID, filepath.Base(lock))
+	if !ok {
+		return nil, inProcKey{}, nil, deniedMsg(nil, "lock file identity is unavailable")
+	}
+	if err := gate.acquire(context.Background(), deadline); err != nil {
+		return nil, inProcKey{}, nil, lockWaitError(err)
+	}
+	defer gate.release()
+
+	st, err := os.Lstat(lock)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, inProcKey{}, nil, deniedMsg(err, "lock file")
+		}
+		if existingOnly {
+			return nil, inProcKey{}, nil, deniedMsg(err, "lock file is missing")
+		}
+		return createLockFile(lock, deadline)
+	}
+	key, ok := lockInodeKey(st)
+	if !ok {
+		return nil, inProcKey{}, nil, deniedMsg(nil, "lock file identity is unavailable")
+	}
+	pl, err := acquireInProc(context.Background(), key, deadline)
+	if err != nil {
+		return nil, inProcKey{}, nil, err
+	}
+	f, opened, err := openExistingLockFileOwned(lock)
+	if err != nil {
+		// The opener transfers a rejected descriptor to us. Release the
+		// candidate inode's semaphore first, then close the descriptor under
+		// the semaphore for the inode actually opened.
 		pl.release()
-		return nil, deniedMsg(err, "lock file")
+		closeRejectedLockFile(f, opened, deadline)
+		return nil, inProcKey{}, nil, err
+	}
+	openedKey, keyOK := lockInodeKey(opened)
+	if !keyOK || openedKey != key {
+		// The path was replaced between the identity decision and the open.
+		// Do not close the opened descriptor while holding the semaphore for
+		// the old inode; release it and close only under the opened inode's
+		// semaphore.
+		pl.release()
+		closeRejectedLockFile(f, opened, deadline)
+		return nil, inProcKey{}, nil, deniedMsg(nil, "lock file changed while opening")
+	}
+	// Re-check under the acquired semaphore that the path still names the
+	// inode that was opened. A replaced path is refused instead of pinning a
+	// Dir to an inode no later operation can reach.
+	current, err := os.Lstat(lock)
+	if err != nil || !sameIdentity(opened, current) {
+		_ = f.Close()
+		pl.release()
+		return nil, inProcKey{}, nil, deniedMsg(err, "lock file is not the inode opened")
 	}
 	_ = f.Close()
 	pl.release()
-	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, lockID: lockID, identity: ids, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
+	return opened, key, pl, nil
+}
+
+// createLockFile creates a missing lock (or opens the winner of a cross-process
+// creation race), then acquires the new inode's process semaphore before closing
+// its descriptor. The caller holds the per-lock creation gate, so another
+// constructor open in this process cannot race the create/open/close sequence.
+func createLockFile(lock string, deadline time.Time) (os.FileInfo, inProcKey, *inProcLock, error) {
+	f, opened, err := openLockFileOwned(lock)
+	if err != nil {
+		closeRejectedLockFile(f, opened, deadline)
+		return nil, inProcKey{}, nil, err
+	}
+	key, ok := lockInodeKey(opened)
+	if !ok {
+		closeRejectedLockFile(f, opened, deadline)
+		return nil, inProcKey{}, nil, deniedMsg(nil, "lock file identity is unavailable")
+	}
+	pl, err := acquireInProc(context.Background(), key, deadline)
+	if err != nil {
+		deferCloseLockFile(f, key, deadline)
+		return nil, inProcKey{}, nil, err
+	}
+	// The identity comes from the opened descriptor, never a later pathname
+	// lookup. Verify the path still names it before accepting the pin.
+	current, err := os.Lstat(lock)
+	if err != nil || !sameIdentity(opened, current) {
+		_ = f.Close()
+		pl.release()
+		return nil, inProcKey{}, nil, deniedMsg(err, "lock file is not the inode opened")
+	}
+	_ = f.Close()
+	pl.release()
+	return opened, key, pl, nil
 }
 
 // makePrivateDir creates d with 0700 when it is missing and then validates it
@@ -589,6 +828,14 @@ func (d *Dir) lockHandle(ctx context.Context) (*os.File, func(), error) {
 	f, err := d.lockHandleOS(ctx, deadline)
 	if err != nil {
 		d.inProc.release()
+		var rejected *lockFileMismatch
+		if errors.As(err, &rejected) {
+			// Validation or the identity check rejected the opened descriptor.
+			// It must not be closed under the pinned inode's semaphore; close it
+			// only under the semaphore for the inode actually opened.
+			closeRejectedLockFile(rejected.file, rejected.info, deadline)
+			return nil, nil, rejected.cause
+		}
 		return nil, nil, err
 	}
 	return f, func() {
@@ -598,27 +845,67 @@ func (d *Dir) lockHandle(ctx context.Context) (*os.File, func(), error) {
 	}, nil
 }
 
+// lockFileMismatch reports an opened descriptor that validation or the
+// non-opening identity decision rejected. The descriptor is returned still open
+// so the caller can close it under the semaphore for the identity obtained from
+// the descriptor itself. info is nil only when that identity could not be
+// obtained; the opener has then already quarantined the descriptor.
+type lockFileMismatch struct {
+	file  *os.File
+	info  os.FileInfo
+	cause error
+}
+
+func (e *lockFileMismatch) Error() string { return e.cause.Error() }
+func (e *lockFileMismatch) Unwrap() error { return e.cause }
+
 // lockHandleOS opens the existing lock file, checks that it is still the inode
 // OpenDir captured, and only then takes the OS lock on that descriptor. It
 // never creates the lock file: a lock removed after OpenDir is refused with
 // ErrDenied rather than silently recreated, and no descriptor for a different
-// inode is ever locked. The check and the later use do not share a path lookup,
-// so a same-UID process replacing the path between them is not defended against
-// (see the package threat model); the lock handle itself still refers to the
-// inode that passed the check.
+// inode is ever locked.
+//
+// The identity decision is a non-opening Lstat made before the open; the
+// opened descriptor is checked again under the already-held semaphore for the
+// pinned inode. If the path was replaced in between, the open descriptor is
+// reported to the caller instead of being closed under the wrong semaphore.
+// The check and the open still do not share a path lookup, so a same-UID
+// process replacing the path between them is not defended against (see the
+// package threat model), but such a replacement cannot make this process close
+// a duplicate descriptor underneath a held kernel lock.
 func (d *Dir) lockHandleOS(ctx context.Context, deadline time.Time) (*os.File, error) {
-	f, err := openExistingLockFile(d.lock)
+	st, err := os.Lstat(d.lock)
 	if err != nil {
-		return nil, err
-	}
-	st, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
 		return nil, deniedMsg(err, "lock file")
 	}
 	if !sameIdentity(d.lockID, st) {
+		return nil, deniedMsg(nil, "lock file is not the inode opened")
+	}
+	key, ok := lockInodeKey(st)
+	if !ok || key != d.lockKey {
+		return nil, deniedMsg(nil, "lock file is not the inode opened")
+	}
+	f, opened, err := openExistingLockFileOwned(d.lock)
+	if err != nil {
+		if f == nil {
+			return nil, err
+		}
+		return nil, &lockFileMismatch{file: f, info: opened, cause: err}
+	}
+	openedKey, keyOK := lockInodeKey(opened)
+	if !keyOK || openedKey != d.lockKey {
+		return nil, &lockFileMismatch{file: f, info: opened, cause: deniedMsg(nil, "lock file is not the inode opened")}
+	}
+	if !sameIdentity(d.lockID, opened) {
 		_ = f.Close()
 		return nil, deniedMsg(nil, "lock file is not the inode opened")
+	}
+	// Re-check the path under the semaphore: a descriptor for the pinned inode
+	// that has been unlinked and replaced must not take a lock on a stale file.
+	current, err := os.Lstat(d.lock)
+	if err != nil || !sameIdentity(opened, current) {
+		_ = f.Close()
+		return nil, deniedMsg(err, "lock file is not the inode opened")
 	}
 	if err := pollLock(ctx, f, deadline); err != nil {
 		_ = f.Close()
