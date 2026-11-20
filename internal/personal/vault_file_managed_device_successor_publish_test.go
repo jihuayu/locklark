@@ -28,7 +28,18 @@ type managedSuccessorPublishFixture struct {
 
 func newManagedSuccessorPublishFixture(t *testing.T, label string) *managedSuccessorPublishFixture {
 	t.Helper()
-	base := newManagedDeviceSuccessorFixture(t, label)
+	return newManagedSuccessorPublishFixtureFromSource(t, label, loadOwnerRecoveryImportSource(t))
+}
+
+func newFreshManagedSuccessorPublishFixture(t *testing.T, label string) *managedSuccessorPublishFixture {
+	t.Helper()
+	return newManagedSuccessorPublishFixtureFromSource(t, label, newFreshOwnerRecoveryImportSource(t))
+}
+
+func newManagedSuccessorPublishFixtureFromSource(t *testing.T, label string,
+	source *ownerRecoveryImportSourceFixture) *managedSuccessorPublishFixture {
+	t.Helper()
+	base := newManagedDeviceSuccessorFixtureFromSource(t, label, source)
 	journalDir := filepath.Join(t.TempDir(), "managed-successor-journal")
 	if err := os.Mkdir(journalDir, 0700); err != nil {
 		t.Fatal("MANAGED_SUCCESSOR_PUBLISH_JOURNAL_DIR_FAILED")

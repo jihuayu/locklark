@@ -65,7 +65,13 @@ func newManagedDeviceSuccessorPin(t *testing.T, expected vaultfile.PolicyCheckpo
 
 func newManagedDeviceSuccessorFixture(t *testing.T, label string) *managedDeviceSuccessorFixture {
 	t.Helper()
-	restored := newOwnerRecoveryImportFixture(t, label)
+	return newManagedDeviceSuccessorFixtureFromSource(t, label, loadOwnerRecoveryImportSource(t))
+}
+
+func newManagedDeviceSuccessorFixtureFromSource(t *testing.T, label string,
+	source *ownerRecoveryImportSourceFixture) *managedDeviceSuccessorFixture {
+	t.Helper()
+	restored := newOwnerRecoveryImportFixtureFromSource(t, label, source)
 	if _, err := restored.destSession.RestoreVaultFileBackupCustodyOwner(context.Background(),
 		restored.artifact, restored.expected, restored.factor, restored.binding,
 		restored.target); err != nil {

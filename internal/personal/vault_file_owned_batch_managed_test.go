@@ -36,8 +36,8 @@ type managedBatchScopes struct {
 // existing encrypted source fixtures and the real publish path.
 func newManagedBatchScopes(t *testing.T) *managedBatchScopes {
 	t.Helper()
-	a := newManagedSuccessorPublishFixture(t, "managed-batch-a")
-	b := newManagedSuccessorPublishFixture(t, "managed-batch-b")
+	a := newFreshManagedSuccessorPublishFixture(t, "managed-batch-a")
+	b := newFreshManagedSuccessorPublishFixture(t, "managed-batch-b")
 
 	if _, err := a.destSession.RestoreVaultFileBackupCustodyOwner(context.Background(),
 		b.artifact, b.expected, b.factor, b.binding, b.target); err != nil {

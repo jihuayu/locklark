@@ -60,6 +60,19 @@ var ownerRecoveryImportSourceCache struct {
 	err     error
 }
 
+func (s *ownerRecoveryImportSourceFixture) clear() {
+	if s == nil {
+		return
+	}
+	clearVaultFileOwners([]vaultFileOwnerRecord{s.owner})
+	clear(s.record)
+	clear(s.artifact)
+	clear(s.factorMaterial)
+	clear(s.expected.OwnerRootPublicKey)
+	clear(s.expected.PolicyDigest)
+	*s = ownerRecoveryImportSourceFixture{}
+}
+
 func loadOwnerRecoveryImportSource(t *testing.T) *ownerRecoveryImportSourceFixture {
 	t.Helper()
 	ownerRecoveryImportSourceCache.once.Do(func() {
@@ -70,6 +83,19 @@ func loadOwnerRecoveryImportSource(t *testing.T) *ownerRecoveryImportSourceFixtu
 		t.Fatal("OWNER_RECOVERY_IMPORT_SOURCE_FIXTURE_UNAVAILABLE")
 	}
 	return ownerRecoveryImportSourceCache.fixture
+}
+
+// newFreshOwnerRecoveryImportSource builds an independently generated source
+// vault and transfers its cleanup to this test. Callers that need genuinely
+// distinct source identities must use this instead of the shared cached source.
+func newFreshOwnerRecoveryImportSource(t *testing.T) *ownerRecoveryImportSourceFixture {
+	t.Helper()
+	source, err := buildOwnerRecoveryImportSource(t)
+	if err != nil {
+		t.Fatal("OWNER_RECOVERY_IMPORT_FRESH_SOURCE_FAILED")
+	}
+	t.Cleanup(source.clear)
+	return source
 }
 
 func readOwnerRecoveryImportProviderRecord(t *testing.T, root string) (string, []byte) {
@@ -207,7 +233,12 @@ func buildOwnerRecoveryImportSource(t *testing.T) (*ownerRecoveryImportSourceFix
 
 func newOwnerRecoveryImportFixture(t *testing.T, label string) *ownerRecoveryImportFixture {
 	t.Helper()
-	source := loadOwnerRecoveryImportSource(t)
+	return newOwnerRecoveryImportFixtureFromSource(t, label, loadOwnerRecoveryImportSource(t))
+}
+
+func newOwnerRecoveryImportFixtureFromSource(t *testing.T, label string,
+	source *ownerRecoveryImportSourceFixture) *ownerRecoveryImportFixture {
+	t.Helper()
 	factor, err := ImportVaultFileBackupRecoveryFactor(source.factorMaterial)
 	if err != nil {
 		t.Fatal("OWNER_RECOVERY_IMPORT_FACTOR_IMPORT_FAILED")
