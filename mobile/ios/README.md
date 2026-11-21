@@ -12,7 +12,7 @@ It does not automatically copy secrets or fetch the next OTP window.
 
 ## Build and test on macOS
 
-Use Xcode with the iOS 17+ SDK and simulator runtime, Go 1.27.3, Python 3, curl
+Use Xcode 16+ with the iOS 17+ SDK and simulator runtime, Go 1.27.3, Python 3, curl
 and unzip. From the repository root:
 
 ```sh
@@ -33,6 +33,9 @@ Do not upload those files or print the runtime log. The CI entry prints fixed
 PASS/FAIL labels and allowlisted source locations/fixed failure reasons. The
 independent evidence verifier checks the complete runtime and exported result
 objects, including failed runs, against the private runner canary manifest.
+Full-positive evidence additionally requires a separately fetched xcresult
+XCTest summary with a passed result over a nonzero test count and no failed,
+skipped, or expected-failure tests.
 UI fixtures enter factors through the runner pasteboard and
 the system Paste action, clear it immediately, and use fixed boolean assertion
 messages instead of value diffs. There are no production test hooks or secret
