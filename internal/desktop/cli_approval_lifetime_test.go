@@ -45,9 +45,9 @@ func TestCLIRunApprovalEarlierDeadlineCancelsExactPending(t *testing.T) {
 	a := dailyAppFixture(t)
 	a.notifyBrowserBrokerUnlocked()
 	session, epoch := a.brokerSession, a.brokerEpoch
+	req := cliLifetimeRequest(t, a)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	req := cliLifetimeRequest(t, a)
 	type result struct {
 		approved bool
 		err      error
