@@ -350,6 +350,47 @@ jobs:
           # TMPDIRs plus long test names previously produced bind EINVAL.
           TMPDIR: /tmp
         run: go test ./internal/browserhost -count=1
+      - name: Test synthetic macOS broker preparation on a native PTY
+        timeout-minutes: 10
+        env:
+          BROWSERHOST_TTY_SMOKE: '1'
+        run: |
+          set -euo pipefail
+          umask 077
+          tmp="$(mktemp -d /tmp/locklark-tty.XXXXXX)"
+          chmod 0700 "$tmp"
+          trap 'rm -rf "$tmp"' EXIT
+          export TMPDIR="$tmp"
+          test_bin="$tmp/locklark-desktop-tty.test"
+          go test -c -o "$test_bin" ./internal/desktop
+          log="$tmp/pty.log"
+          normalized="$tmp/pty.log.normalized"
+          status=0
+          /usr/bin/script -e -q /dev/null "$test_bin" \
+            -test.run '^(TestDarwinBrowserSaveRevisionPinsBrokerPreparation|TestDesktopIPCBrokerUnlockLockAndCLIRun)$' \
+            -test.count=1 -test.v </dev/null >"$log" 2>&1 || status=$?
+          tr -d '\r' <"$log" >"$normalized"
+          cat "$normalized"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -Fxq 'PASS' "$normalized"; then
+            echo 'native PTY smoke did not report a final PASS' >&2
+            exit 1
+          fi
+          if grep -Eq '^(FAIL|SKIP)$|^[[:space:]]*--- (FAIL|SKIP):' "$normalized"; then
+            echo 'native PTY smoke failed or skipped' >&2
+            exit 1
+          fi
+          for name in \
+            TestDarwinBrowserSaveRevisionPinsBrokerPreparation \
+            TestDesktopIPCBrokerUnlockLockAndCLIRun
+          do
+            if ! grep -Eq "^--- PASS: ${name} " "$normalized"; then
+              echo "native PTY smoke did not pass $name" >&2
+              exit 1
+            fi
+          done
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
         env:
