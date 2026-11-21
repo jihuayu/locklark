@@ -1475,8 +1475,10 @@ HIBP_PREFIX_RE = re.compile(r"^[0-9A-F]{5}$")
 
 
 def local_hibp_range_proxy(
-    ctx: E2EContext,
+    ctx: E2EContext | None,
     responses: Mapping[str, Sequence[tuple[str, int]]],
+    *,
+    work_parent: Path | None = None,
 ) -> "LocalHIBPRangeProxy":
     """Start a loopback HTTPS CONNECT proxy in front of a local range server.
 
@@ -1496,10 +1498,12 @@ def local_hibp_range_proxy(
     ``(suffix, count)`` lines.  The caller owns the synthetic passwords, so it
     can supply the one suffix that really belongs to each prefix; the SUT only
     ever sends the prefix.  A zero-count padding line is appended to every
-    response, exactly like the real provider.
+    response, exactly like the real provider.  ``work_parent`` is an optional
+    caller-owned private directory for the throwaway TLS material; it defaults
+    to the E2E context temp directory so existing callers are unchanged.
     """
 
-    return LocalHIBPRangeProxy(ctx, responses)
+    return LocalHIBPRangeProxy(ctx, responses, work_parent=work_parent)
 
 
 def _normalise_hibp_responses(
@@ -1539,11 +1543,18 @@ class LocalHIBPRangeProxy:
 
     def __init__(
         self,
-        ctx: E2EContext,
+        ctx: E2EContext | None,
         responses: Mapping[str, Sequence[tuple[str, int]]],
+        *,
+        work_parent: Path | None = None,
     ) -> None:
         self.responses = _normalise_hibp_responses(responses)
-        work = ctx.temp_dir / "hibp-proxy"
+        if work_parent is not None:
+            work = Path(work_parent)
+        elif ctx is not None:
+            work = ctx.temp_dir / "hibp-proxy"
+        else:
+            raise AssertionError("HIBP proxy requires a private work parent")
         work.mkdir(mode=0o700, exist_ok=True)
         self.cert = work / "range.pem"
         key = work / "range.key"
@@ -2852,6 +2863,8 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_shared_clipboard_acceptance.mjs",
     "scripts/browser_edge_install.mjs",
     "scripts/browser_extension_prebuilt.mjs",
+    "scripts/browser_rotation_acceptance.mjs",
+    "scripts/browser_rotation_site.mjs",
     # The strict Node helper executes this Python runtime closure.
     "scripts/browserrelease/__init__.py",
     "scripts/browserrelease/prebuilt.py",

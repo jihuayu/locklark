@@ -53,6 +53,79 @@ function evaluateHead(env) {
   return JSON.parse(JSON.stringify(context.__decision));
 }
 
+// The rotation opt-in block only reads process.env and asserts, so its real
+// flag derivation and guard can be executed with a controlled environment.
+// The legacy parity dispatch that follows it treats every non-empty value,
+// including "0", as enabled; this guard must use that exact truthiness.
+const ROTATION_BLOCK_END = SOURCE.indexOf(
+  "\n// After every route/Edge compatibility assertion",
+  SOURCE.indexOf("if (rotationRequested) {"),
+);
+assert.ok(ROTATION_BLOCK_END > 0, "rotation guard must exist");
+const ROTATION_BLOCK = SOURCE.slice(
+  SOURCE.indexOf("if (rotationRequested) {"),
+  ROTATION_BLOCK_END,
+);
+const ROTATION_HEAD = IMPORT_HEAD + "\n" + ROTATION_BLOCK;
+
+function evaluateRotation(env) {
+  const context = vm.createContext({
+    process: { env, platform: "linux" },
+    assert,
+    register: "/tmp/locklark-prebuilt-register",
+    isAbsolute: (value) => typeof value === "string" && value.startsWith("/"),
+  });
+  new vm.Script(
+    ROTATION_HEAD + "\n;globalThis.__decision={rotationRequested};",
+  ).runInContext(context);
+  return JSON.parse(JSON.stringify(context.__decision));
+}
+
+const ROTATION_ENV = {
+  LOCKLARK_TEST_BROWSER_ROTATION: "1",
+  LOCKLARK_TEST_BROWSER: "chromium",
+  LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
+  LOCKLARK_BROWSER_FIXTURE: "/tmp/prebuilt-fixture",
+};
+
+test("rotation rejects every parity value the legacy dispatch treats as enabled", () => {
+  assert.deepEqual(evaluateRotation(ROTATION_ENV), { rotationRequested: true });
+  // Unset and empty are the legacy-off values.
+  for (const value of [undefined, ""])
+    assert.deepEqual(
+      evaluateRotation({ ...ROTATION_ENV, LOCKLARK_TEST_BROWSER_PARITY: value }),
+      { rotationRequested: true },
+    );
+  // The exact conflict, plus other non-empty truthy values: rotation must
+  // refuse them rather than run and let the parity branch emit its PASS.
+  for (const value of ["0", "1", "true", "false"]) {
+    assert.throws(
+      () =>
+        evaluateRotation({
+          ...ROTATION_ENV,
+          LOCKLARK_TEST_BROWSER_PARITY: value,
+        }),
+      (error) =>
+        error.message ===
+        "Rotation mode cannot be combined with another acceptance mode",
+      "parity=" + JSON.stringify(value),
+    );
+  }
+  // The guard uses the same expression as the legacy dispatch, not `off`, and
+  // it stays before any private state, file or browser launch.
+  const rotation = ROTATION_BLOCK;
+  assert.match(
+    rotation,
+    /assert\(\n\s+!process\.env\.LOCKLARK_TEST_BROWSER_PARITY,\n\s+"Rotation mode cannot be combined with another acceptance mode",\n\s+\);/,
+  );
+  const modeList = rotation.slice(rotation.indexOf("for (const name of ["));
+  assert.doesNotMatch(modeList, /"LOCKLARK_TEST_BROWSER_PARITY"/);
+  assert.ok(
+    SOURCE.indexOf("if (rotationRequested) {") <
+      SOURCE.indexOf("const state = createPrivateState();"),
+  );
+});
+
 const ROUTE_IDLE_ANCHOR =
   "// OPT-IN: The optional idle-expiry journey starts only here";
 const ROUTE_START = SOURCE.indexOf("async function acceptRouteDetailRead");

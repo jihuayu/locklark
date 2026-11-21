@@ -739,6 +739,23 @@ jobs:
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_OTHER_PROVIDER: "1"
           LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
+      - name: Test Linux Chromium consented mock breach, password rotation and stale/renewed CLI revision component
+        if: ${{ matrix.browser == 'chromium' }}
+        # Component-only Linux Chromium run over the same-run prebuilt host,
+        # register, fixture, extension and downloaded CLI; no build or install.
+        timeout-minutes: 15
+        run: |
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+        env:
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-chromium
+          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
+          LOCKLARK_TEST_BROWSER: chromium
+          LOCKLARK_TEST_BROWSER_ROTATION: '1'
+          LOCKLARK_TEST_BROWSER_ROTATION_CLI: '1'
+          LOCKLARK_TEST_BROWSER_ROTATION_CLI_BIN: ${{ runner.temp }}/locklark-bin/locklark
       - name: Test normal-runner checkout acceptance on Chromium
         if: ${{ matrix.browser == 'chromium' }}
         # The native journey enforces a 900s budget and wraps itself in
