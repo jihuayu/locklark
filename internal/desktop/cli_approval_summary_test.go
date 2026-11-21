@@ -627,6 +627,69 @@ func TestCLIRunHandlerReturnsExactPreparedValuesAndReceipt(t *testing.T) {
 	desktopAssertCallerTargetsCleared(t, "direct", req)
 }
 
+// TestCLIRunHandlerRefusesStaleRevisionBeforeApproval proves the early
+// authenticated-metadata check stops an already-stale target before the native
+// approval is requested, so the desktop never prompts for a request that the
+// post-approval transaction would refuse.
+func TestCLIRunHandlerRefusesStaleRevisionBeforeApproval(t *testing.T) {
+	a, req := desktopCLIRunFixture(t)
+	stale := req.Targets[0].Revision
+	revised, e := a.session.Edit(personal.Edit{ID: req.Targets[0].ID, Revision: stale, Field: "url", Value: "https://example.test/changed"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if revised == stale {
+		t.Fatal("controlled edit did not advance the revision")
+	}
+	prompted := false
+	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) {
+		prompted = true
+		return true, nil
+	}
+	resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+	if e != errCLIRunRefused {
+		t.Fatalf("stale preflight target: want the fixed refusal, got %v", e)
+	}
+	if prompted {
+		t.Fatal("stale preflight target still requested native approval")
+	}
+	if desktopHasCLIPrepared(resp) || resp.V != 0 || resp.Receipt != (personal.RunBundlePreparationReceipt{}) {
+		t.Fatal("stale preflight target returned a partial reply")
+	}
+	desktopAssertCallerTargetsCleared(t, "stale-preflight", req)
+}
+
+// TestCLIRunHandlerRefusesRevisionChangedDuringApproval proves the early check
+// does not replace the post-approval transaction: a target that was current at
+// preflight but changed while the approval was open is still refused by the
+// existing exact-revision preparation check, with no values or receipt.
+func TestCLIRunHandlerRefusesRevisionChangedDuringApproval(t *testing.T) {
+	a, req := desktopCLIRunFixture(t)
+	prompted := false
+	a.cliApprover = func(_ context.Context, _ browserhost.Peer, got browserhost.BrokerCLIRequest) (bool, error) {
+		prompted = true
+		revised, e := a.session.Edit(personal.Edit{ID: got.Targets[0].ID, Revision: got.Targets[0].Revision, Field: "url", Value: "https://example.test/changed-during-approval"})
+		if e != nil {
+			t.Fatalf("controlled edit during approval failed: %v", e)
+		}
+		if revised == got.Targets[0].Revision {
+			t.Fatal("controlled edit did not advance the revision during approval")
+		}
+		return true, nil
+	}
+	resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
+	if !prompted {
+		t.Fatal("current preflight target did not reach native approval")
+	}
+	if e != errCLIRunRefused {
+		t.Fatalf("revision changed during approval: want the fixed refusal, got %v", e)
+	}
+	if desktopHasCLIPrepared(resp) || resp.V != 0 || resp.Receipt != (personal.RunBundlePreparationReceipt{}) {
+		t.Fatal("revision changed during approval returned a partial reply")
+	}
+	desktopAssertCallerTargetsCleared(t, "changed-during-approval", req)
+}
+
 // desktopSkipOrFailWithoutTTY records that a terminal-dependent check could
 // not run because this process has no controlling terminal. Under the PTY
 // smoke run (BROWSERHOST_TTY_SMOKE=1) a controlling terminal is required, so

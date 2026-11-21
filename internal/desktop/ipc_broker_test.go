@@ -106,6 +106,10 @@ func desktopFixture(t *testing.T) (string, []byte, string, personal.Row) {
 func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	path, key, secret, _ := desktopFixture(t)
 	a := New()
+	// Unlock always remembers the fixture Secret Key. Keep that write in the
+	// disposable in-memory store rather than the owner's real OS credential
+	// service.
+	a.deviceSecrets = newFakeDeviceSecretStore()
 	// This fixture runs its UI dispatcher synchronously on the test goroutine;
 	// only broker I/O runs concurrently, as in the real serialized UI loop.
 	a.launch = func(fn func()) { fn() }

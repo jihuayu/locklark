@@ -280,6 +280,19 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	if path != req.VaultPath || browserhost.ValidateCLIRunScope(scope) != nil {
 		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 	}
+	// Reject a target that was already stale before the owner is asked to
+	// approve anything. This is a metadata-only exact-revision check: it
+	// decrypts no item payload, writes no vault audit event and makes no
+	// category or access decision. The post-approval preparation transaction
+	// remains the authoritative check.
+	if e := s.CheckBrokeredRunRevisions(ctx, callbackTargets); e != nil {
+		_ = a.recordCLIActivity("refused", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
+	if ctx.Err() != nil || !a.brokerCurrent(s, epoch) {
+		_ = a.recordCLIActivity("failed", peer, req)
+		return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+	}
 	// Native approval reviews only the rendered summary of scope and targets;
 	// the test-only approver hook sees the request before approval.
 	approved := false
