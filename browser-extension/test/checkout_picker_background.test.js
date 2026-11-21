@@ -316,6 +316,26 @@ const select = (h, picker, choice) =>
     revision: CARD_REV,
   });
 
+const reconfirmation = (picker, overrides = {}) => ({
+  type: "checkout-frames-reconfirm",
+  nonce: picker.nonce,
+  id: CARD_ID,
+  revision: CARD_REV,
+  ...overrides,
+});
+
+const reconfirm = (h, picker, overrides = {}) =>
+  h.send(reconfirmation(picker, overrides));
+
+const assertReconfirmRefused = (state) => {
+  assert.equal(keys(state), '["checkoutPicker"]');
+  assert.equal(state.checkoutPicker, null);
+};
+
+const assertNoNativeChange = (h, before) => {
+  assert.equal(h.sent.length, before, "reconfirmation never contacts the native host");
+};
+
 test("picker exposes only public same-site origins and opaque keys", async () => {
   const h = harness();
   await connect(h);
@@ -378,6 +398,132 @@ test("only the popup sender with the exact message shape may pick", async () => 
   });
   assert.equal(badID.checkoutPicker, undefined);
   assert.equal(h.probes.length, 0, "no frame enumeration on a refused message");
+});
+
+test("reconfirmation returns the same live offer without consuming it", async () => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  const probesBefore = h.probes.length;
+  const nativeBefore = h.sent.length;
+
+  const state = await reconfirm(h, picker);
+  assertNoNativeChange(h, nativeBefore);
+  assert.equal(keys(state), '["checkoutPicker"]', "the reply is only the view");
+  assert.ok(state.checkoutPicker, "the live offer is still available");
+  assert.equal(
+    keys(state.checkoutPicker),
+    '["candidates","expiresAt","nonce","topOrigin"]',
+    "only public picker metadata is returned",
+  );
+  assert.equal(json(state.checkoutPicker), json(picker));
+  assert.equal(
+    state.checkoutPicker.expiresAt,
+    picker.expiresAt,
+    "the original expiry is returned unchanged, never extended",
+  );
+  assert.ok(h.probes.length > probesBefore, "the browser identity was rechecked");
+  // A read never selects, reads fields or asks native for anything.
+  assert.equal(h.injections.length, 0);
+  assert.equal(h.sent.filter((r) => r.type === "match-profiles").length, 0);
+  assert.equal(h.sent.filter((r) => r.type === "fill-profile").length, 0);
+
+  // The exact same offer remains live and selectable after the read.
+  const selected = await select(h, picker, choiceFor(picker, false));
+  assert.equal(selected.checkoutStarted, true);
+  await settle();
+  assert.equal(h.injections.length, 1);
+});
+
+test("reconfirmation refuses mismatched claims and keeps the offer live", async () => {
+  const h = harness();
+  await connect(h);
+  const picker = await openPicker(h);
+  const missingNonce = reconfirmation(picker);
+  delete missingNonce.nonce;
+  const attempts = [
+    reconfirmation(picker, { nonce: "e".repeat(32) }),
+    reconfirmation(picker, { id: "d".repeat(32) }),
+    reconfirmation(picker, { revision: "e".repeat(64) }),
+    reconfirmation(picker, { origin: "https://evil.test" }),
+    missingNonce,
+  ];
+  const nativeBefore = h.sent.length;
+  for (const message of attempts) {
+    const state = await h.send(message);
+    assertReconfirmRefused(state);
+    assertNoNativeChange(h, nativeBefore);
+  }
+  // Refusal never consumed or replaced the live offer.
+  const ok = await reconfirm(h, picker);
+  assertNoNativeChange(h, nativeBefore);
+  assert.equal(keys(ok), '["checkoutPicker"]');
+  assert.equal(json(ok.checkoutPicker), json(picker));
+  const selected = await select(h, picker, choiceFor(picker, false));
+  assert.equal(selected.checkoutStarted, true);
+  await settle();
+});
+
+test("reconfirmation refuses a changed page, expiry or awaited revocation", async () => {
+  // A same-frame navigation changes the current public offer.
+  {
+    const h = harness();
+    await connect(h);
+    const picker = await openPicker(h);
+    h.setFrames([
+      frame(0, TOP_DOC, TOP_ORIGIN, true),
+      frame(3, "sub-doc-2", FRAME_ORIGIN, false),
+    ]);
+    const nativeBefore = h.sent.length;
+    const state = await reconfirm(h, picker);
+    assertReconfirmRefused(state);
+    assertNoNativeChange(h, nativeBefore);
+    assert.equal(h.injections.length, 0);
+  }
+  // The active tab moved to another top origin.
+  {
+    const h = harness();
+    await connect(h);
+    const picker = await openPicker(h);
+    h.setTabUrl("https://changed.test/checkout");
+    const nativeBefore = h.sent.length;
+    const state = await reconfirm(h, picker);
+    assertReconfirmRefused(state);
+    assertNoNativeChange(h, nativeBefore);
+  }
+  // The page is revoked while the browser capture is in flight; the recheck
+  // after that await refuses instead of returning a stale offer.
+  {
+    const h = harness();
+    await connect(h);
+    const picker = await openPicker(h);
+    h.onCheckoutProbe(() => {
+      h.onCheckoutProbe(null);
+      h.setFrames([
+        frame(0, "top-doc-2", TOP_ORIGIN, true),
+        frame(3, FRAME_DOC, FRAME_ORIGIN, false),
+      ]);
+    });
+    const nativeBefore = h.sent.length;
+    const state = await reconfirm(h, picker);
+    assertReconfirmRefused(state);
+    assertNoNativeChange(h, nativeBefore);
+  }
+  // The original picker expiry governs the read; it is not extended.
+  {
+    const h = harness();
+    await connect(h);
+    const picker = await openPicker(h);
+    CLOCK += 30_001;
+    const nativeBefore = h.sent.length;
+    try {
+      const state = await reconfirm(h, picker);
+      assertReconfirmRefused(state);
+      assertNoNativeChange(h, nativeBefore);
+    } finally {
+      CLOCK = 1_700_000_000_000;
+    }
+  }
 });
 
 test("a frame or document replaced before the choice is refused", async () => {

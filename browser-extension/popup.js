@@ -931,26 +931,35 @@
       list.append(container);
     }
   }
-  async function send(message, generation = actionGeneration) {
+  async function send(message, generation = actionGeneration, options = null) {
     // A route page only ever sends route-claim/route-copy-field/route-close.
     if (routeRequested) return null;
     const sequence = ++requestSequence;
     const epoch = connectionEpoch;
+    const renderReply = options?.render !== false;
     try {
       const state = await api.runtime.sendMessage(message);
       if (
         !state ||
         popupInactive || epoch !== connectionEpoch ||
-        generation !== actionGeneration ||
-        sequence <= renderedSequence
+        generation !== actionGeneration
       )
         return null;
+      if (sequence <= renderedSequence) {
+        // Ordinary replies keep the global first-render-wins order. Only the
+        // checkout action may inspect the discarded reply, and it retains
+        // nothing but its opaque nonce.
+        if (renderReply) options?.onSuperseded?.(state);
+        return null;
+      }
+      if (!renderReply) return state;
       renderedSequence = sequence;
       render(state, message?.type);
       return state;
     } catch {
       if (popupInactive || epoch !== connectionEpoch || generation !== actionGeneration || sequence <= renderedSequence)
         return null;
+      if (!renderReply) return null;
       renderedSequence = sequence;
       render({
         connected: false,
@@ -2399,6 +2408,7 @@
     const generation = ++actionGeneration;
     busy = true;
     markDetailFillDiagnostic(diagnostic, "request-sent");
+    let supersededNonce = "";
     const state = await send(
       {
         type: "checkout-frames",
@@ -2407,6 +2417,12 @@
         userGesture,
       },
       generation,
+      {
+        onSuperseded(reply) {
+          const nonce = reply?.checkoutPicker?.nonce;
+          if (checkoutChoiceKey(nonce)) supersededNonce = nonce;
+        },
+      },
     );
     if (generation !== actionGeneration || popupInactive) {
       markDetailFillDiagnostic(diagnostic, "early-guard");
@@ -2418,13 +2434,64 @@
       diagnostic,
       state ? "reply-present" : "reply-null",
     );
-    const view =
-      state && detail === lastDetail
-        ? adoptCheckoutPickerView(state.checkoutPicker, detail)
-        : null;
+    let view = null;
+    let attemptedReconfirmation = false;
+    if (state && detail === lastDetail) {
+      view = adoptCheckoutPickerView(state.checkoutPicker, detail);
+    } else if (!state && supersededNonce) {
+      // The discarded reply's candidates and status are already stale. Recheck
+      // the live popup context before asking for one temporary read of the
+      // same live offer; any invalidation simply ends this attempt.
+      if (
+        generation !== actionGeneration ||
+        popupInactive ||
+        document.visibilityState === "hidden" ||
+        document.body?.dataset?.view !== "detail" ||
+        lastDetail?.id !== detail.id ||
+        lastDetail?.revision !== detail.revision ||
+        lastState?.connected !== true ||
+        !checkoutChoicesSupported(lastDetail) ||
+        checkoutPicker
+      )
+        return;
+      const observedRenderedSequence = renderedSequence;
+      attemptedReconfirmation = true;
+      const confirmed = await send(
+        {
+          type: "checkout-frames-reconfirm",
+          nonce: supersededNonce,
+          id: detail.id,
+          revision: detail.revision,
+        },
+        generation,
+        { render: false },
+      );
+      // A newer rendered state, generation, visibility, detail or connection
+      // invalidation wins. Do not retry and do not touch stale toast or UI.
+      if (
+        generation !== actionGeneration ||
+        popupInactive ||
+        document.visibilityState === "hidden" ||
+        document.body?.dataset?.view !== "detail" ||
+        renderedSequence !== observedRenderedSequence ||
+        lastDetail?.id !== detail.id ||
+        lastDetail?.revision !== detail.revision ||
+        lastState?.connected !== true ||
+        !checkoutChoicesSupported(lastDetail) ||
+        checkoutPicker
+      )
+        return;
+      if (confirmed?.checkoutPicker?.nonce === supersededNonce)
+        view = adoptCheckoutPickerView(confirmed.checkoutPicker, detail);
+    }
     if (!view) {
       markDetailFillDiagnostic(diagnostic, "adopt-refused");
-      toast(state?.status || "无法列出当前页面的结账表单");
+      // A reconfirmation reply never supplies user-visible status.
+      toast(
+        attemptedReconfirmation
+          ? "无法确认当前结账表单，请重新选择"
+          : state?.status || "无法列出当前页面的结账表单",
+      );
       return;
     }
     checkoutPicker = view;

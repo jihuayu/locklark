@@ -1377,6 +1377,52 @@ if (typeof importScripts === "function") importScripts("core.js");
       })),
     };
   }
+  // A popup reply can lose the global first-render-wins race to an ordinary
+  // state poll. This temporary read lets it recover only the still-live offer
+  // bound to the opaque nonce it already saw. It never allocates, consumes or
+  // extends a picker, and it never starts a selection.
+  async function reconfirmCheckoutPicker(message) {
+    if (Object.keys(message).sort().join(",") !== "id,nonce,revision,type")
+      throw Error("refused");
+    if (
+      !/^[a-f0-9]{32}$/.test(message.nonce || "") ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const picker = checkoutPicker;
+    const generation = epoch,
+      expectedCapability = capability,
+      expectedSignature = picker?.signature,
+      expectedExpiry = picker?.expiresAt;
+    const stillLive = () =>
+      !!picker &&
+      checkoutPicker === picker &&
+      picker.nonce === message.nonce &&
+      picker.itemId === message.id &&
+      picker.revision === message.revision &&
+      picker.epoch === generation &&
+      picker.capability === expectedCapability &&
+      generation === epoch &&
+      expectedCapability === capability &&
+      Date.now() <= expectedExpiry &&
+      !pending && !pendingOTP && !pendingPasskey &&
+      checkoutFramePolicy();
+    const sameOffer = (capture) =>
+      capture.tabId === picker.tabId &&
+      capture.windowId === picker.windowId &&
+      capture.topDocumentId === picker.topDocumentId &&
+      capture.topOrigin === picker.topOrigin &&
+      checkoutFrameSignature(capture) === expectedSignature;
+    if (!stillLive()) throw Error("refused");
+    // Browser-observed visual recovery only: never contact the native host or
+    // claim a fresh item read. The frozen id/revision must still equal the
+    // live picker's approved enumeration; checkout-select keeps its own
+    // guarded matching for externally unobserved item changes.
+    const capture = await checkoutCaptureFrames();
+    if (!stillLive() || !sameOffer(capture)) throw Error("refused");
+    return checkoutPickerView(picker);
+  }
   async function startCheckoutPicker(message) {
     if (Object.keys(message).sort().join(",") !== "id,revision,type,userGesture")
       throw Error("refused");
@@ -6992,6 +7038,16 @@ if (typeof importScripts === "function") importScripts("core.js");
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
+    // Read-only offer reconfirmation. It is handled before generic dispatch so
+    // it can never carry a state snapshot, change status or enter an action
+    // path; a refusal is just the same minimal shape with a null view.
+    if (message?.type === "checkout-frames-reconfirm") {
+      reconfirmCheckoutPicker(message).then(
+        (checkoutPicker) => sendResponse({ checkoutPicker }),
+        () => sendResponse({ checkoutPicker: null }),
+      );
+      return true;
+    }
     if (message && typeof message === "object" && ATTACHMENT_REQUESTS.has(message.type))
       return false;
     const requestEpoch = epoch;

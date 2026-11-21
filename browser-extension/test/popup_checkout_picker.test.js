@@ -280,6 +280,35 @@ async function openPicker(h, view = pickerView()) {
   return view;
 }
 
+// Starts the picker, lets an ordinary state poll render first, then delivers
+// the genuine checkout reply so it is discarded as superseded. The returned
+// request is the pending one-shot reconfirmation.
+async function overlapCheckoutReply(h) {
+  h.click("#detail-fill");
+  const frames = h.take("checkout-frames");
+  h.poll();
+  h.take("state").resolve(connectedState({ status: "ordinary poll won" }));
+  await flush();
+  frames.resolve(
+    connectedState({
+      status: "stale checkout status",
+      checkoutPicker: pickerView({
+        topOrigin: "https://stale.test",
+        candidates: [
+          {
+            choice: "9".repeat(32),
+            origin: "https://stale.test",
+            frameId: 0,
+            top: true,
+          },
+        ],
+      }),
+    }),
+  );
+  await flush();
+  return h.take("checkout-frames-reconfirm");
+}
+
 test("card action asks the background only after a trusted gesture", async () => {
   const h = harness();
   await openCard(h);
@@ -471,6 +500,110 @@ test("an unusable frame list is refused instead of rendered", async () => {
   await flush();
   assert.equal(h.el("#checkout-picker").hidden, true);
   assert.equal(h.el("#checkout-choices").children.length, 0);
+  assert.equal(h.sent("checkout-select").length, 0);
+});
+
+test("a superseded checkout reply is reconfirmed once without stale state", async () => {
+  const h = harness();
+  await openCard(h);
+  h.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  const reconfirm = await overlapCheckoutReply(h);
+
+  assert.deepEqual(
+    Object.keys(reconfirm.message).sort(),
+    ["id", "nonce", "revision", "type"],
+    "reconfirmation carries only the opaque offer identity",
+  );
+  assert.equal(reconfirm.message.nonce, NONCE, "the actual reply's nonce");
+  assert.equal(reconfirm.message.id, ID);
+  assert.equal(reconfirm.message.revision, REV);
+  assert.equal("userGesture" in reconfirm.message, false);
+  // Only the nonce survived: the discarded reply's candidates and status are
+  // never rendered or used.
+  assert.equal(h.el("#checkout-picker").hidden, true);
+  assert.equal(h.el("#checkout-choices").children.length, 0);
+  assert.equal(h.el("#checkout-status").textContent, "");
+  assert.equal(h.sent("checkout-select").length, 0);
+
+  reconfirm.resolve(
+    connectedState({
+      status: "fresh reconfirmation",
+      checkoutPicker: pickerView(),
+    }),
+  );
+  await flush();
+
+  assert.equal(h.el("#checkout-picker").hidden, false);
+  assert.equal(
+    h.el("#checkout-current-page").textContent,
+    "当前页面来源：" + TOP_ORIGIN,
+  );
+  assert.deepEqual(
+    h.el("#checkout-choices").children.map((button) => button.dataset.choice),
+    [CHOICE_TOP, CHOICE_FRAME],
+  );
+  assert.equal(
+    h.el("#checkout-status").textContent,
+    "请选择一个结账表单来源；不会自动选择，也不会自动提交",
+  );
+  assert.equal(
+    h.el("#status").textContent,
+    "ordinary poll won",
+    "the reconfirmation is not rendered as global popup state",
+  );
+  assert.equal(h.sent("checkout-frames").length, 1, "no second gesture request");
+  assert.equal(h.sent("checkout-frames-reconfirm").length, 1);
+  assert.equal(h.sent("checkout-select").length, 0, "nothing is auto-selected");
+  assertDiagnosticShape(detailFillDiagnosticLog(h), [
+    "handler-entry",
+    "request-sent",
+    "reply-null",
+    "adopted",
+  ]);
+});
+
+test("a reconfirmation with a different opaque nonce is refused", async () => {
+  const h = harness();
+  await openCard(h);
+  const reconfirm = await overlapCheckoutReply(h);
+
+  reconfirm.resolve(
+    connectedState({
+      status: "stale nonce status",
+      checkoutPicker: pickerView({ nonce: "d".repeat(32) }),
+    }),
+  );
+  await flush();
+
+  assert.equal(h.el("#checkout-picker").hidden, true);
+  assert.equal(h.el("#checkout-choices").children.length, 0);
+  assert.equal(h.el("#checkout-status").textContent, "");
+  assert.equal(h.el("#toast").textContent, "无法确认当前结账表单，请重新选择");
+  assert.equal(h.el("#status").textContent, "ordinary poll won");
+  assert.equal(h.sent("checkout-select").length, 0);
+});
+
+test("a render that wins the reconfirmation fails closed without stale UI", async () => {
+  const h = harness();
+  await openCard(h);
+  const reconfirm = await overlapCheckoutReply(h);
+
+  h.poll();
+  h.take("state").resolve(connectedState({ status: "newer render" }));
+  await flush();
+  reconfirm.resolve(
+    connectedState({
+      status: "stale reconfirmation status",
+      checkoutPicker: pickerView(),
+    }),
+  );
+  await flush();
+
+  assert.equal(h.el("#checkout-picker").hidden, true);
+  assert.equal(h.el("#checkout-choices").children.length, 0);
+  assert.equal(h.el("#checkout-status").textContent, "");
+  assert.equal(h.el("#toast").textContent, "");
+  assert.equal(h.el("#status").textContent, "newer render");
   assert.equal(h.sent("checkout-select").length, 0);
 });
 
