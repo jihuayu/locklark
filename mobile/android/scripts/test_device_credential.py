@@ -427,6 +427,55 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         with self.assertRaises(AcceptanceFailure):runner.cleanup_pin()
         self.assertFalse(any(args[:2]==("locksettings","clear") for args in calls))
 
+    def cleanup_runner(self, candidate_ok, empty_ok, clear_raises=False):
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        runner.pin_attempted=True; runner.pin_owned=True; runner.pin="12345678"
+        runner.diagnosis = auth.safe_host_diagnosis({})
+        calls=[]
+        def shell(*args,**kwargs):
+            calls.append(args)
+            if args[:2] == ("locksettings","clear") and clear_raises:
+                runner.diagnosis.update({"command_exit":"nonzero","exit_code":255,
+                                         "stderr_class":"other","failure_origin":"remote-other"})
+                raise AcceptanceFailure()
+            ok = candidate_ok if args[:2] == ("locksettings","verify") and "--old" in args else (
+                empty_ok if args[:2] == ("locksettings","verify") else True)
+            runner.diagnosis.update({"command_exit":"ok" if ok else "nonzero", "exit_code":0 if ok else 255,
+                                     "stderr_class":"empty" if ok else "other", "failure_origin":"remote-other"})
+            return SimpleNamespace(returncode=0 if ok else 255, stdout=b"", stderr=b"")
+        runner.shell=shell
+        return runner, calls
+
+    def test_cleanup_records_last_attempt_and_keeps_exact_owned_command_sequence(self):
+        force_stop, candidate, clear = (("am","force-stop",auth.PACKAGE),
+                                        ("locksettings","verify","--old","12345678"),
+                                        ("locksettings","clear","--old","12345678"))
+        empty = ("locksettings","verify")
+        cases = (
+            (True, True, False, [force_stop,candidate,clear], "owned-clear", True),
+            (False, True, False, [force_stop,candidate,empty], "empty-verification", True),
+            (False, False, False, [force_stop,candidate,empty], "empty-verification", False),
+            (True, True, True, [force_stop,candidate,clear], "owned-clear", False))
+        for candidate_ok, empty_ok, clear_raises, expected_calls, operation, succeeds in cases:
+            with self.subTest(operation=operation, candidate=candidate_ok, empty=empty_ok, clear=clear_raises):
+                runner, calls = self.cleanup_runner(candidate_ok, empty_ok, clear_raises)
+                if succeeds:
+                    runner.cleanup_pin()
+                else:
+                    with self.assertRaises(AcceptanceFailure): runner.cleanup_pin()
+                # Recording adds no calls/retries and never removes an unknown lock.
+                self.assertEqual(calls, expected_calls)
+                self.assertEqual(runner.cleanup_diagnostic["operation"], operation)
+                if succeeds:
+                    self.assertEqual(runner.cleanup_diagnostic["classification"], "success")
+                    self.assertEqual(runner.cleanup_diagnostic["command_exit"], "ok")
+                else:
+                    self.assertEqual(runner.cleanup_diagnostic["classification"], "command-failed")
+                    self.assertEqual(runner.cleanup_diagnostic["command_exit"], "nonzero")
+                    self.assertEqual(runner.cleanup_diagnostic["exit_code"], 255)
+                if operation == "empty-verification":
+                    self.assertFalse(any(args[:2] == ("locksettings","clear") for args in calls))
+
     def test_copy_and_reinstall_restores_archive_over_adb_shell_stdin(self):
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as bundle:
@@ -520,13 +569,39 @@ class DeviceCredentialMainTests(unittest.TestCase):
         self.assertIn(value, auth.STAGES | {auth.NO_PRIMARY_FAILURE})
         return value
 
-    def run_main(self, clean_main, cleanup, scan=None, step=None):
+    def assert_primary_diagnostic(self, result, original, acceptance):
+        self.assertEqual(result["diagnostic"],
+                         {**original, "failure_diagnosis":acceptance.expected_failure_context})
+
+    def run_main(self, clean_main, cleanup, scan=None, step=None, diagnosis=None):
         """Run main() with the acceptance mocked; scan is None or raising.
 
         step replaces the first main-flow step so a focused test can raise a
         specific exception (or KeyboardInterrupt) from inside the main try.
+        diagnosis lets a test drive and later mutate the fake base context.
         """
         original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
+        diagnosis = diagnosis if diagnosis is not None else {
+            "operation":"tap", "target":"unlock", "step":"unknown", "command":"tap",
+            "command_exit":"nonzero", "exit_code":1, "stderr_class":"permission",
+            "failure_origin":"permission", "bounds":"ready", "exception":"none",
+            "helper":"unknown", "source_line":None, "reason":"unknown"}
+        captured, events = {}, []
+        def record_failure(error):
+            events.append("record_failure")
+            diagnosis.update({"exception":type(error).__name__, "helper":"command",
+                              "source_line":41, "reason":"assertion"})
+            captured.update(auth.failure_context(diagnosis))
+        def failure_metadata():
+            events.append("failure_metadata")
+            # These reads happen after the primary capture and may refresh
+            # live command state; the frozen primary context must not move.
+            diagnosis.update({"operation":"wait", "target":"lock", "step":"unknown",
+                              "command":"ui-cleanup", "command_exit":"ok", "exit_code":0,
+                              "stderr_class":"empty", "failure_origin":"remote-other",
+                              "bounds":"unknown", "helper":"unknown", "source_line":None,
+                              "reason":"unknown"})
+            return {key:(value.copy() if isinstance(value, dict) else value) for key, value in original.items()}
         wrote = []
         source = Path("/tmp/private-run")  # never touched: private_file is mocked
         def fail():
@@ -540,13 +615,16 @@ class DeviceCredentialMainTests(unittest.TestCase):
                 scan()
         acceptance = SimpleNamespace(root="/tmp/private-run", source=source, source_hash=self.FIXTURE_DIGEST,
                                      private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
-                                     checks=["owned_emulator"], key_level="tee",
+                                     checks=["owned_emulator"], key_level="tee", diagnosis=diagnosis,
                                      setup_owned_emulator=step or mock.Mock(),
                                      native_auth_flow=mock.Mock() if clean_main else failure_step,
                                      key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
-                                     failure_metadata=mock.Mock(return_value=original),
+                                     record_failure=mock.Mock(side_effect=record_failure),
+                                     failure_metadata=mock.Mock(side_effect=failure_metadata),
                                      cleanup_pin=cleanup, close=close_scan, scan=mock.Mock(),
                                      write_private=lambda name, value: wrote.append((name, value)))
+        acceptance.expected_failure_context = captured
+        acceptance.main_events = events
         with mock.patch.object(sys, "argv", self.ARGS), \
              mock.patch.object(auth, "validated_evidence", return_value=(source, {}, [], self.FIXTURE_DIGEST)), \
              mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
@@ -578,13 +656,44 @@ class DeviceCredentialMainTests(unittest.TestCase):
         code, result, original, output, acceptance = self.run_main(False, cleanup)
         self.assertEqual(code, 1)
         self.assertFalse(result["success"])
-        self.assertEqual(result["diagnostic"], original)
+        self.assert_primary_diagnostic(result, original, acceptance)
         self.assertEqual(result["original_failure_stage"], "enable-prompt")
         self.assertTrue(result["cleanup_failed"])
         self.assertFalse(result["scan_failed"])
         self.assertEqual(result["stage"], "pin-cleanup")
         self.assertIn("acceptance at pin-cleanup", output)
         self.assertEqual(self.primary_stage(output), "enable-prompt")
+        self.assertNotIn("private-exception-body", output)
+        self.assertNotIn("12345678", output)
+
+    def test_combined_primary_and_cleanup_failure_keeps_frozen_allowlisted_origin(self):
+        diagnosis = {"operation":"wait", "target":"unlock", "step":"unknown", "command":"text",
+                     "command_exit":"nonzero", "exit_code":255, "stderr_class":"permission",
+                     "failure_origin":"permission", "bounds":"ready", "exception":"none",
+                     "helper":"unknown", "source_line":None, "reason":"unknown"}
+        expected = {**diagnosis, "exception":"AcceptanceFailure", "helper":"command",
+                    "source_line":41, "reason":"assertion"}
+        def cleanup():
+            # Secondary cleanup and its diagnostics mutate every live field.
+            diagnosis.update({"operation":"wait", "target":"lock", "step":"unknown",
+                              "command":"ui-cleanup", "command_exit":"ok", "exit_code":0,
+                              "stderr_class":"empty", "failure_origin":"remote-other",
+                              "bounds":"missing", "exception":"RuntimeError", "helper":"unknown",
+                              "source_line":999, "reason":"command-failed"})
+            raise RuntimeError("private-exception-body 12345678 adb-clean")
+        code, result, original, output, acceptance = self.run_main(False, cleanup, diagnosis=diagnosis)
+        self.assertEqual(code, 1)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["stage"], "pin-cleanup")
+        self.assertEqual(result["original_failure_stage"], "enable-prompt")
+        self.assertTrue(result["cleanup_failed"])
+        self.assertEqual(acceptance.main_events[:2], ["record_failure", "failure_metadata"])
+        self.assertEqual(acceptance.expected_failure_context, expected)
+        self.assert_primary_diagnostic(result, original, acceptance)
+        frozen = result["diagnostic"]["failure_diagnosis"]
+        self.assertEqual(frozen, expected)
+        self.assertEqual(frozen["failure_origin"], "permission")
+        self.assertEqual(set(frozen), set(auth.FAILURE_CONTEXT_KEYS))
         self.assertNotIn("private-exception-body", output)
         self.assertNotIn("12345678", output)
 
@@ -605,12 +714,12 @@ class DeviceCredentialMainTests(unittest.TestCase):
     def test_main_failure_and_scan_failure_keeps_original_stage_printed_and_recorded(self):
         def scan():
             raise RuntimeError("private-exception-body adb-clean")
-        code, result, original, output, _ = self.run_main(False, mock.Mock(), scan)
+        code, result, original, output, acceptance = self.run_main(False, mock.Mock(), scan)
         self.assertEqual(code, 1)
         self.assertFalse(result["success"])
         self.assertEqual(result["stage"], "private-canary-scan")
         self.assertEqual(result["original_failure_stage"], "enable-prompt")
-        self.assertEqual(result["diagnostic"], original)
+        self.assert_primary_diagnostic(result, original, acceptance)
         self.assertFalse(result["cleanup_failed"])
         self.assertTrue(result["scan_failed"])
         self.assertIn("acceptance at private-canary-scan", output)
@@ -623,12 +732,12 @@ class DeviceCredentialMainTests(unittest.TestCase):
             raise AcceptanceFailure()
         def scan():
             raise AcceptanceFailure()
-        code, result, original, output, _ = self.run_main(False, cleanup, scan)
+        code, result, original, output, acceptance = self.run_main(False, cleanup, scan)
         self.assertEqual(code, 1)
         self.assertFalse(result["success"])
         self.assertEqual(result["stage"], "pin-cleanup")
         self.assertEqual(result["original_failure_stage"], "enable-prompt")
-        self.assertEqual(result["diagnostic"], original)
+        self.assert_primary_diagnostic(result, original, acceptance)
         self.assertTrue(result["cleanup_failed"])
         self.assertTrue(result["scan_failed"])
         self.assertIn("acceptance at pin-cleanup", output)
@@ -773,14 +882,26 @@ class DeviceCredentialMainTests(unittest.TestCase):
     def acceptance_stub(self, cleanup, wrote):
         """Minimal acceptance stub; cleanup is called inside main's finally."""
         original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
-        return SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
-                               source_hash=self.FIXTURE_DIGEST,
-                               private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
-                               checks=["owned_emulator"], key_level="tee", setup_owned_emulator=mock.Mock(),
-                               native_auth_flow=mock.Mock(), key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
-                               failure_metadata=mock.Mock(return_value=original),
-                               cleanup_pin=cleanup, close=mock.Mock(), scan=mock.Mock(),
-                               write_private=lambda name, value: wrote.append((name, value))), original
+        diagnosis = {"operation":"tap", "target":"unlock", "step":"unknown", "command":"tap",
+                     "command_exit":"nonzero", "exit_code":1, "stderr_class":"permission",
+                     "failure_origin":"permission", "bounds":"ready", "exception":"none",
+                     "helper":"unknown", "source_line":None, "reason":"unknown"}
+        captured = {}
+        def record_failure(error):
+            diagnosis.update({"exception":type(error).__name__, "helper":"command",
+                              "source_line":41, "reason":"assertion"})
+            captured.update(auth.failure_context(diagnosis))
+        acceptance = SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
+                                     source_hash=self.FIXTURE_DIGEST, diagnosis=diagnosis,
+                                     private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
+                                     checks=["owned_emulator"], key_level="tee", setup_owned_emulator=mock.Mock(),
+                                     native_auth_flow=mock.Mock(), key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
+                                     record_failure=mock.Mock(side_effect=record_failure),
+                                     failure_metadata=mock.Mock(return_value=original),
+                                     cleanup_pin=cleanup, close=mock.Mock(), scan=mock.Mock(),
+                                     write_private=lambda name, value: wrote.append((name, value)))
+        acceptance.expected_failure_context = captured
+        return acceptance, original
 
     @staticmethod
     def cloned_main():
@@ -851,7 +972,7 @@ class DeviceCredentialMainTests(unittest.TestCase):
                 self.assertEqual(exit_code, 1)
                 self.assertFalse(result["success"])
                 self.assertEqual(result["original_failure_stage"], "enable-prompt")
-                self.assertEqual(result["diagnostic"], original)
+                self.assert_primary_diagnostic(result, original, acceptance)
                 self.assertNotEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
                 self.assertEqual(self.primary_stage(output), "enable-prompt")
                 self.assertNotIn("PASS: ", output)

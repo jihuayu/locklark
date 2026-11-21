@@ -18,7 +18,8 @@ import tarfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
-from mobile_android_acceptance import AndroidAcceptance, AcceptanceFailure, PACKAGE, actionable_bounds, center, require
+from mobile_android_acceptance import (AndroidAcceptance, AcceptanceFailure, PACKAGE, actionable_bounds, center,
+                                       require, safe_host_diagnosis)
 from test_emulator import complete_pass
 
 OS_PACKAGES = {"com.android.systemui", "com.android.settings"}
@@ -43,6 +44,18 @@ KEY_POLICY_ASSERTIONS = {"none", "installation-format", "one-capsule", "capsule-
                         "envelope-format", "nonexportable", "auth-required", "per-operation", "aes256-gcm", "exact-auth-types",
                         "fresh-unauthenticated-rejected"}
 KEY_LEVELS = {"software", "tee", "strongbox", "unknown", "hardware-unspecified"}
+# These are the already-collected base diagnosis fields that explain a primary
+# command failure. Live UI fields are deliberately excluded: recording them
+# would require extra ADB reads and could change lifecycle/timing.
+FAILURE_CONTEXT_KEYS = ("operation", "target", "step", "command", "command_exit", "exit_code", "stderr_class",
+                        "failure_origin", "bounds", "exception", "helper", "source_line", "reason")
+CLEANUP_OPERATIONS = {"none", "force-stop", "candidate-verification", "empty-verification", "owned-clear"}
+
+
+def failure_context(value):
+    """Freeze only relevant, already-collected base failure context."""
+    safe = safe_host_diagnosis(value)
+    return {key: safe[key] for key in FAILURE_CONTEXT_KEYS}
 
 
 def key_policy_metadata(returncode, raw):
@@ -140,7 +153,7 @@ def fresh_auth_failure(raw, pid, floor):
 
 def locksettings_status(result):
     """Only fixed AOSP status classes; never return exception text or a PIN."""
-    raw = result.stdout + result.stderr
+    raw = getattr(result, "stdout", b"") + getattr(result, "stderr", b"")
     classification = "success" if result.returncode == 0 else "command-failed"
     if result.returncode != 0:
         constants = (
@@ -303,6 +316,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.key_level = "unknown"
         self.key_policy_diagnostic = {}
         self.locksettings_diagnostic = {}
+        self.cleanup_diagnostic = {"operation":"none", "classification":"unknown", "command_exit":"unknown",
+                                   "exit_code":None, "stderr_class":"unknown", "failure_origin":"remote-other"}
         self.secure_lock_screen = None
         self.auth_pid = None
         self.auth_floor = 0
@@ -611,17 +626,49 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.visible("打开本地金库",class_name="android.widget.Button")
         self.done("restored_encrypted_vault_still_requires_and_accepts_original_complete_factors")
 
+    def cleanup_command(self, operation, *arguments, **kwargs):
+        """Record the last bounded cleanup attempt without changing the command."""
+        require(operation in CLEANUP_OPERATIONS - {"none"})
+        self.cleanup_diagnostic = {"operation":operation, "classification":"transport-or-capture-failed",
+                                   "command_exit":"pending", "exit_code":None, "stderr_class":"unknown",
+                                   "failure_origin":"remote-other"}
+        try:
+            result = self.shell(*arguments, **kwargs)
+        except Exception:
+            # A required command may raise before returning. The base command
+            # helper has already reduced its transport/nonzero result to fixed
+            # fields, so preserve those and keep the original failure closed.
+            diagnosis = failure_context(getattr(self, "diagnosis", {}))
+            self.cleanup_diagnostic.update({
+                "classification":("command-failed" if diagnosis["command_exit"] in {"nonzero", "timeout", "error"}
+                                  else "transport-or-capture-failed"),
+                "command_exit":diagnosis["command_exit"], "exit_code":diagnosis["exit_code"],
+                "stderr_class":diagnosis["stderr_class"], "failure_origin":diagnosis["failure_origin"]})
+            raise
+        if operation == "force-stop":
+            classification = "success" if result.returncode == 0 else "command-failed"
+        else:
+            classification = locksettings_status(result)["classification"]
+        diagnosis = failure_context(getattr(self, "diagnosis", {}))
+        self.cleanup_diagnostic.update({"classification":classification, "command_exit":diagnosis["command_exit"],
+                                        "exit_code":diagnosis["exit_code"], "stderr_class":diagnosis["stderr_class"],
+                                        "failure_origin":diagnosis["failure_origin"]})
+        return result
+
     def cleanup_pin(self):
         if self.pin_attempted:
             self.set_stage("pin-cleanup")
-            self.shell("am", "force-stop", PACKAGE, required=False)
+            self.cleanup_command("force-stop", "am", "force-stop", PACKAGE, required=False)
             # A timeout may have applied the requested PIN. Verify only that
             # exact known value; never remove an unknown/pre-existing lock.
-            candidate = self.shell("locksettings", "verify", "--old", self.pin, oracle="pin-candidate-verification.txt", timeout=60, required=False)
+            candidate = self.cleanup_command("candidate-verification", "locksettings", "verify", "--old", self.pin,
+                                             oracle="pin-candidate-verification.txt", timeout=60, required=False)
             if candidate.returncode == 0:
-                self.shell("locksettings", "clear", "--old", self.pin, oracle="pin-cleanup.txt", timeout=60)
+                self.cleanup_command("owned-clear", "locksettings", "clear", "--old", self.pin,
+                                     oracle="pin-cleanup.txt", timeout=60)
             else:
-                empty = self.shell("locksettings", "verify", oracle="pin-empty-cleanup.txt", timeout=60, required=False)
+                empty = self.cleanup_command("empty-verification", "locksettings", "verify",
+                                             oracle="pin-empty-cleanup.txt", timeout=60, required=False)
                 require(empty.returncode == 0)
             self.pin_owned = False
             self.pin_attempted = False
@@ -666,13 +713,27 @@ def main():
         acceptance.copy_and_reinstall()
         require(hashlib.sha256(private_file(acceptance.source / "expected-private.json")).hexdigest() == acceptance.source_hash)
         success = True
-    except (Exception,KeyboardInterrupt):
+    except (Exception,KeyboardInterrupt) as error:
         # Any caught main-flow fault, including an interrupt, wins: a later
         # cleanup or scan cannot make this run succeed.
         faulted = True
         failure = acceptance.stage if acceptance else "prerequisites"
         if acceptance:
-            diagnostic = acceptance.failure_metadata()
+            # Freeze the already-collected base failure context first. The
+            # failure_metadata/auth-log reads below and cleanup afterwards may
+            # update live state (and have produced the stale #167 fields), but
+            # must not replace the primary origin. No extra ADB/UI reads here.
+            try:
+                acceptance.record_failure(error)
+            except Exception:
+                pass
+            primary = failure_context(getattr(acceptance, "diagnosis", {}))
+            try:
+                diagnostic = acceptance.failure_metadata()
+            except Exception:
+                diagnostic = {}
+            # Assign after the later reads so only the frozen primary survives.
+            diagnostic["failure_diagnosis"] = primary
     finally:
         # Own the primary outcome before cleanup: a cleanup fault must never
         # overwrite the original stage or its sanitized diagnosis. Only an
@@ -702,7 +763,8 @@ def main():
             acceptance.write_private("result.json",{"success":success,"stage":stage,
                 "original_failure_stage":original_failure,"cleanup_failed":cleanup_failed,"scan_failed":scan_failed,
                 "checks":acceptance.checks,"reported_key_security_level":acceptance.key_level,
-                "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic})
+                "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic,
+                "cleanup_diagnostic":getattr(acceptance, "cleanup_diagnostic", {}).copy()})
             print("Private Android OS credential evidence: " + str(acceptance.root))
     if not success:
         print("FAIL: Android OS credential acceptance at " + (stage if acceptance else original_failure))
@@ -711,6 +773,8 @@ def main():
         print("Android OS credential primary failure stage: " + original_failure)
         if cleanup_failed:
             print("FAIL: Android OS credential acceptance at pin-cleanup")
+            print("Android OS credential cleanup diagnostic: " +
+                  json.dumps(getattr(acceptance, "cleanup_diagnostic", {}), sort_keys=True))
         if scan_failed:
             print("FAIL: Android OS credential acceptance at private-canary-scan")
     else: print("PASS: native OS credential opt-in, quick unlock, cancellation and nontransferable device key; private canary scan")
