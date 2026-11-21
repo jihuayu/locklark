@@ -108,7 +108,8 @@ machines.
 
 Before dispatching any real release tag, verify externally that production
 credentials are isolated to the `production` environment, `main` protection
-and the required reviews/immutable-tag rules are enforced, and every legacy
+and the required pull-request review policy/immutable-tag rules are enforced,
+and every legacy
 tag-triggered workflow or script in historical tag trees is disabled or made
 inert. Committing the new workflow cannot retroactively stop workflows embedded
 in old tags.
@@ -191,10 +192,14 @@ listed in its manifest.
 The active workflow uses the read-only
 `scripts/desktop_release_routing.py` entry. It binds the default-branch
 `repository_dispatch` to the canonical current run and exact real tag
-candidate, then reuses the C1 policy gates for main protection, reviews,
-immutable tags, environment branch restriction, and environment-only
-credentials. The historical `scripts/authorize_desktop_release.py`
-`workflow_run` CLI remains unwired.
+candidate, then reuses the C1 policy gates for main protection, the explicit
+review policy, immutable tags, environment branch restriction, and
+environment-only credentials. The review policy may require one or more
+approvals, or the owner may explicitly select zero effective approvals. Zero is
+accepted only when the classic protection metadata and the matched active
+main-only PR ruleset both explicitly encode `0`, explicitly disable last-push
+approval, and keep the bypass evidence explicitly empty. The historical
+`scripts/authorize_desktop_release.py` `workflow_run` CLI remains unwired.
 
 The validator is fail-closed. Generic illustrative fixtures that omit `main`
 protection, active immutable `v*` tag rules, a default-branch-only production

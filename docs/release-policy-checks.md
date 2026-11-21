@@ -13,9 +13,19 @@ requires all of the following:
   `15368`. Context-only metadata, a renamed or missing check, an any-app
   sentinel such as `-1`, a null/boolean/string app id, a different app id, or
   duplicate matching checks is refused.
-- `required_pull_request_reviews` requires a positive non-boolean
-  `required_approving_review_count`, enables stale-approval dismissal and
-  last-push approval, and rejects malformed or unknown review metadata.
+- `required_pull_request_reviews` must be present, and
+  `required_approving_review_count` must be an explicitly present,
+  non-boolean integer. Two review policies are supported:
+  - **required approvals**: a count of one or more, with
+    `dismiss_stale_reviews` and `require_last_push_approval` explicitly
+    enabled;
+  - **owner-selected zero approvals**: a count of exactly `0`, with
+    `require_last_push_approval` explicitly disabled. `dismiss_stale_reviews`
+    must still be an explicit boolean; at zero approvals it has no approval to
+    dismiss, so either explicit value is accepted.
+  A missing review object, missing count, null/boolean/string/negative count,
+  or missing/non-boolean review setting is refused. Zero is never inferred
+  from omitted metadata or missing protection.
 - When the classic protection response explicitly includes
   `bypass_pull_request_allowances`, its `users`, `.teams`, and `.apps` lists
   must be present and empty. A present non-empty or malformed value is
@@ -23,12 +33,18 @@ requires all of the following:
 - When the classic response omits `bypass_pull_request_allowances`, absence is
   **not** treated as an empty allowlist. The authorizer instead requires one
   single canonical repository-level branch ruleset that is active, targets
-  `branch`, includes exactly `refs/heads/main` with no exclusions, has an
-  explicitly empty `bypass_actors` list, and contains one `pull_request` rule
-  with a non-boolean approval count at least as strict as the classic count,
-  plus enabled stale-review dismissal and last-push approval. Parent-scoped
-  rulesets, split proofs across multiple rulesets, and summaries claiming
-  different targets or enforcement do not satisfy this proof.
+  `branch`, includes exactly `refs/heads/main` with no exclusions, and has an
+  explicitly empty `bypass_actors` list. Its `pull_request` rule must satisfy
+  the selected review policy:
+  - for required approvals, a non-boolean approval count at least as strict as
+    the classic count, plus enabled stale-review dismissal and last-push
+    approval;
+  - for owner-selected zero approvals, an exactly matched count of `0` and
+    explicitly disabled last-push approval. This ruleset proof is mandatory
+    even when the classic bypass field is explicitly present and empty, so an
+    intentional zero policy is distinguishable from missing protection.
+  Parent-scoped rulesets, split proofs across multiple rulesets, and summaries
+  claiming different targets or enforcement do not satisfy this proof.
 - `enforce_admins` is enabled, while force pushes and deletions are disabled.
 
 The ruleset proof has a visibility limitation. GitHub may omit or hide

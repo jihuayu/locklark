@@ -24,11 +24,14 @@ The validator:
 * obtains the trusted default-branch tip from the read-only branch API and
   proves the tag commit is an ancestor of that real local git object with
   ``git merge-base --is-ancestor``;
-* requires metadata proving main is protected with required checks, admin
-  enforcement, and no force pushes/deletions; an active tag ruleset covering
-  ``refs/tags/v*`` with deletion, update, and non-fast-forward rules and no
-  untrusted bypass; a production environment restricted to the default branch;
-  and production updater/signing secret names only at environment scope.
+* requires metadata proving main is protected with required checks, a required
+  pull-request review policy (one or more approvals, or an explicit
+  owner-selected zero-approval policy matched by an active main-only PR
+  ruleset), admin enforcement, and no force pushes/deletions; an active tag
+  ruleset covering ``refs/tags/v*`` with deletion, update, and non-fast-forward
+  rules and no untrusted bypass; a production environment restricted to the
+  default branch; and production updater/signing secret names only at
+  environment scope.
 
 All API access is through an injectable read-only transport. The production
 transport invokes only ``gh api --method GET`` for an explicit endpoint
@@ -92,6 +95,10 @@ REQUIRED_TAG_RULES = frozenset({"deletion", "update", "non_fast_forward"})
 # a context listed only by name, or bound to any other app, is not trusted.
 REQUIRED_STATUS_CHECK_CONTEXT = "ci-required"
 GITHUB_ACTIONS_APP_ID = 15368
+# Two explicitly supported review policies. The owner may deliberately select
+# zero required approvals, but only with an explicit, matched active PR ruleset.
+REVIEW_POLICY_REQUIRED = "required_approvals"
+REVIEW_POLICY_OWNER_SELECTED_ZERO = "owner_selected_zero_approvals"
 # Organization administrators are the only bypass class treated as trusted.
 # Integrations, teams, users, and repository roles are not trusted to rewrite
 # release tags. An empty bypass list is also accepted.
@@ -1371,7 +1378,27 @@ def _check_required_status_checks(protection: Mapping[str, object]) -> None:
         )
 
 
-def _check_pull_request_reviews(protection: Mapping[str, object]) -> int | None:
+@dataclass(frozen=True)
+class ReviewPolicy:
+    """An explicitly selected classic review policy and its metadata shape."""
+
+    required_approving_review_count: int
+    dismiss_stale_reviews: bool
+    require_last_push_approval: bool
+    classic_bypass_present: bool
+
+    @property
+    def owner_selected_zero(self) -> bool:
+        return self.required_approving_review_count == 0
+
+    @property
+    def mode(self) -> str:
+        if self.owner_selected_zero:
+            return REVIEW_POLICY_OWNER_SELECTED_ZERO
+        return REVIEW_POLICY_REQUIRED
+
+
+def _check_pull_request_reviews(protection: Mapping[str, object]) -> ReviewPolicy:
     reviews = protection.get("required_pull_request_reviews")
     if not isinstance(reviews, dict):
         _refuse(
@@ -1379,23 +1406,64 @@ def _check_pull_request_reviews(protection: Mapping[str, object]) -> int | None:
             "main has no required pull request reviews",
         )
     count = reviews.get("required_approving_review_count")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+    # A missing count is not zero, and zero is never inferred. It must be an
+    # explicitly present, non-boolean integer, including for the owner-selected
+    # zero-approval policy.
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
         _refuse(
             Refusal.BRANCH_PROTECTION_INSUFFICIENT,
             "main requires an invalid approving review count",
         )
-    for field in ("dismiss_stale_reviews", "require_last_push_approval"):
-        if reviews.get(field) is not True:
+    # Both supported policies keep these fields mandatory booleans. At zero
+    # approvals stale dismissal has no approval to act on, but omission and
+    # wrong types still fail closed rather than silently defaulting.
+    dismiss_stale_reviews = reviews.get("dismiss_stale_reviews")
+    if not isinstance(dismiss_stale_reviews, bool):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main review setting dismiss_stale_reviews is absent or malformed",
+        )
+    require_last_push_approval = reviews.get("require_last_push_approval")
+    if not isinstance(require_last_push_approval, bool):
+        _refuse(
+            Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+            "main review setting require_last_push_approval is absent or malformed",
+        )
+    if count == 0:
+        # With no approvals there is no last-push approval to require. It must
+        # be explicitly false; true, missing, and non-boolean values are not
+        # treated as an owner-selected zero policy.
+        if require_last_push_approval is not False:
             _refuse(
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
-                f"main review setting {field} is not enabled",
+                "owner-selected zero approvals requires last-push approval "
+                "to be explicitly false",
+            )
+    else:
+        # Existing one-or-more-review repositories retain the strong review
+        # contract, including stale dismissal and last-push approval.
+        if dismiss_stale_reviews is not True:
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                "main review setting dismiss_stale_reviews is not enabled",
+            )
+        if require_last_push_approval is not True:
+            _refuse(
+                Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                "main review setting require_last_push_approval is not enabled",
             )
     # Official branch-protection GET examples may omit this field entirely.
     # Absence is not evidence of an empty allowlist: it requires an independent
     # canonical ruleset proof. A present value is still validated here, and a
     # malformed or non-empty present value is refused without rescue.
-    if "bypass_pull_request_allowances" not in reviews:
-        return count
+    classic_bypass_present = "bypass_pull_request_allowances" in reviews
+    if not classic_bypass_present:
+        return ReviewPolicy(
+            required_approving_review_count=count,
+            dismiss_stale_reviews=dismiss_stale_reviews,
+            require_last_push_approval=require_last_push_approval,
+            classic_bypass_present=False,
+        )
     bypass = reviews.get("bypass_pull_request_allowances")
     if not isinstance(bypass, dict):
         _refuse(
@@ -1415,7 +1483,12 @@ def _check_pull_request_reviews(protection: Mapping[str, object]) -> int | None:
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
                 f"main review bypass allowance {key} is not empty",
             )
-    return None
+    return ReviewPolicy(
+        required_approving_review_count=count,
+        dismiss_stale_reviews=dismiss_stale_reviews,
+        require_last_push_approval=require_last_push_approval,
+        classic_bypass_present=True,
+    )
 
 
 def _branch_ref_conditions_match(detail: Mapping[str, object]) -> bool:
@@ -1432,7 +1505,7 @@ def _branch_ref_conditions_match(detail: Mapping[str, object]) -> bool:
 
 
 def _branch_pull_request_rule_matches(
-    detail: Mapping[str, object], required_review_count: int
+    detail: Mapping[str, object], policy: ReviewPolicy
 ) -> bool:
     rules = detail.get("rules")
     if not isinstance(rules, list):
@@ -1449,25 +1522,39 @@ def _branch_pull_request_rule_matches(
     if not isinstance(parameters, dict):
         return False
     count = parameters.get("required_approving_review_count")
-    if (
-        isinstance(count, bool)
-        or not isinstance(count, int)
-        or count < required_review_count
-    ):
+    if isinstance(count, bool) or not isinstance(count, int):
         return False
-    return (
-        parameters.get("dismiss_stale_reviews_on_push") is True
-        and parameters.get("require_last_push_approval") is True
-    )
+    dismiss_stale = parameters.get("dismiss_stale_reviews_on_push")
+    if not isinstance(dismiss_stale, bool):
+        return False
+    last_push_approval = parameters.get("require_last_push_approval")
+    if not isinstance(last_push_approval, bool):
+        return False
+    if policy.owner_selected_zero:
+        # The owner-selected zero policy is deliberate only when the required
+        # active main-only PR ruleset explicitly matches the same zero count and
+        # explicitly disables last-push approval. A stronger count is not
+        # treated as a match for this owner-selected policy.
+        return count == 0 and last_push_approval is False
+    if count < policy.required_approving_review_count:
+        return False
+    return dismiss_stale is True and last_push_approval is True
 
 
 def _check_classic_bypass_ruleset_proof(
     transport: ReadOnlyTransport,
     repository: str,
     canonical_repository: str,
-    required_review_count: int,
+    policy: ReviewPolicy,
 ) -> None:
-    """Prove an absent classic bypass field with one canonical branch ruleset.
+    """Prove the required canonical branch ruleset for the selected policy.
+
+    The classic bypass field is a separate evidence shape: when it is present it
+    must be explicitly empty, and when it is absent one canonical ruleset must
+    prove the empty bypass list. The owner-selected zero policy requires this
+    canonical branch ruleset proof even when the classic bypass field is
+    explicitly present and empty, so zero is never inferred from missing
+    protection.
 
     The list summaries are used only for positive ids. Target, enforcement,
     source, conditions, rules, and bypass metadata are read from the detail and
@@ -1548,7 +1635,7 @@ def _check_classic_bypass_ruleset_proof(
             continue
         if not _branch_ref_conditions_match(detail):
             continue
-        if not _branch_pull_request_rule_matches(detail, required_review_count):
+        if not _branch_pull_request_rule_matches(detail, policy):
             continue
         # The field must be explicitly present as an empty list. A missing or
         # hidden field is not inferred to mean no bypass.
@@ -1564,7 +1651,7 @@ def _check_classic_bypass_ruleset_proof(
 
 def _check_protection(
     transport: ReadOnlyTransport, repository: str, canonical_repository: str
-) -> None:
+) -> ReviewPolicy:
     payload = _api_call(
         transport,
         branch_protection_api(repository),
@@ -1579,7 +1666,7 @@ def _check_protection(
         "branch protection metadata is not an object",
     )
     _check_required_status_checks(protection)
-    required_review_count = _check_pull_request_reviews(protection)
+    policy = _check_pull_request_reviews(protection)
     for field, expected in (
         ("enforce_admins", True),
         ("allow_force_pushes", False),
@@ -1598,13 +1685,18 @@ def _check_protection(
                 Refusal.BRANCH_PROTECTION_INSUFFICIENT,
                 f"main protection setting {field} is not fail-closed",
             )
-    if required_review_count is not None:
+    # The owner-selected zero policy always needs the active canonical
+    # main-only PR ruleset proof, even when the classic bypass field is
+    # explicitly present and empty. One-or-more-review repositories keep the
+    # existing proof trigger: only an absent classic bypass field needs it.
+    if policy.owner_selected_zero or not policy.classic_bypass_present:
         _check_classic_bypass_ruleset_proof(
             transport,
             repository,
             canonical_repository,
-            required_review_count,
+            policy,
         )
+    return policy
 
 
 def _covers_all_v_tags(detail: Mapping[str, object]) -> bool | None:
@@ -2038,15 +2130,35 @@ def _check_policy_metadata(
 ) -> str:
     """Run the shared C1 policy gates and return the protected main tip."""
 
+    default_branch_sha, _ = _check_policy_metadata_and_reviews(
+        transport,
+        repository,
+        repository_info,
+        git,
+        require_release_metadata=require_release_metadata,
+    )
+    return default_branch_sha
+
+
+def _check_policy_metadata_and_reviews(
+    transport: ReadOnlyTransport,
+    repository: str,
+    repository_info: RepositoryInfo,
+    git: GitReader,
+    *,
+    require_release_metadata: bool = False,
+) -> tuple[str, ReviewPolicy]:
+    """Run the shared C1 policy gates and report the explicit review policy."""
+
     default_branch_sha = _check_branch(transport, repository)
-    _check_protection(transport, repository, repository_info.full_name)
+    policy = _check_protection(transport, repository, repository_info.full_name)
     _check_tag_rules(transport, repository)
     _check_environment(transport, repository)
     secrets = _check_secrets(transport, repository, repository_info)
     if require_release_metadata:
         _check_release_metadata(transport, repository, secrets)
     git.ensure_commit(default_branch_sha, Refusal.DEFAULT_BRANCH_OBJECT_MISSING)
-    return default_branch_sha
+    return default_branch_sha, policy
 
 
 def _run_authorization(
@@ -2104,7 +2216,7 @@ def _run_authorization(
             "workflow_run head SHA does not equal the exact real tag commit",
         )
 
-    default_branch_sha = _check_policy_metadata(
+    default_branch_sha, review_policy = _check_policy_metadata_and_reviews(
         transport, repository, repository_info, git
     )
     if not git.is_ancestor(tag_info.commit, default_branch_sha):
@@ -2126,6 +2238,12 @@ def _run_authorization(
         "head_branch_hint": binding.head_branch_hint,
         "default_branch": DEFAULT_BRANCH,
         "default_branch_commit": default_branch_sha,
+        "review_policy": review_policy.mode,
+        "required_approving_review_count": (
+            review_policy.required_approving_review_count
+        ),
+        "dismiss_stale_reviews": review_policy.dismiss_stale_reviews,
+        "require_last_push_approval": review_policy.require_last_push_approval,
         "environment": PRODUCTION_ENVIRONMENT,
         "required_tag_rules": sorted(REQUIRED_TAG_RULES),
         "production_secret_scope": "environment",
@@ -2182,12 +2300,20 @@ def authorize_desktop_release(
         )
     except ReleaseRefusal as exc:
         return Decision("REFUSE", exc.reason, exc.detail)
+    detail = (
+        "workflow_run, exact tag commit, protected default branch ancestry, "
+        "tag immutability, environment branch restriction, and credential "
+        "scope metadata all satisfied"
+    )
+    if facts.get("review_policy") == REVIEW_POLICY_OWNER_SELECTED_ZERO:
+        detail += (
+            "; owner-selected zero approvals are explicitly matched by the "
+            "active main-only pull-request ruleset"
+        )
     return Decision(
         "AUTHORIZE",
         Refusal.AUTHORIZED,
-        "workflow_run, exact tag commit, protected default branch ancestry, "
-        "tag immutability, environment branch restriction, and credential "
-        "scope metadata all satisfied",
+        detail,
         facts,
     )
 

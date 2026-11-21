@@ -47,11 +47,22 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
    local git object for the API tip with `git merge-base --is-ancestor`.
 5. `main` is protected with required status checks, required pull-request
    reviews, admin enforcement, force pushes disabled, and deletions disabled.
+   The review policy is either one or more required approvals, or an explicit
+   owner-selected zero-approval policy. One-or-more-review repositories must
+   explicitly enable stale-review dismissal and last-push approval. In the
+   owner-selected zero policy, the count is explicitly `0`, last-push approval
+   is explicitly disabled, and stale-review dismissal is still an explicit
+   boolean. Missing counts and missing or non-boolean review metadata fail
+   closed; zero is never inferred from missing protection.
    A present classic `bypass_pull_request_allowances` field must be explicitly
    empty. If the classic response omits that field, one single active canonical
    repository branch ruleset must independently prove an explicitly empty
-   `bypass_actors` list and a `pull_request` rule at least as strict as the
-   classic review count.
+   `bypass_actors` list. That ruleset must be active, main-only, and match the
+   selected review policy: a count at least as strict as the classic count plus
+   stale-review dismissal and last-push approval for required approvals, or an
+   exactly matched `0` count and explicitly disabled last-push approval for the
+   owner-selected zero policy. The zero-policy ruleset proof is required even
+   when the classic bypass field is explicitly present and empty.
 6. An active tag ruleset includes exactly `refs/tags/v*` and contains
    `deletion`, `update`, and `non_fast_forward` rules. Bare `v*`, broader
    patterns, extra include patterns, and exclusions are refused. Bypass
@@ -68,6 +79,27 @@ unreadable, malformed, and unknown metadata all fail closed; there is no
    (including the optional `WINDOWS_CERTIFICATE` and
    `WINDOWS_CERTIFICATE_PASSWORD` pair if present) must not exist at
    repository or organization scope.
+
+### Review policy modes
+
+Two policies are supported and the authorized decision reports the selected
+mode, approval count, stale-dismissal value, and last-push approval value in
+its facts:
+
+- `required_approvals`: the classic count is one or more,
+  `dismiss_stale_reviews` is true, `require_last_push_approval` is true, and
+  any auxiliary ruleset proof must meet the same strong settings.
+- `owner_selected_zero_approvals`: the owner deliberately requires a pull
+  request but no human approval. The classic count and the matched canonical
+  main-only ruleset count are both exactly `0`; `require_last_push_approval`
+  is explicitly false in both; and the classic bypass field, when present, plus
+  the ruleset `bypass_actors` are each exactly empty. Stale dismissal must be
+  an explicit boolean, but has no approval to dismiss at zero.
+
+A missing review object, a missing count, a non-integer or negative count, a
+missing/non-boolean review setting, or a zero count without the matched active
+ruleset is refused. These are missing or malformed protection, not the
+intentional zero policy.
 
 ### Scope limitation: ruleset bypass metadata may be invisible
 
@@ -103,7 +135,9 @@ future release workflow is allowed to use this validator:
   canonical run actor ids equal. Organization-owned repositories and bot
   initiators require a separate explicit trust design;
 - `main` is protected and its protection settings are enforced for
-  administrators;
+  administrators, with either the strong one-or-more-review policy or the
+  explicit owner-selected zero-approval policy plus its matched active
+  main-only PR ruleset;
 - an active tag ruleset prevents deletion, updates, and non-fast-forward
   movement of every `v*` tag, with no untrusted bypass actor;
 - the `production` environment restricts deployment to the default branch and
@@ -132,6 +166,9 @@ credential.
 
 - the default branch is unprotected, lacks required checks, permits force
   pushes or deletions, or does not enforce protection for administrators;
+- a zero approval count is missing, malformed, accompanied by last-push
+  approval, or has no matched active main-only PR ruleset with an explicitly
+  empty bypass list; a zero count is never read from missing protection;
 - the canonical run actor or triggering actor is missing, malformed, a bot,
   a collaborator, or has a different id than the repository owner id, even if
   an event actor hint or login string appears to match; the repository owner
