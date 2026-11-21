@@ -29,6 +29,13 @@ RUNNER_BUNDLE = "org.locklark.mobile.ios.uitests.xctrunner"
 MANIFEST = pathlib.Path("Library/Application Support/LocklarkUITestEvidence/canaries.json")
 TEST_NAME = "OfflineVaultFlowTests.testActualOfflineCreateUnlockEditRevealAndBackgroundLock"
 STAGES = {"prerequisites", "owned-simulator", "device-manifest", "manifest", "xcresult-export", "canary-scan", "test-outcome", "complete"}
+OUTCOME_FIELDS = ("totalTestCount", "passedTests", "failedTests", "skippedTests", "expectedFailures")
+OUTCOME_STATUSES = {"Passed": "passed", "Failed": "failed", "Skipped": "skipped",
+                    "Expected Failure": "expected-failure", "unknown": "unknown"}
+PUBLIC_OUTCOME_STATUSES = {*OUTCOME_STATUSES.values(), "unavailable"}
+MAX_TEST_COUNT = 1_000_000
+UNAVAILABLE_OUTCOME = {"status": "unavailable", "total": 0, "passed": 0, "failed": 0,
+                       "skipped": 0, "expected_failures": 0}
 
 
 class EvidenceFailure(Exception):
@@ -104,6 +111,53 @@ def scan_file(path, values):
                     for match in re.finditer(rb"(?<![A-Za-z0-9])" + value + rb"(?![A-Za-z0-9])", tail)))
 
 
+def parse_test_outcome(raw):
+    def unique(items):
+        keys = [key for key, _ in items]
+        require(len(keys) == len(set(keys)))
+        return dict(items)
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (EvidenceFailure, TypeError, ValueError, UnicodeError, RecursionError):
+        raise EvidenceFailure() from None
+    require(isinstance(value, dict))
+    counts = {}
+    for field in OUTCOME_FIELDS:
+        require(field in value and type(value[field]) is int
+                and 0 <= value[field] <= MAX_TEST_COUNT)
+        counts[field] = value[field]
+    result = value.get("result")
+    require(type(result) is str and result in OUTCOME_STATUSES)
+    return {"status": OUTCOME_STATUSES[result], "total": counts["totalTestCount"],
+            "passed": counts["passedTests"], "failed": counts["failedTests"],
+            "skipped": counts["skippedTests"], "expected_failures": counts["expectedFailures"]}
+
+
+def outcome_accepted(outcome):
+    if not isinstance(outcome, dict) or outcome.get("status") != "passed":
+        return False
+    if any(type(outcome.get(key)) is not int or not 0 <= outcome[key] <= MAX_TEST_COUNT
+           for key in ("total", "passed", "failed", "skipped", "expected_failures")):
+        return False
+    return (outcome["total"] > 0 and outcome["passed"] == outcome["total"]
+            and outcome["failed"] == outcome["skipped"] == outcome["expected_failures"] == 0)
+
+
+def outcome_summary(outcome):
+    value = outcome if isinstance(outcome, dict) else {}
+    status = value.get("status")
+    status = status if isinstance(status, str) and status in PUBLIC_OUTCOME_STATUSES else "unavailable"
+
+    def count(key):
+        number = value.get(key)
+        return str(number) if type(number) is int and 0 <= number <= MAX_TEST_COUNT else "0"
+
+    return (" test_status=" + status + " total_test_count=" + count("total")
+            + " passed_tests=" + count("passed") + " failed_tests=" + count("failed")
+            + " skipped_tests=" + count("skipped") + " expected_failures=" + count("expected_failures"))
+
+
 def parse_canaries(raw):
     value = json.loads(raw)
     candidates = value.get("canaries", []) if isinstance(value, dict) else []
@@ -171,6 +225,9 @@ class EvidenceVerifier:
         self.manifest_valid = False
         self.manifest_complete = False
         self.export_complete = False
+        self.canary_scan_ok = False
+        self.canary_scan_failed = False
+        self.outcome = dict(UNAVAILABLE_OUTCOME)
 
     def command(self, name, arguments, timeout=90):
         self.counter += 1
@@ -282,10 +339,27 @@ class EvidenceVerifier:
         require(complete)
         self.export_complete = True
 
+    def load_outcome(self):
+        self.stage = "test-outcome"
+        path = pathlib.Path(self.args.xcresult).resolve()
+        ok, output = self.command("test-results-summary",
+                                  ["xcresulttool", "get", "test-results", "summary", "--path", str(path)])
+        require(ok)
+        require(output.is_file() and not output.is_symlink() and output.stat().st_size <= 1 << 20)
+        self.outcome = parse_test_outcome(output.read_bytes())
+
     def scan(self):
         self.stage = "canary-scan"
-        for path in self.files:
-            scan_file(path, self.canaries)
+        self.canary_scan_ok = False
+        try:
+            for path in self.files:
+                scan_file(path, self.canaries)
+        except Exception:
+            self.canary_scan_failed = True
+            raise
+        else:
+            if not self.canary_scan_failed:
+                self.canary_scan_ok = True
 
     def execute(self):
         source = pathlib.Path(self.args.runtime_log)
@@ -304,10 +378,15 @@ class EvidenceVerifier:
         except Exception:
             failures.append(self.stage)
         try:
+            self.load_outcome()
+        except Exception:
+            pass
+        try:
             self.scan()
         except Exception:
             failures.insert(0, "canary-scan")
-        if not self.manifest_complete or self.args.test_exit_code != 0:
+        if (not self.manifest_valid or not self.manifest_complete or not self.export_complete
+                or self.args.test_exit_code != 0 or not outcome_accepted(self.outcome)):
             failures.append("test-outcome")
         self.stage = failures[0] if failures else "complete"
         return not failures
@@ -333,14 +412,19 @@ def parser():
     return result
 
 
-def failure_summary(stage, files, manifest_valid, manifest_complete, export_complete):
+def failure_summary(stage, files, manifest_valid, manifest_complete, export_complete, outcome=None,
+                    canary_scan_ok=False):
     stage = stage if isinstance(stage, str) and stage in STAGES else "prerequisites"
     count = min(files, 99999) if type(files) is int and files >= 0 else 0
     boolean = lambda value: "true" if value is True else "false"
+    # Counts can themselves be numeric canaries; publish them only after a
+    # successful scan against a complete, trusted manifest.
+    trusted = canary_scan_ok is True and manifest_valid is True and manifest_complete is True
     return ("FAIL: iOS UI evidence validation stage=" + stage + " files=" + str(count)
             + " manifest_valid=" + boolean(manifest_valid)
             + " manifest_complete=" + boolean(manifest_complete)
-            + " export_complete=" + boolean(export_complete))
+            + " export_complete=" + boolean(export_complete)
+            + outcome_summary(outcome if trusted else None))
 
 
 def main(argv=None):
@@ -367,15 +451,19 @@ def main(argv=None):
                 verifier.scan()
             except Exception:
                 success = False
+                verifier.canary_scan_ok = False
                 stage = "canary-scan"
             result = {"success": success, "stage": "complete" if success else stage,
                       "manifest_valid": verifier.manifest_valid, "manifest_complete": verifier.manifest_complete,
                       "xcresult_export_complete": verifier.export_complete, "files_scanned": len(verifier.files)}
             (verifier.root / "result.json").write_text(json.dumps(result) + "\n")
         if success:
-            print("PASS: iOS UI evidence canary scan")
+            print("PASS: iOS UI evidence canary scan" + outcome_summary(verifier.outcome))
         elif verifier:
-            print(failure_summary(stage, len(verifier.files), verifier.manifest_valid, verifier.manifest_complete, verifier.export_complete))
+            print(failure_summary(stage, len(verifier.files), verifier.manifest_valid,
+                                  verifier.manifest_complete, verifier.export_complete,
+                                  getattr(verifier, "outcome", None),
+                                  getattr(verifier, "canary_scan_ok", False)))
         else:
             print(failure_summary(stage, 0, False, False, False))
         if verifier:
