@@ -16,6 +16,7 @@ import {
 // They carry no path, value, item ID, revision or raw CLI output.
 const ROTATION_CLI_PRE_STDOUT =
   "PASS: browser-rotation-cli r0_before_website_post\n" +
+  "PASS: browser-rotation-cli hibp_pre_website_post\n" +
   "PASS: browser-rotation-cli pre_complete\n";
 const ROTATION_CLI_POST_STDOUT =
   "PASS: browser-rotation-cli stale_exact_refusal_no_intent\n" +
@@ -34,6 +35,10 @@ const ROTATION_CLI_STAGES = new Set([
   "binding-r0",
   "r0",
   "audit-r0",
+  "hibp-decline",
+  "audit-hibp-decline",
+  "hibp-consent",
+  "audit-hibp-consent",
   "stale",
   "audit-stale",
   "binding-r1",
@@ -129,6 +134,12 @@ export async function acceptBrowserRotation(driver) {
   let cliStateDir = null;
   let cliEvidence = null;
   const cliRequested = Boolean(rotationCli);
+  // With the explicit CLI opt-in the rotation's R0 is the generated value that
+  // the earlier real save tests already proved is never persisted by a
+  // rejected/edit-buffer save. Its pre-existing active save login uses the
+  // successful UpdateValue, so HIBP sees one breached R0 and two clean
+  // controls. With the opt-in off the ordinary fixture.Value path is unchanged.
+  const r0Value = cliRequested ? fixture.RejectedValue : fixture.Value;
   const cliScript = join(root, "scripts/browser_rotation_cli.py");
   const fixtureRoot = join(state, "vault");
 
@@ -278,8 +289,8 @@ export async function acceptBrowserRotation(driver) {
 
     step("register-r0");
     await enter("#username", fixture.Username);
-    await enter("#password", fixture.Value);
-    await enter("#confirm-password", fixture.Value);
+    await enter("#password", r0Value);
+    await enter("#confirm-password", r0Value);
     const [registered] = await Promise.all([
       page.waitForResponse(
         (response) =>
@@ -297,7 +308,7 @@ export async function acceptBrowserRotation(driver) {
     step("save-r0");
     await page.goto(urls.loginURL);
     await enter("#username", fixture.Username);
-    await enter("#password", fixture.Value);
+    await enter("#password", r0Value);
     const beforeNew = observe();
     let popup = await openPopup();
     await wait(
@@ -334,12 +345,12 @@ export async function acceptBrowserRotation(driver) {
 
     step("login-r0");
     await closePopups();
-    await fillAndLogin(itemID, r0, fixture.Username, fixture.Value);
+    await fillAndLogin(itemID, r0, fixture.Username, r0Value);
     const r0Authentication = await authenticateWebsite(
       urls.targetURL,
       cert,
       fixture.Username,
-      fixture.Value,
+      r0Value,
     );
     assert(
       r0Authentication.authorized && r0Authentication.status === 200,
@@ -358,7 +369,7 @@ export async function acceptBrowserRotation(driver) {
       assert(
         runRotationCli("pre", itemID, {
           revisionR0: r0,
-          tokenR0: fixture.Value,
+          tokenR0: r0Value,
         }) === ROTATION_CLI_PRE_STDOUT,
         "Rotation CLI pre phase output changed",
       );
@@ -367,6 +378,13 @@ export async function acceptBrowserRotation(driver) {
         cliR0BindingCreated: true,
         cliR0ExactChild: true,
         cliR0AuditIntent: true,
+        hibpDeclineNoNetwork: true,
+        hibpPrefixRequestsExact: true,
+        hibpMockResponseExact: true,
+        hibpControlsClean: true,
+        hibpSameItemRevision: true,
+        hibpBeforeWebsitePost: true,
+        hibpAudited: true,
       };
     }
 
@@ -414,7 +432,7 @@ export async function acceptBrowserRotation(driver) {
       urls.targetURL,
       cert,
       fixture.Username,
-      fixture.Value,
+      r0Value,
     );
     const newAuthentication = await authenticateWebsite(
       urls.targetURL,
@@ -496,7 +514,7 @@ export async function acceptBrowserRotation(driver) {
         runRotationCli("post", itemID, {
           revisionR0: r0,
           revisionR1: r1,
-          tokenR0: fixture.Value,
+          tokenR0: r0Value,
           tokenR1: fixture.UpdateValue,
         }) === ROTATION_CLI_POST_STDOUT,
         "Rotation CLI post phase output changed",

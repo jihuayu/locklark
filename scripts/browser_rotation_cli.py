@@ -13,7 +13,10 @@ The caller invokes this script twice with one owner-only ephemeral state
 directory:
 
   pre   before the actual website password-change POST: pin R0, prove it once
-        through the real local-factor child, and audit exactly that intent.
+        through the real local-factor child, audit exactly that intent, then
+        run the real `personal health --hibp true` opt-in twice (declined and
+        consented) through the existing loopback CONNECT/TLS proxy. The only
+        breached active login is the browser save's R0.
   post  after the approved browser update to R1: keep the same R0 binding
         byte-identical through one stale refusal, audit zero new intent, then
         explicitly rebind the same item at R1, prove the R1 child, and audit
@@ -61,6 +64,21 @@ from cli_broker_acceptance import (  # noqa: E402
     write_private,
 )
 
+if str(ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tests"))
+try:
+    from e2e.support import (  # noqa: E402
+        HIBP_FIXED_HOST,
+        HIBP_HTTPS_PORT,
+        HIBP_NETWORK_PROMPT,
+        HIBP_PREFIX_RE,
+        HIBP_RANGE_SEGMENT,
+        local_hibp_range_proxy,
+    )
+except BaseException:
+    sys.stderr.write("FAIL: browser-rotation-cli prerequisites\n")
+    raise SystemExit(1)
+
 PROFILE = "token"
 SLOT = "token"
 FIELD = "password"
@@ -80,6 +98,7 @@ STALE_ERROR = b"locklark: login changed; list again and review before retrying\n
 
 PRE_STDOUT = (
     "PASS: browser-rotation-cli r0_before_website_post\n"
+    "PASS: browser-rotation-cli hibp_pre_website_post\n"
     "PASS: browser-rotation-cli pre_complete\n"
 )
 POST_STDOUT = (
@@ -91,8 +110,9 @@ POST_STDOUT = (
 
 STAGES = frozenset({
     "prerequisites", "vault", "audit-baseline", "binding-r0", "r0",
-    "audit-r0", "stale", "audit-stale", "binding-r1", "r1", "audit-r1",
-    "complete",
+    "audit-r0", "hibp-decline", "audit-hibp-decline", "hibp-consent",
+    "audit-hibp-consent", "stale", "audit-stale", "binding-r1", "r1",
+    "audit-r1", "complete",
 })
 
 PRE_KEYS = frozenset({
@@ -109,10 +129,16 @@ INIT_KEYS = frozenset({
 })
 SECRET_RECEIPT = re.compile(r"^[0-9a-f]{64}$")
 FIXTURE_PASSWORD = re.compile(r"Acceptance-[0-9a-f]{16}")
-FIXTURE_R0 = re.compile(r"Synthetic-[0-9a-f]{32}")
+FIXTURE_VALUE = re.compile(r"Synthetic-[0-9a-f]{32}")
+FIXTURE_REJECTED = re.compile(r"Synthetic-rejected-[0-9a-f]{32}")
 FIXTURE_R1 = re.compile(r"Synthetic-updated-[0-9a-f]{32}")
 FIXTURE_SECRET = re.compile(r"LL1-[A-Z2-7]{26}")
 MAX_FIXTURE = 64 * 1024
+HIBP_NETWORK_PROMPT_BYTES = HIBP_NETWORK_PROMPT.encode("utf-8")
+HIBP_CANCELLED = b"locklark: HIBP network check cancelled"
+HIBP_FIXED_TARGET = HIBP_FIXED_HOST + ":" + str(HIBP_HTTPS_PORT)
+HIBP_BREACH_COUNT = 7
+HIBP_PADDING = "0" * 35 + ":0\r\n"
 
 # Same fixed child contract as the existing CLI broker acceptance, but the
 # Linux digest utility is pinned by absolute path. The helper is generated
@@ -155,8 +181,6 @@ class RotationCLI:
         require(type(timeout) is int and 30 <= timeout <= PHASE_TIMEOUT)
         self.deadline = time.monotonic() + timeout
         self.values = [self.master, self.secret, self.token_r0]
-        if self.token_r1 is not None:
-            self.values.append(self.token_r1)
 
         self.cli = validate_cli(payload.get("cli"))
         self.vault_root = canonical_private_dir(payload.get("vaultRoot"),
@@ -168,6 +192,8 @@ class RotationCLI:
                                             "synthetic.ll")
         require(self.vault.parent == self.vault_root)
         require_within(self.vault, self.vault_root)
+        self.env = dict(os.environ)
+        self.env.pop("LOCKLARK_CLI_ACTIVE", None)
         fixture = canonical_private_file(
             str(self.vault_root / "fixture.json"), "fixture.json")
         self.require_fixture_scope(fixture)
@@ -180,16 +206,10 @@ class RotationCLI:
         self.binding = self.data_dir / "binding.json"
         self.digest_receipt = self.data_dir / "binding.sha256"
         self.receipt = self.receipt_dir / "receipt.txt"
+        self.proxy_dir = self.state_dir / "hibp-proxy"
         for path in (self.helper, self.binding, self.digest_receipt,
-                     self.receipt):
+                     self.receipt, self.proxy_dir):
             require_within(path, self.state_dir)
-        self.env = dict(os.environ)
-        self.env.pop("LOCKLARK_CLI_ACTIVE", None)
-        # Factors never enter the environment or the argv of any process this
-        # helper starts. The product alone injects the one pinned slot token
-        # into the child it prepares.
-        scan("\n".join(self.env.values()), self.values)
-        scan(" ".join(sys.argv), self.values)
 
     def require_fixture_scope(self, path):
         require(owner_only(path))
@@ -212,11 +232,64 @@ class RotationCLI:
                 == self.master)
         require(fixture_value(fixture, "Secret", FIXTURE_SECRET)
                 == self.secret)
-        require(fixture_value(fixture, "Value", FIXTURE_R0)
-                == self.token_r0)
+        # The browser save precondition ran first on this same vault: the
+        # original seed and the successfully updated saved login are the two
+        # clean controls. CLI opt-in reuses the generated rejected value as R0
+        # so the later HIBP scan has exactly one breached active login.
+        self.seed_id = fixed_hex(fixture.get("SeedID"), 32)
+        require(self.item_id != self.seed_id)
+        self.seed_value = fixture_value(fixture, "Value", FIXTURE_VALUE)
+        self.update_value = fixture_value(fixture, "UpdateValue", FIXTURE_R1)
+        self.rejected_value = fixture_value(
+            fixture, "RejectedValue", FIXTURE_REJECTED)
+        require(self.token_r0 == self.rejected_value)
         if self.phase == "post":
-            require(fixture_value(fixture, "UpdateValue", FIXTURE_R1)
-                    == self.token_r1)
+            require(self.token_r1 == self.update_value)
+        for value in (self.seed_value, self.update_value):
+            if value not in self.values:
+                self.values.append(value)
+        # Actual password / full-hash duplication would make the synthetic
+        # counts ambiguous. A mere prefix collision is handled by the response
+        # builder below and must not be refused.
+        require(len({self.rejected_value, self.seed_value,
+                     self.update_value}) == 3)
+        hashes = {self._hibp_digest(value) for value in
+                  (self.rejected_value, self.seed_value, self.update_value)}
+        require(len(hashes) == 3)
+        self.hibp_hashes = tuple(sorted(hashes))
+        self.hibp_suffixes = tuple(value[5:] for value in self.hibp_hashes)
+        self.scan_hibp("\n".join(self.env.values()))
+        self.scan_hibp(" ".join(sys.argv))
+
+    @staticmethod
+    def _hibp_digest(value):
+        digest = hashlib.sha1(value.encode("utf-8")).hexdigest().upper()
+        require(HIBP_PREFIX_RE.fullmatch(digest[:5]) is not None)
+        return digest
+
+    def scan_hibp(self, raw):
+        scan(raw, self.values)
+        scan(raw, self.hibp_hashes)
+        scan(raw, self.hibp_suffixes)
+
+    def hibp_responses(self):
+        """One target line per distinct prefix, clean controls stay zero.
+
+        The target is appended first, so an accidental shared five-hex prefix
+        still returns its own suffix while a control's suffix is absent (zero).
+        Duplicate passwords or identical full hashes were refused above.
+        """
+        responses = {}
+        for value, count in (
+            (self.rejected_value, HIBP_BREACH_COUNT),
+            (self.seed_value, 0),
+            (self.update_value, 0),
+        ):
+            digest = self._hibp_digest(value)
+            lines = responses.setdefault(digest[:5], [])
+            if count:
+                lines.append((digest[5:], count))
+        return responses
 
     # ------------------------------------------------------------- files --
     def install_helper(self):
@@ -322,9 +395,11 @@ class RotationCLI:
             "--", str(self.receipt),
         ]
 
-    def start(self, argv, capture_stderr):
-        scan(" ".join(argv), self.values)
-        return PTYChild(self.cli, argv, self.env, self.run_dir,
+    def start(self, argv, capture_stderr, environment=None):
+        self.scan_hibp(" ".join(argv))
+        environment = environment or self.env
+        self.scan_hibp("\n".join(environment.values()))
+        return PTYChild(self.cli, argv, environment, self.run_dir,
                         capture_stderr=capture_stderr)
 
     def audit(self):
@@ -346,7 +421,7 @@ class RotationCLI:
                     len(stderr) <= MAX_CHILD_OUTPUT)
             require(stderr == b"")
             for raw in (stdout, stderr, terminal):
-                scan(raw, self.values)
+                self.scan_hibp(raw)
             try:
                 events = json.loads(stdout)
             except (TypeError, ValueError):
@@ -383,6 +458,204 @@ class RotationCLI:
             require(self.receipt.read_bytes() == expected_receipt(token))
         finally:
             child.terminate()
+
+    # --------------------------------------------------------------- hibp --
+    def health_arguments(self):
+        return [str(self.cli), "personal", "health", "--file", str(self.vault),
+                "--hibp", "true"]
+
+    def health_child(self, proxy):
+        environment = dict(self.env)
+        environment.update(proxy.env)
+        return self.start(self.health_arguments(), False, environment)
+
+    def health_session(self, proxy, expected_reply, expect_success):
+        child = self.health_child(proxy)
+        try:
+            child.start()
+            child.expect(MASTER_PROMPT, self.master.encode("utf-8"),
+                         self.deadline)
+            child.expect(SECRET_PROMPT, self.secret.encode("utf-8"),
+                         self.deadline)
+            child.expect(HIBP_NETWORK_PROMPT_BYTES, expected_reply,
+                         self.deadline)
+            status = child.wait(self.deadline)
+            stdout, stderr, terminal = child.stdout(), child.stderr(), child.terminal()
+            require((status == 0) is expect_success)
+            require(len(stdout) <= MAX_EVENTS and
+                    len(stderr) <= MAX_CHILD_OUTPUT)
+            for raw in (stdout, stderr, terminal):
+                self.scan_hibp(raw)
+            return status, stdout, stderr, terminal
+        finally:
+            child.terminate()
+
+    def health_decline(self, proxy):
+        _status, stdout, stderr, terminal = self.health_session(
+            proxy, b"DECLINE", False)
+        require(stdout == b"")
+        require(stderr == b"")
+        require(HIBP_CANCELLED in terminal)
+        # The cancelled consent must stop before unlock or any socket.
+        require(not proxy.connections)
+        require(not proxy.requests)
+        require(not proxy.refused)
+
+    def health_consent(self, proxy, responses):
+        _status, stdout, stderr, _terminal = self.health_session(
+            proxy, b"NETWORK", True)
+        require(stderr == b"")
+        try:
+            payload = json.loads(stdout.decode("utf-8"))
+        except (TypeError, ValueError):
+            raise AcceptanceFailure() from None
+        self.require_health_payload(payload)
+        self.require_health_network(proxy, responses)
+        return payload
+
+    def require_health_payload(self, payload):
+        require(type(payload) is dict)
+        require(set(payload) == {
+            "status", "hibp_checked", "checked", "skipped", "findings"})
+        require(payload["status"] == "checked-hibp")
+        require(payload["hibp_checked"] is True)
+        require(type(payload["checked"]) is int)
+        require(payload["checked"] == 3)
+        require(type(payload["skipped"]) is int)
+        require(payload["skipped"] == 0)
+        findings = payload["findings"]
+        require(type(findings) is list and len(findings) == 3)
+        for finding in findings:
+            require(type(finding) is dict)
+            require(set(finding) == {
+                "id", "revision", "flags", "breach_count"})
+            require(type(finding["id"]) is str and
+                    re.fullmatch(r"[0-9a-f]{32}", finding["id"]) is not None)
+            require(type(finding["revision"]) is str and
+                    re.fullmatch(r"[0-9a-f]{64}", finding["revision"]) is not None)
+            require(type(finding["flags"]) is list and
+                    all(type(flag) is str for flag in finding["flags"]))
+            require(type(finding["breach_count"]) is int)
+        require(len({finding["id"] for finding in findings}) == 3)
+        require(len({finding["revision"] for finding in findings}) == 3)
+        targets = [finding for finding in findings
+                   if finding["id"] == self.item_id]
+        require(len(targets) == 1)
+        target = targets[0]
+        require(target["revision"] == self.r0)
+        require(target["breach_count"] == HIBP_BREACH_COUNT)
+        require("vulnerable" in target["flags"])
+        require(any(finding["id"] == self.seed_id for finding in findings))
+        for finding in findings:
+            if finding is target:
+                continue
+            require(finding["breach_count"] == 0)
+            require("vulnerable" not in finding["flags"])
+
+    def require_health_network(self, proxy, responses):
+        connections = list(proxy.connections)
+        requests = list(proxy.requests)
+        refused = list(proxy.refused)
+        require(not refused)
+        require(connections)
+        require(all(target == HIBP_FIXED_TARGET for target in connections))
+        expected = set(responses)
+        require(len(requests) == len(expected))
+        seen = set()
+        forbidden = {"cookie", "authorization", "proxy-authorization"}
+        for record in requests:
+            require(type(record) is dict)
+            path = record.get("path")
+            prefix = record.get("prefix")
+            headers = record.get("headers")
+            require(type(path) is str and type(prefix) is str and
+                    type(headers) is dict)
+            require(HIBP_PREFIX_RE.fullmatch(prefix) is not None)
+            require(path == HIBP_RANGE_SEGMENT + prefix)
+            require(prefix in expected and prefix not in seen)
+            seen.add(prefix)
+            require(record.get("unknown_prefix") is False)
+            require(record.get("refused") is not True)
+            normalised = {str(name).lower(): str(value)
+                          for name, value in headers.items()}
+            require(not (set(normalised) & forbidden))
+            require(normalised.get("add-padding") == "true")
+            self.scan_hibp(path.encode("utf-8"))
+            for name, value in normalised.items():
+                self.scan_hibp(name.encode("utf-8"))
+                self.scan_hibp(value.encode("utf-8"))
+            lines = responses[prefix]
+            require(record.get("suffixes") == [
+                {"suffix": suffix, "count": count}
+                for suffix, count in lines])
+            body = record.get("body")
+            require(type(body) is str)
+            expected_body = "".join(
+                suffix + ":" + str(count) + "\r\n"
+                for suffix, count in lines) + HIBP_PADDING
+            require(body == expected_body)
+        require(seen == expected)
+
+    def audit_actions(self, events):
+        actions = []
+        for event in events:
+            require(type(event) is dict)
+            require(type(event.get("action")) is str and
+                    type(event.get("result")) is str)
+            if event["action"] == "audit.list":
+                continue
+            actions.append((event["action"], event["result"]))
+        return actions
+
+    def health_pre_website_post(self):
+        self.stage = "hibp-decline"
+        responses = self.hibp_responses()
+        proxy = None
+        try:
+            proxy = local_hibp_range_proxy(
+                None, responses, work_parent=self.proxy_dir)
+            before = self.audit()
+            self.health_decline(proxy)
+            self.stage = "audit-hibp-decline"
+            baseline = self.audit_actions(self.audit())
+            require(baseline == self.audit_actions(before))
+            self.stage = "hibp-consent"
+            self.health_consent(proxy, responses)
+            self.stage = "audit-hibp-consent"
+            delta = self.audit_actions(self.audit())
+            require(delta[:len(baseline)] == baseline)
+            require(delta[len(baseline):] == [
+                ("desktop.unlock", "succeeded"),
+                ("vault.health.watchtower", "succeeded"),
+                ("vault.health.hibp", "intent"),
+                ("vault.health.hibp", "succeeded"),
+            ])
+        finally:
+            try:
+                if proxy is not None:
+                    proxy.close()
+            finally:
+                self.cleanup_proxy_material()
+
+    def cleanup_proxy_material(self):
+        for name in ("range.pem", "range.key"):
+            path = self.proxy_dir / name
+            if path.exists() or path.is_symlink():
+                require_within(path, self.state_dir)
+                require(not path.is_symlink() and path.is_file())
+                path.unlink()
+        trust = self.proxy_dir / "trust"
+        if trust.exists() or trust.is_symlink():
+            require_within(trust, self.state_dir)
+            require(trust.is_dir() and not trust.is_symlink())
+            for entry in trust.iterdir():
+                require(not entry.is_symlink() and entry.is_file())
+                entry.unlink()
+            trust.rmdir()
+        if self.proxy_dir.exists() or self.proxy_dir.is_symlink():
+            require_within(self.proxy_dir, self.state_dir)
+            require(self.proxy_dir.is_dir() and not self.proxy_dir.is_symlink())
+            self.proxy_dir.rmdir()
 
     def stale(self):
         require(not self.receipt.exists())
@@ -446,6 +719,10 @@ class RotationCLI:
         self.stage = "audit-r0"
         self.require_intents(self.audit(), [self.r0])
         require(self.read_digest_receipt() == self.binding_digest())
+        # Still before the caller's website password-change POST. The real
+        # HIBP opt-in is driven twice: a cancelled consent, then one consented
+        # range check over exactly the three active logins.
+        self.health_pre_website_post()
         self.stage = "complete"
 
     def post(self):
@@ -484,6 +761,10 @@ class RotationCLI:
 
     # ------------------------------------------------------------ cleanup --
     def cleanup(self):
+        try:
+            self.cleanup_proxy_material()
+        except BaseException:
+            pass
         for path in (self.receipt, self.digest_receipt, self.binding,
                      self.helper):
             if path.exists() or path.is_symlink():
