@@ -409,7 +409,7 @@ def _run_dispatch_authorization(
         binding,
     )
 
-    default_branch_sha = trust._check_policy_metadata(
+    default_branch_sha, review_policy = trust._check_policy_metadata_and_reviews(
         transport,
         repository,
         repository_info,
@@ -447,6 +447,12 @@ def _run_dispatch_authorization(
         "workflow_sha": binding.workflow_sha,
         "default_branch": trust.DEFAULT_BRANCH,
         "default_branch_commit": default_branch_sha,
+        "review_policy": review_policy.mode,
+        "required_approving_review_count": (
+            review_policy.required_approving_review_count
+        ),
+        "dismiss_stale_reviews": review_policy.dismiss_stale_reviews,
+        "require_last_push_approval": review_policy.require_last_push_approval,
         "environment": trust.PRODUCTION_ENVIRONMENT,
         "required_tag_rules": sorted(trust.REQUIRED_TAG_RULES),
         "production_secret_scope": "environment",
@@ -513,10 +519,16 @@ def authorize_desktop_release_dispatch(
             trust.Refusal.INTERNAL_ERROR,
             _SAFE_REFUSAL_DETAIL,
         )
+    detail = _SUCCESS_DETAIL
+    if facts.get("review_policy") == trust.REVIEW_POLICY_OWNER_SELECTED_ZERO:
+        detail += (
+            "; owner-selected zero effective approvals are explicitly matched "
+            "by the active main-only pull-request ruleset"
+        )
     return trust.Decision(
         "AUTHORIZE",
         trust.Refusal.AUTHORIZED,
-        _SUCCESS_DETAIL,
+        detail,
         facts,
     )
 

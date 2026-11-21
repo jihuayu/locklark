@@ -321,6 +321,18 @@ class AuthorizationTests(unittest.TestCase):
             },
         }
 
+    def zero_reviews(self) -> dict[str, object]:
+        return {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews": True,
+            "require_last_push_approval": False,
+            "bypass_pull_request_allowances": {
+                "users": [],
+                "teams": [],
+                "apps": [],
+            },
+        }
+
     def valid_protection(self) -> dict[str, object]:
         return {
             "required_status_checks": self.valid_status_checks(),
@@ -329,6 +341,14 @@ class AuthorizationTests(unittest.TestCase):
             "allow_force_pushes": {"enabled": False},
             "allow_deletions": {"enabled": False},
         }
+
+    def zero_protection(self, *, bypass_present: bool = True) -> dict[str, object]:
+        protection = self.valid_protection()
+        reviews = self.zero_reviews()
+        if not bypass_present:
+            reviews.pop("bypass_pull_request_allowances", None)
+        protection["required_pull_request_reviews"] = reviews
+        return protection
 
     def classic_protection_without_bypass(self) -> dict[str, object]:
         protection = self.valid_protection()
@@ -342,6 +362,8 @@ class AuthorizationTests(unittest.TestCase):
         *,
         ruleset_id: int = 11,
         review_count: int = 1,
+        dismiss_stale_reviews: bool = True,
+        last_push_approval: bool = True,
         source: str = REPOSITORY,
         source_type: str = "Repository",
         target: str = "branch",
@@ -365,8 +387,8 @@ class AuthorizationTests(unittest.TestCase):
                     "type": "pull_request",
                     "parameters": {
                         "required_approving_review_count": review_count,
-                        "dismiss_stale_reviews_on_push": True,
-                        "require_last_push_approval": True,
+                        "dismiss_stale_reviews_on_push": dismiss_stale_reviews,
+                        "require_last_push_approval": last_push_approval,
                     },
                 }
             ],
@@ -762,6 +784,35 @@ class AuthorizationTests(unittest.TestCase):
                 )
                 decision = self.dispatch_decision(run=run)
                 self.assertTrue(decision.authorized, decision.detail)
+
+    def test_dispatch_owner_selected_zero_policy_is_ruleset_matched(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+            self.zero_protection()
+        )
+        self.install_branch_rulesets(
+            transport,
+            [self.valid_branch_ruleset(review_count=0, last_push_approval=False)],
+        )
+        decision = self.dispatch_decision(transport=transport)
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(
+            decision.facts["review_policy"],
+            trust.REVIEW_POLICY_OWNER_SELECTED_ZERO,
+        )
+        self.assertEqual(decision.facts["required_approving_review_count"], 0)
+        self.assertFalse(decision.facts["require_last_push_approval"])
+
+        # Omitting the matched ruleset is missing protection, not zero mode.
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+            self.zero_protection()
+        )
+        self.assert_refused(
+            self.dispatch_decision(transport=transport),
+            trust.Refusal.BRANCH_RULES_ABSENT,
+        )
 
     def test_dispatch_requires_explicit_main_branch(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)
@@ -2073,7 +2124,7 @@ class AuthorizationTests(unittest.TestCase):
             ("missing reviews", {k: v for k, v in base.items() if k != "required_pull_request_reviews"}),
             ("null reviews", {**base, "required_pull_request_reviews": None}),
             (
-                "zero approvals",
+                "zero approvals with last push approval enabled",
                 {
                     **base,
                     "required_pull_request_reviews": {
@@ -2214,6 +2265,291 @@ class AuthorizationTests(unittest.TestCase):
         transport.responses[trust.branch_protection_api(REPOSITORY)] = payload
         decision = self.authorize(transport=transport)
         self.assertTrue(decision.authorized, decision.detail)
+        self.assertEqual(decision.facts["review_policy"], trust.REVIEW_POLICY_REQUIRED)
+        self.assertEqual(decision.facts["required_approving_review_count"], 2)
+        self.assertTrue(decision.facts["dismiss_stale_reviews"])
+        self.assertTrue(decision.facts["require_last_push_approval"])
+
+    def test_owner_selected_zero_approvals_require_matched_ruleset(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        zero_detail = self.valid_branch_ruleset(
+            review_count=0, last_push_approval=False
+        )
+        cases = (
+            ("explicit empty classic bypass", self.zero_protection()),
+            ("absent classic bypass", self.zero_protection(bypass_present=False)),
+        )
+        for label, protection in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    protection
+                )
+                self.install_branch_rulesets(
+                    transport, [copy.deepcopy(zero_detail)]
+                )
+                decision = self.authorize(transport=transport)
+                self.assertTrue(decision.authorized, decision.detail)
+                self.assertEqual(
+                    decision.facts["review_policy"],
+                    trust.REVIEW_POLICY_OWNER_SELECTED_ZERO,
+                )
+                self.assertEqual(
+                    decision.facts["required_approving_review_count"], 0
+                )
+                self.assertFalse(decision.facts["require_last_push_approval"])
+                self.assertIn(
+                    ("get_list", trust.branch_rulesets_api(REPOSITORY)),
+                    transport.calls,
+                )
+
+        # At zero approvals stale dismissal has no approval to act on. An
+        # explicit boolean false is still a valid, matched metadata value.
+        protection = self.zero_protection()
+        reviews = dict(protection["required_pull_request_reviews"])  # type: ignore[arg-type]
+        reviews["dismiss_stale_reviews"] = False
+        protection["required_pull_request_reviews"] = reviews
+        detail = self.valid_branch_ruleset(
+            review_count=0,
+            last_push_approval=False,
+            dismiss_stale_reviews=False,
+        )
+        transport = self.valid_transport()
+        transport.responses[trust.branch_protection_api(REPOSITORY)] = protection
+        self.install_branch_rulesets(transport, [detail])
+        decision = self.authorize(transport=transport)
+        self.assertTrue(decision.authorized, decision.detail)
+        self.assertFalse(decision.facts["dismiss_stale_reviews"])
+
+    def test_owner_selected_zero_approval_classic_metadata_fails_closed(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        zero_detail = self.valid_branch_ruleset(
+            review_count=0, last_push_approval=False
+        )
+        missing = object()
+
+        def protection_with(**changes: object) -> dict[str, object]:
+            protection = self.zero_protection()
+            reviews = dict(protection["required_pull_request_reviews"])  # type: ignore[arg-type]
+            for key, value in changes.items():
+                if value is missing:
+                    reviews.pop(key, None)
+                else:
+                    reviews[key] = value
+            protection["required_pull_request_reviews"] = reviews
+            return protection
+
+        without_reviews = self.zero_protection()
+        without_reviews.pop("required_pull_request_reviews")
+        cases: list[tuple[str, dict[str, object]]] = [
+            ("missing reviews", without_reviews),
+            (
+                "missing count",
+                protection_with(required_approving_review_count=missing),
+            ),
+            (
+                "boolean count",
+                protection_with(required_approving_review_count=True),
+            ),
+            (
+                "string count",
+                protection_with(required_approving_review_count="0"),
+            ),
+            (
+                "negative count",
+                protection_with(required_approving_review_count=-1),
+            ),
+            (
+                "missing last push approval",
+                protection_with(require_last_push_approval=missing),
+            ),
+            (
+                "true last push approval",
+                protection_with(require_last_push_approval=True),
+            ),
+            (
+                "integer last push approval",
+                protection_with(require_last_push_approval=0),
+            ),
+            (
+                "missing stale dismissal",
+                protection_with(dismiss_stale_reviews=missing),
+            ),
+            (
+                "null stale dismissal",
+                protection_with(dismiss_stale_reviews=None),
+            ),
+            (
+                "nonempty classic bypass",
+                protection_with(
+                    bypass_pull_request_allowances={
+                        "users": [{"login": "untrusted"}],
+                        "teams": [],
+                        "apps": [],
+                    }
+                ),
+            ),
+            (
+                "malformed classic bypass",
+                protection_with(bypass_pull_request_allowances=None),
+            ),
+        ]
+        for label, protection in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    protection
+                )
+                # A valid ruleset must not rescue malformed classic metadata.
+                self.install_branch_rulesets(
+                    transport, [copy.deepcopy(zero_detail)]
+                )
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.BRANCH_PROTECTION_INSUFFICIENT,
+                )
+                self.assertFalse(
+                    any(
+                        path == trust.branch_rulesets_api(REPOSITORY)
+                        for _, path in transport.calls
+                    )
+                )
+
+    def test_owner_selected_zero_approval_ruleset_metadata_fails_closed(self) -> None:
+        self.git.lightweight_tag(TAG, self.git.reviewed)
+        valid_detail = self.valid_branch_ruleset(
+            review_count=0, last_push_approval=False
+        )
+
+        def detail_with() -> dict[str, object]:
+            return copy.deepcopy(valid_detail)
+
+        cases: list[
+            tuple[str, dict[str, object] | None, bool, trust.Refusal]
+        ] = []
+
+        def add_detail(
+            label: str,
+            detail: dict[str, object],
+            expected: trust.Refusal = trust.Refusal.BRANCH_RULES_INSUFFICIENT,
+        ) -> None:
+            cases.append((label, detail, True, expected))
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = 1
+        add_detail("ruleset count one", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = 2
+        add_detail("ruleset count stronger but unmatched", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"].pop(  # type: ignore[index]
+            "required_approving_review_count"
+        )
+        add_detail("ruleset count missing", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "required_approving_review_count"
+        ] = True
+        add_detail("ruleset count boolean", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"].pop(  # type: ignore[index]
+            "dismiss_stale_reviews_on_push"
+        )
+        add_detail("ruleset stale dismissal missing", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "dismiss_stale_reviews_on_push"
+        ] = 1
+        add_detail("ruleset stale dismissal non-boolean", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "require_last_push_approval"
+        ] = True
+        add_detail("ruleset last push approval true", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"].pop(  # type: ignore[index]
+            "require_last_push_approval"
+        )
+        add_detail("ruleset last push approval missing", detail)
+
+        detail = detail_with()
+        detail["rules"][0]["parameters"][  # type: ignore[index]
+            "require_last_push_approval"
+        ] = 0
+        add_detail("ruleset last push approval non-boolean", detail)
+
+        detail = detail_with()
+        detail.pop("bypass_actors")
+        add_detail("ruleset bypass actors missing", detail)
+
+        detail = detail_with()
+        detail["bypass_actors"] = None
+        add_detail("ruleset bypass actors hidden", detail)
+
+        detail = detail_with()
+        detail["bypass_actors"] = [{"actor_type": "OrganizationAdmin"}]
+        add_detail("ruleset bypass actors nonempty", detail)
+
+        detail = detail_with()
+        detail["target"] = "tag"
+        add_detail("ruleset target tag", detail)
+
+        detail = detail_with()
+        detail["enforcement"] = "evaluate"
+        add_detail("ruleset enforcement not active", detail)
+
+        detail = detail_with()
+        detail["conditions"] = {
+            "ref_name": {"include": ["refs/heads/release"], "exclude": []}
+        }
+        add_detail("ruleset not main-only", detail)
+
+        detail = detail_with()
+        detail["source_type"] = "Organization"
+        detail["source"] = OWNER
+        add_detail("ruleset parent source", detail)
+
+        for label, detail, install, expected in cases:
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    self.zero_protection()
+                )
+                if install:
+                    self.install_branch_rulesets(
+                        transport, [detail] if detail is not None else []
+                    )
+                self.assert_refused(
+                    self.authorize(transport=transport), expected
+                )
+
+        # A missing or empty branch-ruleset list is distinct from an
+        # intentionally matched zero policy.
+        for label, payload in (("list absent", None), ("list empty", [])):
+            with self.subTest(case=label):
+                transport = self.valid_transport()
+                transport.responses[trust.branch_protection_api(REPOSITORY)] = (
+                    self.zero_protection()
+                )
+                if payload is not None:
+                    transport.responses[trust.branch_rulesets_api(REPOSITORY)] = (
+                        payload
+                    )
+                self.assert_refused(
+                    self.authorize(transport=transport),
+                    trust.Refusal.BRANCH_RULES_ABSENT,
+                )
 
     def test_classic_bypass_absent_composed_ruleset_proof(self) -> None:
         self.git.lightweight_tag(TAG, self.git.reviewed)

@@ -29,9 +29,14 @@ positive user id as the event sender. The workflow path must be exactly
 ## Policy reuse and ancestry
 
 The routing path reuses every C1 policy gate: app-bound required status checks,
-review enforcement with the auxiliary no-bypass ruleset proof, admin/force/
-delete settings, immutable tag rules, production environment branch restriction,
-and environment-only production credential metadata. It resolves the exact real
+the required-pull-request review policy, admin/force/delete settings, immutable
+tag rules, production environment branch restriction, and environment-only
+production credential metadata. The review policy may be one or more required
+approvals or an explicit owner-selected zero-approval policy; zero effective
+approvals are accepted only when the classic protection metadata and the
+matched active main-only PR ruleset both explicitly encode `0`, explicitly
+disable last-push approval, and keep the bypass evidence explicitly empty.
+It resolves the exact real
 local tag object and commit, requires that commit to be an ancestor of the
 trusted workflow SHA, and requires the workflow SHA to be an ancestor of the
 current API-protected default-branch tip.
