@@ -72,8 +72,6 @@ func TestDarwinBrowserSaveRevisionPinsBrokerPreparation(t *testing.T) {
 		mu.Lock()
 		approvals++
 		mu.Unlock()
-		// Every request here receives an explicit approve decision. The product
-		// still decides whether the approved target is current.
 		return true, nil
 	}
 	approved := func() int {
@@ -130,7 +128,8 @@ func TestDarwinBrowserSaveRevisionPinsBrokerPreparation(t *testing.T) {
 		t.Fatal("saved revision is not the committed revision of the same item")
 	}
 
-	// 3. The approved stale R0 target is refused by preparation, not disclosed.
+	// 3. The stale R0 target is refused by the fixed preapproval check, which
+	// reaches no approver and returns no prepared values.
 	stale := req
 	stale.Scope = req.Scope.Clone()
 	stale.Scope.Nonce = desktopFreshNonce(t)
@@ -145,8 +144,8 @@ func TestDarwinBrowserSaveRevisionPinsBrokerPreparation(t *testing.T) {
 		t.Fatalf("stale R0 target was not the fixed denial without prepared values (refused=%v, prepared=%v)",
 			errors.Is(err, browserhost.ErrCLIRunRefused), desktopHasCLIPrepared(staleResp))
 	}
-	if got := approved(); got != 2 {
-		t.Fatalf("approved test-only decisions after stale R0 = %d, want 2", got)
+	if got := approved(); got != 1 {
+		t.Fatalf("approved test-only decisions after stale R0 = %d, want 1", got)
 	}
 
 	// 4. Only the explicitly approved current R1 discloses its new value.
@@ -160,7 +159,7 @@ func TestDarwinBrowserSaveRevisionPinsBrokerPreparation(t *testing.T) {
 	defer desktopReleaseCLIPrepared(currentResp)
 	desktopAssertCLIPrepared(t, "R1 broker preparation", currentResp, err, current.Targets)
 	desktopAssertCLIPreparedBytes(t, "R1 broker preparation", currentResp, "token", string(wantR1))
-	if got := approved(); got != 3 {
-		t.Fatalf("approved test-only decisions after R1 = %d, want 3", got)
+	if got := approved(); got != 2 {
+		t.Fatalf("approved test-only decisions after R1 = %d, want 2", got)
 	}
 }
