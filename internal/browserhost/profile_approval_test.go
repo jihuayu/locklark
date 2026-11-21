@@ -3,6 +3,7 @@ package browserhost
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -141,6 +142,122 @@ func profileRaw(out *memoryPipe) []byte {
 	return bytes.Clone(out.Buffer.Bytes())
 }
 
+// profileBlankToken and profileBlankRevision remove only canonical opaque
+// selectors from the documented response metadata levels below.
+func profileBlankToken(fields map[string]any, key string) {
+	if value, ok := fields[key].(string); ok && token.MatchString(value) {
+		fields[key] = ""
+	}
+}
+
+func profileBlankRevision(fields map[string]any, key string) {
+	if value, ok := fields[key].(string); ok && revision.MatchString(value) {
+		fields[key] = ""
+	}
+}
+
+// profileScanEnvelope filters only the decoded response envelope, its
+// profile_fill selectors and each profiles entry's documented fingerprint
+// fields. Nested fields, credit_card, identity and unknown objects are never
+// traversed or suppressed.
+func profileScanEnvelope(envelope map[string]any) {
+	profileBlankToken(envelope, "id")
+	profileBlankToken(envelope, "item_id")
+	profileBlankToken(envelope, "capability")
+	profileBlankRevision(envelope, "revision")
+	profileBlankRevision(envelope, "nonce")
+	if fill, ok := envelope["profile_fill"].(map[string]any); ok {
+		profileBlankToken(fill, "item_id")
+		profileBlankRevision(fill, "revision")
+	}
+	if profiles, ok := envelope["profiles"].([]any); ok {
+		for _, entry := range profiles {
+			profile, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			profileBlankToken(profile, "id")
+			profileBlankRevision(profile, "revision")
+		}
+	}
+}
+
+// profileRawForScan rewrites native response frames for the fixture privacy
+// checks only. It blanks canonical opaque wire metadata values and preserves
+// every data-bearing value and literal property name, so no secret-bearing
+// payload is skipped.
+func profileRawForScan(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var scan bytes.Buffer
+	frames := bytes.NewReader(raw)
+	for {
+		frame, e := readFrame(frames, MaxOutput)
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			t.Fatal("profile response frame is unreadable")
+		}
+		var value any
+		if e := json.Unmarshal(frame, &value); e != nil {
+			t.Fatal("profile response frame is not valid JSON")
+		}
+		if envelope, ok := value.(map[string]any); ok {
+			profileScanEnvelope(envelope)
+		}
+		encoder := json.NewEncoder(&scan)
+		encoder.SetEscapeHTML(false)
+		if e := encoder.Encode(value); e != nil {
+			t.Fatal("profile response frame cannot be scanned")
+		}
+	}
+	return scan.Bytes()
+}
+
+func TestProfileScanOnlyBlanksOpaqueWireMetadata(t *testing.T) {
+	const marker = "4321"
+	hex32 := strings.Repeat("a", 28) + marker
+	hex64 := strings.Repeat("b", 60) + marker
+	wrong31 := strings.Repeat("a", 27) + marker
+	wrong63 := strings.Repeat("b", 59) + marker
+	if len(hex32) != 32 || len(hex64) != 64 || len(wrong31) != 31 || len(wrong63) != 63 {
+		t.Fatal("synthetic marker fixture has the wrong length")
+	}
+	syntheticFrame := func(t *testing.T, value map[string]any) []byte {
+		t.Helper()
+		raw, e := json.Marshal(value)
+		if e != nil {
+			t.Fatal("synthetic frame marshal failed")
+		}
+		var out bytes.Buffer
+		if e := writeFrame(&out, raw); e != nil {
+			t.Fatal("synthetic frame write failed")
+		}
+		return out.Bytes()
+	}
+	check := func(name string, value map[string]any, want bool) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			got := profileRawForScan(t, syntheticFrame(t, value))
+			if bytes.Contains(got, []byte(marker)) != want {
+				t.Fatalf("marker detection = %v, want %v", !want, want)
+			}
+		})
+	}
+	check("documented fingerprint fields ignored", map[string]any{
+		"id": hex32, "item_id": hex32, "capability": hex32, "revision": hex64, "nonce": hex64,
+		"profile_fill": map[string]any{"item_id": hex32, "revision": hex64},
+		"profiles":     []any{map[string]any{"id": hex32, "revision": hex64}},
+	}, false)
+	check("nested id remains", map[string]any{"fields": map[string]any{"id": marker}}, true)
+	check("wrong lengths remain", map[string]any{"id": wrong31, "revision": wrong63}, true)
+	check("cross-field lengths remain", map[string]any{"id": hex64, "revision": hex32}, true)
+	scan := profileRawForScan(t, syntheticFrame(t, map[string]any{"pin": ""}))
+	if !bytes.Contains(scan, []byte(`"pin"`)) {
+		t.Fatal("literal pin property was filtered")
+	}
+}
+
 func profileResponsesOfType(out *memoryPipe, t *testing.T, kind string) int {
 	count := 0
 	for _, r := range out.responses(t) {
@@ -204,7 +321,7 @@ func TestFillProfileNeverDeliversBeforeNativeApproval(t *testing.T) {
 	if fill.ProfileFill.CreditCard == nil || fill.ProfileFill.CreditCard.PIN != "" || fill.ProfileFill.CreditCard.Number != "4242424242424242" {
 		t.Fatalf("structured card fill: %#v", fill.ProfileFill.CreditCard)
 	}
-	raw := profileRaw(f.out)
+	raw := profileRawForScan(t, profileRaw(f.out))
 	if bytes.Contains(raw, []byte("4321")) || bytes.Contains(raw, []byte(`"pin"`)) {
 		t.Fatal("approved card response exposed the card PIN")
 	}
@@ -460,7 +577,7 @@ func TestFillProfileIdentityWhitelist(t *testing.T) {
 	if fill.ProfileFill.Fields["given-name"] != "Alice" || fill.ProfileFill.Fields["family-name"] != "Smith" {
 		t.Fatalf("identity mapping: %#v", fill.ProfileFill.Fields)
 	}
-	raw := profileRaw(f.out)
+	raw := profileRawForScan(t, profileRaw(f.out))
 	for _, secret := range []string{"123-45-6789", "P-999888", "D-777666", "4321"} {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Fatalf("identity response leaked private identifier %q", secret)
