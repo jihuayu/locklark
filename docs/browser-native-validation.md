@@ -22,10 +22,11 @@ Chrome/Edge 使用 Chromium 宿主；Firefox 有独立启动身份、注册及�
 
 首次完整验收发现锁库提示被异步失败覆盖，保留失败日志并修复；随后 `browser-native-e2e.log` 已通过：批准前字段为空、批准后两字段与合成值一致、未自动提交、原生拒绝后无值、文档导航后旧请求不填新页面、锁库停止匹配/交付且提示锁定、浏览器控制台不含合成秘密。合成证据目录 `/tmp/locklark-browser-acceptance-vTSzqm`，原生确认截图 `native-confirm.png`；合成因素目录不上传、不提交。真实 DOM 测试还覆盖隐藏/disabled/readonly/歧义字段、跨来源表单 action/base 与 iframe 拒绝，见 `browser-dom.log`。
 
-复跑命令（路径按本机调整）：
+本机原生验收使用合成金库。与 Linux Web CI 一样，先安装 `imagemagick` 包以提供截图工具 `import`，并通过 `LOCKLARK_DESKTOP_LAYOUT=classic` 启用解锁脚本使用的「金库文件」输入。按本机环境调整下方路径。
 
 ```sh
 DISPLAY=:94 \
+LOCKLARK_DESKTOP_LAYOUT=classic \
 LOCKLARK_TEST_PLAYWRIGHT=/workspace/locklark/web/node_modules/playwright \
 LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
 LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-chromium \
@@ -104,10 +105,11 @@ Luna/max 对 Linux 两宿主无障碍环境恢复、Windows 启动测试路径�
 主代理对最终 Chromium 控件/进程定位与私密截图版再次独立验收通过：`browser-xvfb-final-parent.log`，私有诊断目录 `locklark-browser-acceptance-d36xtN/diagnostics-103CUb`。定向 Go desktop/browserhost 与 15 项 Node 回归亦由主代理独立通过（`browser-parent-incremental-go.log`、`browser-parent-incremental-node.log`）。Firefox 最终仓库脚本亦由主代理独立复跑通过：`firefox-repo-final-parent.log`，私有目录 `locklark-firefox-native-lVt62A`。精确新 head CI 结果随后记录。
 
 
-Firefox 最终复跑命令（使用已经运行的隔离显示，路径按本机调整）：
+Firefox 最终复跑命令（使用已运行的隔离显示，路径按本机调整，安装 `imagemagick` 包以提供截图工具 `import`，并设置 `LOCKLARK_DESKTOP_LAYOUT=classic`）：
 
 ```sh
 DISPLAY=:95 \
+LOCKLARK_DESKTOP_LAYOUT=classic \
 LOCKLARK_FIREFOX=/home/agent/.cache/ms-playwright/firefox-1555/firefox/firefox \
 LOCKLARK_GECKODRIVER=/tmp/locklark-validation/firefox-document-binding/geckodriver \
 LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
