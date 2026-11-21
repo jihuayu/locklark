@@ -1165,16 +1165,23 @@ test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive
   const routeFunction =
     "function routeModeCompatible() " +
     sourceBlock(nativeSource, "function routeModeCompatible()");
-  const compatible = (env) =>
-    new Function("process", routeFunction + "; return routeModeCompatible;")({
-      env,
-    })();
+  // The extracted function's `rotationRequested` free variable is bound from
+  // the helper's explicit simulated argument. Its default is rotation-off, so
+  // every pre-existing pair/disconnect assertion keeps its original meaning.
+  const compatible = (env, rotationRequested = false) =>
+    new Function(
+      "process",
+      "rotationRequested",
+      routeFunction + "; return routeModeCompatible;",
+    )({ env }, rotationRequested)();
   assert.equal(compatible({}), true);
   assert.equal(
     compatible({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }),
     false,
   );
   assert.equal(compatible({ LOCKLARK_TEST_EDGE_INSTALL_ONLY: "1" }), false);
+  // Rotation is not compatible with the default Edge route either.
+  assert.equal(compatible({}, true), false);
   // Execute the actual guard block with a synthetic Edge launch context and
   // the same assert implementation it uses in production.
   const guard = (env, browser, executable) =>
