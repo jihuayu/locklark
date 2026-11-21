@@ -59,6 +59,22 @@ assert(
   "Rotation mode requires an explicit opt-in",
 );
 const rotationRequested = rotationFlag === "1";
+// Explicit opt-in on top of the rotation journey only: after the browser has
+// saved R0 and before the actual website POST, and again after the approved
+// browser update to R1, the same synthetic vault is driven through the real
+// built `locklark cli` local-factor prompts. The executable is explicit; the
+// mode never selects a product fallback, broker, or test hook.
+const rotationCliFlag = process.env.LOCKLARK_TEST_BROWSER_ROTATION_CLI;
+assert(
+  [undefined, "", "0", "1"].includes(rotationCliFlag),
+  "Browser rotation CLI mode requires an explicit opt-in",
+);
+const rotationCliRequested = rotationCliFlag === "1";
+if (rotationCliRequested)
+  assert(
+    rotationRequested,
+    "Browser rotation CLI mode requires browser rotation mode",
+  );
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
 // prefix and one fixed phase, printed only at its real launch boundary.
 const CHECKOUT_STARTUP_PREFIX = "Native checkout startup: ";
@@ -280,6 +296,30 @@ if (rotationRequested) {
       register,
     "Rotation mode requires same-run prebuilt inputs",
   );
+}
+// The browser-to-CLI chain never accepts a command name or a lookup result:
+// only one explicit absolute regular executable, with an execute bit, is
+// valid. Keep the check after the rotation guard so an off invocation cannot
+// touch the filesystem for the CLI mode.
+let rotationCliExecutable = null;
+if (rotationCliRequested) {
+  try {
+    const raw = process.env.LOCKLARK_TEST_BROWSER_ROTATION_CLI_BIN;
+    assert(
+      typeof raw === "string" &&
+        raw.startsWith("/") &&
+        !/[\r\n\0]/.test(raw),
+      "Browser rotation CLI requires an explicit executable",
+    );
+    const info = lstatSync(raw);
+    assert(
+      info.isFile() && !info.isSymbolicLink() && (info.mode & 0o111) !== 0,
+      "Browser rotation CLI requires an explicit executable",
+    );
+    rotationCliExecutable = resolve(raw);
+  } catch {
+    throw Error("Browser rotation CLI requires an explicit executable");
+  }
 }
 // After every route/Edge compatibility assertion above: a checkout invocation
 // in any of those modes is refused there, so this is the first point at which
@@ -3423,6 +3463,7 @@ try {
         key: readFileSync(key),
         cert: readFileSync(cert),
         returnURL: origin + "/login",
+        rotationCli: rotationCliExecutable,
       });
       console.log(
         "PASS: Linux browser rotation subjourney only " +

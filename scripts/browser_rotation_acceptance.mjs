@@ -4,10 +4,45 @@
 // extension generator, staging receipt, or direct product RPC.
 import assert from "node:assert/strict";
 import { request } from "node:https";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import {
   createBrowserRotationSite,
   ROTATION_SITE_HOST,
 } from "./browser_rotation_site.mjs";
+
+// The optional browser-to-CLI chain has exactly these fixed terminal outputs.
+// They carry no path, value, item ID, revision or raw CLI output.
+const ROTATION_CLI_PRE_STDOUT =
+  "PASS: browser-rotation-cli r0_before_website_post\n" +
+  "PASS: browser-rotation-cli pre_complete\n";
+const ROTATION_CLI_POST_STDOUT =
+  "PASS: browser-rotation-cli stale_exact_refusal_no_intent\n" +
+  "PASS: browser-rotation-cli r1_rebound_same_item\n" +
+  "PASS: browser-rotation-cli r1_child_two_intents\n" +
+  "PASS: browser-rotation-cli post_complete\n";
+const ROTATION_CLI_TIMEOUT_MS = 150000;
+// The helper's own deadline is shorter, so it can stop and reap its owned PTY
+// child and report the actual fixed stage before this spawn timeout fires.
+const ROTATION_CLI_PHASE_TIMEOUT_MS = 90000;
+const ROTATION_CLI_MAX_OUTPUT = 64 * 1024;
+const ROTATION_CLI_STAGES = new Set([
+  "prerequisites",
+  "vault",
+  "audit-baseline",
+  "binding-r0",
+  "r0",
+  "audit-r0",
+  "stale",
+  "audit-stale",
+  "binding-r1",
+  "r1",
+  "audit-r1",
+  "complete",
+]);
+const ROTATION_CLI_FAILURE =
+  /^FAIL: browser-rotation-cli ([a-z0-9-]+)\n?$/;
 
 // Independent Basic verification through the same owned TLS endpoint. Every
 // call opens a fresh connection; only the private fixture CA is trusted.
@@ -79,6 +114,10 @@ export async function acceptBrowserRotation(driver) {
     key,
     cert,
     returnURL,
+    rotationCli,
+    root,
+    state,
+    env,
   } = driver;
   const step = (name) => phase("rotation:" + name);
   let site;
@@ -87,6 +126,62 @@ export async function acceptBrowserRotation(driver) {
   let cleaned = false;
   let failed = false;
   let receipt;
+  let cliStateDir = null;
+  let cliEvidence = null;
+  const cliRequested = Boolean(rotationCli);
+  const cliScript = join(root, "scripts/browser_rotation_cli.py");
+  const fixtureRoot = join(state, "vault");
+
+  // Only the fixed stage in the helper's own FAIL line is ever promoted into
+  // the existing phase report. Raw streams and paths stay in this process.
+  const failedCliStage = (stderr) => {
+    if (typeof stderr !== "string") return null;
+    const match = ROTATION_CLI_FAILURE.exec(stderr);
+    return match && ROTATION_CLI_STAGES.has(match[1]) ? match[1] : null;
+  };
+
+  // One separate Python invocation per phase, with all inputs (including the
+  // synthetic factors) on bounded stdin JSON. Only its fixed PASS lines are
+  // accepted; raw CLI output, paths and failures never enter this process.
+  const runRotationCli = (phaseName, itemID, extra) => {
+    assert(cliStateDir, "Rotation CLI state directory missing");
+    const input = JSON.stringify({
+      version: 1,
+      phase: phaseName,
+      cli: rotationCli,
+      vault: fixture.Path,
+      vaultRoot: fixtureRoot,
+      stateDir: cliStateDir,
+      itemID,
+      masterPassword: fixture.Password,
+      secretKey: fixture.Secret,
+      timeout: Math.floor(ROTATION_CLI_PHASE_TIMEOUT_MS / 1000),
+      ...extra,
+    });
+    assert(
+      Buffer.byteLength(input, "utf8") <= 64 * 1024,
+      "Rotation CLI input too large",
+    );
+    const result = spawnSync("python3", [cliScript], {
+      cwd: root,
+      env,
+      input,
+      encoding: "utf8",
+      timeout: ROTATION_CLI_TIMEOUT_MS,
+      maxBuffer: ROTATION_CLI_MAX_OUTPUT,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const runtimeFailure =
+      result.error !== undefined ||
+      result.signal !== null ||
+      result.status !== 0;
+    if (runtimeFailure) {
+      const stage = failedCliStage(result.stderr);
+      if (stage) step("cli-" + phaseName + "-failure:" + stage);
+    }
+    assert(!runtimeFailure, "Rotation CLI phase failed");
+    return result.stdout;
+  };
 
   // Ordinary typing only: focus the real control, replace its contents and
   // insert the synthetic value through browser keyboard input.
@@ -251,6 +346,30 @@ export async function acceptBrowserRotation(driver) {
       "Rotation R0 must authenticate before the password change",
     );
 
+    if (cliRequested) {
+      // This is before the actual password-change POST below: the browser-made
+      // R0 is already the exact vault row, and the real CLI must use it once.
+      step("cli-r0:before-website-post");
+      assert(
+        fixture.Path === join(state, "vault", "synthetic.ll"),
+        "Rotation CLI vault must be the owned synthetic fixture",
+      );
+      cliStateDir = mkdtempSync(join(state, "rotation-cli-"));
+      assert(
+        runRotationCli("pre", itemID, {
+          revisionR0: r0,
+          tokenR0: fixture.Value,
+        }) === ROTATION_CLI_PRE_STDOUT,
+        "Rotation CLI pre phase output changed",
+      );
+      cliEvidence = {
+        cliR0BeforeWebsitePost: true,
+        cliR0BindingCreated: true,
+        cliR0ExactChild: true,
+        cliR0AuditIntent: true,
+      };
+    }
+
     step("change-r1");
     // This checkpoint uses the private fixture's UpdateValue as an ordinary
     // typed R1. Extension-generated/staged saves stay a separate, unclaimed
@@ -367,6 +486,33 @@ export async function acceptBrowserRotation(driver) {
       "Rotation update must advance the same item from the exact R0 revision",
     );
 
+    if (cliRequested) {
+      // The R0 binding created before the website POST stays byte-identical
+      // through one explicit stale refusal, then the same item is explicitly
+      // rebound at R1 and run once more. Both runs use hidden local factors
+      // and the deliberate RUN consent; only fixed booleans are retained.
+      step("cli-r1:stale-then-rebind");
+      assert(
+        runRotationCli("post", itemID, {
+          revisionR0: r0,
+          revisionR1: r1,
+          tokenR0: fixture.Value,
+          tokenR1: fixture.UpdateValue,
+        }) === ROTATION_CLI_POST_STDOUT,
+        "Rotation CLI post phase output changed",
+      );
+      cliEvidence = {
+        ...cliEvidence,
+        cliBindingUnchangedThroughStale: true,
+        cliStaleExactRefusal: true,
+        cliStaleNoChild: true,
+        cliStaleNoNewIntent: true,
+        cliR1ReboundSameItem: true,
+        cliR1ExactChild: true,
+        cliAuditIntentDeltas: 2,
+      };
+    }
+
     step("refill-login-r1");
     await closePopups();
     await fillAndLogin(itemID, r1, fixture.Username, fixture.UpdateValue);
@@ -408,12 +554,25 @@ export async function acceptBrowserRotation(driver) {
       passwordChanges: counts.passwordChanges,
       basicAccepted: counts.basicAccepted,
       basicRejected: counts.basicRejected,
+      ...(cliEvidence ?? {}),
     };
     completed = true;
     step("cleanup");
   } catch {
     failed = true;
   } finally {
+    try {
+      if (cliStateDir) {
+        assert(
+          cliStateDir.startsWith(join(state, "rotation-cli-")),
+          "Rotation CLI cleanup target changed",
+        );
+        rmSync(cliStateDir, { recursive: true, force: true });
+        cliStateDir = null;
+      }
+    } catch {
+      failed = true;
+    }
     try {
       await closePopups();
       await page.goto(returnURL);
