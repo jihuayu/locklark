@@ -3,7 +3,7 @@ package personal
 import (
 	"math/rand"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // personalCapacityItem mirrors the vault capacity fixture for package-local

@@ -47,7 +47,7 @@ test("real directory → Go broker → Next.js → browser stays read-only and p
   ).toBeVisible();
   await expect(page.getByText("本地目录已验证", { exact: true })).toBeVisible();
   const cookies = await context.cookies();
-  const cookie = cookies.find((c) => c.name === "locklark_management");
+  const cookie = cookies.find((c) => c.name === "passme_management");
   expect(cookie?.httpOnly).toBe(true);
   expect(cookie?.secure).toBe(true);
   expect(cookie?.sameSite).toBe("Strict");
@@ -140,7 +140,7 @@ test("real directory → Go broker → Next.js → browser stays read-only and p
   await page.getByRole("button", { name: "刷新状态" }).click();
   await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
   const revoked = await request.get("/api/summary", {
-    headers: { Cookie: `locklark_management=${cookie?.value}` },
+    headers: { Cookie: `passme_management=${cookie?.value}` },
   });
   expect(revoked.status()).toBe(401);
   const direct = await request.get(`${config.connection.url}/v1/summary`, {

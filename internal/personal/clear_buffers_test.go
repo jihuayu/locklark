@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -233,7 +233,7 @@ func TestCommandCloseZeroesAttachmentBytes(t *testing.T) {
 }
 
 func TestReadAuthenticatedItemsZeroesDecodedAttachmentBody(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owner.ll")
+	path := filepath.Join(t.TempDir(), "owner.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -322,7 +322,7 @@ func TestAddItemReopenKeepsNewValue(t *testing.T) {
 // buffers stay byte-exact while the stored value reopens intact.
 func TestLegacyAddKeepsCallerBuffersAndReopens(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "legacy.ll")
+	path := filepath.Join(dir, "legacy.pm")
 	key := bytes.Repeat([]byte{42}, 16)
 	if err := Create(path, "legacy-fixture", key); err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func TestLegacyAddKeepsCallerBuffersAndReopens(t *testing.T) {
 // caller's seed stays intact for saveSSHKey's outer defer, while the sealed
 // key reopens byte-exact and stays listed.
 func TestSSHAddKeepsCallerSeedAndReopens(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ssh.ll")
+	path := filepath.Join(t.TempDir(), "ssh.pm")
 	key := bytes.Repeat([]byte{43}, 16)
 	if err := Create(path, "ssh-fixture", key); err != nil {
 		t.Fatal(err)

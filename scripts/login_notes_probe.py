@@ -6,7 +6,7 @@ from browser_native_x11 import NativeControls, AccessibilityQueryUnavailable
 
 class NotesMetadataReader(NativeControls):
     def __init__(self,pid):
-        super().__init__("Locklark · 本地金库",pid)
+        super().__init__("Passme · 本地金库",pid)
 
     def inspect(self,item_id,revision):
         if not re.fullmatch("[0-9a-f]{32}",item_id) or not re.fullmatch("[0-9a-f]{64}",revision):

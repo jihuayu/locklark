@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // CLIRunApprovalMaxLifetime bounds one legacy CLI approval from the request
@@ -963,7 +963,7 @@ func peerProcessAllowed(peer Peer) bool {
 }
 
 // peerProcessAllowedFor is the pure policy used by tests. The process must be
-// the desktop's own canonical executable or one exact Locklark browser host
+// the desktop's own canonical executable or one exact Passme browser host
 // name at any absolute installation directory. The directory is deliberately
 // not constrained: native-host registration accepts any absolute --host path.
 // What binds the peer is the OS-authenticated canonical path, its exact
@@ -1006,7 +1006,7 @@ func trustedBrowserHostName(name, goos string) bool {
 		name = strings.TrimSuffix(name, ".exe")
 	}
 	switch name {
-	case "locklark-browser-chromium", "locklark-browser-firefox", "locklark-browser-safari":
+	case "passme-browser-chromium", "passme-browser-firefox", "passme-browser-safari":
 		return true
 	}
 	return false

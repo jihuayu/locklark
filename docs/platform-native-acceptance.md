@@ -319,7 +319,7 @@ python3 scripts/native_acceptance_driver.py --platform macos < request.json
 ```
 
 `request.json` is the same document the `.mjs` callers already build, e.g.
-`{"title":"Locklark · 浏览器原生确认","executable":"C:\\Program Files\\...\\browser.exe",
+`{"title":"Passme · 浏览器原生确认","executable":"C:\\Program Files\\...\\browser.exe",
 "actions":[{"click_label":"批准本次填充"}]}`.
 
 Real runs are opt-in, one action per invocation, on a dedicated test desktop and

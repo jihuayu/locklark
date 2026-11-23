@@ -18,7 +18,7 @@
 
 ## 失败先行与验证
 
-先运行新增引用测试，由缺失 References/RevealReference/引用请求接口导致编译失败，日志 `/tmp/locklark-validation/personal-reference-red.log`。实现后覆盖：
+先运行新增引用测试，由缺失 References/RevealReference/引用请求接口导致编译失败，日志 `/tmp/passme-validation/personal-reference-red.log`。实现后覆盖：
 
 - 真实加密库目录无字段值；规范 ID 引用、别名/大小写；写终端时另一事务可看到已提交的稳定字段意图，条目修订不变。
 - 重名、名称冒充 ID、不存在目标、错误类型、旧修订与错库，拒绝事件只含固定类别；直接 ID 路径保持可用。

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // A native keychain failure, an expired capsule and a cancelled prompt are

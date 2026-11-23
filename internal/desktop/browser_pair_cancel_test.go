@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 func TestBrowserPairContextCancellationClearsPendingReview(t *testing.T) {
@@ -14,7 +14,7 @@ func TestBrowserPairContextCancellationClearsPendingReview(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		_, err := a.approveBrowserPair(ctx, browserhost.BrowserPairRequest{
-			Peer:    browserhost.Peer{User: "UID 501", PID: 5151, Process: "locklark-browser-firefox"},
+			Peer:    browserhost.Peer{User: "UID 501", PID: 5151, Process: "passme-browser-firefox"},
 			Browser: browserhost.Firefox,
 			Origin:  browserhost.FirefoxID,
 		})

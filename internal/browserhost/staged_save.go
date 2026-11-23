@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 const stagedSaveTTL = 5 * time.Minute

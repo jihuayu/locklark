@@ -1,7 +1,7 @@
 package personal
 
 import (
-	"github.com/jihuayu/locklark/internal/origin"
+	"github.com/jihuayu/passme/internal/origin"
 	"golang.org/x/net/publicsuffix"
 )
 

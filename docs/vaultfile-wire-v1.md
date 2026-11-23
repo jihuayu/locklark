@@ -1,4 +1,4 @@
-# locklark.vault-file/v1 Wire Schema
+# passme.vault-file/v1 Wire Schema
 
 Status: draft. Implemented in `pkg/vaultfile`: structure, canonical codec,
 preimage derivation, the CEK envelope (`SealCEK`/`OpenCEK`, see [CEK sealing and
@@ -77,12 +77,12 @@ permission.
 ## Background
 
 Earlier drafts labelled this document revision v3, while the public wire
-identifier was always required to be `locklark.vault-file/v1`. The design
+identifier was always required to be `passme.vault-file/v1`. The design
 revision number is a planning label only and never described the wire. Every
 protocol identifier in this document, in `pkg/vaultfile` and in
 `pkg/vaultfile/testdata/vaultfile-v1-vectors.json` therefore carries the `v1`
 token, `version` is `1`, and the schema URI is
-`https://locklark.dev/schema/locklark.vault-file/v1`.
+`https://passme.dev/schema/passme.vault-file/v1`.
 
 v1 has no header signature. An earlier draft carried a `header_sig` member;
 it is not a member of v1 and is rejected as `unknown_field`. The header is
@@ -93,21 +93,21 @@ covered through `content_signature`, which commits to the derived revision id
 
 | Constant        | Value                                                 |
 | --------------- | ----------------------------------------------------- |
-| `format`        | `locklark.vault-file`                                 |
+| `format`        | `passme.vault-file`                                 |
 | `version`       | `1`                                                   |
-| schema URI      | `https://locklark.dev/schema/locklark.vault-file/v1`  |
-| MIME type       | `application/vnd.locklark.vault-file+json`            |
+| schema URI      | `https://passme.dev/schema/passme.vault-file/v1`  |
+| MIME type       | `application/vnd.passme.vault-file+json`            |
 | `content_encoding` | `kdbx`                                             |
 
 Domain-separation labels are the constant strings defined in
 `pkg/vaultfile/domain.go`. None of them starts with `/`: every label begins
-with `locklark.vault-file/v1/`, and `DomainSeparated` hashes
+with `passme.vault-file/v1/`, and `DomainSeparated` hashes
 `domain || 0x00 || data` with no separator between the domain and the NUL.
 
 The entries below are listed by their suffix only, for brevity. The leading `/`
 in an entry is suffix shorthand and is **never** part of the label bytes: the
-label for `/revision` is exactly `locklark.vault-file/v1/revision`, not
-`/locklark.vault-file/v1/revision`.
+label for `/revision` is exactly `passme.vault-file/v1/revision`, not
+`/passme.vault-file/v1/revision`.
 
 Purpose domains (each prefixes exactly one preimage, followed by `0x00`):
 
@@ -237,7 +237,7 @@ reject it.
 A policy carries no digest of itself. There is exactly one policy digest:
 
 ```
-policy_digest(P) = SHA-256( "locklark.vault-file/v1/policy-document" || 0x00
+policy_digest(P) = SHA-256( "passme.vault-file/v1/policy-document" || 0x00
                             || canonical policy document bytes )
 ```
 
@@ -441,7 +441,7 @@ implementation must omit the member too; an omitted member and an empty
 member are different bytes and different hashes.
 
 ```
-RevisionID(f) = SHA-256( "locklark.vault-file/v1/revision" || 0x00
+RevisionID(f) = SHA-256( "passme.vault-file/v1/revision" || 0x00
                          || canonical file
                             without header.revision_id
                             without content_signature )
@@ -463,12 +463,12 @@ ContentSigningBytes(f) = canonical file
 
 `header.revision_id` is present and names the derived revision.
 `content_signature` is removed entirely. The signer signs
-`"locklark.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
+`"passme.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
 The preimage is the same for the builder draft and for the sealed file, so the
 header is covered through the revision id without a second signature.
 
 ```
-FileDigest(f) = SHA-256( "locklark.vault-file/v1/file-digest" || 0x00
+FileDigest(f) = SHA-256( "passme.vault-file/v1/file-digest" || 0x00
                          || EncodeFile(f) )
 ```
 
@@ -583,7 +583,7 @@ VerifyContentSignature(f *File, signerDeviceID string, publicKey ed25519.PublicK
   is never taken from the unsigned/unverified `signed_policy_proofs` as a
   trust anchor.
 - It verifies, with `crypto/ed25519`, exactly
-  `"locklark.vault-file/v1/content-signature" || 0x00 ||
+  `"passme.vault-file/v1/content-signature" || 0x00 ||
   ContentSigningBytes(f)` against `content_signature.sig`. The preimage is
   not hashed further and not altered.
 - A signer mismatch, a `publicKey` that is not 32 bytes, a key that differs
@@ -657,7 +657,7 @@ stable while the call runs.
   `signer_id` is then either
   `checkpoint.OwnerRootKeyID` — a root-signed proof, verified with a
   `crypto/ed25519` signature over
-  `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
+  `"passme.vault-file/v1/policy-document-signature" || 0x00 ||
   SignedPolicy.document` that verifies under the pinned owner-root public key
   and **not** restricted by the policy diff — or a device in the
   authenticated predecessor policy that satisfies every condition of
@@ -687,7 +687,7 @@ stable while the call runs.
   The content signature is then
   verified with the current policy's `content_signing_key` for
   `header.author_device_id`,
-  exactly `"locklark.vault-file/v1/content-signature" || 0x00 ||
+  exactly `"passme.vault-file/v1/content-signature" || 0x00 ||
   ContentSigningBytes(f)`. A content signature that does not verify is
   `signature_verify_failed` with an empty path; a policy proof signature that
   does not verify is `signature_verify_failed` at
@@ -707,7 +707,7 @@ from the predecessor policy the chain has already authenticated:
 - that device carries an Ed25519 `PolicySigningKey` (non-nil, `alg`
   `ed25519`, 32-byte key), and the proof's signature verifies under exactly
   that key, over the same
-  `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
+  `"passme.vault-file/v1/policy-document-signature" || 0x00 ||
   SignedPolicy.document` preimage (a failure here is
   `signature_verify_failed` at `signed_policy_proofs[i]`);
 - an active `AdminDelegation` in that same predecessor names the device
@@ -789,7 +789,7 @@ aad)`; the AEAD generates the nonce and prepends it, and the standard `Seal`
 output already ends with the tag:
 
 ```
-aad         = "locklark.vault-file/v1/cek-wrapping" || 0x00
+aad         = "passme.vault-file/v1/cek-wrapping" || 0x00
               || canonicalHeaderWithoutRevisionID(header)
 
 wrapped_cek = nonce_prefix(12) || ciphertext(32) || tag(16)
@@ -873,7 +873,7 @@ The envelope is a standard age file produced by `age.Encrypt` for exactly one
 `age.X25519Identity`. The plaintext is a fixed, unambiguous byte layout:
 
 ```
-plaintext = "locklark.vault-file/v1/vuk-device-wrapping" || 0x00
+plaintext = "passme.vault-file/v1/vuk-device-wrapping" || 0x00
             || uint16_be(len(vault_id))   || vault_id
             || uint64_be(key_epoch)
             || uint16_be(len(device_id))  || device_id
@@ -1192,7 +1192,7 @@ no KDF, compression or encryption runs before they pass.
    retained. `db` is mutated and its exact prior `Credentials` pointer and
    contents are restored as `SealKDBXPayload` documents.
 7. **Signature and file.** `ContentSigningBytes` of the completed draft is
-   signed with `authorPrivateKey` over `locklark.vault-file/v1/content-signature
+   signed with `authorPrivateKey` over `passme.vault-file/v1/content-signature
    || 0x00 || bytes`; `SealFile` derives `revision_id` and writes the content
    signature; `ParseFile` re-parses the canonical result.
 8. **Final verification.** `VerifyPolicyCheckpoint(sealed, checkpoint)` must

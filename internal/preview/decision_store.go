@@ -15,14 +15,14 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/account"
+	"github.com/jihuayu/passme/internal/account"
 	bolt "go.etcd.io/bbolt"
 )
 
 var errDecision = errors.New("decision journal or request binding is invalid")
 var journal = []byte("signed-decisions-v1")
 
-const decisionDomain = "locklark/local-decision/v1\x00"
+const decisionDomain = "passme/local-decision/v1\x00"
 
 type Decision struct {
 	Snapshot string     `json:"snapshot_pin,omitempty"`
@@ -45,7 +45,7 @@ func requestDigest(q Request) string {
 	q.SenderStatus = ""
 	q.Review = ""
 	raw, _ := json.Marshal(q)
-	h := sha256.Sum256(append([]byte("locklark/local-review/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/local-review/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func validID(id string) bool {

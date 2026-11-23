@@ -1,6 +1,6 @@
 # 浏览器扩展无障碍外部验收驱动
 
-更新：2026-11-09。范围是真实 Locklark Chromium 扩展的**实际工具栏 action 弹窗**与真实 `options.html` 页面。驱动只做只读 axe/DOM 探针与 Tab 遍历；不连接原生宿主、不创建金库、不注入解锁/批准/认证/状态消息、不关闭 CSP、不点击产品操作、不截图。
+更新：2026-11-09。范围是真实 Passme Chromium 扩展的**实际工具栏 action 弹窗**与真实 `options.html` 页面。驱动只做只读 axe/DOM 探针与 Tab 遍历；不连接原生宿主、不创建金库、不注入解锁/批准/认证/状态消息、不关闭 CSP、不点击产品操作、不截图。
 
 ## 运行方式（仅主代理执行，需要可见 GUI）
 
@@ -8,12 +8,12 @@ worker 不启动浏览器/Xvfb。主代理在仓库根目录执行一次可见 G
 
 ```sh
 timeout 300 env \
-  LOCKLARK_TEST_AXE_SOURCE=/workspace/toolchains/a11y/node_modules/axe-core/axe.min.js \
+  PASSME_TEST_AXE_SOURCE=/workspace/toolchains/a11y/node_modules/axe-core/axe.min.js \
   node scripts/browser_accessibility_acceptance.mjs \
     --out browser-accessibility-receipt.json
 ```
 
-- 默认 Edge：`/workspace/toolchains/edge/opt/microsoft/msedge/msedge`；默认 Playwright：`/workspace/locklark/web/node_modules/playwright`。可用 `LOCKLARK_TEST_EDGE` / `LOCKLARK_TEST_PLAYWRIGHT` 覆盖。
+- 默认 Edge：`/workspace/toolchains/edge/opt/microsoft/msedge/msedge`；默认 Playwright：`/workspace/passme/web/node_modules/playwright`。可用 `PASSME_TEST_EDGE` / `PASSME_TEST_PLAYWRIGHT` 覆盖。
 - axe 必须是绝对路径、存在的 `axe.min.js`，页面内验证版本为 `4.10.3`（已确认本机 pinned axe 为 4.10.3）。
 - `--out` 必填且必须尚不存在；驱动使用独占创建，不覆盖旧回执。退出码：`PASS=0`、`FAIL=1`、`UNAVAILABLE=3`、参数/驱动枚举错误=2。
 - 需要 `DISPLAY` 与 `python3`（复用 `scripts/browser_native_x11.py` 的 XTest 输入）。驱动本身不开 headless。

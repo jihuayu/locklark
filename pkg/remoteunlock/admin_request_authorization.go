@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Wire constants of the v1 canonical admin remote-unlock authorization.
@@ -30,7 +30,7 @@ const (
 	// distinct from the owner-root authorization, owner-root delegation and
 	// device binding domains: a signature made for one never verifies for
 	// another.
-	AdminAuthorizationSignatureDomain = "locklark.remote-unlock/v1/admin-authorization\x00"
+	AdminAuthorizationSignatureDomain = "passme.remote-unlock/v1/admin-authorization\x00"
 	// MaxAdminAuthorizationSize is the maximum encoded or accepted
 	// authorization size in bytes.
 	MaxAdminAuthorizationSize = 1024

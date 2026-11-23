@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -23,7 +23,7 @@ func (a *App) onevraHeaderLeading(c *ui.Context) {
 		mark.Children(func() {
 			oneui.Icon(c, lucide.KeyRound()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.AccentText)
 		})
-		oneui.Text(c, "Locklark").Bold().SingleLine()
+		oneui.Text(c, "Passme").Bold().SingleLine()
 		ui.Box(c).Width(1).Height(t.Space(3.5)).Background(t.Border)
 		label := "本地金库"
 		if a.session != nil {
@@ -164,11 +164,11 @@ func (a *App) onevraVaultDialogs(c *ui.Context) {
 	a.onevraEditorDialog(c)
 	ui.Column(c.Key("dialog-new-vault")).Children(func() {
 		oneui.Dialog(c, &a.v2.newVaultOpen, oneui.DialogOptions{Label: "新建子保险库"}, func(panel ui.Element) {
-			panel.Width(420).Background(t.Surface).Border(1, t.Border).Radius(t.Radius*1.5).Padding(t.Space(5))
+			panel.Width(420).Background(t.Surface).Border(1, t.Border).Radius(t.Radius * 1.5).Padding(t.Space(5))
 			panel.Children(func() {
 				ui.Column(c).FillWidth().Gap(t.Space(3)).Children(func() {
 					oneui.Text(c, "新建保险库").FontSize(t.Rem(1.15)).Bold()
-					oneui.Text(c, "子保险库存储在同一加密 .ll 金库文件内，用于按工作、个人或项目分组管理凭据。").
+					oneui.Text(c, "子保险库存储在同一加密 .pm 金库文件内，用于按工作、个人或项目分组管理凭据。").
 						FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
 					oneui.TextBox(c, &a.v2.newVaultName, oneui.TextBoxOptions{}).
 						Label("保险库名称").Placeholder("例如：工作基础设施、开源维护").Disabled(a.uiBusy(c))
@@ -194,7 +194,7 @@ func (a *App) onevraVaultDialogs(c *ui.Context) {
 
 	ui.Column(c.Key("dialog-move-vault")).Children(func() {
 		oneui.Dialog(c, &a.onevra.moveDialogOpen, oneui.DialogOptions{Label: "移动或复制到其他保险库"}, func(panel ui.Element) {
-			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius*1.5).Padding(t.Space(5))
+			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius * 1.5).Padding(t.Space(5))
 			panel.Children(func() {
 				ui.Column(c).FillWidth().Gap(t.Space(3)).Children(func() {
 					oneui.Text(c, "跨保险库整理条目").FontSize(t.Rem(1.15)).Bold()
@@ -683,7 +683,7 @@ func (a *App) onevraDetailView(c *ui.Context) {
 				tag := tag
 				chip := ui.Row(c.Key("tag:"+tag)).AlignItems(ui.Center).Gap(t.Space(1)).Padding(t.Space(.75), t.Space(2.5)).
 					Radius(t.Space(4)).Border(1, t.Border).Background(t.Surface).Cursor(ui.CursorPointer).
-					Role(ui.RoleButton).Label("筛选标签 "+tag).Focusable()
+					Role(ui.RoleButton).Label("筛选标签 " + tag).Focusable()
 				if chip.Hovered() {
 					chip.Background(t.Text.Alpha(.05))
 				}
@@ -718,7 +718,7 @@ func (a *App) onevraDetailView(c *ui.Context) {
 		}
 	})
 	if a.v2.historyOpen && len(detail.History) > 0 {
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).Children(func() {
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius * 1.25).Background(t.Surface).Children(func() {
 			for i, entry := range detail.History {
 				i, entry := i, entry
 				if i > 0 {
@@ -1136,7 +1136,7 @@ func (a *App) v2DetailFieldRow(c *ui.Context, detail *personal.ItemDetail, f det
 	value := v2FieldDisplayWith(detail, plain, key, revealed, narrow)
 	left, frac, copied := a.copiedRemaining(detail.ID, key, now)
 
-	row := ui.Column(c.Key("field:"+key)).FillWidth().MinWidth(0)
+	row := ui.Column(c.Key("field:" + key)).FillWidth().MinWidth(0)
 	hovered := row.Hovered()
 	if hovered {
 		row.Background(t.Text.Alpha(.03))

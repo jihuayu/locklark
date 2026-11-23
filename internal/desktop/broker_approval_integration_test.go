@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 type brokerFrameClient struct {
@@ -87,7 +87,7 @@ func brokeredDesktopFixture(t *testing.T) (*App, *personal.Session, *brokerFrame
 
 func brokeredDesktopFixtureWithQuick(t *testing.T, quickFill bool) (*App, *personal.Session, *brokerFrameClient, *browserhost.Connection, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "brokered.ll")
+	path := filepath.Join(t.TempDir(), "brokered.pm")
 	key := bytes.Repeat([]byte{13}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -134,7 +134,7 @@ func brokeredDesktopFixtureWithQuick(t *testing.T, quickFill bool) (*App, *perso
 		t.Fatal("fixture passkey missing")
 	}
 
-	t.Setenv("LOCKLARK_BROWSER_SOCKET", desktopBrokerSocket(t))
+	t.Setenv("PASSME_BROWSER_SOCKET", desktopBrokerSocket(t))
 	a := New()
 	a.launch = func(fn func()) { fn() }
 	a.session = s

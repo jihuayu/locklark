@@ -7,8 +7,8 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // cliPendingBindingFixture builds a pending review bound to a real owned,
@@ -212,7 +212,7 @@ func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
 	p1 := cliPendingBindingFixture(t, a, "pending-1")
 	p2 := cliPendingBindingFixture(t, a, "pending-2")
 	p2.peer.Process = "p2-process"
-	p2.request.VaultPath = "/fixture/p2-visible.ll"
+	p2.request.VaultPath = "/fixture/p2-visible.pm"
 	p2.request.Targets[0].Slot = "P2_SLOT"
 	popup1 := &cliApprovalPopup{id: p1.id}
 	popup2 := &cliApprovalPopup{id: p2.id}
@@ -223,7 +223,7 @@ func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
 	// invoke the content callback captured for p1.
 	setCLIApprovalPopup(a, p2, popup2)
 	staleView := ui.NewTester(staleRender, 560, 430)
-	for _, leaked := range []string{"p2-visible.ll", "p2-process", "P2_SLOT",
+	for _, leaked := range []string{"p2-visible.pm", "p2-process", "P2_SLOT",
 		"批准本地 CLI 凭据请求", "打开主窗口", "拒绝本次请求", "仅批准本次 CLI 请求"} {
 		if staleView.HasText(leaked) {
 			t.Fatalf("retired p1 content rendered p2 detail or action %q", leaked)
@@ -238,7 +238,7 @@ func TestStaleCLIApprovalContentCannotRenderReplacement(t *testing.T) {
 
 	// The live p2 content still renders its own body and actions.
 	liveView := ui.NewTester(a.cliApprovalPopupContent(popup2), 560, 430)
-	for _, want := range []string{"p2-visible.ll", "p2-process", "P2_SLOT",
+	for _, want := range []string{"p2-visible.pm", "p2-process", "P2_SLOT",
 		"批准本地 CLI 凭据请求", "打开主窗口", "拒绝本次请求", "仅批准本次 CLI 请求"} {
 		if !liveView.HasText(want) {
 			t.Fatalf("live p2 content missing %q", want)

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -433,7 +433,7 @@ func TestPasskeySignalClearedOnLockAndRejectsStaleApproval(t *testing.T) {
 // real bbolt write transaction and block the owner confirmation mid-commit.
 func signalConnectionFixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string, string, string, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "signal.ll")
+	path := filepath.Join(t.TempDir(), "signal.pm")
 	key := bytes.Repeat([]byte{5}, 16)
 	if err := personal.Create(path, "fixture", key); err != nil {
 		t.Fatal(err)

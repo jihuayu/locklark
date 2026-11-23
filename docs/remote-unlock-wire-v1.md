@@ -86,7 +86,7 @@ The context is one UTF-8 JSON object:
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `channel-binding-context` |
 | 4 | `request_id` | string | identifier |
@@ -197,7 +197,7 @@ deterministic bytes `0x00` through `0x1f`; the policy digest is the
 deterministic bytes `0x1f` down to `0x00`.
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"channel-binding-context","request_id":"req-0001","request_digest":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","pair_id":"pair-0001","pair_generation":0,"lock_generation":1,"member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","vault_id":"vault-0001","key_epoch":7,"policy_seq":0,"policy_digest":"Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA","deadline_unix_ms":1800000000000}
+{"format":"passme.remote-unlock","version":1,"kind":"channel-binding-context","request_id":"req-0001","request_digest":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","pair_id":"pair-0001","pair_generation":0,"lock_generation":1,"member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","vault_id":"vault-0001","key_epoch":7,"policy_seq":0,"policy_digest":"Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA","deadline_unix_ms":1800000000000}
 ```
 
 The same 473 bytes appear as a literal in the package tests. They encode a
@@ -243,7 +243,7 @@ each endpoint binding by digest over its complete signed bytes.
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `device-transport-binding` |
 | 4 | `member_id` | string | identifier |
@@ -277,7 +277,7 @@ The Ed25519 signature is over the following bytes, with no length prefix and no
 newline:
 
 ```
-locklark.remote-unlock/v1/device-transport-binding\x00
+passme.remote-unlock/v1/device-transport-binding\x00
 ```
 
 followed immediately by the canonical JSON object containing members 1 through
@@ -313,7 +313,7 @@ or enrollment. The SPKI digest is the bytes `0x00` through `0x1f` and the
 recipient is a throwaway synthetic age recipient.
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"}
+{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"}
 ```
 
 The matching public key is the unpadded base64url string
@@ -396,7 +396,7 @@ signature
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `owner-authorization` |
 | 4 | `owner_root_key_id` | string | identifier (non-empty, at most 128 bytes) |
@@ -425,15 +425,15 @@ Each value has its own domain label, followed immediately by one literal NUL
 byte (`\x00`):
 
 ```
-context_sha256        = SHA-256( "locklark.remote-unlock/v1/authorization-context\x00"
+context_sha256        = SHA-256( "passme.remote-unlock/v1/authorization-context\x00"
                                  || EncodeChannelBindingContext(context) )          (473-byte vector)
 
-binding_sha256(b)     = SHA-256( "locklark.remote-unlock/v1/device-transport-binding-digest\x00"
+binding_sha256(b)     = SHA-256( "passme.remote-unlock/v1/device-transport-binding-digest\x00"
                                  || EncodeDeviceTransportBinding(b) )               (complete bytes,
                                                                                      signature included)
 
 signature             = Ed25519_sign( owner root key,
-                        "locklark.remote-unlock/v1/owner-authorization\x00"
+                        "passme.remote-unlock/v1/owner-authorization\x00"
                         || canonical JSON of members 1..8 )
 ```
 
@@ -540,10 +540,10 @@ target_binding_sha256 = yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM
 ```
 
 Signed JSON (members 1..8), followed immediately by the domain
-`locklark.remote-unlock/v1/owner-authorization\x00` and nothing else:
+`passme.remote-unlock/v1/owner-authorization\x00` and nothing else:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}
+{"format":"passme.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}
 ```
 
 The synthetic owner-root public key is the unpadded base64url string
@@ -552,7 +552,7 @@ preimage is `uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZ
 The complete canonical authorization is 450 bytes:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw"}
+{"format":"passme.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw"}
 ```
 
 These bytes are pinned literally in the package tests, which also recompute
@@ -602,7 +602,7 @@ signature
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `owner-admin-delegation` |
 | 4 | `owner_root_key_id` | string | identifier |
@@ -646,7 +646,7 @@ The owner root signs the following bytes, with no length prefix and no
 newline:
 
 ```
-locklark.remote-unlock/v1/admin-delegation\x00
+passme.remote-unlock/v1/admin-delegation\x00
 ```
 
 followed immediately by the canonical JSON object containing members 1 through
@@ -654,12 +654,12 @@ followed immediately by the canonical JSON object containing members 1 through
 NUL byte. `AdminDelegationSigningBytes` returns exactly this preimage.
 
 The domain is distinct from the owner-root authorization domain
-(`locklark.remote-unlock/v1/owner-authorization\x00`) and from the device
-binding domain (`locklark.remote-unlock/v1/device-transport-binding\x00`); a
+(`passme.remote-unlock/v1/owner-authorization\x00`) and from the device
+binding domain (`passme.remote-unlock/v1/device-transport-binding\x00`); a
 signature made for one never verifies for another.
 
 `AdminDelegationDigest` returns `SHA-256` of the separate domain
-`locklark.remote-unlock/v1/admin-delegation-digest\x00` followed by the complete
+`passme.remote-unlock/v1/admin-delegation-digest\x00` followed by the complete
 canonical encoding of the delegation, `signature` member included, so any
 change to a claim or to the signature changes the digest. It is a stable
 reference for a later signed request, not a signature and not an
@@ -759,10 +759,10 @@ target_binding_sha256 = yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM
 ```
 
 Signed JSON (members 1..19), followed immediately by the domain
-`locklark.remote-unlock/v1/admin-delegation\x00` and nothing else:
+`passme.remote-unlock/v1/admin-delegation\x00` and nothing else:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000}
+{"format":"passme.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000}
 ```
 
 The synthetic owner-root public key is
@@ -770,7 +770,7 @@ The synthetic owner-root public key is
 delegation is 810 bytes:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000,"signature":"7zsUu-9zDLf7LNOMKpGFBk1tqhqZgctUzNBQFFd6S4A8GO2-WAUpRKwXSx_ejkkxI7Snk3fmSa9Qymz1n90UDg"}
+{"format":"passme.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000,"signature":"7zsUu-9zDLf7LNOMKpGFBk1tqhqZgctUzNBQFFd6S4A8GO2-WAUpRKwXSx_ejkkxI7Snk3fmSa9Qymz1n90UDg"}
 ```
 
 `AdminDelegationDigest` of that complete encoding is
@@ -825,7 +825,7 @@ signature
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `admin-authorization` |
 | 4 | `delegation_digest` | string | exactly 32 bytes: `AdminDelegationDigest` of the reusable grant |
@@ -852,7 +852,7 @@ The delegated admin device signs the following bytes, with no length prefix and
 no newline:
 
 ```
-locklark.remote-unlock/v1/admin-authorization\x00
+passme.remote-unlock/v1/admin-authorization\x00
 ```
 
 followed immediately by the canonical JSON object containing members 1 through
@@ -860,10 +860,10 @@ followed immediately by the canonical JSON object containing members 1 through
 NUL byte. `AdminAuthorizationSigningBytes` returns exactly this preimage.
 
 The domain is distinct from every other remote-unlock domain: the owner-root
-authorization domain (`locklark.remote-unlock/v1/owner-authorization\x00`), the
-owner-root delegation domain (`locklark.remote-unlock/v1/admin-delegation\x00`),
+authorization domain (`passme.remote-unlock/v1/owner-authorization\x00`), the
+owner-root delegation domain (`passme.remote-unlock/v1/admin-delegation\x00`),
 the device binding domain
-(`locklark.remote-unlock/v1/device-transport-binding\x00`), the context digest
+(`passme.remote-unlock/v1/device-transport-binding\x00`), the context digest
 domain and both digest domains. A signature made for one never verifies for
 another, and the tests assert the domains are pairwise distinct.
 
@@ -952,16 +952,16 @@ target_binding_sha256 = yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM
 ```
 
 Signed JSON (members 1..8), followed immediately by the domain
-`locklark.remote-unlock/v1/admin-authorization\x00` and nothing else:
+`passme.remote-unlock/v1/admin-authorization\x00` and nothing else:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}
+{"format":"passme.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}
 ```
 
 The complete canonical authorization is 478 bytes:
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"TfY7H33nPo2v_xpNmd8kbIFtbsuc_e4sK-a6WWQS_Oaew-7Ew-uEtIxQn-_mc3Zq9PFbLJHkqATZl-xUoYxYDA"}
+{"format":"passme.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"TfY7H33nPo2v_xpNmd8kbIFtbsuc_e4sK-a6WWQS_Oaew-7Ew-uEtIxQn-_mc3Zq9PFbLJHkqATZl-xUoYxYDA"}
 ```
 
 The tests pin these bytes literally, recompute the preimage and signature from
@@ -1006,7 +1006,7 @@ device_a_signature, device_b_signature
 
 | # | Member | Type | Constraint |
 |---|--------|------|------------|
-| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 1 | `format` | string | constant `passme.remote-unlock` |
 | 2 | `version` | integer | constant `1` |
 | 3 | `kind` | string | constant `pair-consent` |
 | 4 | `tenant_id` | string | identifier |
@@ -1042,7 +1042,7 @@ digests and two 86-character signatures, the maximum legal encoding is
 ### Consent domain and preimage
 
 ```
-locklark.remote-unlock/v1/pair-consent\x00
+passme.remote-unlock/v1/pair-consent\x00
   || canonical JSON of members 1..13 in order
 ```
 
@@ -1129,26 +1129,26 @@ Device a's complete signed binding (`DeviceTransportBindingDigest`
 `7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ`):
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-a","install_id":"install-device-a","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"uoqoeY0yK9mAuLEXv0L05INOZnBMrE2k_HZcdx6Ah9hHSLq_vMq3AAKhwWG7kQKFxCBpY4fwB-jZMsRmRWyWAQ"}
+{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-a","install_id":"install-device-a","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"uoqoeY0yK9mAuLEXv0L05INOZnBMrE2k_HZcdx6Ah9hHSLq_vMq3AAKhwWG7kQKFxCBpY4fwB-jZMsRmRWyWAQ"}
 ```
 
 Device b's complete signed binding (digest
 `nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU`):
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-b","install_id":"install-device-b","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"VQ35nU7y3c3A_5FVwfwPb-GlBXBzddBexv7oaNO0OnO-9Xmsz9xuqSpuRWDZFPxauOKHAT6EhZ5UyBhZXWdNDg"}
+{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-b","install_id":"install-device-b","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"VQ35nU7y3c3A_5FVwfwPb-GlBXBzddBexv7oaNO0OnO-9Xmsz9xuqSpuRWDZFPxauOKHAT6EhZ5UyBhZXWdNDg"}
 ```
 
 Signed preimage (domain shown as `<pair-consent domain>`, one zero byte):
 
 ```
-<pair-consent domain>{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}
+<pair-consent domain>{"format":"passme.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}
 ```
 
 Complete canonical consent (638 bytes):
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}
+{"format":"passme.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}
 ```
 
 Each binding's signature verifies only under its intended binding signing key

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Every key, identity, policy, vault-file content byte and timestamp in this
@@ -45,19 +45,19 @@ type (
 const (
 	// adminAuthorizationVectorDelegationDigest is AdminDelegationDigest of the
 	// fixed reusable grant of admin_authorization_test.go.
-	adminAuthorizationVectorDelegationDigest = "BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU"
+	adminAuthorizationVectorDelegationDigest = "0LuCL2IZm4opMSvBq6NnzHCBBGzcEOZMlWt1VSFwtLE"
 
 	// adminAuthorizationSignedJSON is the canonical JSON of members 1..8, the
 	// delegated-device signed preimage without its domain.
-	adminAuthorizationSignedJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}`
+	adminAuthorizationSignedJSON = `{"format":"passme.remote-unlock","version":1,"kind":"admin-authorization","delegation_digest":"0LuCL2IZm4opMSvBq6NnzHCBBGzcEOZMlWt1VSFwtLE","context_sha256":"fC70V79jL_x1zIHAH3tpNJeriZWXmkYpphduZMSVDLs","source_binding_sha256":"yjnBQ-AsJsx94BGoiK_11QDS9ltZuDwuHrR6X8FGw9k","target_binding_sha256":"uw5uhdEb3vVsEsSgsE38ZwVog5TBeYkTX-4fbEX4hL8","expires_unix_ms":1799999999000}`
 
 	// adminAuthorizationVectorSignature is the fixed synthetic signature over
 	// the domain and adminAuthorizationSignedJSON, by the delegated admin
 	// device's policy signing key of seed span 0xd0.
-	adminAuthorizationVectorSignature = "TfY7H33nPo2v_xpNmd8kbIFtbsuc_e4sK-a6WWQS_Oaew-7Ew-uEtIxQn-_mc3Zq9PFbLJHkqATZl-xUoYxYDA"
+	adminAuthorizationVectorSignature = "-hgX0A3ds3-nEB0AhAA5v4jNVXWdx8i6Iucpw1HGtaalYFRgWAo3Wl6mYhoqZXAV9waGdFft_p5IVmDuPoSyDA"
 )
 
-// adminAuthorizationVectorJSON is the complete canonical 478-byte
+// adminAuthorizationVectorJSON is the complete canonical 476-byte
 // authorization: the signed members with the signature member appended.
 var adminAuthorizationVectorJSON = adminAuthorizationSignedJSON[:len(adminAuthorizationSignedJSON)-1] +
 	`,"signature":"` + adminAuthorizationVectorSignature + `"}`
@@ -202,8 +202,8 @@ func TestAdminAuthorizationFixedSyntheticVector(t *testing.T) {
 	}
 
 	encoded := mustEncodeAdminAuthorization(t, a)
-	if string(encoded) != adminAuthorizationVectorJSON || len(encoded) != 478 {
-		t.Fatalf("canonical encoding is %d bytes, want the pinned 478-byte vector\n got: %s", len(encoded), encoded)
+	if string(encoded) != adminAuthorizationVectorJSON || len(encoded) != 476 {
+		t.Fatalf("canonical encoding is %d bytes, want the pinned 476-byte vector\n got: %s", len(encoded), encoded)
 	}
 	parsed, err := ParseAdminRemoteUnlockAuthorization(encoded)
 	if err != nil || parsed != a {
@@ -239,7 +239,7 @@ func TestAdminAuthorizationMaximumLegalBudget(t *testing.T) {
 	a.ExpiresUnixMS = 1<<63 - 1
 	a = signAdminAuthorization(t, a, delegationAdminKey)
 	encoded := mustEncodeAdminAuthorization(t, a)
-	const wantMax = 478 - len("1799999999000") + 19
+	const wantMax = 476 - len("1799999999000") + 19
 	if len(encoded) != wantMax {
 		t.Fatalf("maximum legal authorization is %d bytes, want %d", len(encoded), wantMax)
 	}
@@ -254,7 +254,7 @@ func TestAdminAuthorizationMaximumLegalBudget(t *testing.T) {
 	a.ExpiresUnixMS = 1
 	a = signAdminAuthorization(t, a, delegationAdminKey)
 	// Every other member is fixed-width, so only the one-digit expiry remains.
-	if got, want := len(mustEncodeAdminAuthorization(t, a)), 478-len("1799999999000")+1; got != want {
+	if got, want := len(mustEncodeAdminAuthorization(t, a)), 476-len("1799999999000")+1; got != want {
 		t.Fatalf("minimum legal authorization is %d bytes, want %d", got, want)
 	}
 }
@@ -360,7 +360,7 @@ func TestAdminAuthorizationParseRejectsNonCanonicalInput(t *testing.T) {
 			return replaceOnce(t, b, `"admin-authorization"`, `"admin\u002dauthorization"`)
 		}, field: "kind"},
 		tc{name: "wrong format", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark.remote-unlock.v2"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme.remote-unlock.v2"`)
 		}, field: "format"},
 		tc{name: "owner-root authorization kind", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"admin-authorization"`, `"owner-authorization"`)

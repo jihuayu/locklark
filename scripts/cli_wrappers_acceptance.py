@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end acceptance for F16 locklark CLI wrappers.
+"""End-to-end acceptance for F16 passme CLI wrappers.
 
-The controller builds (or accepts) a locklark binary and the independent
+The controller builds (or accepts) a passme binary and the independent
 cli-wrappers fixture. It verifies only non-secret metadata, the NeedsAuth fast
 path, denied-argument refusal before prompting, executable pinning, generated
 shell functions and privacy of every captured public stream. Failure output is
@@ -129,17 +129,17 @@ class Acceptance:
         self.parent_environment = dict(os.environ)
         self.values = ["Canary" + os.urandom(24).hex() for _ in range(3)]
         self.environment = dict(os.environ)
-        self.environment.pop("LOCKLARK_CLI_ACTIVE", None)
-        self.environment["LOCKLARK_TEST_SECRET_CANARY"] = self.values[0]
+        self.environment.pop("PASSME_CLI_ACTIVE", None)
+        self.environment["PASSME_TEST_SECRET_CANARY"] = self.values[0]
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir(mode=0o700)
-        self.cli = pathlib.Path(args.cli).resolve() if args.cli else self.bin_dir / executable_name("locklark")
+        self.cli = pathlib.Path(args.cli).resolve() if args.cli else self.bin_dir / executable_name("passme")
         self.fixture = pathlib.Path(args.fixture_bin).resolve() if args.fixture_bin else self.bin_dir / executable_name("cli-wrappers-fixture")
         self.private_root = windows_private_directory() if os.name == "nt" else None
         self.binding_dir = self.private_root if self.private_root else self.root / "binding"
         self.binding_dir.mkdir(mode=0o700, exist_ok=True)
-        self.binding = self.binding_dir / ".locklark-cli.json"
-        self.vault = self.root / "owner.ll"
+        self.binding = self.binding_dir / ".passme-cli.json"
+        self.vault = self.root / "owner.pm"
 
     def private_bytes(self, name, raw):
         self.counter += 1
@@ -154,7 +154,7 @@ class Acceptance:
 
     def go_environment(self):
         environment = dict(os.environ)
-        environment.pop("LOCKLARK_CLI_ACTIVE", None)
+        environment.pop("PASSME_CLI_ACTIVE", None)
         environment.setdefault("GOTOOLCHAIN", "go1.27.3")
         return environment
 
@@ -177,7 +177,7 @@ class Acceptance:
 
     def prepare(self):
         if not self.args.cli:
-            self.build(self.cli, "./cmd/locklark")
+            self.build(self.cli, "./cmd/passme")
         if not self.args.fixture_bin:
             self.build(self.fixture, "./scripts/cli_wrappers_fixture")
         require(self.cli.is_file() and self.fixture.is_file())
@@ -316,15 +316,15 @@ class Acceptance:
             require("--binding" in script)
             require(not any(line.lstrip().startswith("alias ") for line in script.splitlines()))
             if shell in ("bash", "zsh"):
-                require("gh() {" in script and 'command locklark cli run gh' in script and '-- "$@"' in script)
+                require("gh() {" in script and 'command passme cli run gh' in script and '-- "$@"' in script)
                 require("docker() {" in script and "aws()" not in script)
             elif shell == "fish":
                 require("function gh --wraps=gh" in script and " -- $argv" in script)
                 require("function docker --wraps=docker" in script and "function aws" not in script)
             else:
-                require("function Invoke-LocklarkCli_gh" in script)
-                require("Set-Alias -Name gh -Value Invoke-LocklarkCli_gh" in script)
-                require(" -- @args" in script and "Invoke-LocklarkCli_aws" not in script)
+                require("function Invoke-PassmeCli_gh" in script)
+                require("Set-Alias -Name gh -Value Invoke-PassmeCli_gh" in script)
+                require(" -- @args" in script and "Invoke-PassmeCli_aws" not in script)
         result = self.command([self.cli, "cli", "shell-init", "--shell", "bash"])
         script = result.stdout.decode()
         require("aws() {" in script and "terraform() {" in script)
@@ -414,7 +414,7 @@ class Acceptance:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cli", help="prebuilt locklark executable")
+    parser.add_argument("--cli", help="prebuilt passme executable")
     parser.add_argument("--fixture-bin", help="independently built cli-wrappers fixture")
     parser.add_argument("--go", default="go")
     parser.add_argument("--artifacts", help="private artifact directory")

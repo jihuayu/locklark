@@ -10,10 +10,10 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
-const roleDomain = "locklark/teamclient/protected-role/v1\x00"
+const roleDomain = "passme/teamclient/protected-role/v1\x00"
 const maxProtectedRoleBytes = 1400
 
 type roleBinding struct {
@@ -54,7 +54,7 @@ func cloneOwner(d OwnerDescriptor) OwnerDescriptor {
 func roleID(b roleBinding) string {
 	b.ProfilePath = ""
 	raw, _ := json.Marshal(b)
-	h := sha256.Sum256(append([]byte("locklark/teamclient/role-store-id/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/teamclient/role-store-id/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func encodeRole(b roleBinding, seed []byte) ([]byte, error) {
@@ -66,7 +66,7 @@ func encodeRole(b roleBinding, seed []byte) ([]byte, error) {
 }
 func roleDigest(b roleBinding) string {
 	raw, _ := json.Marshal(b)
-	h := sha256.Sum256(append([]byte("locklark/teamclient/role-binding/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/teamclient/role-binding/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func decodeRole(b roleBinding, raw []byte) ([]byte, error) {
@@ -118,7 +118,7 @@ func bindingFor(r profileRecord, role string) (roleBinding, string, error) {
 		public.Device.State = ""
 		public.Service.State = ""
 		encoded, _ := json.Marshal(public)
-		digest := sha256.Sum256(append([]byte("locklark/teamclient/owner-context/v1\x00"), encoded...))
+		digest := sha256.Sum256(append([]byte("passme/teamclient/owner-context/v1\x00"), encoded...))
 		b := roleBinding{Descriptor: d, Pins: clonePins(r.Owner.Pins), ProfilePath: r.Path, OwnerContext: hex.EncodeToString(digest[:])}
 		return b, roleID(b), nil
 	}

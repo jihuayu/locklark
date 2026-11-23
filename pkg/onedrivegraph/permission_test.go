@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 // All values below are synthetic fixtures. No request leaves the loopback

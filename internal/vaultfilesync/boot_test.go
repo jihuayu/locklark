@@ -21,13 +21,13 @@ import (
 	"filippo.io/age"
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/testtemp"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/testtemp"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 func TestMain(m *testing.M) {
@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 // crypto generated around it: an age X25519 identity for device-1, a real
 // Ed25519 content-signing key and a real VUK.
 const (
-	remoteName        = "vault-01.locklark"
+	remoteName        = "vault-01.passme"
 	fixtureDeviceID   = "device-1"
 	fixtureRootPublic = "sdtT9ivuFVcIsKunv9utR5FqBWUY/CeCwbmdJKQdSB4="
 
@@ -51,7 +51,7 @@ const (
 	// fixturePolicyDocument is the canonical policy document (policy_seq 5,
 	// alice writer/admin/owner with device-1), base64. It is not JSON: it is
 	// the exact canonical document bytes carried by the signed proof.
-	fixturePolicyDocument = "eyJmb3JtYXQiOiJsb2NrbGFyay52YXVsdC1maWxlIiwidmVyc2lvbiI6MSwidmF1bHRfaWQiOiJ2YXVsdC0wMSIsInBvbGljeV9zZXEiOjUsInByZXZfcG9saWN5X2RpZ2VzdCI6IkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkUiLCJvd25lcl9yb290Ijp7ImtleV9pZCI6Im93bmVyLXJvb3QtMDEiLCJhbGciOiJlZDI1NTE5IiwicHVibGljX2tleSI6InNkdFQ5aXZ1RlZjSXNLdW52OXV0UjVGcUJXVVlfQ2VDd2JtZEpLUWRTQjQiLCJvd25lcnMiOlt7InByaW5jaXBhbF9pZCI6ImFsaWNlIiwibGFiZWwiOiJBbGljZSJ9XX0sInJlYWRlcnMiOltdLCJ3cml0ZXJzIjpbeyJwcmluY2lwYWxfaWQiOiJhbGljZSIsImxhYmVsIjoiQWxpY2UifV0sImFkbWlucyI6W3sicHJpbmNpcGFsX2lkIjoiYWxpY2UiLCJsYWJlbCI6IkFsaWNlIn1dLCJvd25lcnMiOlt7InByaW5jaXBhbF9pZCI6ImFsaWNlIiwibGFiZWwiOiJBbGljZSJ9XSwiYWRtaW5fZGVsZWdhdGlvbnMiOltdLCJkZXZpY2VzIjpbeyJkZXZpY2VfaWQiOiJkZXZpY2UtMSIsInByaW5jaXBhbF9pZCI6ImFsaWNlIiwibGFiZWwiOiJBbGljZSBsYXB0b3AiLCJjb250ZW50X3NpZ25pbmdfa2V5Ijp7ImFsZyI6ImVkMjU1MTkiLCJwdWJsaWNfa2V5IjoicHBlUzJfNmdSTEtjTngzdk1FQkNWSnVQdTNSajA4d1VEZmhiZXQ0SUtWbyJ9LCJwb2xpY3lfc2lnbmluZ19rZXkiOm51bGwsImFnZV9lbmNyeXB0aW9uX2tleSI6ImFnZTFxcmh6bWp1cXJtN3hsdWh4eXp4bWFjeDJjZ2dncm11cm1zcHkwbWVtdmpzc2xtZzU3ZnFxdmhoMGxoIn1dfQ=="
+	fixturePolicyDocument = "eyJmb3JtYXQiOiJwYXNzbWUudmF1bHQtZmlsZSIsInZlcnNpb24iOjEsInZhdWx0X2lkIjoidmF1bHQtMDEiLCJwb2xpY3lfc2VxIjo1LCJwcmV2X3BvbGljeV9kaWdlc3QiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFIiwib3duZXJfcm9vdCI6eyJrZXlfaWQiOiJvd25lci1yb290LTAxIiwiYWxnIjoiZWQyNTUxOSIsInB1YmxpY19rZXkiOiJzZHRUOWl2dUZWY0lzS3Vudjl1dFI1RnFCV1VZX0NlQ3dibWRKS1FkU0I0Iiwib3duZXJzIjpbeyJwcmluY2lwYWxfaWQiOiJhbGljZSIsImxhYmVsIjoiQWxpY2UifV19LCJyZWFkZXJzIjpbXSwid3JpdGVycyI6W3sicHJpbmNpcGFsX2lkIjoiYWxpY2UiLCJsYWJlbCI6IkFsaWNlIn1dLCJhZG1pbnMiOlt7InByaW5jaXBhbF9pZCI6ImFsaWNlIiwibGFiZWwiOiJBbGljZSJ9XSwib3duZXJzIjpbeyJwcmluY2lwYWxfaWQiOiJhbGljZSIsImxhYmVsIjoiQWxpY2UifV0sImFkbWluX2RlbGVnYXRpb25zIjpbXSwiZGV2aWNlcyI6W3siZGV2aWNlX2lkIjoiZGV2aWNlLTEiLCJwcmluY2lwYWxfaWQiOiJhbGljZSIsImxhYmVsIjoiQWxpY2UgbGFwdG9wIiwiY29udGVudF9zaWduaW5nX2tleSI6eyJhbGciOiJlZDI1NTE5IiwicHVibGljX2tleSI6InBwZVMyXzZnUkxLY054M3ZNRUJDVkp1UHUzUmowOHdVRGZoYmV0NElLVm8ifSwicG9saWN5X3NpZ25pbmdfa2V5IjpudWxsLCJhZ2VfZW5jcnlwdGlvbl9rZXkiOiJhZ2UxcXJoem1qdXFybTd4bHVoeHl6eG1hY3gyY2dnZ3JtdXJtc3B5MG1lbXZqc3NsbWc1N2ZxcXZoaDBsaCJ9XX0="
 )
 
 // plaintextMarkers are values that must never appear in a receipt or an error.

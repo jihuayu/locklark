@@ -10,11 +10,11 @@ type Runtime = {
   origin: string;
 };
 const scope = globalThis as typeof globalThis & {
-  __locklarkManagementRuntime?: Runtime;
+  __passmeManagementRuntime?: Runtime;
 };
 export function runtime(): Runtime {
-  if (!scope.__locklarkManagementRuntime) {
-    const origin = process.env.LOCKLARK_WEB_ORIGIN ?? "";
+  if (!scope.__passmeManagementRuntime) {
+    const origin = process.env.PASSME_WEB_ORIGIN ?? "";
     const url = new URL(origin);
     if (
       url.protocol !== "http:" ||
@@ -23,19 +23,19 @@ export function runtime(): Runtime {
       url.origin !== origin
     )
       throw new Error("Management runtime unavailable");
-    scope.__locklarkManagementRuntime = {
+    scope.__passmeManagementRuntime = {
       registry: new SessionRegistry(
-        process.env.LOCKLARK_WEB_CODE ?? "",
+        process.env.PASSME_WEB_CODE ?? "",
         Date.now,
-        Number(process.env.LOCKLARK_WEB_STARTED_AT),
+        Number(process.env.PASSME_WEB_STARTED_AT),
       ),
-      connection: parseConnection(process.env.LOCKLARK_CONNECTION_JSON ?? ""),
+      connection: parseConnection(process.env.PASSME_CONNECTION_JSON ?? ""),
       origin,
     };
-    delete process.env.LOCKLARK_WEB_CODE;
-    delete process.env.LOCKLARK_CONNECTION_JSON;
+    delete process.env.PASSME_WEB_CODE;
+    delete process.env.PASSME_CONNECTION_JSON;
   }
-  return scope.__locklarkManagementRuntime;
+  return scope.__passmeManagementRuntime;
 }
 export async function sessionExpiry(): Promise<number | null> {
   return runtime().registry.verify((await cookies()).get(COOKIE)?.value);

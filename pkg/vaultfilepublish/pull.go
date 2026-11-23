@@ -37,7 +37,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 const (

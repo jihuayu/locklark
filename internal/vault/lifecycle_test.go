@@ -3,7 +3,7 @@ package vault
 import (
 	"bytes"
 	"encoding/json"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"testing"
 )
 
@@ -23,7 +23,7 @@ func TestNativeArchiveState(t *testing.T) {
 			t.Fatal("state roundtrip", err)
 		}
 		for _, bad := range []string{"active", "deleted", ""} {
-			db.Content.Root.Groups[0].Entries[1].Values[3] = slot("Locklark.State", bad, false)
+			db.Content.Root.Groups[0].Entries[1].Values[3] = slot("Passme.State", bad, false)
 			if _, _, err := readItems(db, db.Content.Root.Groups[0]); err == nil {
 				t.Fatal("unsupported stored state", bad)
 			}

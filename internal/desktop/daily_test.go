@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestDailyNativeControls(t *testing.T) {
@@ -32,7 +32,7 @@ func TestDailyNativeControls(t *testing.T) {
 func dailyAppFixture(t *testing.T) *App {
 	t.Helper()
 	a := New()
-	a.path = filepath.Join(t.TempDir(), "daily.ll")
+	a.path = filepath.Join(t.TempDir(), "daily.pm")
 	key := bytes.Repeat([]byte{4}, 16)
 	if e := personal.Create(a.path, "fixture", key); e != nil {
 		t.Fatal(e)

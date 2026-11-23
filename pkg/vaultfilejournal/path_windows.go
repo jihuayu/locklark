@@ -79,7 +79,7 @@ const (
 		genericWrite | genericAll
 
 	// journalTempPrefix names this package's uniquely named publication files.
-	journalTempPrefix = ".locklark-vaultfilejournal-"
+	journalTempPrefix = ".passme-vaultfilejournal-"
 
 	// symlinkFlagAllowUnprivilegedCreate lets a Developer Mode process create
 	// links without SeCreateSymbolicLinkPrivilege.

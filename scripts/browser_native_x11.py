@@ -29,10 +29,10 @@ import time
 CONTROL_LABELS = (
     "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
     "取消 / 使用其他验证器", "确认连接（每次敏感操作需批准）",
-    "登录：login.locklark.test · passkey-test · passkey-test",
-    "登录：login.locklark.test · passkey-other · passkey-other",
-    "登录：login.locklark.test · signal-one · signal-one",
-    "登录：login.locklark.test · signal-two · signal-two",
+    "登录：login.passme.test · passkey-test · passkey-test",
+    "登录：login.passme.test · passkey-other · passkey-other",
+    "登录：login.passme.test · signal-one · signal-one",
+    "登录：login.passme.test · signal-two · signal-two",
     "确认应用这些更新", "取消（不做任何更改）", "取消尚未提交的更新",
     "金库文件", "主密码", "使用应急资料…", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
@@ -65,7 +65,7 @@ CONTROL_LABELS = (
 # list is closed; the credential hint is eight public Base64URL characters and
 # an ellipsis. Labels are still matched by full equality, never by substring.
 PASSKEY_CHOICE_LABEL = re.compile(
-    r"^(?:登录|保存到)：login\.locklark\.test · login\.locklark\.test · "
+    r"^(?:登录|保存到)：login\.passme\.test · login\.passme\.test · "
     r"(?:passkey-test|passkey-other|signal-one|signal-two) · "
     r"(?:passkey-test|passkey-other|signal-one|signal-two)"
     r"(?: · 凭据 [A-Za-z0-9_-]{8}…)?"

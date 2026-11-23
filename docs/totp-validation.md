@@ -4,7 +4,7 @@
 
 已 fetch 最新 `origin/main`、原分支和 PR head；main 为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`，工作分支为 `codex/first-preview`，接手 head 为 `8d5d81d64ce0db7a46ce607a8dcf157862bb80d5`。本地/远端分支/PR ref 一致，工作树干净，未见其他开发测试进程。已重读 design、progress、development-goal，无新增 AGENTS 指令，不依赖 Ryugi。
 
-[PR #1](https://github.com/jihuayu/locklark/pull/1) 开放、未合并；实现提交 `295e8c35601941ca02c13e4afd8c203ebbb5f0a7` 已普通快进推送原分支。提交前重新 fetch，未出现并发新 head。未覆盖后续提交、从空 main 重做、强推或修改 main。文档最终 head 由本文件所在提交与 PR head 确定，远端最终检查见 [PR checks](https://github.com/jihuayu/locklark/pull/1/checks)。
+[PR #1](https://github.com/jihuayu/passme/pull/1) 开放、未合并；实现提交 `295e8c35601941ca02c13e4afd8c203ebbb5f0a7` 已普通快进推送原分支。提交前重新 fetch，未出现并发新 head。未覆盖后续提交、从空 main 重做、强推或修改 main。文档最终 head 由本文件所在提交与 PR head 确定，远端最终检查见 [PR checks](https://github.com/jihuayu/passme/pull/1/checks)。
 
 ## 支持范围
 
@@ -30,7 +30,7 @@ Config 和 Code 的普通 fmt、JSON 以及标准 slog 输出均脱敏，JSON �
 
 ## 失败先行与来源/审计验收
 
-先写 API 空实现与合成测试，运行 `go test -count=1 ./internal/totp`，实际失败：RFC 向量、默认参数、规范输入、错误分类、脱敏和并发正例均未满足。随后实现并转绿；这是新增能力的失败先行，不声称空实现是已有生产漏洞。临时日志 `/tmp/locklark-validation/totp/red.log` 不保证跨环境保留。
+先写 API 空实现与合成测试，运行 `go test -count=1 ./internal/totp`，实际失败：RFC 向量、默认参数、规范输入、错误分类、脱敏和并发正例均未满足。随后实现并转绿；这是新增能力的失败先行，不声称空实现是已有生产漏洞。临时日志 `/tmp/passme-validation/totp/red.log` 不保证跨环境保留。
 
 已读取 RFC Editor 原文核对 [RFC 6238 Appendix B](https://www.rfc-editor.org/rfc/rfc6238#appendix-B) 的全部 18 个输出，按其参考程序使用 SHA1/256/512 对应的 20/32/64 字节公开密钥；同时核对 [RFC 4226 Appendix D](https://www.rfc-editor.org/rfc/rfc4226#appendix-D) 的 10 个计数向量。覆盖前导零、2038 年后及第 20000000000 秒；每个 RFC 4226 计数在区间起点/末秒均测试，下一秒切换。另测 1/60/3600 秒步长、负时间、int64 上界、空配置及 32 个 goroutine 并发只读。
 
@@ -40,17 +40,17 @@ Config 和 Code 的普通 fmt、JSON 以及标准 slog 输出均脱敏，JSON �
 
 ## 实跑检查
 
-环境 Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0；下表 go 为 `/tmp/locklark-tools/go/bin/go`，产物目录为 `/tmp/locklark-validation/totp`。
+环境 Cloud Linux，Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0；下表 go 为 `/tmp/passme-tools/go/bin/go`，产物目录为 `/tmp/passme-validation/totp`。
 
 | 检查 | 实际命令与结果 |
 | --- | --- |
 | 核心和来源 | `go test -count=1 ./internal/totp ./internal/preview -run 'TestRFC\|TestParseCanonical\|TestParseRejects\|TestSensitive\|TestConfigurationConcurrent\|TestTOTPAuthenticated'` 通过；来源测试改为在计算前核验 witness 后，定向单测再次通过 |
-| 全仓 Go | 设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含 KDBX 独立实现互操作与 Bun 子进程；preview 81.489 秒 |
+| 全仓 Go | 设置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun`、`PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python` 后，`go test -count=1 ./...` 通过，含 KDBX 独立实现互操作与 Bun 子进程；preview 81.489 秒 |
 | 定向 race | `go test -race -count=1 -timeout=5m ./internal/totp ./internal/preview -run 'TestRFC\|TestParseCanonical\|TestParseRejects\|TestSensitive\|TestConfigurationConcurrent\|TestTOTPAuthenticated'` 通过；core 1.173 秒、preview 6.815 秒。来源测试顺序调整后单独 race 再通过，4.693 秒 |
 | 模糊测试 | `go test ./internal/totp -run '^$' -fuzz=FuzzParseAndGenerate -fuzztime=20s -parallel=2` 通过，708401 次执行；检查固定错误、无部分结果、支持范围、确定性、窗口与敏感序列化 |
 | 静态/模块 | `go mod verify`、`go vet ./...`、`git diff --check` 通过；最后来源测试调整后 vet 再通过 |
-| 个人真实 PTY | 构建 locklark 后，`python3 scripts/personal_acceptance.py /tmp/locklark-validation/totp/locklark` 通过；错误恢复材料、损坏备份、已有目标不发钥/不留库，FIFO/旧格式/迟到目标及建库/重开回归通过 |
-| Bun/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后，`python3 scripts/mcp_acceptance.py /tmp/locklark-validation/totp/locklark` 通过 |
+| 个人真实 PTY | 构建 passme 后，`python3 scripts/personal_acceptance.py /tmp/passme-validation/totp/passme` 通过；错误恢复材料、损坏备份、已有目标不发钥/不留库，FIFO/旧格式/迟到目标及建库/重开回归通过 |
+| Bun/MCP | `bun test ./plugins/github-pull-reader` 2 pass/0 fail；Bun 加入 PATH 后，`python3 scripts/mcp_acceptance.py /tmp/passme-validation/totp/passme` 通过 |
 | Windows 编译 | 对 `./internal/totp`、`./internal/preview` 分别执行 `GOOS=windows GOARCH=amd64 go test -c -o ...`，通过；仅编译 |
 | macOS 编译 | 对上述两包分别执行 `GOOS=darwin GOARCH=arm64 go test -c -o ...`，通过；仅编译 |
 
@@ -58,7 +58,7 @@ Config 和 Code 的普通 fmt、JSON 以及标准 slog 输出均脱敏，JSON �
 
 ## 远端、复核与下一项
 
-实现提交的 [run 41910241147](https://github.com/jihuayu/locklark/actions/runs/41910241147) 中，[Ubuntu job 126855565969](https://github.com/jihuayu/locklark/actions/runs/41910241147/job/126855565969) 和 [Windows job 126855565484](https://github.com/jihuayu/locklark/actions/runs/41910241147/job/126855565484) 均 failure、零 steps。本轮重新读取两个 check annotations，均明确为近期付款失败或需提高 spending limit，job 未启动。没有远端测试通过证据，保留 PR，不绕过保护合并。
+实现提交的 [run 41910241147](https://github.com/jihuayu/passme/actions/runs/41910241147) 中，[Ubuntu job 126855565969](https://github.com/jihuayu/passme/actions/runs/41910241147/job/126855565969) 和 [Windows job 126855565484](https://github.com/jihuayu/passme/actions/runs/41910241147/job/126855565484) 均 failure、零 steps。本轮重新读取两个 check annotations，均明确为近期付款失败或需提高 spending limit，job 未启动。没有远端测试通过证据，保留 PR，不绕过保护合并。
 
 已自行复查解析边界、HMAC/截断/整数运算、敏感格式化和来源测试，未发现新增生产问题；自查不是独立复核。本轮读取 PR reviews/review comments 为空，没有关闭既有待复核范围的新意见。本切片、先前恢复/引用切片和 `4932c8d..a0d8ab1` 等已标待复核范围仍未完成独立复核。main 未动，未 squash，全部设计和逐平台验收仍未完成，持续目标保持进行。
 

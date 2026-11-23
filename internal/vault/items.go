@@ -12,9 +12,9 @@ import (
 	"unicode/utf8"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	"github.com/jihuayu/passme/internal/passkey"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -76,10 +76,10 @@ const MaxNotes = 64 << 10
 // normalize Unicode, whitespace, or line endings.
 func ValidNotes(s string) bool { return len(s) <= MaxNotes && xmlText(s) }
 
-const itemGroup = "Locklark items v1"
+const itemGroup = "Passme items v1"
 
 func itemUUID(id string) kdbx.UUID {
-	h := sha256.Sum256([]byte("locklark/kdbx/item/v1\x00" + id))
+	h := sha256.Sum256([]byte("passme/kdbx/item/v1\x00" + id))
 	return kdbx.UUID(h[:16])
 }
 func xmlText(s string) bool {
@@ -384,21 +384,21 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 	g.Name = itemGroup
 	m := kdbx.NewEntry()
 	m.UUID = itemUUID("")
-	m.Values = []kdbx.ValueData{slot("Title", "Locklark metadata v1", false), slot("Notes", base64.StdEncoding.EncodeToString(metadata), true)}
+	m.Values = []kdbx.ValueData{slot("Title", "Passme metadata v1", false), slot("Notes", base64.StdEncoding.EncodeToString(metadata), true)}
 	g.Entries = []kdbx.Entry{m}
 	refs := map[binaryKey]int{}
 	for _, it := range items {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
-		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Locklark.ID", it.ID, false), slot("Locklark.Kind", it.Kind, false)}
+		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Passme.ID", it.ID, false), slot("Passme.Kind", it.Kind, false)}
 		if len(it.ImportSource) > 0 {
-			e.Values = append(e.Values, slot("Locklark.ImportSource", base64.StdEncoding.EncodeToString(it.ImportSource), true))
+			e.Values = append(e.Values, slot("Passme.ImportSource", base64.StdEncoding.EncodeToString(it.ImportSource), true))
 		}
 		if it.State != "" {
-			e.Values = append(e.Values, slot("Locklark.State", it.State, false))
+			e.Values = append(e.Values, slot("Passme.State", it.State, false))
 		}
 		if it.PreviousState != "" {
-			e.Values = append(e.Values, slot("Locklark.PreviousState", it.PreviousState, false))
+			e.Values = append(e.Values, slot("Passme.PreviousState", it.PreviousState, false))
 		}
 		if len(it.Passkeys) != 0 {
 			// The collection always lives in its own protected slot; it is never
@@ -411,10 +411,10 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		}
 		if !hasV2Extension(it) {
 			// Legacy v1 layout, byte-for-byte compatible with the original
-			// Locklark native KDBX profile.
+			// Passme native KDBX profile.
 			if it.Kind == "login" {
 				if len(it.Passkey) != 0 {
-					e.Values = append(e.Values, slot("Locklark.Passkey", base64.StdEncoding.EncodeToString(it.Passkey), true))
+					e.Values = append(e.Values, slot("Passme.Passkey", base64.StdEncoding.EncodeToString(it.Passkey), true))
 				}
 				if it.Notes != "" {
 					e.Values = append(e.Values, slot("Notes", it.Notes, true))
@@ -427,7 +427,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 					e.Values = append(e.Values, slot("UserName", it.Username, true))
 				}
 			} else if it.Kind == "ssh-key" {
-				e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
+				e.Values = append(e.Values, slot("Passme.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Passme.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 			} else {
 				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
 				e.Binaries = []kdbx.BinaryReference{kdbx.NewBinaryReference(it.Filename, ref)}
@@ -439,7 +439,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		cat := it.EffectiveCategory()
 		switch {
 		case cat == CategorySSHKey && (it.Kind == "ssh-key" || len(it.SSHSeed) > 0):
-			e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
+			e.Values = append(e.Values, slot("Passme.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Passme.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 		case cat == CategoryDocument:
 			if it.Filename != "" || it.Attachment != nil {
 				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
@@ -447,7 +447,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			}
 		default:
 			if len(it.Passkey) != 0 {
-				e.Values = append(e.Values, slot("Locklark.Passkey", base64.StdEncoding.EncodeToString(it.Passkey), true))
+				e.Values = append(e.Values, slot("Passme.Passkey", base64.StdEncoding.EncodeToString(it.Passkey), true))
 			}
 			if it.Notes != "" {
 				e.Values = append(e.Values, slot("Notes", it.Notes, true))
@@ -582,7 +582,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed" || v.Key == "Locklark.Passkey" || v.Key == itemPasskeysSlot || v.Key == itemV2Slot
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Passme.ImportSource" || v.Key == "Passme.SSHSeed" || v.Key == "Passme.Passkey" || v.Key == itemPasskeysSlot || v.Key == itemV2Slot
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -592,7 +592,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return nil, nil, ErrSnapshot
 		}
 		if e.UUID == itemUUID("") {
-			if foundMeta || len(fields) != 2 || fields["Title"].Content != "Locklark metadata v1" || !fields["Notes"].Protected.Bool || len(e.Binaries) > 0 {
+			if foundMeta || len(fields) != 2 || fields["Title"].Content != "Passme metadata v1" || !fields["Notes"].Protected.Bool || len(e.Binaries) > 0 {
 				return nil, nil, ErrSnapshot
 			}
 			var err error
@@ -603,7 +603,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			foundMeta = true
 			continue
 		}
-		it := Item{ID: fields["Locklark.ID"].Content, Kind: fields["Locklark.Kind"].Content, Title: fields["Title"].Content}
+		it := Item{ID: fields["Passme.ID"].Content, Kind: fields["Passme.Kind"].Content, Title: fields["Title"].Content}
 		// Track the item before any passkey decode so a later field/attachment/
 		// category/validation failure cannot leave decoded records uncleared.
 		pending = &it
@@ -611,7 +611,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return nil, nil, ErrSnapshot
 		}
 		extra := 0
-		if source, ok := fields["Locklark.ImportSource"]; ok {
+		if source, ok := fields["Passme.ImportSource"]; ok {
 			var err error
 			it.ImportSource, err = base64.StdEncoding.Strict().DecodeString(source.Content)
 			if err != nil || len(it.ImportSource) == 0 || base64.StdEncoding.EncodeToString(it.ImportSource) != source.Content {
@@ -619,14 +619,14 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 			extra++
 		}
-		if state, ok := fields["Locklark.State"]; ok {
+		if state, ok := fields["Passme.State"]; ok {
 			if state.Content != "archived" && state.Content != "trashed" {
 				return nil, nil, ErrSnapshot
 			}
 			it.State = state.Content
 			extra++
 		}
-		if previous, ok := fields["Locklark.PreviousState"]; ok {
+		if previous, ok := fields["Passme.PreviousState"]; ok {
 			if it.State != "trashed" || previous.Content != "archived" {
 				return nil, nil, ErrSnapshot
 			}
@@ -650,17 +650,17 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 					return nil, nil, ErrSnapshot
 				}
 				var err error
-				it.SSHSeed, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHSeed"].Content)
-				if err != nil || base64.StdEncoding.EncodeToString(it.SSHSeed) != fields["Locklark.SSHSeed"].Content {
+				it.SSHSeed, err = base64.StdEncoding.Strict().DecodeString(fields["Passme.SSHSeed"].Content)
+				if err != nil || base64.StdEncoding.EncodeToString(it.SSHSeed) != fields["Passme.SSHSeed"].Content {
 					return nil, nil, ErrSnapshot
 				}
-				it.SSHPublicKey, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHPublicKey"].Content)
-				if err != nil || base64.StdEncoding.EncodeToString(it.SSHPublicKey) != fields["Locklark.SSHPublicKey"].Content {
+				it.SSHPublicKey, err = base64.StdEncoding.Strict().DecodeString(fields["Passme.SSHPublicKey"].Content)
+				if err != nil || base64.StdEncoding.EncodeToString(it.SSHPublicKey) != fields["Passme.SSHPublicKey"].Content {
 					return nil, nil, ErrSnapshot
 				}
 			case "login":
 				expected := 5 + extra
-				if v, ok := fields["Locklark.Passkey"]; ok {
+				if v, ok := fields["Passme.Passkey"]; ok {
 					var err error
 					it.Passkey, err = base64.StdEncoding.Strict().DecodeString(v.Content)
 					if err != nil || len(it.Passkey) == 0 || base64.StdEncoding.EncodeToString(it.Passkey) != v.Content {
@@ -731,17 +731,17 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		}
 		cat := it.EffectiveCategory()
 		switch {
-		case cat == CategorySSHKey && (it.Kind == "ssh-key" || len(fields["Locklark.SSHSeed"].Content) > 0):
+		case cat == CategorySSHKey && (it.Kind == "ssh-key" || len(fields["Passme.SSHSeed"].Content) > 0):
 			if len(fields) != 6+extra {
 				return nil, nil, ErrSnapshot
 			}
 			var err error
-			it.SSHSeed, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHSeed"].Content)
-			if err != nil || base64.StdEncoding.EncodeToString(it.SSHSeed) != fields["Locklark.SSHSeed"].Content {
+			it.SSHSeed, err = base64.StdEncoding.Strict().DecodeString(fields["Passme.SSHSeed"].Content)
+			if err != nil || base64.StdEncoding.EncodeToString(it.SSHSeed) != fields["Passme.SSHSeed"].Content {
 				return nil, nil, ErrSnapshot
 			}
-			it.SSHPublicKey, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHPublicKey"].Content)
-			if err != nil || base64.StdEncoding.EncodeToString(it.SSHPublicKey) != fields["Locklark.SSHPublicKey"].Content {
+			it.SSHPublicKey, err = base64.StdEncoding.Strict().DecodeString(fields["Passme.SSHPublicKey"].Content)
+			if err != nil || base64.StdEncoding.EncodeToString(it.SSHPublicKey) != fields["Passme.SSHPublicKey"].Content {
 				return nil, nil, ErrSnapshot
 			}
 		case cat == CategoryDocument:
@@ -750,7 +750,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 		default:
 			expected := 6 + extra
-			if v, ok := fields["Locklark.Passkey"]; ok {
+			if v, ok := fields["Passme.Passkey"]; ok {
 				var err error
 				it.Passkey, err = base64.StdEncoding.Strict().DecodeString(v.Content)
 				if err != nil || len(it.Passkey) == 0 || base64.StdEncoding.EncodeToString(it.Passkey) != v.Content {

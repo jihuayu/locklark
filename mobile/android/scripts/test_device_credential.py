@@ -15,11 +15,11 @@ from device_credential_acceptance import credential_marker, focused_identity, va
 
 class DeviceCredentialHarnessTests(unittest.TestCase):
     def key_policy_output(self, validity="0"):
-        fields = {"class":"org.locklark.android.DeviceKeyProtectionTest", "test":"realDeviceCapsuleUsesNonexportablePerOperationKey",
-                  "locklark_key_stage":"complete", "locklark_key_assertion":"none", "locklark_key_level":"tee",
-                  "locklark_key_auth_required":"true", "locklark_key_auth_validity":validity, "locklark_key_nonexportable":"true",
-                  "locklark_key_cipher_exact":"true", "locklark_key_auth_types_exact":"true", "locklark_key_fresh_rejected":"true"}
-        fields["locklark_key_fresh_denial"] = "keystore_authentication_required"
+        fields = {"class":"org.passme.android.DeviceKeyProtectionTest", "test":"realDeviceCapsuleUsesNonexportablePerOperationKey",
+                  "passme_key_stage":"complete", "passme_key_assertion":"none", "passme_key_level":"tee",
+                  "passme_key_auth_required":"true", "passme_key_auth_validity":validity, "passme_key_nonexportable":"true",
+                  "passme_key_cipher_exact":"true", "passme_key_auth_types_exact":"true", "passme_key_fresh_rejected":"true"}
+        fields["passme_key_fresh_denial"] = "keystore_authentication_required"
         return ("\n".join("INSTRUMENTATION_STATUS: " + name + "=" + value for name, value in fields.items()) +
                 "\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n").encode()
 
@@ -29,12 +29,12 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         for validity in ("1", "30", "86400", "-2", "out-of-range", "12345678-private-body"):
             self.assertFalse(auth.key_policy_passed(auth.key_policy_metadata(0, self.key_policy_output(validity))))
         for field in ("auth_required", "nonexportable", "cipher_exact", "auth_types_exact", "fresh_rejected"):
-            raw = self.key_policy_output().replace(("locklark_key_" + field + "=true").encode(), ("locklark_key_" + field + "=false").encode())
+            raw = self.key_policy_output().replace(("passme_key_" + field + "=true").encode(), ("passme_key_" + field + "=false").encode())
             self.assertFalse(auth.key_policy_passed(auth.key_policy_metadata(0, raw)))
 
     def test_key_policy_diagnostic_keeps_fixed_failure_stage_and_no_private_body(self):
-        raw = self.key_policy_output().replace(b"locklark_key_stage=complete", b"locklark_key_stage=auth-validity").replace(
-            b"locklark_key_assertion=none", b"locklark_key_assertion=per-operation") + b"INSTRUMENTATION_STATUS: locklark_key_exception=assertion\nINSTRUMENTATION_STATUS: locklark_key_source_line=84\nFAILURES!!!\nprivate-alias-value-body\n"
+        raw = self.key_policy_output().replace(b"passme_key_stage=complete", b"passme_key_stage=auth-validity").replace(
+            b"passme_key_assertion=none", b"passme_key_assertion=per-operation") + b"INSTRUMENTATION_STATUS: passme_key_exception=assertion\nINSTRUMENTATION_STATUS: passme_key_source_line=84\nFAILURES!!!\nprivate-alias-value-body\n"
         metadata = auth.key_policy_metadata(0, raw)
         self.assertFalse(auth.key_policy_passed(metadata))
         self.assertEqual(metadata["stage"], "auth-validity")
@@ -47,9 +47,9 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         raw = self.key_policy_output()
         bad = [raw.replace(b"OK (1 test)", b"OK (2 tests)"), raw.replace(b"DeviceKeyProtectionTest", b"private-class-body"),
                raw.replace(b"realDeviceCapsuleUsesNonexportablePerOperationKey", b"private-test-body"),
-               raw + b"INSTRUMENTATION_STATUS: locklark_key_level=tee\n",
-               raw.replace(b"locklark_key_fresh_denial=keystore_authentication_required", b"locklark_key_fresh_denial=none"),
-               raw.replace(b"INSTRUMENTATION_STATUS: locklark_key_fresh_rejected=true\n", b"")]
+               raw + b"INSTRUMENTATION_STATUS: passme_key_level=tee\n",
+               raw.replace(b"passme_key_fresh_denial=keystore_authentication_required", b"passme_key_fresh_denial=none"),
+               raw.replace(b"INSTRUMENTATION_STATUS: passme_key_fresh_rejected=true\n", b"")]
         for value in bad:
             metadata = auth.key_policy_metadata(0, value)
             self.assertFalse(auth.key_policy_passed(metadata))
@@ -57,7 +57,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
             self.assertNotIn("private-test-body", json.dumps(metadata))
 
     def test_key_policy_unknown_exception_stage_and_oversized_metadata_are_sanitized(self):
-        raw = self.key_policy_output("99999999") + b"INSTRUMENTATION_STATUS: locklark_key_exception=private-body\nINSTRUMENTATION_STATUS: locklark_key_stage=private-stage\nINSTRUMENTATION_STATUS: locklark_key_source_line=private-path\n"
+        raw = self.key_policy_output("99999999") + b"INSTRUMENTATION_STATUS: passme_key_exception=private-body\nINSTRUMENTATION_STATUS: passme_key_stage=private-stage\nINSTRUMENTATION_STATUS: passme_key_source_line=private-path\n"
         metadata = auth.key_policy_metadata(99999999, raw)
         self.assertFalse(auth.key_policy_passed(metadata))
         self.assertEqual(metadata["exit_code"], "outside-range")
@@ -80,7 +80,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         self.assertNotIn("private", json.dumps(auth.fresh_auth_failure(raw + b"private-factor-body\n", 42, 2)))
 
     def test_device_failure_ui_is_classified_without_exposing_text(self):
-        nodes = [self.node(package="org.locklark.android", text="准备设备加密未完成：固定类别", **{"class":"android.widget.TextView"})]
+        nodes = [self.node(package="org.passme.android", text="准备设备加密未完成：固定类别", **{"class":"android.widget.TextView"})]
         self.assertEqual(auth.native_ui_state(nodes), "refused")
 
     def node(self, **values):
@@ -232,7 +232,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
     def test_unrelated_os_window_is_not_an_auth_prompt(self):
         self.assertFalse(credential_marker([self.node(text="Notifications")],"com.android.systemui"))
         self.assertFalse(credential_marker([self.node(**{"class":"android.widget.EditText","password":"true","resource-id":"com.android.settings:id/wifi_password","package":"com.android.settings"})],"com.android.settings"))
-        self.assertFalse(credential_marker([self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})],"org.locklark.android"))
+        self.assertFalse(credential_marker([self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})],"org.passme.android"))
 
     def test_real_credential_markers_are_required_and_enabled(self):
         pin=self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})
@@ -251,7 +251,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
     def test_api35_lockPassword_marker_stays_bound_to_OS(self):
         lock = self.node(**{"resource-id":"com.android.systemui:id/lockPassword","class":"com.android.internal.widget.ImeAwareEditText"})
         self.assertTrue(credential_marker([lock],"com.android.systemui"))
-        self.assertFalse(credential_marker([{**lock,"package":"org.locklark.android"}],"org.locklark.android"))
+        self.assertFalse(credential_marker([{**lock,"package":"org.passme.android"}],"org.passme.android"))
         self.assertFalse(credential_marker([self.node(**{"package":"com.android.settings","resource-id":"com.android.settings:id/wifi_password","class":"android.widget.EditText","password":"true"})],"com.android.settings"))
         self.assertFalse(credential_marker([{**lock,"enabled":"false"}],"com.android.systemui"))
 
@@ -297,7 +297,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         runner.load_trusted_window_uids()
         for package in auth.OS_PACKAGES:
             self.assertIn(("pm", "list", "packages", "-s", "-U", package), calls)
-        self.assertIn(("pm", "list", "packages", "-U", "org.locklark.android"), calls)
+        self.assertIn(("pm", "list", "packages", "-U", "org.passme.android"), calls)
 
     def test_missing_or_ambiguous_window_authority_never_accepts_marker(self):
         nodes = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
@@ -323,7 +323,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         self.assertTrue(evidence["owner_package_verified"])
 
     def test_disabled_queued_lock_page_does_not_refuse_prompt(self):
-        queued = [self.node(package="org.locklark.android",text="打开本地金库",**{"class":"android.widget.Button","enabled":"false"})]
+        queued = [self.node(package="org.passme.android",text="打开本地金库",**{"class":"android.widget.Button","enabled":"false"})]
         prompt = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
         runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
         runner.args = SimpleNamespace(timeout=1)
@@ -332,7 +332,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         frames = iter([queued,prompt])
         def observation(deadline):
             nodes = next(frames)
-            package = "org.locklark.android" if nodes is queued else "com.android.systemui"
+            package = "org.passme.android" if nodes is queued else "com.android.systemui"
             return nodes, package, (b"abc", 10123, package)
         runner.bound_snapshot = observation
         observed=[]
@@ -430,7 +430,7 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
     def test_copy_and_reinstall_restores_archive_over_adb_shell_stdin(self):
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as bundle:
-            for name, payload in (("personal.ll", b"private-vault"),
+            for name, payload in (("personal.pm", b"private-vault"),
                                   ("device-unlock/installation", b"private-installation"),
                                   ("device-unlock/" + "a" * 64 + ".capsule", b"private-capsule")):
                 member = tarfile.TarInfo(name)
@@ -439,9 +439,9 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         archive = buffer.getvalue()
 
         runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
-        runner.args = SimpleNamespace(apk="/tmp/locklark.apk")
+        runner.args = SimpleNamespace(apk="/tmp/passme.apk")
         runner.adb = ["adb", "-s", "emulator-5554"]
-        runner.fixture = {"master":"MasterFixture", "key":"LL1-" + "A" * 26,
+        runner.fixture = {"master":"MasterFixture", "key":"PM1-" + "A" * 26,
                           "items":[{"id":"a" * 32, "revision":"b" * 64, "title":"HostFirst", "password":"FirstPassword"}]}
         runner.controller = mock.Mock()
         runner.command = mock.Mock(return_value=SimpleNamespace(stdout=archive, stderr=b"", returncode=0))
@@ -470,15 +470,15 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
 
         run.assert_called_once()
         positional, keywords = run.call_args
-        self.assertEqual(positional[0], runner.adb + ["shell", "run-as", "org.locklark.android", "tar", "-C", "no_backup", "-xf", "-"])
+        self.assertEqual(positional[0], runner.adb + ["shell", "run-as", "org.passme.android", "tar", "-C", "no_backup", "-xf", "-"])
         self.assertEqual(keywords["input"], archive)
         self.assertNotIn("exec-out", positional[0])
-        self.assertIn(("run-as", "org.locklark.android", "test", "-s", "no_backup/personal.ll",
+        self.assertIn(("run-as", "org.passme.android", "test", "-s", "no_backup/personal.pm",
                        "-a", "-s", "no_backup/device-unlock/installation"), shell_calls)
 
     def fixture(self, root):
         run=root/"android-host-ui-owned";run.mkdir(mode=0o700)
-        key="LL1-"+"A"*26
+        key="PM1-"+"A"*26
         fixture={"master":"MasterFixture","key":key,"items":[{"id":"a"*32,"revision":"b"*64,"title":"HostFirst","password":"FirstPassword"},{"id":"c"*32,"revision":"d"*64,"title":"HostSecond","password":"SecondPassword"}]}
         for name,value in (("result.json",{"success":True,"stage":"complete","checks":["full_controller_and_logcat_outputs_contain_no_secret_canaries"]}),
                            ("expected-private.json",fixture),("canaries.json",["MasterFixture",key,"FirstPassword","SecondPassword"])):

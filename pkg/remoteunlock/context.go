@@ -13,7 +13,7 @@ import (
 // Wire constants of the v1 canonical binding context.
 const (
 	// Format is the fixed value of the "format" member.
-	Format = "locklark.remote-unlock"
+	Format = "passme.remote-unlock"
 	// Version is the canonical JSON integer of the "version" member.
 	Version = 1
 	// Kind is the fixed value of the "kind" member.

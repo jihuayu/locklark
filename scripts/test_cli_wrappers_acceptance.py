@@ -89,12 +89,12 @@ class EndToEndTests(unittest.TestCase):
         bin_dir = cls.root / "bin"
         bin_dir.mkdir(mode=0o700)
         suffix = ".exe" if os.name == "nt" else ""
-        cls.cli = bin_dir / ("locklark" + suffix)
+        cls.cli = bin_dir / ("passme" + suffix)
         cls.fixture = bin_dir / ("cli-wrappers-fixture" + suffix)
         environment = dict(os.environ)
-        environment.pop("LOCKLARK_CLI_ACTIVE", None)
+        environment.pop("PASSME_CLI_ACTIVE", None)
         environment.setdefault("GOTOOLCHAIN", "go1.27.3")
-        for output, package in ((cls.cli, "./cmd/locklark"), (cls.fixture, "./scripts/cli_wrappers_fixture")):
+        for output, package in ((cls.cli, "./cmd/passme"), (cls.fixture, "./scripts/cli_wrappers_fixture")):
             result = subprocess.run(
                 ["go", "build", "-o", str(output), package], cwd=ROOT,
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -111,7 +111,7 @@ class EndToEndTests(unittest.TestCase):
         artifacts = pathlib.Path(tempfile.mkdtemp(prefix="cli-wrappers-artifacts-", dir=self.root))
         artifacts.chmod(0o700)
         environment = dict(os.environ)
-        environment.pop("LOCKLARK_CLI_ACTIVE", None)
+        environment.pop("PASSME_CLI_ACTIVE", None)
         environment.setdefault("GOTOOLCHAIN", "go1.27.3")
         result = subprocess.run(
             [

@@ -8,7 +8,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // authenticateState must admit any snapshot the vault can seal: items below

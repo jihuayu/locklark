@@ -79,7 +79,7 @@ function harness() {
     generatedHistory: [],
   });
   const context = {
-    LocklarkCore: core,
+    PassmeCore: core,
     document,
     navigator: {
       clipboard: {

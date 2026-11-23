@@ -150,7 +150,7 @@ type S3Config struct {
 // image
 // ghcr.io/rustfs/rustfs@sha256:829b46dd6f2bbf0ece67e5ef6ae3f1de3b3542ad3b8b614288b17b98cca61c3e
 // (linux/arm64), run as the owned container
-// locklark-s3-smoke-rustfs-cbe3121f452a on the loopback TLS endpoint
+// passme-s3-smoke-rustfs-cbe3121f452a on the loopback TLS endpoint
 // https://127.0.0.1:32875, with synthetic credentials held only in private
 // temporary files. TestS3RustFSAllocatorSafetyTLSSmoke passed on it: a
 // missing-key If-Match write was rejected and left the key absent, an exact

@@ -25,7 +25,7 @@ public final class SerializedPipeWriter {
     private static let queueKey = DispatchSpecificKey<QueueToken>()
     private let token = QueueToken()
     private let stateLock = NSLock()
-    private let queue = DispatchQueue(label: "org.locklark.safari.pipe.writer")
+    private let queue = DispatchQueue(label: "org.passme.safari.pipe.writer")
     private let fd: Int32
     private let deadline: TimeInterval
     private let writeOperation: WriteOperation

@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 type requestCounts struct{ opens atomic.Int32 }

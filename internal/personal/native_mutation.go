@@ -4,8 +4,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrMutationRefused = errors.New("native mutation refused")

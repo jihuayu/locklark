@@ -10,7 +10,7 @@ import (
 
 	"filippo.io/age"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // fileSealFixture is one caller-pinned vault for the full-file seal tests. The

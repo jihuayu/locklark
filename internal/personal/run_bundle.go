@@ -17,9 +17,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/clibinding"
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/clibinding"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const runBundleAction = "item.run.bundle"
@@ -236,7 +236,7 @@ func (s *runBundleStoreRequest) binding(secret []byte) (string, error) {
 	if s == nil || s.validate() != nil {
 		return "", ErrRunTarget
 	}
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/run-bundle/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/run-bundle/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

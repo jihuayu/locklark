@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func profileFixture(t *testing.T, item vault.Item) (*Session, string, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "profile.ll")
+	path := filepath.Join(t.TempDir(), "profile.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if e := Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 func serviceTarget(p directory.Pins, scope, digest, db, anchor string) string {
@@ -19,7 +19,7 @@ func serviceTarget(p directory.Pins, scope, digest, db, anchor string) string {
 		Pins                             directory.Pins
 		Scope, Digest, Directory, Anchor string
 	}{p, scope, digest, db, anchor})
-	h := sha256.Sum256(append([]byte("locklark/teamclient/sequencer-scope-adoption/v1\x00"), raw...))
+	h := sha256.Sum256(append([]byte("passme/teamclient/sequencer-scope-adoption/v1\x00"), raw...))
 	return hex.EncodeToString(h[:])
 }
 func checkedInit(path string, r profileRecord, q ServiceInitRequest) (ServiceInitRequest, []byte, error) {

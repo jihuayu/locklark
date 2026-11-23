@@ -12,6 +12,6 @@
 
 挑战绑定当前 parent；目录更新后未消费证明失效。同一 parent 下的并发提交只有一个成功。没有墙钟 TTL，也不把证明称为完整邀请/审批租期。身份和公钥撤销墓碑照常校验，即便旧设备提供新的正确证明也不能复活已退役身份。全文件/远端最新性仍需独立可信检查点；这项证明不解决恶意中继扣留新版本。
 
-失败先行日志 `/tmp/locklark-validation/possession-red.log`。测试覆盖单钥不足、签名/密文/nonce 篡改、成员/设备/parent 重绑定、无证明的 genesis/新增设备拒绝、策略 scope 防降级、深拷贝、撤销墓碑、失败事务零回执、并发单赢家，以及重签历史剥离证明仍拒绝。独立子进程仅凭公开 pins、checkpoint 和数据库路径重开验证，不接收任何私钥。故障注入断言遵守既有固定 `ErrStorage` 契约，不透出 updater 内部错误。
+失败先行日志 `/tmp/passme-validation/possession-red.log`。测试覆盖单钥不足、签名/密文/nonce 篡改、成员/设备/parent 重绑定、无证明的 genesis/新增设备拒绝、策略 scope 防降级、深拷贝、撤销墓碑、失败事务零回执、并发单赢家，以及重签历史剥离证明仍拒绝。独立子进程仅凭公开 pins、checkpoint 和数据库路径重开验证，不接收任何私钥。故障注入断言遵守既有固定 `ErrStorage` 契约，不透出 updater 内部错误。
 
 Luna/max 已独立审阅当前实现，运行定向/整包 directory 测试、vet 与 diff 检查，无阻塞项。最终 head、全仓/race 与双平台 CI 证据记录在本批 PR。

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"io"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // KDBX payload sealing and opening under the per-snapshot CEK.
@@ -53,7 +53,7 @@ const (
 func errKDBXPayloadInvalid() error  { return &Error{Code: CodeKDBXPayloadInvalid} }
 func errKDBXPayloadTooLarge() error { return &Error{Code: CodeKDBXPayloadTooLarge} }
 
-// Locklark snapshot KDBX 4.1 profile fixed by SealKDBXPayload: Argon2id,
+// Passme snapshot KDBX 4.1 profile fixed by SealKDBXPayload: Argon2id,
 // KDF version 0x13, 16 MiB memory, 3 iterations, parallelism 2, no secret key
 // and no associated data.
 const (
@@ -146,7 +146,7 @@ func installKDBXKey(db *kdbx.Database, cek []byte) (key []byte, err error) {
 	return key, nil
 }
 
-// configureKDBXProfile sets the exact Locklark snapshot Argon2id profile on
+// configureKDBXProfile sets the exact Passme snapshot Argon2id profile on
 // db's header, keeping the random 32-byte salt the header already carries. A
 // header whose salt is unset receives a fresh random one, so no header ends up
 // with the profile's fixed parameters and an all-zero salt.
@@ -190,7 +190,7 @@ func configureKDBXProfile(db *kdbx.Database) error {
 // credentials and any prior password, key or Windows value, because it
 // installs its own for the duration of the call.
 //
-// Sealing. Seal sets the fixed Locklark snapshot profile on db's header:
+// Sealing. Seal sets the fixed Passme snapshot profile on db's header:
 // Argon2id, KDF version 0x13, 16 MiB memory, 3 iterations, parallelism 2, no
 // secret key, no associated data. The existing random 32-byte salt is
 // preserved; an unset salt receives a fresh random one. Any other prior KDF

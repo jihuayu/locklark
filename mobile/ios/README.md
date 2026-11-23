@@ -24,7 +24,7 @@ binds both iOS device and simulator targets into `Build/Mobilecore.xcframework`,
 verifies the SHA-256 of XcodeGen 2.46.0, generates the project, runs pure Swift
 tests, creates a fresh simulator and runs actual SDK adapter/core/UI tests.
 No prebuilt or fake framework is accepted. For local signed-device work, run
-the two build/generate scripts and open `Locklark.xcodeproj`, then choose your
+the two build/generate scripts and open `Passme.xcodeproj`, then choose your
 own development team. The generated project and build products are ignored.
 
 Runtime output, XCTest result bundles and screenshots under `Build/` are
@@ -67,7 +67,7 @@ GO_BIN=go mobile/ios/scripts/device-ci.sh
 ```
 
 The bundle base must be an explicit test namespace such as
-`com.example.locklark.acceptance`, with at least two reverse-DNS prefix components.
+`com.example.passme.acceptance`, with at least two reverse-DNS prefix components.
 App, unit-test and UI-runner identifiers derive from that one build setting;
 production identifiers are rejected. The script refuses an existing test app or
 runner instead of removing its container. Choose a fresh configured test bundle

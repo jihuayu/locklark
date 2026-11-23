@@ -11,7 +11,7 @@ from personal_acceptance import invoke
 
 def check(binary):
     with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "owner.ll")
+        path = str(pathlib.Path(tmp) / "owner.pm")
         pw = "synthetic-master-" + os.urandom(8).hex()
         password = "synthetic-private-" + os.urandom(8).hex() + '\t"quote"[{}]'
         username = "synthetic-user-" + os.urandom(8).hex()
@@ -31,7 +31,7 @@ def check(binary):
             invoke(binary, "reveal-login", path, factors + [("输入 SHOW 确认显示", "\x03")],
                    options=options, ok=False, forbidden=denied_values)
         for wrong in ([("主密码", pw + "x"), factors[1]],
-                      [factors[0], ("Secret Key", "LL1-" + "A" * 26)]):
+                      [factors[0], ("Secret Key", "PM1-" + "A" * 26)]):
             invoke(binary, "reveal-login", path, wrong + consent, options=options,
                    ok=False, forbidden=denied_values, expect_error="invalid personal vault")
         unknown = ("--id", "a" * 32, *options[2:])

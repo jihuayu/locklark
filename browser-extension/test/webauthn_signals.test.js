@@ -94,13 +94,13 @@ function makeHarness(options = {}) {
       messages.push(data);
       if (
         data &&
-        data.source === "locklark-capability-v1" &&
+        data.source === "passme-capability-v1" &&
         typeof data.conditional !== "boolean"
       )
         // Answer the capability handshake so availability probes stay bounded.
         queueMicrotask(() =>
           deliver({
-            source: "locklark-capability-v1",
+            source: "passme-capability-v1",
             id: data.id,
             conditional: options.extensionConditional === true,
           }),
@@ -153,9 +153,9 @@ function makeHarness(options = {}) {
     calls,
     messages,
     hints: () =>
-      messages.filter((message) => message?.source === "locklark-signal-v1"),
+      messages.filter((message) => message?.source === "passme-signal-v1"),
     requestPosts: () =>
-      messages.filter((message) => message?.source === "locklark-request-v1"),
+      messages.filter((message) => message?.source === "passme-request-v1"),
     resolve: (index, value) => calls[index].resolve(value),
     reject: (index, error) => calls[index].reject(error),
   };
@@ -177,7 +177,7 @@ test("signalUnknownCredential returns the exact native promise and posts one hin
   const hints = h.hints();
   assert.equal(hints.length, 1, "exactly one hint per fulfilment");
   assert.deepEqual(Object.keys(hints[0]).sort(), ["id", "options", "source"]);
-  assert.equal(hints[0].source, "locklark-signal-v1");
+  assert.equal(hints[0].source, "passme-signal-v1");
   assert.match(hints[0].id, /^[a-f0-9-]{36}$/);
   assert.deepEqual(JSON.parse(hints[0].options), {
     kind: "unknown",
@@ -384,7 +384,7 @@ test("a throwing member getter is ignored and the native call keeps its outcome"
   assert.equal(await promise, "ok");
   await flush();
   assert.equal(h.hints().length, 0);
-  assert.equal(h.messages.some((m) => m?.source === "locklark-signal-v1"), false);
+  assert.equal(h.messages.some((m) => m?.source === "passme-signal-v1"), false);
 });
 
 test("a non-thenable native return value is returned as-is and posts no hint", async () => {

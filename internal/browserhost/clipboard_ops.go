@@ -5,8 +5,8 @@ import (
 	"crypto/subtle"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 const clipboardCapability = "native-clipboard-lease-v1"

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func pendingOTPFixture(t *testing.T) (*Connection, *personal.Session, *memoryPipe, Request) {

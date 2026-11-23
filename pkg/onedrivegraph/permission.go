@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 // This file adds a narrow Microsoft Graph permission transport for one

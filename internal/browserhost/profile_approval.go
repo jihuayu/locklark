@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // pendingProfile is one extension-proposed sensitive profile fill that has not

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func desktopFrame(raw []byte) []byte {
@@ -83,7 +83,7 @@ func (c *desktopRelay) recvType(t *testing.T, want string) map[string]any {
 
 func desktopFixture(t *testing.T) (string, []byte, string, personal.Row) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "desktop.ll")
+	path := filepath.Join(t.TempDir(), "desktop.pm")
 	key := bytes.Repeat([]byte{3}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -135,7 +135,7 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	// named pipe; there is no skip or fallback there.
 	endpoint := desktopBrokerSocket(t)
 	if e := desktopBrokerTrusted(endpoint); e == nil {
-		t.Setenv("LOCKLARK_BROWSER_SOCKET", endpoint)
+		t.Setenv("PASSME_BROWSER_SOCKET", endpoint)
 		// On Unix the trusted endpoint is also the listening path. On Windows
 		// it is only the safe token: DefaultBrokerEndpoint appends it to the
 		// per-user pipe name, so the two differ by design. Both the broker and

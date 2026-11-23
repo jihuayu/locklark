@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -66,7 +66,7 @@ func newBenchVault(b *testing.B, history int, restored bool) (string, []byte) {
 	pw := "fixture"
 	key := bytes.Repeat([]byte{7}, 16)
 	if restored {
-		src := filepath.Join(b.TempDir(), "source.ll")
+		src := filepath.Join(b.TempDir(), "source.pm")
 		if err := Create(src, pw, key); err != nil {
 			b.Fatal(err)
 		}
@@ -76,30 +76,30 @@ func newBenchVault(b *testing.B, history int, restored bool) (string, []byte) {
 			}
 		}
 		fillBenchHistory(b, src, pw, key, uint64(history))
-		archive1 := filepath.Join(b.TempDir(), "first.llb")
+		archive1 := filepath.Join(b.TempDir(), "first.pmb")
 		kit1, err := Backup(src, archive1, pw, key)
 		if err != nil {
 			b.Fatal(err)
 		}
 		key1 := bytes.Repeat([]byte{8}, 16)
-		restored1 := filepath.Join(b.TempDir(), "restored1.ll")
+		restored1 := filepath.Join(b.TempDir(), "restored1.pm")
 		if err = Restore(archive1, restored1, pw, key, kit1, key1); err != nil {
 			b.Fatal(err)
 		}
-		archive2 := filepath.Join(b.TempDir(), "second.llb")
+		archive2 := filepath.Join(b.TempDir(), "second.pmb")
 		kit2, err := Backup(restored1, archive2, pw, key1)
 		if err != nil {
 			b.Fatal(err)
 		}
 		key2 := bytes.Repeat([]byte{9}, 16)
-		restored2 := filepath.Join(b.TempDir(), "restored2.ll")
+		restored2 := filepath.Join(b.TempDir(), "restored2.pm")
 		if err = Restore(archive2, restored2, pw, key1, kit2, key2); err != nil {
 			b.Fatal(err)
 		}
 		fillBenchHistory(b, restored2, pw, key2, uint64(history))
 		return restored2, key2
 	}
-	path := filepath.Join(b.TempDir(), "vault.ll")
+	path := filepath.Join(b.TempDir(), "vault.pm")
 	if err := Create(path, pw, key); err != nil {
 		b.Fatal(err)
 	}

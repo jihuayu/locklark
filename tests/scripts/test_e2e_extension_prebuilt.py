@@ -28,10 +28,10 @@ class PrebuiltHarnessTests(unittest.TestCase):
 
     def env(self, **overrides):
         values = {
-            "LOCKLARK_BROWSER_REQUIRE_PREBUILT": "1",
-            "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": str(self.tmp / "prepared"),
-            "LOCKLARK_BROWSER_EXTENSION_CHROMIUM": str(self.tmp / "chromium"),
-            "LOCKLARK_BROWSER_EXTENSION_FIREFOX": str(self.tmp / "firefox"),
+            "PASSME_BROWSER_REQUIRE_PREBUILT": "1",
+            "PASSME_BROWSER_EXTENSION_PREPARED_DIR": str(self.tmp / "prepared"),
+            "PASSME_BROWSER_EXTENSION_CHROMIUM": str(self.tmp / "chromium"),
+            "PASSME_BROWSER_EXTENSION_FIREFOX": str(self.tmp / "firefox"),
         }
         values.update(overrides)
         return values
@@ -52,11 +52,11 @@ class PrebuiltHarnessTests(unittest.TestCase):
 
     def test_missing_partial_malformed_and_failure_are_fixed(self):
         for overrides in (
-            {"LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": ""},
-            {"LOCKLARK_BROWSER_EXTENSION_FIREFOX": ""},
-            {"LOCKLARK_BROWSER_REQUIRE_PREBUILT": "0"},
-            {"LOCKLARK_BROWSER_REQUIRE_PREBUILT": "true"},
-            {"LOCKLARK_BROWSER_EXTENSION_SAFARI": ""},
+            {"PASSME_BROWSER_EXTENSION_PREPARED_DIR": ""},
+            {"PASSME_BROWSER_EXTENSION_FIREFOX": ""},
+            {"PASSME_BROWSER_REQUIRE_PREBUILT": "0"},
+            {"PASSME_BROWSER_REQUIRE_PREBUILT": "true"},
+            {"PASSME_BROWSER_EXTENSION_SAFARI": ""},
         ):
             with self.subTest(overrides=overrides), mock.patch.dict(
                 os.environ, self.env(**overrides), clear=True
@@ -69,8 +69,8 @@ class PrebuiltHarnessTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": str(self.tmp / "prepared"),
-                "LOCKLARK_BROWSER_EXTENSION_CHROMIUM": str(self.tmp / "chromium"),
+                "PASSME_BROWSER_EXTENSION_PREPARED_DIR": str(self.tmp / "prepared"),
+                "PASSME_BROWSER_EXTENSION_CHROMIUM": str(self.tmp / "chromium"),
             },
             clear=True,
         ):

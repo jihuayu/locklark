@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -19,7 +19,7 @@ func saveTarget(fill BrowserFillTarget) BrowserSaveTarget {
 
 func TestBrowserSaveUpdatePreservesExistingEmptyTitle(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "source.ll")
+	path := filepath.Join(dir, "source.pm")
 	key := bytes.Repeat([]byte{8}, 16)
 	if e := Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -36,7 +36,7 @@ func TestBrowserSaveUpdatePreservesExistingEmptyTitle(t *testing.T) {
 	// The signed snapshot schema accepts an empty title even though current
 	// editing and import entry points require a nonempty one.
 	recovered.Items = []vault.Item{{ID: "22222222222222222222222222222222", Kind: "login", URL: "https://example.test/login", Username: "old-user", Password: "old-password"}}
-	restored := filepath.Join(dir, "empty-title.ll")
+	restored := filepath.Join(dir, "empty-title.pm")
 	if e = create(restored, "fixture", key, recovered); e != nil {
 		t.Fatal(e)
 	}
@@ -63,7 +63,7 @@ func TestBrowserSaveUpdatePreservesExistingEmptyTitle(t *testing.T) {
 
 func TestBrowserSavePreservesMetadataRefusalSnapshotAndRecovery(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "source.ll")
+	path := filepath.Join(dir, "source.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if Create(path, "fixture", key) != nil {
 		t.Fatal("create")
@@ -120,7 +120,7 @@ func TestBrowserSavePreservesMetadataRefusalSnapshotAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal("backup history", e)
 	}
-	restored := filepath.Join(dir, "restored.ll")
+	restored := filepath.Join(dir, "restored.pm")
 	fresh := bytes.Repeat([]byte{7}, 16)
 	if e = Restore(archive, restored, "fixture", key, kit, fresh); e != nil {
 		t.Fatal("restore browser audit", e)

@@ -27,9 +27,9 @@ from .errors import ReleaseError
 from .receiptcheck import verify_prepared_pair
 from .version import validate_version
 
-SCHEMA = "locklark-browser-release-attestation/v1"
+SCHEMA = "passme-browser-release-attestation/v1"
 DOMAIN = SCHEMA
-REPO = "jihuayu/locklark"
+REPO = "jihuayu/passme"
 MAX_ATTESTATION_BYTES = 64 * 1024
 MAX_PUBLIC_KEY_BYTES = 128
 FIELDS = (
@@ -132,8 +132,8 @@ def canonical_bytes(payload: dict[str, str]) -> bytes:
 
     The format is ASCII, one field per line, with a final newline:
 
-        locklark-browser-release-attestation/v1
-        repo=jihuayu/locklark
+        passme-browser-release-attestation/v1
+        repo=jihuayu/passme
         product=chromium
         version=0.1.0
         source_commit=<40 lowercase hex>

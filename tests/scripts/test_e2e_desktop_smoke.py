@@ -553,7 +553,7 @@ class DesktopSmokeFixture(unittest.TestCase):
         self.records: list[Path] = []
         self.installs = 0
         self.executed = self.temp_dir / "stand-in-executions"
-        self.vault = self.temp_dir / "target-vault.ll"
+        self.vault = self.temp_dir / "target-vault.pm"
         self.vault.write_bytes(_VAULT_BYTES)
         self.desktop = self._install_stand_in()
         self.ctx = SimpleNamespace(
@@ -873,7 +873,7 @@ class DesktopSmokeFixture(unittest.TestCase):
             "_keep_running()\n",
             encoding="utf-8",
         )
-        binary = self.temp_dir / f"locklark-desktop-{install}"
+        binary = self.temp_dir / f"passme-desktop-{install}"
         record = self.temp_dir / f"stand-in-record-{install}.json"
         self.records.append(record)
         binary.write_text(
@@ -947,7 +947,7 @@ class SpawnArgvTests(DesktopSmokeFixture):
     def test_usage_refusal_is_a_visible_failure(self):
         # Exit 2 is the desktop's fixed argument refusal and must surface as
         # an AssertionError from the helper's launch, not as a later failure.
-        fast = self.temp_dir / "locklark-desktop-fast"
+        fast = self.temp_dir / "passme-desktop-fast"
         fast.write_text("#!/bin/sh\nexit 2\n", encoding="utf-8")
         fast.chmod(0o700)
         self.ctx.desktop_bin = fast
@@ -958,13 +958,13 @@ class SpawnArgvTests(DesktopSmokeFixture):
 
     def test_missing_target_vault_is_refused_before_spawning(self):
         with self.assertRaisesRegex(AssertionError, "does not exist"):
-            self.launch(self.temp_dir / "absent.ll")
+            self.launch(self.temp_dir / "absent.pm")
         self.assertFalse(self.executed.exists(), "no desktop may spawn for a missing vault")
 
     def test_target_vault_outside_the_private_root_is_refused_before_spawning(self):
         outside = Path(tempfile.mkdtemp(prefix="ll-desktop-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
-        vault = outside / "vault.ll"
+        vault = outside / "vault.pm"
         vault.write_bytes(b"outside\n")
         with self.assertRaisesRegex(AssertionError, "outside the private fixture root"):
             self.launch(vault)
@@ -1285,7 +1285,7 @@ class LifecycleAndVaultTests(DesktopSmokeFixture):
     def test_early_exit_is_false_not_a_liveness_pass(self):
         # A desktop that stops during the window (other than the exit-2 usage
         # refusal) fails the liveness smoke without raising.
-        quick = self.temp_dir / "locklark-desktop-quick"
+        quick = self.temp_dir / "passme-desktop-quick"
         quick.write_text("#!/bin/sh\nexec true\n", encoding="utf-8")
         quick.chmod(0o700)
         self.ctx.desktop_bin = quick
@@ -1370,7 +1370,7 @@ class ProductContractTests(unittest.TestCase):
         self.assertEqual(argv, ["--settings", "/tmp/private/settings.json"])
         self.assertEqual(
             support.DESKTOP_SETTINGS_USAGE,
-            "usage: locklark-desktop [--settings ABSOLUTE_PATH]",
+            "usage: passme-desktop [--settings ABSOLUTE_PATH]",
         )
 
     def test_product_still_advertises_only_the_settings_argument(self):

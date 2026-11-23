@@ -10,7 +10,7 @@ import (
 
 // The fixed vector below is synthetic. It demonstrates codec behaviour only;
 // it is not a real pairing, request, policy, identity or authorization.
-const vectorJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"channel-binding-context","request_id":"req-0001","request_digest":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","pair_id":"pair-0001","pair_generation":0,"lock_generation":1,"member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","vault_id":"vault-0001","key_epoch":7,"policy_seq":0,"policy_digest":"Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA","deadline_unix_ms":1800000000000}`
+const vectorJSON = `{"format":"passme.remote-unlock","version":1,"kind":"channel-binding-context","request_id":"req-0001","request_digest":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","pair_id":"pair-0001","pair_generation":0,"lock_generation":1,"member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","vault_id":"vault-0001","key_epoch":7,"policy_seq":0,"policy_digest":"Hx4dHBsaGRgXFhUUExIREA8ODQwLCgkIBwYFBAMCAQA","deadline_unix_ms":1800000000000}`
 
 func ascendingDigest() [DigestSize]byte {
 	var d [DigestSize]byte
@@ -149,7 +149,7 @@ func TestMaximumLegalBudget(t *testing.T) {
 		DeadlineUnixMS: 1<<63 - 1,
 	}
 	got := mustEncode(t, c)
-	const maxLegalSize = 1259 // 6 IDs (128 each), four uint64 maxima, int64 maximum and two digests.
+	const maxLegalSize = 1257 // 6 IDs (128 each), four uint64 maxima, int64 maximum and two digests.
 	if len(got) != maxLegalSize {
 		t.Fatalf("maximum legal context uses %d bytes, want %d", len(got), maxLegalSize)
 	}
@@ -375,7 +375,7 @@ func TestParseRejectsNonCanonicalInput(t *testing.T) {
 			return replaceOnce(t, b, `"req-0001"`, `"req\u002d0001"`)
 		}},
 		{name: "escaped constant", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark\u002eremote-unlock"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme\u002eremote-unlock"`)
 		}},
 		{name: "uppercase escape in key", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"format"`, `"\u0066ormat"`)
@@ -386,7 +386,7 @@ func TestParseRejectsNonCanonicalInput(t *testing.T) {
 
 		// Constants and types.
 		{name: "wrong format", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark.remote-unlock.v2"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme.remote-unlock.v2"`)
 		}},
 		{name: "wrong kind", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"channel-binding-context"`, `"request-context"`)

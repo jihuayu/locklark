@@ -3,7 +3,7 @@ package vault
 import (
 	"bytes"
 	"errors"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"strings"
 	"unicode/utf8"
 )
@@ -35,7 +35,7 @@ func ExportKDBX(items []Item, password string) ([]byte, error) {
 	if err := writeItems(db, nil, items); err != nil {
 		return nil, err
 	}
-	// The portable export has no Locklark internal metadata record.
+	// The portable export has no Passme internal metadata record.
 	db.Content.Root.Groups[0].Entries = db.Content.Root.Groups[0].Entries[1:]
 	if err := db.LockProtectedEntries(); err != nil {
 		return nil, err

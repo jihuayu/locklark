@@ -10,7 +10,7 @@ def exact_result_ids(seen,expected):
 
 class QuickMetadataReader(NativeControls):
     def __init__(self,pid):
-        super().__init__("Locklark · 本地金库",pid)
+        super().__init__("Passme · 本地金库",pid)
 
     def focused(self,node):
         state=self.at.atspi_accessible_get_state_set(node)

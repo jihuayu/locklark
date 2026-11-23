@@ -58,7 +58,7 @@ class BrowserOTPPrivateState(unittest.TestCase):
         os.chmod(path, mode)
         return path
 
-    def child(self, parent, name="locklark-browser-acceptance-one", mode=0o700):
+    def child(self, parent, name="passme-browser-acceptance-one", mode=0o700):
         child = parent / name
         child.mkdir(mode=mode)
         os.chmod(child, mode)
@@ -115,20 +115,20 @@ class BrowserOTPPrivateState(unittest.TestCase):
 
     def test_state_symlink_foreign_mode_multiple_and_unrelated_refuse(self):
         parent = self.parent()
-        link = parent / "locklark-browser-acceptance-link"
+        link = parent / "passme-browser-acceptance-link"
         link.symlink_to(parent, target_is_directory=True)
         with self.assertRaises(ValueError):
             find_private_child_state(parent)
 
         parent2 = self.parent("parent2")
-        bad_mode = self.child(parent2, "locklark-browser-acceptance-mode", 0o755)
+        bad_mode = self.child(parent2, "passme-browser-acceptance-mode", 0o755)
         with self.assertRaises(ValueError):
             find_private_child_state(parent2)
         self.assertFalse(bad_mode.is_symlink())
 
         parent3 = self.parent("parent3")
-        self.child(parent3, "locklark-browser-acceptance-a")
-        self.child(parent3, "locklark-browser-acceptance-b")
+        self.child(parent3, "passme-browser-acceptance-a")
+        self.child(parent3, "passme-browser-acceptance-b")
         with self.assertRaises(ValueError):
             find_private_child_state(parent3)
 

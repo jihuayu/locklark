@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 // formatVersion is the only record version this package reads or writes.
@@ -14,7 +14,7 @@ const formatVersion uint16 = 1
 // Record layout (version 1), all integers big-endian:
 //
 //	offset  size  field
-//	0       4     magic "LLVJ"
+//	0       4     magic "PMVJ"
 //	4       2     format version (1)
 //	6       8     generation                 > 0
 //	14      1     operation ID length        > 0
@@ -30,7 +30,7 @@ const formatVersion uint16 = 1
 // total record length and the digest have all been validated; the only
 // allocation it makes is the copy of a checksum-validated proposal.
 const (
-	recordMagic    = "LLVJ"
+	recordMagic    = "PMVJ"
 	recordPrefix   = 4 + 2 + 8 + 1 + 2 + 4
 	recordDigest   = sha256.Size
 	recordOverhead = recordPrefix + recordDigest
@@ -48,7 +48,7 @@ const (
 
 	maxRecordLen = recordOverhead + MaxOperationIDBytes + MaxExpectedRevisionBytes + MaxProposalBytes
 
-	digestDomain = "locklark vault-file journal record v1\x00"
+	digestDomain = "passme vault-file journal record v1\x00"
 
 	bucketName = "journal"
 	recordKey  = "proposal"

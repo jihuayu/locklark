@@ -14,7 +14,7 @@ import (
 // probeContext is a non-empty probe context used by ClientHandshake and
 // ServerHandshake to prove, inside the handshake, that the key exporter
 // works for this exact connection. It is never returned to callers.
-const probeContext = "locklark/remote-unlock-tls/v1/handshake-probe"
+const probeContext = "passme/remote-unlock-tls/v1/handshake-probe"
 
 // Channel is an established, pinned, mutually authenticated TLS 1.3
 // connection to the expected peer.

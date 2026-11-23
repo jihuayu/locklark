@@ -14,10 +14,10 @@ import (
 // over the documented preimage, but the key belongs to no device, member,
 // vault, pairing, certificate or enrollment. It demonstrates the codec and the
 // signature verification boundary only.
-const bindingVectorJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"}`
+const bindingVectorJSON = `{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg"}`
 
 // bindingVectorSignedJSON is bindingVectorJSON without the signature member.
-const bindingVectorSignedJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea"}`
+const bindingVectorSignedJSON = `{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea"}`
 
 const (
 	bindingVectorPublicKey = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg"
@@ -44,7 +44,7 @@ func syntheticSigningPublicKey() ed25519.PublicKey {
 func bindingVector(t *testing.T) DeviceTransportBinding {
 	t.Helper()
 	signature, err := base64.RawURLEncoding.DecodeString(
-		"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg")
+		"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg")
 	if err != nil {
 		t.Fatalf("decode fixed signature: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestBindingParseRejectsNonCanonicalInput(t *testing.T) {
 
 		// Constants and member types.
 		{name: "wrong format", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark.remote-unlock.v2"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme.remote-unlock.v2"`)
 		}},
 		{name: "wrong kind", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"device-transport-binding"`, `"channel-binding-context"`)
@@ -370,17 +370,17 @@ func TestBindingParseRejectsNonCanonicalInput(t *testing.T) {
 		// Signature form.
 		{name: "signature one byte short", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b,
-				`"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"`,
+				`"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg"`,
 				`"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFC"`)
 		}},
 		{name: "signature padded", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b,
-				`"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"`,
-				`"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg="`)
+				`"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg"`,
+				`"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg="`)
 		}},
 		{name: "signature standard base64 alphabet", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b,
-				`"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"`,
+				`"_Jfqx2syPO4dENOLDkZlPGp6NfoMJIK9s3mA6VVL58Czj3uTFvEBqg85QSwmVFabD-0Lb4bRKsDH5Y9G92hRDg"`,
 				`"+hqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"`)
 		}},
 

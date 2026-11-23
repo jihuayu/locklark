@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -45,7 +45,7 @@ func consistentVaultCopy(source, destination string) (string, error) {
 	defer file.Close()
 	var digest string
 	if err = db.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte("locklark.personal/v1"))
+		bucket := tx.Bucket([]byte("passme.personal/v1"))
 		if bucket == nil || len(bucket.Get([]byte("snapshot"))) == 0 {
 			return errors.New("missing synthetic snapshot")
 		}
@@ -88,7 +88,7 @@ func observeFixture(input string) error {
 	}
 	defer clear(raw)
 	var f fixture
-	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(input), "synthetic.ll") {
+	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(input), "synthetic.pm") {
 		return errors.New("invalid synthetic fixture path")
 	}
 	key, err := personal.ParseSecret(f.Secret)
@@ -101,7 +101,7 @@ func observeFixture(input string) error {
 		return err
 	}
 	defer os.RemoveAll(private)
-	copyPath := filepath.Join(private, "snapshot.ll")
+	copyPath := filepath.Join(private, "snapshot.pm")
 	digest, err := consistentVaultCopy(f.Path, copyPath)
 	if err != nil {
 		return err

@@ -413,7 +413,7 @@ test("connectNative refuses non-Safari runtimes and leaves the API untouched", (
     assert.equal(api.runtime.connectNative, original);
     assert.equal(api.runtime.sendNativeMessage, originalSend);
     assert.deepEqual(Object.keys(api.runtime).sort(), keys);
-    assert.equal(api.runtime.__locklarkSafariNativePort, undefined);
+    assert.equal(api.runtime.__passmeSafariNativePort, undefined);
   }
   const partial = {
     runtime: { getURL: () => "safari-web-extension://abc/" },
@@ -442,7 +442,7 @@ test("connectNative builds an explicit Port on Safari without patching the API",
     callTimeoutMs: 500,
   });
   assert.equal(typeof port.postMessage, "function");
-  assert.equal(port.name, "locklark-native");
+  assert.equal(port.name, "passme-native");
   await wait(5);
   assert.ok(sent.length >= 1);
   for (const call of sent) assert.equal(call.host, NATIVE_HOST_NAME);
@@ -464,7 +464,7 @@ test("connectNative builds an explicit Port on Safari without patching the API",
   assert.equal(runtime.connectNative, originalConnect);
   assert.equal(runtime.sendNativeMessage, originalSend);
   assert.deepEqual(Object.keys(runtime).sort(), keys);
-  assert.equal(runtime.__locklarkSafariNativePort, undefined);
+  assert.equal(runtime.__passmeSafariNativePort, undefined);
   await closePort(port);
 });
 
@@ -514,8 +514,8 @@ test("loading in a page-like VM creates only the namespace, no browser patch", (
   vm.runInNewContext(source, sandbox);
   assert.equal(sandbox.chrome, undefined);
   assert.equal(sandbox.browser, undefined);
-  assert.equal(typeof sandbox.LocklarkSafariNativePort.createPort, "function");
-  assert.equal(Object.keys(sandbox).includes("LocklarkSafariNativePort"), false);
+  assert.equal(typeof sandbox.PassmeSafariNativePort.createPort, "function");
+  assert.equal(Object.keys(sandbox).includes("PassmeSafariNativePort"), false);
 });
 
 test("a Safari-shaped VM exposes an explicit namespace only, and background.js uses it only there", async () => {
@@ -540,8 +540,8 @@ test("a Safari-shaped VM exposes an explicit namespace only, and background.js u
   // Auto-patching is gone: the runtime is untouched after load.
   assert.equal(runtime.connectNative, originalConnect);
   assert.deepEqual(Object.keys(runtime).sort(), keys);
-  assert.equal(runtime.__locklarkSafariNativePort, undefined);
-  const namespace = sandbox.LocklarkSafariNativePort;
+  assert.equal(runtime.__passmeSafariNativePort, undefined);
+  const namespace = sandbox.PassmeSafariNativePort;
   assert.equal(namespace.isSafariRuntime({ runtime }), true);
   let host = "";
   runtime.sendNativeMessage = (name, envelope) => {
@@ -564,10 +564,10 @@ test("a Safari-shaped VM exposes an explicit namespace only, and background.js u
     path.join(__dirname, "..", "background.js"),
     "utf8",
   );
-  assert.match(background, /globalThis\.LocklarkSafariNativePort/);
+  assert.match(background, /globalThis\.PassmeSafariNativePort/);
   assert.match(
     background,
-    /api\.runtime\.connectNative\("org\.locklark\.browser"\)/,
+    /api\.runtime\.connectNative\("org\.passme\.browser"\)/,
   );
   assert.doesNotMatch(background, /runtime\.connectNative\s*=/);
   assert.doesNotMatch(background, /globalThis\.(chrome|browser)\s*=/);

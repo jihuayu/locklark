@@ -29,7 +29,7 @@ type statusReply struct {
 	Sig    []byte
 }
 
-func (r statusReply) proof() []byte { r.Sig = nil; return message("locklark/status-reply/v1\x00", r) }
+func (r statusReply) proof() []byte { r.Sig = nil; return message("passme/status-reply/v1\x00", r) }
 func (c PollConfig) Start(id, review string) (string, error) {
 	if c.Private == "" || c.Exchange == "" {
 		return "", errInvoke

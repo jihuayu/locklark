@@ -15,16 +15,16 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/watchtower"
 )
 
-const HostName = "org.locklark.browser"
+const HostName = "org.passme.browser"
 const ChromiumID = "geldnhjapnackobgknocomedmjgphnpe"
-const FirefoxID = "browser@locklark.local"
-const SafariID = "org.locklark.browser.safari.Extension"
+const FirefoxID = "browser@passme.local"
+const SafariID = "org.passme.browser.safari.Extension"
 const MaxInput = 256 << 10
 const MaxOutput = 256 << 10
 

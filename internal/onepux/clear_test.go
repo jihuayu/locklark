@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Failure messages render as public entity names, so a leak assertion never
@@ -18,7 +18,7 @@ const (
 	clearMarker      = "SensitiveMarker"
 )
 
-var clearSource = `{"format":"locklark/1pux-source/v1","account":"` + clearMarker + `"}`
+var clearSource = `{"format":"passme/1pux-source/v1","account":"` + clearMarker + `"}`
 
 // strictV2Items lists logins accepted by both mappers: one URL and a password
 // field without the optional field metadata the narrow login profile refuses.
@@ -67,7 +67,7 @@ func assertEmptyMapping(t *testing.T, mapped MappedLogins, err error) {
 
 func assertHandedOff(t *testing.T, item vault.Item) {
 	t.Helper()
-	if item.Title == "" || item.Username != clearPlaceholder || item.Password != clearPlaceholder || item.Notes != clearPlaceholder || bytes.Count(item.ImportSource, []byte("locklark/1pux-source/v1")) != 1 {
+	if item.Title == "" || item.Username != clearPlaceholder || item.Password != clearPlaceholder || item.Notes != clearPlaceholder || bytes.Count(item.ImportSource, []byte("passme/1pux-source/v1")) != 1 {
 		t.Fatalf("handed-off item was wiped or lost: %+v", item)
 	}
 }

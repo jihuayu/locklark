@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -97,7 +97,7 @@ func TestBrowserOTPHistorySurvivesBackupRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.DiscardBrowserOTP(p)
-	archive, restored := filepath.Join(t.TempDir(), "backup.llb"), filepath.Join(t.TempDir(), "restored.ll")
+	archive, restored := filepath.Join(t.TempDir(), "backup.pmb"), filepath.Join(t.TempDir(), "restored.pm")
 	kit, err := Backup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal("backup failed")

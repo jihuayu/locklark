@@ -11,7 +11,7 @@ Guarantees:
 
 - The image is never pulled or built. If it is not present locally the run
   fails clearly. Only ``minio/minio@sha256:...`` references are accepted.
-- The container is named ``locklark-s3-smoke-<random>``. Every start, inspect,
+- The container is named ``passme-s3-smoke-<random>``. Every start, inspect,
   stop and remove call uses that exact name; other containers are never
   inspected, stopped or removed.
 - The certificate and credentials are generated into a private 0700 temp
@@ -34,7 +34,7 @@ after a passing run (the harness prints their paths and the loopback
 endpoint); otherwise they are removed.
 
 Requires ``go``, ``openssl`` and ``docker`` (or a compatible runtime such as
-``podman``, named by ``LOCKLARK_S3_SMOKE_CONTAINER``).
+``podman``, named by ``PASSME_S3_SMOKE_CONTAINER``).
 
 Why the certificate is installed after startup: the official image sets
 ``MINIO_CONFIG_ENV_FILE``, and while those file variables are set MinIO reads
@@ -63,10 +63,10 @@ import time
 
 IMAGE = "minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
 IMAGE_DIGEST = "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e"
-CONTAINER_PREFIX = "locklark-s3-smoke-"
+CONTAINER_PREFIX = "passme-s3-smoke-"
 GO_TEST = "TestS3MinioTLSSmoke"
 TEST_PACKAGE = "./pkg/vaultfilebackend"
-CERTS_DIR = "/run/locklark-smoke"
+CERTS_DIR = "/run/passme-smoke"
 STARTUP_TIMEOUT_SEC = 90
 GO_TEST_TIMEOUT_SEC = 300
 STOP_TIMEOUT_SEC = 30
@@ -118,7 +118,7 @@ def text(result: subprocess.CompletedProcess) -> str:
 
 
 def container_cli() -> str:
-    override = os.environ.get("LOCKLARK_S3_SMOKE_CONTAINER")
+    override = os.environ.get("PASSME_S3_SMOKE_CONTAINER")
     if override:
         return override
     if shutil.which("docker"):
@@ -166,7 +166,7 @@ def generate_certificate(directory: pathlib.Path) -> tuple[pathlib.Path, pathlib
             "-days",
             "1",
             "-subj",
-            "/CN=locklark-s3-smoke",
+            "/CN=passme-s3-smoke",
             "-addext",
             "subjectAltName=IP:127.0.0.1,DNS:localhost",
             "-addext",

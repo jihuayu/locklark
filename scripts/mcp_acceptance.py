@@ -9,7 +9,7 @@ import threading
 import tempfile
 
 exe = str(Path(sys.argv[1]).resolve())
-root = Path(tempfile.mkdtemp(prefix="locklark-mcp-"))
+root = Path(tempfile.mkdtemp(prefix="passme-mcp-"))
 demo = root / "demo"
 device = demo / "clients" / "B"
 key = root / "runner.sessionkey"
@@ -62,7 +62,7 @@ class Bridge:
 
 call={"repo":"123","number":7,"reason":"check merge","request_key":"0123456789abcdef0123456789abcdef"}
 with Bridge() as b:
-    assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"github_pulls_get","locklark_resume","locklark_collect"}
+    assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"github_pulls_get","passme_resume","passme_collect"}
     first=b.tool("github_pulls_get",call)
 with Bridge() as b:
     retried=b.tool("github_pulls_get",call)
@@ -70,13 +70,13 @@ with Bridge() as b:
     conflict=b.rpc("tools/call",{"name":"github_pulls_get","arguments":{**call,"number":8}})
     assert conflict["isError"]
     request={"request_id":first["id"],"review":first["review"]}
-    waiting=b.tool("locklark_resume",request)
+    waiting=b.tool("passme_resume",request)
     assert waiting["state"]=="awaiting-holder"
 cli("status-serve","--once","--device",device,"--inbox",demo/"inbox","--exchange",root/"exchange","--session","job","--profile",profile)
 with Bridge() as b:
-    observed=b.tool("locklark_resume",{**request,"poll_id":waiting["poll_id"]})
+    observed=b.tool("passme_resume",{**request,"poll_id":waiting["poll_id"]})
     assert observed["state"]=="pending" and observed["request_id"]==first["id"] and observed["observed_at"]
-    assert b.tool("locklark_collect",request)["state"]=="awaiting-receipt"
+    assert b.tool("passme_collect",request)["state"]=="awaiting-receipt"
 assert not cli("executions","--device",device,"--session","job")
 cli("decide","--device",device,"--inbox",demo/"inbox","--bundle",demo/"share/epoch-3","--id",first["id"],"--review",first["review"],"--choice","approve","--reason","only this recorded pull")
 recording=root/"recorded.json"
@@ -84,14 +84,14 @@ recording.write_text(json.dumps({"number":7,"state":"open","merged_at":None,"bas
 ticket=root/"exchange"/(first["id"]+".invoke.age")
 original_ticket=ticket.read_bytes()
 with Bridge() as b:
-    assert b.tool("locklark_collect",request)["state"]=="awaiting-receipt"
+    assert b.tool("passme_collect",request)["state"]=="awaiting-receipt"
 assert not cli("executions","--device",device,"--session","job")
 cli("invoke-run","--device",device,"--bundle",demo/"share/epoch-3","--ticket",ticket,"--recorded-response",recording,"--out",root/"holder-reply.age")
 cli("status-serve","--once","--device",device,"--inbox",demo/"inbox","--exchange",root/"exchange")
 assert (root/"exchange"/(first["id"]+".result.age")).read_bytes()==(root/"holder-reply.age").read_bytes()
 for _ in range(2):
     with Bridge() as b:
-        got=b.tool("locklark_collect",request)
+        got=b.tool("passme_collect",request)
         assert got=={"state":"succeeded","request_id":first["id"],"result":{"source":"recorded-response/v1","pull":{"number":7,"state":"open","merged_at":None}}}
         assert b.tool("github_pulls_get",call)==first
 assert ticket.read_bytes()==original_ticket
@@ -102,7 +102,7 @@ if len(sys.argv)>2:
     # shipping different plugin bytes: allow historical reads, not new calls.
     args[0]=str(Path(sys.argv[2]).resolve())
     with Bridge() as b:
-        assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"locklark_collect","locklark_resume"}
-        assert b.tool("locklark_collect",request)==got
+        assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"passme_collect","passme_resume"}
+        assert b.tool("passme_collect",request)==got
     print("PASS: upgraded bridge still reads old receipts without exposing the retired action")
 print("PASS: MCP reconnect, idempotent submission, read-only status and signed result collection without re-execution")

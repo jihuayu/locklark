@@ -4,7 +4,7 @@
 The archives hold minimal real Go PE/Mach-O fixtures signed by a temporary
 Ed25519 key; deltas use the real MyGo raw-DEFLATE index format. They exercise
 the verifier's real digest, size, OpenSSL, PE, Mach-O, Go build-info, tar and
-delta-index checks; they do not build, sign, or publish a real Locklark
+delta-index checks; they do not build, sign, or publish a real Passme
 release, apply a delta, or prove production release acceptance.
 """
 
@@ -31,15 +31,15 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "verify_desktop_release.py"
 VERSION = "1.2.3"
 OLD_VERSION = "1.0.0"
-IDENTIFIER = "app.locklark.desktop"
-WINDOWS_EXECUTABLE = "Locklark.exe"
-DARWIN_BUNDLE = "Locklark.app"
-DARWIN_EXECUTABLE = DARWIN_BUNDLE + "/Contents/MacOS/Locklark"
+IDENTIFIER = "app.passme.desktop"
+WINDOWS_EXECUTABLE = "Passme.exe"
+DARWIN_BUNDLE = "Passme.app"
+DARWIN_EXECUTABLE = DARWIN_BUNDLE + "/Contents/MacOS/Passme"
 DARWIN_INFO_PLIST = DARWIN_BUNDLE + "/Contents/Info.plist"
 DELTA_MAGIC = b"mygo delta 1\n"
 PLATFORM_ARCHIVE = {
-    "windows-amd64": f"locklark-{VERSION}-windows-amd64.tar.gz",
-    "darwin-universal": f"locklark-{VERSION}-darwin-universal.tar.gz",
+    "windows-amd64": f"passme-{VERSION}-windows-amd64.tar.gz",
+    "darwin-universal": f"passme-{VERSION}-darwin-universal.tar.gz",
 }
 
 
@@ -55,7 +55,7 @@ class SyntheticRelease:
     """A temporary release directory and the Ed25519 key used to sign it."""
 
     def __init__(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="locklark-release-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="passme-release-test-"))
         os.chmod(self.root, 0o700)
         self.key = self.root / "key.pem"
         self.public_der = self.root / "public.der"
@@ -141,7 +141,7 @@ class SyntheticRelease:
         payload: bytes,
         version: str = VERSION,
     ) -> tuple[str, dict]:
-        name = f"locklark-{from_version}-to-{version}-{platform}.delta"
+        name = f"passme-{from_version}-to-{version}-{platform}.delta"
         self.add_asset(assets, name, payload)
         return name, {
             "from": from_version,
@@ -151,8 +151,8 @@ class SyntheticRelease:
         }
 
     def add_installer_assets(self, assets: Path, version: str = VERSION) -> None:
-        self.add_asset(assets, f"locklark-setup-{version}-amd64.exe", b"setup")
-        self.add_asset(assets, f"locklark-{version}.dmg", b"dmg")
+        self.add_asset(assets, f"passme-setup-{version}-amd64.exe", b"setup")
+        self.add_asset(assets, f"passme-{version}.dmg", b"dmg")
         self.add_asset(assets, "install.ps1", b"install ps1")
         self.add_asset(assets, "install.sh", b"install sh")
 
@@ -947,8 +947,8 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
             set(checksums),
             {
                 *PLATFORM_ARCHIVE.values(),
-                f"locklark-setup-{VERSION}-amd64.exe",
-                f"locklark-{VERSION}.dmg",
+                f"passme-setup-{VERSION}-amd64.exe",
+                f"passme-{VERSION}.dmg",
                 "install.ps1",
                 "install.sh",
             },
@@ -1161,7 +1161,7 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
     def test_wrong_version_archive_name_is_rejected(self) -> None:
         assets = self.release.assets()
         payload = self.windows_archive
-        wrong_name = "locklark-1.0.0-windows-amd64.tar.gz"
+        wrong_name = "passme-1.0.0-windows-amd64.tar.gz"
         darwin = self.darwin_archive
         self.release.add_asset(assets, wrong_name, payload)
         self.release.add_asset(assets, PLATFORM_ARCHIVE["darwin-universal"], darwin)
@@ -1179,7 +1179,7 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
     def test_wrong_architecture_archive_name_is_rejected(self) -> None:
         assets = self.release.assets()
         windows = self.windows_archive
-        wrong_name = f"locklark-{VERSION}-darwin-arm64.tar.gz"
+        wrong_name = f"passme-{VERSION}-darwin-arm64.tar.gz"
         payload = self.darwin_archive
         self.release.add_asset(assets, PLATFORM_ARCHIVE["windows-amd64"], windows)
         self.release.add_asset(assets, wrong_name, payload)
@@ -1199,7 +1199,7 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
         windows = self.windows_archive
         darwin = self.darwin_archive
         delta = b"delta payload made for darwin\n"
-        delta_name = f"locklark-1.1.0-to-{VERSION}-darwin-universal.delta"
+        delta_name = f"passme-1.1.0-to-{VERSION}-darwin-universal.delta"
         self.release.add_asset(assets, PLATFORM_ARCHIVE["windows-amd64"], windows)
         self.release.add_asset(assets, PLATFORM_ARCHIVE["darwin-universal"], darwin)
         self.release.add_asset(assets, delta_name, delta)
@@ -1222,7 +1222,7 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
         result = self.release.run(assets)
         self.assert_rejected(result, assets)
         self.assertIn("windows-amd64 delta from 1.1.0", result.stderr)
-        self.assertIn(f"locklark-1.1.0-to-{VERSION}-windows-amd64.delta", result.stderr)
+        self.assertIn(f"passme-1.1.0-to-{VERSION}-windows-amd64.delta", result.stderr)
 
     def test_malformed_manifest_fields_are_rejected(self) -> None:
         def bool_size(assets: Path, manifest: dict) -> None:
@@ -1286,7 +1286,7 @@ class VerifyDesktopReleaseTests(unittest.TestCase):
                 {"name": WINDOWS_EXECUTABLE, "data": executable, "mode": 0o755},
             ],
             "traversal": [
-                {"name": "../Locklark.exe", "data": executable, "mode": 0o755}
+                {"name": "../Passme.exe", "data": executable, "mode": 0o755}
             ],
             "link-escape": [
                 {

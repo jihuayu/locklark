@@ -15,9 +15,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/clibinding"
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/clibinding"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // TestRunBundlePinChild is the owned synthetic child used by the real
@@ -38,7 +38,7 @@ func TestRunBundlePinChild(t *testing.T) {
 	if os.Getenv("GH_TOKEN") != bundleTestPassword {
 		os.Exit(70)
 	}
-	if os.Getenv("LOCKLARK_CLI_ACTIVE") != "" {
+	if os.Getenv("PASSME_CLI_ACTIVE") != "" {
 		os.Exit(71)
 	}
 	if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
@@ -291,7 +291,7 @@ func TestRunBundlePinBinding(t *testing.T) {
 
 	// The pre-pin canonical object, byte for byte. The empty pin must omit its
 	// field so existing unpinned signed bytes and digests do not change.
-	key, err := hkdf.Key(sha256.New, secret, nil, "locklark/personal/run-bundle/key/v1", 32)
+	key, err := hkdf.Key(sha256.New, secret, nil, "passme/personal/run-bundle/key/v1", 32)
 	if err != nil {
 		t.Fatal("binding key unavailable")
 	}

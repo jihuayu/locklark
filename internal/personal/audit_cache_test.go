@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -196,7 +196,7 @@ func TestAuditCacheMiddleAndShapeTampering(t *testing.T) {
 
 func TestAuditCacheRestoredChainTampering(t *testing.T) {
 	pw, key := "fixture", bytes.Repeat([]byte{4}, 16)
-	src := filepath.Join(t.TempDir(), "src.ll")
+	src := filepath.Join(t.TempDir(), "src.pm")
 	if err := Create(src, pw, key); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestAuditCacheRestoredChainTampering(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	archive := filepath.Join(t.TempDir(), "history.llb")
+	archive := filepath.Join(t.TempDir(), "history.pmb")
 	kit, err := Backup(src, archive, pw, key)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestAuditCacheRestoredChainTampering(t *testing.T) {
 	newKey := bytes.Repeat([]byte{8}, 16)
 	for _, kind := range []string{"altered", "malformed"} {
 		t.Run(kind, func(t *testing.T) {
-			restored := filepath.Join(t.TempDir(), "restored.ll")
+			restored := filepath.Join(t.TempDir(), "restored.pm")
 			if err := Restore(archive, restored, pw, key, kit, newKey); err != nil {
 				t.Fatal(err)
 			}
@@ -341,7 +341,7 @@ func TestAuditCacheLockDropsAndLatePopulationRefused(t *testing.T) {
 }
 
 func TestAuditCacheHoldsNoSecretMaterial(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secret.ll")
+	path := filepath.Join(t.TempDir(), "secret.pm")
 	key := bytes.Repeat([]byte{5}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -415,12 +415,12 @@ func TestAuditConsumersRetainCompleteHistory(t *testing.T) {
 		t.Fatal("audit.list lost history after cache warm")
 	}
 	// A full backup consumer must also verify and carry the history.
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, err := Backup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	if err = Restore(archive, restored, "fixture", key, kit, bytes.Repeat([]byte{3}, 16)); err != nil {
 		t.Fatal(err)
 	}

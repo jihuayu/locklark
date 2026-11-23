@@ -4,11 +4,11 @@
 This is one external, opaque-box checkpoint for exactly the approved journey:
 
   synthetic vault -> one login -> explicit `token` binding -> real desktop
-  native unlock -> real `locklark cli run` in a controlling PTY -> native
+  native unlock -> real `passme cli run` in a controlling PTY -> native
   "仅批准本次 CLI 请求" click -> one deterministic child -> one audited
   `item.run.bundle` intent.
 
-Only the real built `cmd/locklark` and `cmd/locklark-desktop` executables are
+Only the real built `cmd/passme` and `cmd/passme-desktop` executables are
 accepted (as explicit absolute paths). Native input is emitted exclusively by
 the existing external `scripts/native_acceptance_driver.py --platform macos`;
 this script never grants or requests Accessibility trust and never uses a
@@ -44,7 +44,7 @@ DRIVER = ROOT / "scripts" / "native_acceptance_driver.py"
 # The only result an activation-only driver request may report.
 ACTIVATION_RESULT = {"activated": True}
 
-TITLE = "Locklark · 本地金库"
+TITLE = "Passme · 本地金库"
 APPROVE_LABEL = "仅批准本次 CLI 请求"
 UNLOCK_FIELDS = ("金库文件", "主密码", "Secret Key")
 EMERGENCY_ENTRY_LABEL = "使用应急资料…"
@@ -145,7 +145,7 @@ def unlock_plans(vault, master, secret):
 
 
 TOOL = "synthetic-cli"
-TOKEN_ENV = "LOCKLARK_SYNTHETIC_TOKEN"
+TOKEN_ENV = "PASSME_SYNTHETIC_TOKEN"
 CHILD_STDOUT = b"cli-broker-child-stdout\n"
 CHILD_STDERR = b"cli-broker-child-stderr\n"
 CHILD_EXIT = 23
@@ -184,7 +184,7 @@ DRIVER_ERROR_CATEGORIES = frozenset({
     "window-ambiguous", "capability-unavailable", "a11y-query",
 })
 DRIVER_ERROR_OTHER = "other"
-SECRET_PATTERN = re.compile(rb"LL1-[A-Z2-7]{26}")
+SECRET_PATTERN = re.compile(rb"PM1-[A-Z2-7]{26}")
 
 PROC_PIDTBSDINFO = 3
 GENERATION_FIELDS = ("pid", "executable", "euid", "start_sec", "start_usec")
@@ -198,8 +198,8 @@ MAX_EXECUTABLE = 4096
 HELPER_SCRIPT = """#!/bin/sh
 set -eu
 umask 077
-: "$LOCKLARK_SYNTHETIC_TOKEN"
-digest=$(printf '%s' "$LOCKLARK_SYNTHETIC_TOKEN" | /usr/bin/shasum -a 256)
+: "$PASSME_SYNTHETIC_TOKEN"
+digest=$(printf '%s' "$PASSME_SYNTHETIC_TOKEN" | /usr/bin/shasum -a 256)
 digest=${digest%% *}
 printf '%s\\n' "$digest" > "$1"
 printf 'cli-broker-child-stdout\\n'
@@ -446,7 +446,7 @@ def broker_summary_pattern(vault, program, program_sha, cwd, timeout, token_env,
     """
     quoted = go_quote
     lines = [
-        "桌面代理 CLI 执行请求（locklark cli run）",
+        "桌面代理 CLI 执行请求（passme cli run）",
         "  密码库  ：" + re.escape(quoted(vault)),
         "  Profile ：" + re.escape(quoted("token")),
         "  终端    ：" + TTY_PATTERN + "（平台 " + re.escape(quoted("darwin")) + "）",
@@ -508,15 +508,15 @@ def validate_audit(events, item_id, revision):
 
 def desktop_environment(base, socket):
     environment = dict(base)
-    environment["LOCKLARK_DESKTOP_LAYOUT"] = "classic"
-    environment["LOCKLARK_BROWSER_SOCKET"] = str(socket)
+    environment["PASSME_DESKTOP_LAYOUT"] = "classic"
+    environment["PASSME_BROWSER_SOCKET"] = str(socket)
     return environment
 
 
 def cli_environment(base, socket):
     environment = dict(base)
-    environment.pop("LOCKLARK_CLI_ACTIVE", None)
-    environment["LOCKLARK_BROWSER_SOCKET"] = str(socket)
+    environment.pop("PASSME_CLI_ACTIVE", None)
+    environment["PASSME_BROWSER_SOCKET"] = str(socket)
     return environment
 
 
@@ -557,7 +557,7 @@ class Fixture:
         os.chmod(self.root, 0o700)
         for name in DIRECTORY_NAMES:
             (self.root / name).mkdir(mode=0o700)
-        self.vault = self.root / "vault" / "synthetic.ll"
+        self.vault = self.root / "vault" / "synthetic.pm"
         self.settings = self.root / "settings" / "settings.json"
         self.socket = self.root / "s" / "b.sock"
         self.binding = self.root / "state" / "binding.json"
@@ -900,7 +900,7 @@ class Acceptance:
         if self.secret is None:
             self.secret = extract_secret(transcript).decode("ascii")
             self.values.append(self.secret)
-            require(self.secret.startswith("LL1-"))
+            require(self.secret.startswith("PM1-"))
         return self.secret.encode()
 
     def create_binding(self):
@@ -1261,9 +1261,9 @@ class Acceptance:
 def main(argv=None):
     parser = __import__("argparse").ArgumentParser(description=__doc__)
     parser.add_argument("--cli", required=True,
-                        help="explicit absolute path to the built cmd/locklark binary")
+                        help="explicit absolute path to the built cmd/passme binary")
     parser.add_argument("--desktop", required=True,
-                        help="explicit absolute path to the built cmd/locklark-desktop binary")
+                        help="explicit absolute path to the built cmd/passme-desktop binary")
     parser.add_argument("--timeout", type=int, default=240,
                         help="bounded overall acceptance deadline in seconds")
     args = parser.parse_args(argv)

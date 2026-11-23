@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func TestRecoveryRejectsResignedHistory(t *testing.T) {
@@ -185,7 +185,7 @@ func TestPreparedRecoveryPinsPayloadAndRefusesLateTarget(t *testing.T) {
 func TestLegacyAndIncompleteRecoveryFailExplicitly(t *testing.T) {
 	archive, pw, key, kit := recoveryFixture(t)
 	dest := filepath.Join(t.TempDir(), "restored")
-	legacy := "LLR1-" + kit[5:57]
+	legacy := "PMR1-" + kit[5:57]
 	if _, err := PrepareRestore(archive, dest, pw, key, legacy); !errors.Is(err, ErrLegacyRecovery) {
 		t.Fatal("legacy kit downgraded", err)
 	}

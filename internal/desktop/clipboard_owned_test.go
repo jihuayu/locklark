@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
 )
 
 func TestOwnedClipboardWriteReturnsExactPartialLease(t *testing.T) {

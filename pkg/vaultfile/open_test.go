@@ -7,7 +7,7 @@ import (
 
 	"filippo.io/age"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // openFixture is a genuine sealed file for the full-file open path. Its

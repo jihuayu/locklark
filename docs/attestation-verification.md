@@ -118,8 +118,8 @@ PYTHONPATH=scripts python3 -m browserrelease.attestation \
 under their fixed names:
 
 ```text
-locklark-browser-extension-<product>-unsigned.zip
-locklark-browser-extension-<product>-unsigned.receipt.json
+passme-browser-extension-<product>-unsigned.zip
+passme-browser-extension-<product>-unsigned.receipt.json
 ```
 
 A successful run prints `PASS: attestation signature matches the explicitly
@@ -149,8 +149,8 @@ The public attestation is a flat JSON object with exactly these members:
 
 ```json
 {
-  "schema": "locklark-browser-release-attestation/v1",
-  "repo": "jihuayu/locklark",
+  "schema": "passme-browser-release-attestation/v1",
+  "repo": "jihuayu/passme",
   "product": "chromium",
   "version": "0.1.0",
   "source_commit": "<40 lowercase hex characters>",
@@ -185,8 +185,8 @@ newline. The first line is the domain separator. The `signature` field itself
 is not signed.
 
 ```text
-locklark-browser-release-attestation/v1
-repo=jihuayu/locklark
+passme-browser-release-attestation/v1
+repo=jihuayu/passme
 product=chromium
 version=0.1.0
 source_commit=<40 lowercase hex>
@@ -237,7 +237,7 @@ A successful run proves only:
 
 It does **not** prove:
 
-- that the public key genuinely belongs to the Locklark release owner;
+- that the public key genuinely belongs to the Passme release owner;
 - that a release owner approved this particular artifact;
 - Chrome Web Store, Microsoft Edge Addons, or Firefox AMO signing, review,
   publication, or listing acceptance;

@@ -63,7 +63,7 @@ class GitFixture:
     """A real, test-owned repository with graph branches but no checkout."""
 
     def __init__(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="locklark-trust-git-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="passme-trust-git-")
         self.root = Path(self.temporary.name)
         run_command("git", "init", "-q", "--initial-branch=main", str(self.root))
         run_command(

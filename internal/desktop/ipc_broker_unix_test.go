@@ -5,7 +5,7 @@ package desktop
 import (
 	"path/filepath"
 
-	"github.com/jihuayu/locklark/internal/localpath"
+	"github.com/jihuayu/passme/internal/localpath"
 )
 
 // desktopBrokerTrusted reports whether endpoint is a socket path whose parent

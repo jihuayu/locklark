@@ -22,13 +22,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/cliprofile"
 )
 
 const (
 	// DefaultFileName is the owner-only binding file created in the working
-	// directory when LOCKLARK_CLI_BINDING is not set.
-	DefaultFileName = ".locklark-cli.json"
+	// directory when PASSME_CLI_BINDING is not set.
+	DefaultFileName = ".passme-cli.json"
 	// SchemaVersion is the only binding file schema accepted by this build.
 	SchemaVersion = 1
 
@@ -82,11 +82,11 @@ func NewStore() Store {
 	return Store{Version: SchemaVersion, Bindings: map[string]ToolBinding{}}
 }
 
-// DefaultPath resolves the binding file path. LOCKLARK_CLI_BINDING is honored
+// DefaultPath resolves the binding file path. PASSME_CLI_BINDING is honored
 // only when it is absolute; any other value is ignored rather than interpreted
 // relative to an attacker-controlled working directory.
 func DefaultPath() (string, error) {
-	if env := os.Getenv("LOCKLARK_CLI_BINDING"); env != "" && filepath.IsAbs(env) {
+	if env := os.Getenv("PASSME_CLI_BINDING"); env != "" && filepath.IsAbs(env) {
 		return filepath.Clean(env), nil
 	}
 	wd, err := os.Getwd()

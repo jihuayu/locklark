@@ -3,8 +3,8 @@ package teamclient
 import (
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrProfile = errors.New("team bootstrap profile unavailable or invalid")

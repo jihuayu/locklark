@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
 	bolt "go.etcd.io/bbolt"
 )
 

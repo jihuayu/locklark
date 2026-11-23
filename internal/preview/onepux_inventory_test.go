@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/onepux"
+	"github.com/jihuayu/passme/internal/onepux"
 )
 
 func TestOnepuxInventoryFromVerifiedFixture(t *testing.T) {

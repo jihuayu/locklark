@@ -17,8 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cli_broker_acceptance as harness
 
-TITLE = "Locklark · 本地金库"
-DESKTOP = "/opt/locklark/locklark-desktop"
+TITLE = "Passme · 本地金库"
+DESKTOP = "/opt/passme/passme-desktop"
 
 
 class FakeProcess:
@@ -89,7 +89,7 @@ class OwnedPidRequestTests(unittest.TestCase):
                 self.assertEqual(instance.sent, [])
 
     def test_relative_or_missing_desktop_refuses_before_any_request(self):
-        for desktop in (None, "locklark-desktop", "relative/path"):
+        for desktop in (None, "passme-desktop", "relative/path"):
             with self.subTest(desktop=desktop):
                 instance = acceptance(desktop=desktop)
                 with self.assertRaises(harness.AcceptanceFailure):

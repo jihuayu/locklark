@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -30,7 +30,7 @@ import (
 // Audit record layout (version 1), all integers big-endian:
 //
 //	offset  size  field
-//	0       4     magic "LLVA"
+//	0       4     magic "PMVA"
 //	4       2     format version (1)
 //	6       8     old state generation
 //	14      8     new generation
@@ -54,10 +54,10 @@ import (
 // conversion to int. It checks the checksum before slicing any payload span.
 // It checks the base/revision pairing and all semantic invariants (including
 // proposal.ExpectedRevision == remote revision) before allocating the copies
-// it returns. The audit format is independent of LLVJ, LLVS and LLVP, whose
+// it returns. The audit format is independent of PMVJ, PMVS and PMVP, whose
 // layouts are unchanged.
 const (
-	auditMagic    = "LLVA"
+	auditMagic    = "PMVA"
 	auditVersion  = uint16(1)
 	auditPrefix   = 4 + 2 + 8 + 8 + 4 + 2 + 4 + 4 + 2 + 4 + 2 + 2 + 8
 	auditDigest   = sha256.Size
@@ -70,7 +70,7 @@ const (
 		MaxBaseBytes + MaxStateRevisionBytes + MaxProposalBytes +
 		MaxOperationIDBytes + MaxExpectedRevisionBytes
 
-	auditDigestDomain = "locklark vault-file journal rebase audit v1\x00"
+	auditDigestDomain = "passme vault-file journal rebase audit v1\x00"
 
 	auditBucketName = "rebase-audit"
 )
@@ -394,7 +394,7 @@ func (j *Journal) LoadRebaseAudit(newGeneration uint64) (RebaseAudit, error) {
 //     (BaseBytes, RemoteRevision, WorkingBytes and Generation);
 //   - no legacy proposal record and no prepared proposal record exists;
 //   - remoteBase and remoteRevision are non-empty and within their bounds;
-//   - proposal is a valid LLVJ v1 proposal and proposal.ExpectedRevision equals
+//   - proposal is a valid PMVJ v1 proposal and proposal.ExpectedRevision equals
 //     remoteRevision. proposal.Bytes is both the new working bytes M and the
 //     exact proposal bytes P.
 //

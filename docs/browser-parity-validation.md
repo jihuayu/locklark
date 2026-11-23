@@ -15,11 +15,11 @@
 | 生成器、提交后保存、设置、快捷键、菜单与体检 | 已有扩展与宿主实现及相应 Node/Go 测试；可选 HIBP 的数据范围与同意边界单独控制 | 实际联网数据时点、商店分发或参考产品全部行为已经对照 |
 | 跨端数据 | 桌面与插件共同读写持久化 v2；重开、修订、收藏、隐藏字段保留与原子拒绝有回归 | 已可正式迁移全部真实资料并替换原密码管理器 |
 
-六项 CI 全部通过：[Go/桌面/Web](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动端](https://github.com/jihuayu/locklark/actions/runs/42315487747)。Web 日志包含 151 项扩展测试、真实弹窗编辑和两引擎完整原生流程。iOS 是保护能力不足时正确拒绝的验收，不是完整成功路径。
+六项 CI 全部通过：[Go/桌面/Web](https://github.com/jihuayu/passme/actions/runs/42315487787)、[移动端](https://github.com/jihuayu/passme/actions/runs/42315487747)。Web 日志包含 151 项扩展测试、真实弹窗编辑和两引擎完整原生流程。iOS 是保护能力不足时正确拒绝的验收，不是完整成功路径。
 
 ## 本轮收尾
 
-附件分块上传/下载/删除、备注和隐藏自定义字段显式清空、旧 E2E 探测修正及额外浏览器验收，见[插件收尾验收](plugin-completion-validation.md)。本轮行为与基线分开记录，最终远端 CI 和合并回执见 [PR #44](https://github.com/jihuayu/locklark/pull/44)，不沿用上述基线检查。
+附件分块上传/下载/删除、备注和隐藏自定义字段显式清空、旧 E2E 探测修正及额外浏览器验收，见[插件收尾验收](plugin-completion-validation.md)。本轮行为与基线分开记录，最终远端 CI 和合并回执见 [PR #44](https://github.com/jihuayu/passme/pull/44)，不沿用上述基线检查。
 
 ## 持续缺口
 

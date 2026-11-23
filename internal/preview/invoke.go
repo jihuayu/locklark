@@ -224,7 +224,7 @@ func Executions(device, session string) ([]UseReport, error) {
 	return rows, nil
 }
 func WriteReply(path string, b []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".locklark-reply-*")
+	f, err := os.CreateTemp(filepath.Dir(path), ".passme-reply-*")
 	if err != nil {
 		return err
 	}

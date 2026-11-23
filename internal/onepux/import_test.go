@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const mappedLogin = `{"uuid":"same","categoryUuid":"001","state":"active","createdAt":123,"overview":{"title":"private-title","url":"https://example.test/login"},"details":{"loginFields":[{"id":"u","name":"email","designation":"username","fieldType":"T","value":"private-user"},{"id":"p","designation":"password","fieldType":"P","value":"private-pass"}]}}`

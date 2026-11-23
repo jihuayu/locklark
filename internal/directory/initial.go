@@ -3,7 +3,7 @@ package directory
 import (
 	"crypto/ed25519"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // VerifyInitial verifies a complete genesis bootstrap against independently

@@ -87,10 +87,10 @@ class RealTestBinarySmoke(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-partition-smoke-")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="passme-partition-smoke-")
         root = pathlib.Path(cls.temporary.name)
         (root / "go.mod").write_text(
-            "module locklark.local/partitionfixture\n\ngo 1.27.3\n", encoding="utf-8"
+            "module passme.local/partitionfixture\n\ngo 1.27.3\n", encoding="utf-8"
         )
         (root / "fixture_test.go").write_text(FIXTURE, encoding="utf-8")
         name = "fixture.test.exe" if os.name == "nt" else "fixture.test"
@@ -177,21 +177,21 @@ class PartitionContract(unittest.TestCase):
         packages = [
             split.PERSONAL_PACKAGE,
             split.PERSONAL_PACKAGE + "/helper",
-            "github.com/jihuayu/locklark/internal/personalized",
-            "github.com/jihuayu/locklark/cmd/locklark",
+            "github.com/jihuayu/passme/internal/personalized",
+            "github.com/jihuayu/passme/cmd/passme",
         ]
         self.assertEqual(
             split.filter_other_packages(packages),
             [
                 split.PERSONAL_PACKAGE + "/helper",
-                "github.com/jihuayu/locklark/internal/personalized",
-                "github.com/jihuayu/locklark/cmd/locklark",
+                "github.com/jihuayu/passme/internal/personalized",
+                "github.com/jihuayu/passme/cmd/passme",
             ],
         )
         with self.assertRaises(split.PartitionError):
             split.filter_other_packages([split.PERSONAL_PACKAGE])
         with self.assertRaises(split.PartitionError):
-            split.filter_other_packages(packages + ["github.com/jihuayu/locklark/cmd/locklark"])
+            split.filter_other_packages(packages + ["github.com/jihuayu/passme/cmd/passme"])
         with self.assertRaises(split.PartitionError):
             split.filter_other_packages([p for p in packages if p != split.PERSONAL_PACKAGE])
 

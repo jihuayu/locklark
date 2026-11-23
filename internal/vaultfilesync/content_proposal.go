@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
-	"github.com/jihuayu/locklark/pkg/vaultfilepublish"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/pkg/vaultfilepublish"
 )
 
 // ErrContentProposalRejected reports that a caller-pinned content proposal was

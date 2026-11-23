@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Wire constants of the v1 canonical owner-root remote-unlock authorization.
@@ -28,15 +28,15 @@ const (
 	// AuthorizationContextDomain separates the context digest preimage from
 	// every other structure. The preimage is this domain followed by exactly
 	// EncodeChannelBindingContext(context) bytes.
-	AuthorizationContextDomain = "locklark.remote-unlock/v1/authorization-context\x00"
+	AuthorizationContextDomain = "passme.remote-unlock/v1/authorization-context\x00"
 	// BindingDigestDomain separates the binding digest preimage. The preimage
 	// is this domain followed by exactly the complete canonical
 	// EncodeDeviceTransportBinding bytes of the binding, signature included.
-	BindingDigestDomain = "locklark.remote-unlock/v1/device-transport-binding-digest\x00"
+	BindingDigestDomain = "passme.remote-unlock/v1/device-transport-binding-digest\x00"
 	// OwnerRootAuthorizationSignatureDomain separates the authorization
 	// signature preimage. The preimage is this domain followed by the
 	// canonical JSON of every authorization member except "signature".
-	OwnerRootAuthorizationSignatureDomain = "locklark.remote-unlock/v1/owner-authorization\x00"
+	OwnerRootAuthorizationSignatureDomain = "passme.remote-unlock/v1/owner-authorization\x00"
 	// MaxAuthorizationSize is the maximum encoded or accepted authorization
 	// size in bytes.
 	MaxAuthorizationSize = 1024

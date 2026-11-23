@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // MappingReport deliberately contains no source names, identifiers or values.
@@ -93,9 +93,9 @@ func MapLogins(raw []byte) (MappedLogins, error) {
 					return releaseMappedItems(&out), e
 				}
 				identity, _ := json.Marshal([]any{accountAttrs["uuid"], vaultAttrs["uuid"], source["uuid"]})
-				h := sha256.Sum256(append([]byte("locklark/import/1pux/login/v1\x00"), identity...))
+				h := sha256.Sum256(append([]byte("passme/import/1pux/login/v1\x00"), identity...))
 				item.ID = hex.EncodeToString(h[:16])
-				item.ImportSource, e = json.Marshal(map[string]any{"format": "locklark/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
+				item.ImportSource, e = json.Marshal(map[string]any{"format": "passme/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
 				if e != nil {
 					return releaseMappedItems(&out), ErrInvalid
 				}

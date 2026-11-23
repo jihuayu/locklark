@@ -1,12 +1,12 @@
 # 浏览器验证码填充验收
 
-基线 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`，分支 `codex/browser-native-otp`。桌面 [PR #28](https://github.com/jihuayu/locklark/pull/28) 已经 Luna/max、主代理独立完整GUI及精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的四项 [CI 42120014509](https://github.com/jihuayu/locklark/actions/runs/42120014509) 合入；其中Windows/macOS原生剪贴板smoke均实际执行并通过。
+基线 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`，分支 `codex/browser-native-otp`。桌面 [PR #28](https://github.com/jihuayu/passme/pull/28) 已经 Luna/max、主代理独立完整GUI及精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的四项 [CI 42120014509](https://github.com/jihuayu/passme/actions/runs/42120014509) 合入；其中Windows/macOS原生剪贴板smoke均实际执行并通过。
 
 本批已按 [架构约定](browser-otp-design.md) 实现浏览器逐次原生批准的OTP填充；固定构建的最终本地验收已通过，待PR精确head远端检查。主代理设计与独立验收；Sol xhigh分别承担Go核心/宿主与扩展/外部工具；Luna max独立review。需要保留失败先行、修复、固定构建、两浏览器真实GUI、全部值扫描及精确head CI证据。
 
 ## 已保留的失败证据
 
-私有日志保存在 `/tmp/locklark-validation`，仅固定分类进入交接，不复制夹具秘密或原始诊断。
+私有日志保存在 `/tmp/passme-validation`，仅固定分类进入交接，不复制夹具秘密或原始诊断。
 
 - `browser-otp-protocol-red.log`：当前协议拒绝新增完整OTP请求，属于行为失败。
 - `browser-otp-core-red.log`：独立目标/control及Prepare→Authorize→Grant接口尚不存在，属于编译失败；不将它称为已执行安全断言。
@@ -19,7 +19,7 @@
 
 ## 主代理早期独立复跑
 
-当前扩展草稿的 `node --test test/*.test.js` 45项全部通过，日志 `browser-otp-parent-node-draft.log`。随后使用 `LOCKLARK_TEST_PLAYWRIGHT=/workspace/locklark/web/node_modules/playwright` 分别设置 `LOCKLARK_TEST_BROWSER=chromium`、`firefox`，运行 `node scripts/browser_extension_dom.cjs`，两次均exit 0；日志为 `browser-otp-parent-dom-{chromium,firefox}-draft2.log`。它们包含原填充/保存与新增OTP静态函数的页面检查，尚未连接真实原生OTP宿主。
+当前扩展草稿的 `node --test test/*.test.js` 45项全部通过，日志 `browser-otp-parent-node-draft.log`。随后使用 `PASSME_TEST_PLAYWRIGHT=/workspace/passme/web/node_modules/playwright` 分别设置 `PASSME_TEST_BROWSER=chromium`、`firefox`，运行 `node scripts/browser_extension_dom.cjs`，两次均exit 0；日志为 `browser-otp-parent-dom-{chromium,firefox}-draft2.log`。它们包含原填充/保存与新增OTP静态函数的页面检查，尚未连接真实原生OTP宿主。
 
 此前同名不带draft2的DOM尝试因当前worktree没有默认Playwright模块，在加载阶段失败；使用已有主worktree的依赖后复跑，未把环境失败算作产品失败或成功。上述草稿后仍有并发修复，不能替代最终固定源码验收。
 
@@ -27,7 +27,7 @@
 
 ## candidate1 集成诊断（不是最终验收）
 
-首个固定构建在 `/tmp/locklark-tools/browser-otp-candidate1`：Chromium SHA256 `7c465389c89cabcb1850d98c46aa0ead2a2233b6f43632fd0b5a46291bb48e2f`；Firefox `c7b13628577ea42dac1389ae4e721532c435a0fbb5f0049873a96ed1e5aa4c54`；注册器 `bac3b0037141d355866f84c4e232dfc94b23187062f0067742ca296b5e4aec62`。主代理已独立核对这三个摘要。后续仍在修协议/取消竞态，不能以candidate1代替最终源码。
+首个固定构建在 `/tmp/passme-tools/browser-otp-candidate1`：Chromium SHA256 `7c465389c89cabcb1850d98c46aa0ead2a2233b6f43632fd0b5a46291bb48e2f`；Firefox `c7b13628577ea42dac1389ae4e721532c435a0fbb5f0049873a96ed1e5aa4c54`；注册器 `bac3b0037141d355866f84c4e232dfc94b23187062f0067742ca296b5e4aec62`。主代理已独立核对这三个摘要。后续仍在修协议/取消竞态，不能以candidate1代替最终源码。
 
 Sol CI的Firefox正常链路exit 0（`browser-otp-firefox-candidate1.log`），包含旧fill/save、6/8位独立HMAC、审计及OTP拒绝/导航/锁定/表单/旧修订/未配置/短窗口检查。draft2工具的Chrome和Firefox实际参数故障验收均通过：子进程在预期OTP故障阶段exit 1，外层隐私门槛exit 0，完整controller码/因素扫描通过，OTP失败截图为零。日志为 `browser-otp-{chromium,firefox}-candidate1-draft2-fault.log`。这是实现代理的集成证据，主代理最终独立验收仍待完成。
 
@@ -51,7 +51,7 @@ Chrome独立无金库实验没有证明旧target长期存活：20次零等待打
 
 ## candidate3 与扩展 draft4 的固定实现
 
-Go产品候选3保存在 `/tmp/locklark-tools/browser-otp-candidate3`，`browser-otp-candidate3-products.sha256` 固定146个产品源码/模块文件及3个二进制；主代理独立核对149项全部匹配。Chromium宿主 SHA256 `dcea6f514ca4fec3eb1bee6bb9b74c86ee2eb04d4f97f919d8c6e37e7a1dbbcc`，Firefox宿主 `bb7f5e3c283d5291482befb1a1877b5c2ac9bba631c9561026d837b9ac31e91d`，注册器 `6ede0e9e03b0ebd625993bb9aebddab7c35faacb2a13b5330ca8eb3f201f5ecb`。工具和扩展另由 `browser-otp-tools-draft4.sha256` 固定22项，两个dist由同一源码重建；不把Go摘要当作扩展摘要。
+Go产品候选3保存在 `/tmp/passme-tools/browser-otp-candidate3`，`browser-otp-candidate3-products.sha256` 固定146个产品源码/模块文件及3个二进制；主代理独立核对149项全部匹配。Chromium宿主 SHA256 `dcea6f514ca4fec3eb1bee6bb9b74c86ee2eb04d4f97f919d8c6e37e7a1dbbcc`，Firefox宿主 `bb7f5e3c283d5291482befb1a1877b5c2ac9bba631c9561026d837b9ac31e91d`，注册器 `6ede0e9e03b0ebd625993bb9aebddab7c35faacb2a13b5330ca8eb3f201f5ecb`。工具和扩展另由 `browser-otp-tools-draft4.sha256` 固定22项，两个dist由同一源码重建；不把Go摘要当作扩展摘要。
 
 从candidate1到最终Go候选关闭了用途/目标/control身份校验和独立核心cap到期清码问题。主代理复跑用途/control测试先失败（`browser-otp-parent-purpose-control-red.log`）；修复绑定browser用途、精确目标、原Session及原holder。独立长control测试另证明短cap过期后缓冲仍留存（`browser-otp-cap-expiry-red.log`），最终在发布缓冲前缩短同一个control至实际cap期限并复核Pending，不能通过新建gate绕过撤权。Luna独立复验相关核心测试通过（12.900s）。同包测试人工篡改私有control时原无值登记可延至短timer清理，此有限元数据保留不被描述成立即清除。
 
@@ -79,4 +79,4 @@ Chromium最终完整正常链路exit 0，日志 `browser-otp-candidate3-parent-c
 
 ## 合并结果
 
-[PR #29](https://github.com/jihuayu/locklark/pull/29) 的最终head `ced61e5391c19d761e3ded615d5afd4074b20906` 在 [run 42133038819](https://github.com/jihuayu/locklark/actions/runs/42133038819) 的Linux、Windows、macOS和Web四项检查全部通过。主代理另外核对CI完整日志中Chromium/Firefox正常链路及两种OTP参数故障均实际执行并通过。2026-11-06 00:04:59 UTC正常squash合入 main `20e27aa48b6ac855e027cc7abde64fc3c56591f7`。以上更新前文历史等待状态；物理系统解锁、Safari/手机/Passkey等持续范围未由本批关闭。下一批为[桌面快捷搜索](desktop-quick-search-design.md)。
+[PR #29](https://github.com/jihuayu/passme/pull/29) 的最终head `ced61e5391c19d761e3ded615d5afd4074b20906` 在 [run 42133038819](https://github.com/jihuayu/passme/actions/runs/42133038819) 的Linux、Windows、macOS和Web四项检查全部通过。主代理另外核对CI完整日志中Chromium/Firefox正常链路及两种OTP参数故障均实际执行并通过。2026-11-06 00:04:59 UTC正常squash合入 main `20e27aa48b6ac855e027cc7abde64fc3c56591f7`。以上更新前文历史等待状态；物理系统解锁、Safari/手机/Passkey等持续范围未由本批关闭。下一批为[桌面快捷搜索](desktop-quick-search-design.md)。

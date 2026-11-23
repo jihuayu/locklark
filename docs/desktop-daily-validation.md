@@ -1,20 +1,20 @@
 # MyGo 日常密码生成与 TOTP 验收
 
-[PR #28](https://github.com/jihuayu/locklark/pull/28) 已于2026-11-05正常squash合入 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`。最终精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的 [CI 42120014509](https://github.com/jihuayu/locklark/actions/runs/42120014509) 四项全部成功，Windows/macOS原生剪贴板smoke、Ubuntu CLI/Go及Web/两浏览器真实GUI均通过。主代理独立核对run/head/四job后按正常流程合并。以下保留此前红测及各轮历史记录，不把早期“等待CI”视作当前状态。
+[PR #28](https://github.com/jihuayu/passme/pull/28) 已于2026-11-05正常squash合入 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`。最终精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的 [CI 42120014509](https://github.com/jihuayu/passme/actions/runs/42120014509) 四项全部成功，Windows/macOS原生剪贴板smoke、Ubuntu CLI/Go及Web/两浏览器真实GUI均通过。主代理独立核对run/head/四job后按正常流程合并。以下保留此前红测及各轮历史记录，不把早期“等待CI”视作当前状态。
 
 基线 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`，分支 `codex/desktop-daily-tools`。用户指定主代理架构与验收、Sol xhigh 实现、Luna max review；[架构约定](desktop-daily-design.md) 已根据Luna预审冻结。本批本地实现、失败先行、独立复核和最终GUI均已完成；精确head远端CI与合并仍待完成。以下保留各轮失败和修正，不能将候选或旧轮证据替代最终结果。
 
-前批浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的四项 [CI 42089993817](https://github.com/jihuayu/locklark/actions/runs/42089993817) 全部通过并已合入该基线。
+前批浏览器保存/更新 [PR #27](https://github.com/jihuayu/passme/pull/27) 精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的四项 [CI 42089993817](https://github.com/jihuayu/passme/actions/runs/42089993817) 全部通过并已合入该基线。
 
 本批必须完成核心原子生成/收据与取消仲裁、原生OTP意图/持久复验/单次交付、双时钟和剪贴板所有权、真实原生GUI、值扫描、独立review及精确head CI。系统硬件解锁、全部类别/附件迁移、移动/远端同步等不因本批单测或Linux GUI通过而关闭。
 
 ## 失败先行与预审
 
-`/tmp/locklark-validation/desktop-daily-core-red.log` 记录新MutationGate、原生生成和OTP窄API不存在导致契约测试编译失败。此为核心接口缺失证据，不等于事务或GUI负测已经完成。Luna/max 已核对正式架构与预审一致，无架构阻塞；后续实现还需逐阶段独立review。
+`/tmp/passme-validation/desktop-daily-core-red.log` 记录新MutationGate、原生生成和OTP窄API不存在导致契约测试编译失败。此为核心接口缺失证据，不等于事务或GUI负测已经完成。Luna/max 已核对正式架构与预审一致，无架构阻塞；后续实现还需逐阶段独立review。
 
 前批非阻塞工具维护项的窗口ref异常释放已有纯工具先红后绿（`desktop-daily-windowref-red.log`、`desktop-daily-windowref-green.log`，8项工具测试通过）；不因此宣称原生产品功能完成。第一轮旧桌面GUI探测误等待disabled保存按钮，属于验收工具错误，明确不计为产品缺入口red；修正观察后再记录有效证据。
 
-修正外部观察后，真实旧版MyGo GUI缺入口red已完成（`desktop-daily-gui-red-final.log`，预期退出1）：旧手工保存/密码显示控件存在，可选网站、生成保存、重新生成、验证码显示/复制均不存在。基线binary在 `/tmp/locklark-tools/desktop-daily-baseline/`，SHA256 `456904d110cedb63ed889c4125d755995450fcfa36c5b4fbb92b36e5493baa5d`。该证据只证明新功能入口缺失；生成/OTP安全语义及新实现真实链路仍需后续验收。
+修正外部观察后，真实旧版MyGo GUI缺入口red已完成（`desktop-daily-gui-red-final.log`，预期退出1）：旧手工保存/密码显示控件存在，可选网站、生成保存、重新生成、验证码显示/复制均不存在。基线binary在 `/tmp/passme-tools/desktop-daily-baseline/`，SHA256 `456904d110cedb63ed889c4125d755995450fcfa36c5b4fbb92b36e5493baa5d`。该证据只证明新功能入口缺失；生成/OTP安全语义及新实现真实链路仍需后续验收。
 
 ## 第一阶段核心
 
@@ -32,9 +32,9 @@ Luna核心增量确认两个阻塞点：最后校验与callback之间RequestLock
 
 ## v1 固定程序首轮
 
-`/tmp/locklark-tools/desktop-daily-v1/locklark-desktop` 的SHA256为 `95aaa0012759392d1a08409774f9de5bb88c197ac651486c4bab683fe7d3a32b`，不覆盖该产物。`desktop-daily-v1-gui.log` 记录真实手工/生成新建、授权显示/复制精确值、同ID重新生成和其他字段保留、取消/过时修订/归档/回收站，以及独立Python HMAC、显示/原码窗口到期、改选/切页/观察修订/锁定清理等均已越过。但最后 `otp-later-clipboard-owner-preserved` 控件等待超时，整套不计为通过，私有状态 `locklark-desktop-acceptance-8wkpzd39` 保留。该轮扫描仅覆盖native.log和failureJSON两个文件，不冒称controller输出也扫描过。
+`/tmp/passme-tools/desktop-daily-v1/passme-desktop` 的SHA256为 `95aaa0012759392d1a08409774f9de5bb88c197ac651486c4bab683fe7d3a32b`，不覆盖该产物。`desktop-daily-v1-gui.log` 记录真实手工/生成新建、授权显示/复制精确值、同ID重新生成和其他字段保留、取消/过时修订/归档/回收站，以及独立Python HMAC、显示/原码窗口到期、改选/切页/观察修订/锁定清理等均已越过。但最后 `otp-later-clipboard-owner-preserved` 控件等待超时，整套不计为通过，私有状态 `passme-desktop-acceptance-8wkpzd39` 保留。该轮扫描仅覆盖native.log和failureJSON两个文件，不冒称controller输出也扫描过。
 
-独立v1定向诊断在 `select-otp` 等待显示密码时失败（`desktop-daily-v1-owner-targeted.log`，`locklark-desktop-acceptance-649a_cuu`）；后续只读诊断显示对应控件唯一且enabled/showing，两个授权显示组为空。尚不足以归因产品或工具/时序；后续增加固定动作、异常类别与耗时，不重试点击或延长产品lease。工具已经统一安全输出并把controller文本写入私有controller.log，和动态生成值/OTP token一并扫描，避免为了扫描持久化原值。
+独立v1定向诊断在 `select-otp` 等待显示密码时失败（`desktop-daily-v1-owner-targeted.log`，`passme-desktop-acceptance-649a_cuu`）；后续只读诊断显示对应控件唯一且enabled/showing，两个授权显示组为空。尚不足以归因产品或工具/时序；后续增加固定动作、异常类别与耗时，不重试点击或延长产品lease。工具已经统一安全输出并把controller文本写入私有controller.log，和动态生成值/OTP token一并扫描，避免为了扫描持久化原值。
 
 增量review继续发现并修复：Prepare末次wall观察需保存，普通字段disclose的切页ABA/隐藏晚回调需核曝光代次；OTP复制之后的普通密码复制必须失效旧OTP timer/bounds/owner，防止旧任务误清新值。后者要求定向先红后绿及真实GUI追加场景；最终v2仍待这些修复闭环、冻结与独立验收。
 
@@ -44,21 +44,21 @@ Luna核心增量确认两个阻塞点：最后校验与callback之间RequestLock
 
 `desktop-daily-core-race-final.log`（66.417秒）和 `desktop-daily-ui-race.log`（39.944秒）覆盖原生事务/旧浏览器门控、交付与锁竞争、迟到UI、切页ABA、隐藏和剪贴板所有权。Luna/max最新独立复核没有剩余阻塞，其独立命令 `go test ./internal/personal ./internal/desktop -run 'TestDailyOTP|TestDailyOldOTPTimerCannotClearLaterOrdinaryCopy|TestDailyNativeReadInvalidAndCloseFailureStillLocks|TestDailyOrdinaryDisclosure' -count=1` 通过（personal 17.227秒、desktop 3.023秒），并确认 `git diff --check` 通过。此结论是代码复核，最终固定binary的完整GUI和远端CI仍单列验收。
 
-全量 `go test -count=1 ./...` 已以退出码0完成，实际设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python`，使用Go 1.27.3；日志 `desktop-daily-go-all.log`（personal 290.213秒、preview 140.730秒、desktop 9.407秒、browserhost 18.171秒）。全量 `go vet ./...` 退出0，`desktop-daily-vet.log` 无诊断。
+全量 `go test -count=1 ./...` 已以退出码0完成，实际设置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun`、`PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python`，使用Go 1.27.3；日志 `desktop-daily-go-all.log`（personal 290.213秒、preview 140.730秒、desktop 9.407秒、browserhost 18.171秒）。全量 `go vet ./...` 退出0，`desktop-daily-vet.log` 无诊断。
 
-最终v2程序固定在 `/tmp/locklark-tools/desktop-daily-v2/locklark-desktop`，SHA256 `cd24f877f1824bf51fe136accf4ac204e6bcf48f6677a9191b3cce11eb492759`；`desktop-daily-v2-artifacts.sha256` 同时记录产品源码和测试，主代理独立逐项校验通过。v1保持不覆盖；v2完整GUI与故障诊断隐私扫描分别进行。
+最终v2程序固定在 `/tmp/passme-tools/desktop-daily-v2/passme-desktop`，SHA256 `cd24f877f1824bf51fe136accf4ac204e6bcf48f6677a9191b3cce11eb492759`；`desktop-daily-v2-artifacts.sha256` 同时记录产品源码和测试，主代理独立逐项校验通过。v1保持不覆盖；v2完整GUI与故障诊断隐私扫描分别进行。
 
 ## v2 外部验收诊断
 
-主代理首轮 `desktop-daily-v2-parent.log` 在过时重新生成的审计断言失败，私有状态 `locklark-desktop-acceptance-tr0xjrw8` 保留。原因是后来补充的工具断言把冲突事件 `base_revision` 错认成旧请求修订；签名历史契约始终要求当前已认证修订。私有oracle仅返回固定布尔，确认conflict、精确itemID、当前base revision、独立编辑确实存在、审计安全和观察未写活库。脚本改为核对 `independent` 当前修订，快照/全部条目不变的断言保持。Luna独立确认修正符合 `appendLinked` 与 `journal.history` 的现有契约，17项工具测试及编译/diff检查通过。该轮失败属于验收工具，不能冒称产品事务缺陷，也不算完整GUI通过；v1越过此阶段不能回溯当作这项新断言的验证。
+主代理首轮 `desktop-daily-v2-parent.log` 在过时重新生成的审计断言失败，私有状态 `passme-desktop-acceptance-tr0xjrw8` 保留。原因是后来补充的工具断言把冲突事件 `base_revision` 错认成旧请求修订；签名历史契约始终要求当前已认证修订。私有oracle仅返回固定布尔，确认conflict、精确itemID、当前base revision、独立编辑确实存在、审计安全和观察未写活库。脚本改为核对 `independent` 当前修订，快照/全部条目不变的断言保持。Luna独立确认修正符合 `appendLinked` 与 `journal.history` 的现有契约，17项工具测试及编译/diff检查通过。该轮失败属于验收工具，不能冒称产品事务缺陷，也不算完整GUI通过；v1越过此阶段不能回溯当作这项新断言的验证。
 
-真实 `probe-input` 故障验收 `desktop-daily-v2-probe-failure.log` 已按预期退出1（`private-probe-failure`）：先真实生成新密码，再将私有值送入探针错误路径，固定枚举错误返回。私有状态 `locklark-desktop-acceptance-49n__tem` 中controller/native/诊断共3文件及重定向controller输出均经动态密码、因素、种子与独立OTP token扫描，无原值泄漏。产品v2未改动，最终正常GUI正在独立重跑。
+真实 `probe-input` 故障验收 `desktop-daily-v2-probe-failure.log` 已按预期退出1（`private-probe-failure`）：先真实生成新密码，再将私有值送入探针错误路径，固定枚举错误返回。私有状态 `passme-desktop-acceptance-49n__tem` 中controller/native/诊断共3文件及重定向controller输出均经动态密码、因素、种子与独立OTP token扫描，无原值泄漏。产品v2未改动，最终正常GUI正在独立重跑。
 
-第二轮 `desktop-daily-v2-parent-final.log` 已通过修正后的冲突审计、归档/回收站，在OTP显示的外部读取中收到固定 `probe-a11y-query`，整套仍不计通过，状态 `locklark-desktop-acceptance-shrm4fv2` 保留。独立显示探针之前对 `AccessibilityQueryUnavailable` 单次失败，而共享控件driver已处理这种查询错误。现探针仅对这一类型错误在原请求内允许0.5秒单调预算启动只读重取，并处理非阻塞事件队列；其他结构/授权错误直接失败，到期空值/不匹配不能重取成新码。没有重复点击或生成，没有延长产品lease；单次底层查询耗时仍受外部15秒请求时限约束，0.5秒不冒称底层调用的硬超时。安全响应只新增尝试次数。`desktop-daily-probe-query-red.log` 记录工具先行失败，green日志21项工具测试通过；最终完整GUI继续以同一v2程序执行。
+第二轮 `desktop-daily-v2-parent-final.log` 已通过修正后的冲突审计、归档/回收站，在OTP显示的外部读取中收到固定 `probe-a11y-query`，整套仍不计通过，状态 `passme-desktop-acceptance-shrm4fv2` 保留。独立显示探针之前对 `AccessibilityQueryUnavailable` 单次失败，而共享控件driver已处理这种查询错误。现探针仅对这一类型错误在原请求内允许0.5秒单调预算启动只读重取，并处理非阻塞事件队列；其他结构/授权错误直接失败，到期空值/不匹配不能重取成新码。没有重复点击或生成，没有延长产品lease；单次底层查询耗时仍受外部15秒请求时限约束，0.5秒不冒称底层调用的硬超时。安全响应只新增尝试次数。`desktop-daily-probe-query-red.log` 记录工具先行失败，green日志21项工具测试通过；最终完整GUI继续以同一v2程序执行。
 
 Luna/max已独立复核该探针修正，核对有限预算、仅指定异常重取、授权静态文本范围、引用释放以及到期值仍拒绝；独立执行probe和共享X11 driver的17项测试通过，无剩余工具阻塞。CI的macOS筛选已包含 `TestDaily`，Linux/Windows全量测试与既有两浏览器GUI链路保留。
 
-第三轮 `desktop-daily-v2-parent-probe-fixed.log` 已通过独立HMAC显示与到期清理，但在 `otp-copy-original-window-expiry` 未完成，状态 `locklark-desktop-acceptance-4470j4zo` 保留。复制点击成功，固定诊断中原生按钮enabled，显示探针最大尝试次数1；随后私有探针响应不可用，故障诊断也无法再取得display。整套失败、完整日志扫描通过，尚不能据此确定为产品或探针剪贴板路径的问题。后续需补精确超时分类并定位，不能把无响应认作剪贴板为空，也不能跳过剩余场景。
+第三轮 `desktop-daily-v2-parent-probe-fixed.log` 已通过独立HMAC显示与到期清理，但在 `otp-copy-original-window-expiry` 未完成，状态 `passme-desktop-acceptance-4470j4zo` 保留。复制点击成功，固定诊断中原生按钮enabled，显示探针最大尝试次数1；随后私有探针响应不可用，故障诊断也无法再取得display。整套失败、完整日志扫描通过，尚不能据此确定为产品或探针剪贴板路径的问题。后续需补精确超时分类并定位，不能把无响应认作剪贴板为空，也不能跳过剩余场景。
 
 ## 剪贴板重入修复
 
@@ -78,13 +78,13 @@ Luna增量复核还发现“每次clear都递增序号”会让嵌套Lock阻止�
 
 Luna已对重入、锁库顺序和ownership代次的最终产品实现复核，无剩余阻塞；其独立定向桌面测试通过（12.781秒）。最终 `go test ./internal/desktop -count=1` 通过（15.097秒，`desktop-daily-v3-desktop-all.log`），定向UI race通过（62.355秒，`desktop-daily-v3-desktop-race.log`），desktop vet退出0（`desktop-daily-v3-desktop-vet.log`）。9个personal源码/测试文件与v2清单逐一SHA相同，因此保留上文全量Go/全vet与核心race的证据，新增行为另由本次desktop回归和随后精确head CI覆盖。
 
-`/tmp/locklark-tools/desktop-daily-v3/locklark-desktop` SHA256为 `edee1658a03cfaad0c6473b2ca40f605f8a89519089736a9c49a89b6029037a6`；主代理独立验证 `desktop-daily-v3-artifacts.sha256` 的程序及全部源码/测试匹配。v1/v2保持不覆盖。主代理使用隔离display `:94`、私有DBus、真实AT-SPI/XTest输入执行完整GUI，工具代理在独立 `:95` 以同一v3执行最终故障隐私验收。
+`/tmp/passme-tools/desktop-daily-v3/passme-desktop` SHA256为 `edee1658a03cfaad0c6473b2ca40f605f8a89519089736a9c49a89b6029037a6`；主代理独立验证 `desktop-daily-v3-artifacts.sha256` 的程序及全部源码/测试匹配。v1/v2保持不覆盖。主代理使用隔离display `:94`、私有DBus、真实AT-SPI/XTest输入执行完整GUI，工具代理在独立 `:95` 以同一v3执行最终故障隐私验收。
 
-v3故障隐私验收通过（`desktop-daily-v3-probe-failure.log`，状态 `locklark-desktop-acceptance-nzgk91ut`）：实际生成后预期exit1，wrapper核对host SHA并扫描重定向stdout/DBus及state内3个日志/诊断文件，无因素、种子、生成值和独立OTP token泄漏。正常整套首轮 `desktop-daily-v3-parent.log` 仍在OTP显示/到期场景失败为 `probe-unexpected`（状态 `locklark-desktop-acceptance-2jbnl3hw`），不得计通过；日志扫描通过，原生日志无panic/fatal/segfault。现补固定异常分类和无值结构诊断后定向定位，不在未确认原因时放宽树预算或归因CPU。
+v3故障隐私验收通过（`desktop-daily-v3-probe-failure.log`，状态 `passme-desktop-acceptance-nzgk91ut`）：实际生成后预期exit1，wrapper核对host SHA并扫描重定向stdout/DBus及state内3个日志/诊断文件，无因素、种子、生成值和独立OTP token泄漏。正常整套首轮 `desktop-daily-v3-parent.log` 仍在OTP显示/到期场景失败为 `probe-unexpected`（状态 `passme-desktop-acceptance-2jbnl3hw`），不得计通过；日志扫描通过，原生日志无panic/fatal/segfault。现补固定异常分类和无值结构诊断后定向定位，不在未确认原因时放宽树预算或归因CPU。
 
 安全诊断增量只公开固定异常类别、本工具白名单函数别名/行号、数值depth/visited/remaining/children，并在probe与controller两侧过滤；不输出异常args、文本、locals或源路径。已知tree/child/window guard分别分类，原12层/512节点/256子节点限制不变；先红日志 `desktop-probe-guard-reason-red.log`，37项工具测试通过 `desktop-probe-guard-diagnostic-green.log`。定向真实OTP显示/HMAC/到期通过（`desktop-daily-v3-otp-targeted.log`，状态 `b29maoqg`）。持有真实已移除OTP组proxy的只读实验显示child_count=-1且GError=true（`desktop-daily-v3-defunct-count.log`，状态 `e9kwuxsn`），属于已有typed-query路径，不证明“负count无错误”假说。两项均有私有扫描；尚未复现首轮unexpected，不将定向通过当根因修复。
 
-主代理第二轮v3整套 `desktop-daily-v3-parent-diagnostic.log` 已越过OTP显示/原窗口到期、OTP复制被普通密码替换、切换条目/页面、观察修订、锁定清理和到期保留外部owner；最后 `otp-later-clipboard-owner-preserved` 点击锁定后等待解锁界面10.127秒超时，整套仍失败（状态 `locklark-desktop-acceptance-lp3hw8o0`）。扫描通过，诊断中旧OTP组仍显示，锁定按钮仍enabled。这些只是最后可见的可访问树，不能仅凭它区分点击未到达与锁定已执行但OS读取阻塞，后续需单次输入与私有栈符号诊断。没有重复点击或把部分通过当完整验收。
+主代理第二轮v3整套 `desktop-daily-v3-parent-diagnostic.log` 已越过OTP显示/原窗口到期、OTP复制被普通密码替换、切换条目/页面、观察修订、锁定清理和到期保留外部owner；最后 `otp-later-clipboard-owner-preserved` 点击锁定后等待解锁界面10.127秒超时，整套仍失败（状态 `passme-desktop-acceptance-lp3hw8o0`）。扫描通过，诊断中旧OTP组仍显示，锁定按钮仍enabled。这些只是最后可见的可访问树，不能仅凭它区分点击未到达与锁定已执行但OS读取阻塞，后续需单次输入与私有栈符号诊断。没有重复点击或把部分通过当完整验收。
 
 随后执行环境重启，源码和v3 SHA均保留。旧display进程与socket需核实状态后恢复；已完成测试证据保留，重启中断的实验另记环境原因，不能当产品失败。主代理隔离display `:94` 已重新建立，继续同一v3的诊断。
 
@@ -116,7 +116,7 @@ Luna发现旧GTK lease仅凭GObject数值地址和owner XID可能接受释放后
 
 ## v4 最终固定构建
 
-`/tmp/locklark-tools/desktop-daily-v4/locklark-desktop` 构建退出0，SHA256 `0c098b9249ddfb3e8d86ff0dba538c674c02cdbb3554510a0a9f0d035f529228`；源码清单 `desktop-daily-v4-artifacts.sha256` 包含binary及91项源码/go.mod/go.sum，主代理逐项校验通过，工具9项清单亦通过。personal核心相对v3未改；purego v0.11.1仅改为直接依赖，无版本变动。最终GUI与故障验收正在该固定构建上执行，候选1不能替代。
+`/tmp/passme-tools/desktop-daily-v4/passme-desktop` 构建退出0，SHA256 `0c098b9249ddfb3e8d86ff0dba538c674c02cdbb3554510a0a9f0d035f529228`；源码清单 `desktop-daily-v4-artifacts.sha256` 包含binary及91项源码/go.mod/go.sum，主代理逐项校验通过，工具9项清单亦通过。personal核心相对v3未改；purego v0.11.1仅改为直接依赖，无版本变动。最终GUI与故障验收正在该固定构建上执行，候选1不能替代。
 
 最终产品测试 `desktop-daily-v4-desktop-all.log` 通过（nativeclipboard 0.046秒、desktop 8.233秒）；竞态 `desktop-daily-v4-desktop-race-final.log` 通过（1.137/61.766秒）。Linux `desktop-daily-v4-desktop-vet.log`、Windows amd64 `desktop-daily-v4-windows-vet.log`、macOS arm64 `desktop-daily-v4-darwin-vet.log` 均退出0。跨平台静态检查和测试包交叉编译不等于原生运行；Windows/macOS的 `TestNativeClipboardSmoke` 已在CI显式启用，包含独立owner进程，Windows另核busy、nonce格式序号变化和部分写入。
 
@@ -138,7 +138,7 @@ Luna/max最终产品增量复核无阻塞，独立Linux定向测试通过（nati
 
 ## PR #28 首轮真实平台CI
 
-[PR #28](https://github.com/jihuayu/locklark/pull/28) 首个精确head `cdd7e599a99a3713c45eb1ce2ee36e40f12712c2` 的 [run 42118122749](https://github.com/jihuayu/locklark/actions/runs/42118122749) 已执行。macOS job成功，包含显式启用的原生剪贴板smoke。Windows job `127563078621` 在 `TestNativeClipboardSmoke` 的固定 `partial native write cleanup failed` 断言失败（smoke_windows_test.go原第98行）：之前ErrWrite、lease非nil及实际Unicode内容读回均通过，说明文本已交OS但清理未确认。Ubuntu矩阵因fail-fast取消，不计为通过；Web最终成功，包含Linux原生桌面、管理两浏览器E2E、Chrome/Firefox DOM及两浏览器原生fill/save全部步骤。
+[PR #28](https://github.com/jihuayu/passme/pull/28) 首个精确head `cdd7e599a99a3713c45eb1ce2ee36e40f12712c2` 的 [run 42118122749](https://github.com/jihuayu/passme/actions/runs/42118122749) 已执行。macOS job成功，包含显式启用的原生剪贴板smoke。Windows job `127563078621` 在 `TestNativeClipboardSmoke` 的固定 `partial native write cleanup failed` 断言失败（smoke_windows_test.go原第98行）：之前ErrWrite、lease非nil及实际Unicode内容读回均通过，说明文本已交OS但清理未确认。Ubuntu矩阵因fail-fast取消，不计为通过；Web最终成功，包含Linux原生桌面、管理两浏览器E2E、Chrome/Firefox DOM及两浏览器原生fill/save全部步骤。
 
 该Windows路径在文本已写入而nonce失败后依赖Close前采样的sequence；现有日志不能区分写Close、后续读取或合成格式是否推进了序号，不把推断写成已观测根因。架构改为同Open锁内nonce先于文本；凭证失败则不发布秘密，所有secret-bearing lease均可用nonce验证。Sol实施窄修、Luna增量复审，之后新head必须四项CI全部通过，不能用Linux GUI或macOS成功替代Windows失败。原始CI日志仅私下保存，普通输出只引用固定测试/阶段。
 

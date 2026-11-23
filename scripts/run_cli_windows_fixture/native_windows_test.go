@@ -12,7 +12,7 @@ import (
 )
 
 func TestWindowsPrivateOracleBoundParentInIsolatedChild(t *testing.T) {
-	const helper = "LOCKLARK_TEST_PRIVATE_ORACLE_CHILD"
+	const helper = "PASSME_TEST_PRIVATE_ORACLE_CHILD"
 	if os.Getenv(helper) == "1" {
 		if len(os.Args) < 3 || privateRootAt(os.Args[len(os.Args)-2], os.Args[len(os.Args)-1]) != nil {
 			t.Fatal("isolated child rejected bound private oracle")
@@ -65,7 +65,7 @@ func TestWindowsPrivateOracleRejectsParentAndACLChanges(t *testing.T) {
 		t.Fatal("valid private oracle rejected")
 	}
 	for _, paths := range [][2]string{{root, filepath.Join(parent, "other-parent")}, {root, "."},
-		{"locklark-run-cli-acceptance-relative", parent}, {root + `\.`, parent}, {root, parent + `\.`}} {
+		{"passme-run-cli-acceptance-relative", parent}, {root + `\.`, parent}, {root, parent + `\.`}} {
 		if privateRootAt(paths[0], paths[1]) == nil {
 			t.Fatal("non-exact private oracle parent accepted")
 		}

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 type profileFlow struct {
@@ -35,7 +35,7 @@ func profileGate(t *testing.T, s *personal.Session) *personal.MutationGate {
 
 func newProfileFixture(t *testing.T, quick bool) (*profileFlow, *personal.Session, string, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "profile.ll")
+	path := filepath.Join(t.TempDir(), "profile.pm")
 	key := bytes.Repeat([]byte{8}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

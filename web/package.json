@@ -13,7 +13,7 @@
     "tsx": "4.23.15",
     "typescript": "5.9.3"
   },
-  "name": "locklark-management",
+  "name": "passme-management",
   "version": "0.1.0",
   "private": true,
   "type": "module",

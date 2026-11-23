@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified opaque-box E2E runner for the Locklark M5 test track.
+"""Unified opaque-box E2E runner for the Passme M5 test track.
 
 The runner imports test modules from ``tests/e2e`` lazily, executes every
 selected test in its own :class:`~tests.e2e.harness.E2EContext`, and reports a
@@ -310,7 +310,7 @@ def _print_summary(report: dict[str, Any], strict: bool) -> None:
     summary = report["summary"]
     print()
     print("=" * 72)
-    print("Locklark M5 E2E summary")
+    print("Passme M5 E2E summary")
     print("=" * 72)
     print(
         f"Total: {summary['total']}  "
@@ -399,11 +399,11 @@ def _run_self_test(bin_dir: Path) -> int:
         )
         assert "GOPROXY" in os.environ, "GOPROXY was not initialized"
         for path in (
-            bin_dir / "locklark",
-            bin_dir / "locklark-browser-chromium",
-            bin_dir / "locklark-browser-firefox",
-            bin_dir / "locklark-browser-register",
-            bin_dir / "locklark-desktop",
+            bin_dir / "passme",
+            bin_dir / "passme-browser-chromium",
+            bin_dir / "passme-browser-firefox",
+            bin_dir / "passme-browser-register",
+            bin_dir / "passme-desktop",
         ):
             assert path.is_file() and os.access(path, os.X_OK), (
                 f"required binary is missing or not executable: {path}"
@@ -419,7 +419,7 @@ def _run_self_test(bin_dir: Path) -> int:
             assert ctx.temp_dir.is_dir()
             assert (ctx.temp_dir.stat().st_mode & 0o777) == 0o700
             assert ctx.temp_dir.parent.name == "e2e-runs"
-            assert ctx.locklark_bin.is_file()
+            assert ctx.passme_bin.is_file()
             assert ctx.browser_chromium_bin.is_file()
             assert ctx.browser_firefox_bin.is_file()
             assert ctx.browser_register_bin.is_file()
@@ -433,8 +433,8 @@ def _run_self_test(bin_dir: Path) -> int:
         def check_run_cli() -> None:
             result = ctx.run_cli(["help"])
             assert result.returncode == 0, result.stderr
-            assert "Locklark" in result.stdout
-            assert result.args[0] == str(ctx.locklark_bin)
+            assert "Passme" in result.stdout
+            assert result.args[0] == str(ctx.passme_bin)
             assert result["returncode"] == 0
 
         check("run_cli against the real CLI", check_run_cli)
@@ -653,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="e2e_runner.py",
         description=(
-            "Run the Locklark M5 opaque-box E2E suite. Tests are registered "
+            "Run the Passme M5 opaque-box E2E suite. Tests are registered "
             "in tests/e2e/tier*.py and executed against real product binaries."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

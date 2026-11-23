@@ -9,8 +9,8 @@ import (
 	"reflect"
 	"testing"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 // The synthetic credentials below exist only to prove that the adapter's
@@ -172,7 +172,7 @@ func TestItemDatabaseNewIsUnlockedSnapshotProfile(t *testing.T) {
 		t.Fatalf("unexpected shape: group %q, %d groups, %d entries", g.Name, len(g.Groups), len(g.Entries))
 	}
 	meta := g.Entries[0]
-	if meta.GetContent("Title") != "Locklark metadata v1" {
+	if meta.GetContent("Title") != "Passme metadata v1" {
 		t.Fatal("metadata entry title changed")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(meta.GetContent("Notes"))
@@ -188,7 +188,7 @@ func TestItemDatabaseNewIsUnlockedSnapshotProfile(t *testing.T) {
 	// New returns the unlocked layout: protected values still carry plaintext.
 	for _, id := range []string{"v1-login", "item-login"} {
 		for _, e := range g.Entries {
-			if e.GetContent("Locklark.ID") != id {
+			if e.GetContent("Passme.ID") != id {
 				continue
 			}
 			if got := e.GetContent("Password"); got != "p" && got != "password" {
@@ -198,7 +198,7 @@ func TestItemDatabaseNewIsUnlockedSnapshotProfile(t *testing.T) {
 	}
 	for _, e := range g.Entries {
 		for _, v := range e.Values {
-			if v.Key == "Locklark.V2" {
+			if v.Key == "Passme.V2" {
 				if !v.Value.Protected.Bool {
 					t.Fatal("v2 slot lost its protected flag")
 				}
@@ -473,7 +473,7 @@ func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 		"legacy preview group": func(t *testing.T) *kdbx.Database {
 			d := newOpened(t)
 			g := kdbx.NewGroup()
-			g.Name = "Locklark"
+			g.Name = "Passme"
 			d.Content.Root.Groups = []kdbx.Group{g}
 			return d
 		},
@@ -490,7 +490,7 @@ func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 		"unknown field": func(t *testing.T) *kdbx.Database {
 			d := newOpened(t)
 			e := &d.Content.Root.Groups[0].Entries[1]
-			e.Values = append(e.Values, slot("Locklark.Extra", "x", false))
+			e.Values = append(e.Values, slot("Passme.Extra", "x", false))
 			return d
 		},
 		"unprotected password": func(t *testing.T) *kdbx.Database {

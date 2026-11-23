@@ -238,7 +238,7 @@ func keyName(id, token string) (string, error) {
 	if e != nil {
 		return "", ErrUnavailable
 	}
-	return u.User.Sid.String() + "//Locklark/" + id + "/" + token, nil
+	return u.User.Sid.String() + "//Passme/" + id + "/" + token, nil
 }
 func openKey(id, token string) (uintptr, error) {
 	name, e := keyName(id, token)
@@ -297,7 +297,7 @@ func createKey(id, token string) (uintptr, error) {
 	if setCacheType(h, 1) != nil {
 		return 0, ErrUnavailable
 	}
-	attachUIContext(h, "Locklark：第 1/2 步 — 创建 Windows Hello 保护密钥")
+	attachUIContext(h, "Passme：第 1/2 步 — 创建 Windows Hello 保护密钥")
 	r, _, _ = nFinalize.Call(h, 0)
 	if r != 0 {
 		return 0, classifyHelloStatus(r)
@@ -347,7 +347,7 @@ type sealed struct {
 	Wrapped, Nonce, Data []byte
 }
 
-func store() mygo.SecretsModule { return mygo.Secrets.Service("app.locklark.hello.v1") }
+func store() mygo.SecretsModule { return mygo.Secrets.Service("app.passme.hello.v1") }
 
 // helloSecretGet is the Credential Manager read used before deleting a Hello
 // item. Tests replace it to classify Get failures without opening the real
@@ -393,7 +393,7 @@ func (hello) Store(id string, raw []byte) error {
 	if e != nil {
 		return e
 	}
-	check, e := crypt(verifyHandle, wrapped, true, "Locklark：第 2/2 步 — 验证 Windows Hello 解密授权")
+	check, e := crypt(verifyHandle, wrapped, true, "Passme：第 2/2 步 — 验证 Windows Hello 解密授权")
 	release(verifyHandle)
 	defer clear(check)
 	if e != nil {
@@ -408,7 +408,7 @@ func (hello) Store(id string, raw []byte) error {
 	if _, e = rand.Read(iv); e != nil {
 		return ErrUnavailable
 	}
-	data := aead.Seal(nil, iv, raw, []byte("locklark/hello/v1/"+id+"/"+token))
+	data := aead.Seal(nil, iv, raw, []byte("passme/hello/v1/"+id+"/"+token))
 	encoded, e := json.Marshal(sealed{1, token, wrapped, iv, data})
 	if e != nil || len(encoded) > mygo.MaxSecretSize {
 		return ErrUnavailable
@@ -448,7 +448,7 @@ func (hello) Load(id string) ([]byte, error) {
 		return nil, e
 	}
 	defer release(h)
-	key, e := crypt(h, blob.Wrapped, true, "Locklark：使用 Windows Hello 解锁金库")
+	key, e := crypt(h, blob.Wrapped, true, "Passme：使用 Windows Hello 解锁金库")
 	defer clear(key)
 	if e != nil {
 		return nil, e
@@ -458,7 +458,7 @@ func (hello) Load(id string) ([]byte, error) {
 	}
 	block, _ := aes.NewCipher(key)
 	aead, _ := cipher.NewGCM(block)
-	value, e := aead.Open(nil, blob.Nonce, blob.Data, []byte("locklark/hello/v1/"+id+"/"+blob.Token))
+	value, e := aead.Open(nil, blob.Nonce, blob.Data, []byte("passme/hello/v1/"+id+"/"+blob.Token))
 	if e != nil {
 		return nil, ErrUnavailable
 	}

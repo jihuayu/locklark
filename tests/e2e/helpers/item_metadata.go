@@ -27,7 +27,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 const maxRequest = 64 << 10
@@ -219,7 +219,7 @@ func verifySSHPair(session *personal.Session, id, revision, encoded string) (boo
 	if err != nil {
 		return false, errMetadata
 	}
-	challenge := []byte("locklark/e2e/ssh-pair-proof/v1")
+	challenge := []byte("passme/e2e/ssh-pair-proof/v1")
 	defer clear(challenge)
 	request := personal.SSHSignRequest{
 		RequestID:    requestID,

@@ -3,7 +3,7 @@ package browserhost
 import (
 	"encoding/json"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // MaxPasskeyCandidates bounds one conditional account list. Larger result sets

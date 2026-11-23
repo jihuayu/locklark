@@ -15,7 +15,7 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/edwards25519"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrInvalid = errors.New("invalid team directory configuration, proposal or evidence")
@@ -132,7 +132,7 @@ func NewConfig(pins Pins) (*Config, error) {
 	parts = append(parts, owners...)
 	parts = append(parts, pins.Sequencer, pins.Publisher)
 	h := sha256.New()
-	h.Write([]byte("locklark/team-directory/config/v1\x00"))
+	h.Write([]byte("passme/team-directory/config/v1\x00"))
 	h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(owners))))
 	for _, p := range parts {
 		h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(p))))
@@ -160,19 +160,19 @@ func (c *Config) validCheckpoint(cp Checkpoint) bool {
 func encoded(v any) []byte { raw, _ := json.Marshal(v); return raw }
 func (p Proposal) proof() []byte {
 	p.Signature = nil
-	return append([]byte("locklark/team-directory/proposal/v1\x00"), encoded(p)...)
+	return append([]byte("passme/team-directory/proposal/v1\x00"), encoded(p)...)
 }
 func (r Receipt) proof() []byte {
 	r.Signature = nil
-	return append([]byte("locklark/team-directory/receipt/v1\x00"), encoded(r)...)
+	return append([]byte("passme/team-directory/receipt/v1\x00"), encoded(r)...)
 }
 func (r Receipt) Checkpoint() Checkpoint {
-	h := sha256.Sum256(append([]byte("locklark/team-directory/head/v1\x00"), encoded(r)...))
+	h := sha256.Sum256(append([]byte("passme/team-directory/head/v1\x00"), encoded(r)...))
 	return Checkpoint{r.Proposal.Scope, r.Proposal.Epoch, hex.EncodeToString(h[:])}
 }
 func snapshotDigest(s vault.Snapshot) string {
 	h := sha256.New()
-	h.Write([]byte("locklark/team-directory/snapshot/v1\x00"))
+	h.Write([]byte("passme/team-directory/snapshot/v1\x00"))
 	h.Write(binary.BigEndian.AppendUint64(nil, s.Epoch))
 	for _, part := range [][]byte{s.Database, s.Envelope, s.Signature} {
 		h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part))))
@@ -268,7 +268,7 @@ func Build(c *Config, owner, publisher ed25519.PrivateKey, parent Checkpoint, me
 	if c.verifyAdmissions(Proposal{Parent: parent, Mode: "active", Members: members, Admissions: proofs}) != nil {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
 	}
-	s, err := vault.SealItems([]byte("locklark/team/items/v1/"+c.scope), items, parent.Version+1, recipients, publisher)
+	s, err := vault.SealItems([]byte("passme/team/items/v1/"+c.scope), items, parent.Version+1, recipients, publisher)
 	if err != nil {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
 	}

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// desktopBrokerSocket returns a unique LOCKLARK_BROWSER_SOCKET value. On
+// desktopBrokerSocket returns a unique PASSME_BROWSER_SOCKET value. On
 // Windows that variable is a safe token appended to the per-user named-pipe
 // name, not a filesystem path, so it must stay short and use only
 // [A-Za-z0-9._-] (see browserhost.safeBrokerToken).

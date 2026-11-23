@@ -1,4 +1,4 @@
-// Package vaultcreationauth defines the locklark.vault-creation/v1 identity
+// Package vaultcreationauth defines the passme.vault-creation/v1 identity
 // proof: the canonical codec and signing preimage for the proof a creator
 // device presents when asking a backend to create a new vault. It also defines
 // CreationPlanDigest, the canonical digest of the creation plan a proof may
@@ -24,7 +24,7 @@
 // One proof is a context and a signature over that context:
 //
 //	{
-//	  "format":"locklark.vault-creation/v1",
+//	  "format":"passme.vault-creation/v1",
 //	  "version":1,
 //	  "kind":"identity-proof",
 //	  "context":{
@@ -51,7 +51,7 @@
 // against exactly the SigningBytes of the context it built itself, and must
 // not sign or trust preimage bytes supplied by a peer. The preimage is
 //
-//	SigningDomain = "locklark.vault-creation/v1/identity-proof"
+//	SigningDomain = "passme.vault-creation/v1/identity-proof"
 //	SigningBytes(c) = SigningDomain || 0x00 || canonicalContextJSON(c)
 //
 // where canonicalContextJSON is exactly the proof's "context" member: scope,
@@ -81,7 +81,7 @@
 //	  u32be(len(Slug)) || Slug ||
 //	  u32be(len(Name)) || Name )
 //
-// where CreationPlanDomain is "locklark.vault-creation-plan/v1". GenesisBytes
+// where CreationPlanDomain is "passme.vault-creation-plan/v1". GenesisBytes
 // is hashed as the exact bytes supplied, never parsed or re-encoded. Nothing
 // is concatenated into a full preimage: the hash is fed field by field. Only
 // fresh vaults are digested: PolicySeq must be zero.
@@ -117,13 +117,13 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Wire constants fixed by this schema. They are part of the protocol.
 const (
 	// Format is the proof's "format" member.
-	Format = "locklark.vault-creation/v1"
+	Format = "passme.vault-creation/v1"
 	// Version is the proof's "version" member.
 	Version = 1
 	// Kind is the proof's "kind" member.
@@ -132,7 +132,7 @@ const (
 	// SigningDomain prefixes every signing preimage. It is domain separation
 	// only: it is never a SHA-256 domain label and is never hashed by this
 	// package. The 0x00 that follows it is not a part of this string.
-	SigningDomain = "locklark.vault-creation/v1/identity-proof"
+	SigningDomain = "passme.vault-creation/v1/identity-proof"
 
 	// SignatureAlgorithm names the algorithm of the 64-byte signature this
 	// schema carries (Ed25519). It is not a wire member; it documents the
@@ -188,7 +188,7 @@ type Context struct {
 	PlanDigest [32]byte  `json:"creation_plan_sha256"`
 }
 
-// Proof is one complete locklark.vault-creation/v1 identity proof. Signature
+// Proof is one complete passme.vault-creation/v1 identity proof. Signature
 // is exactly SignatureBytes. Encode and Parse only check its wire shape (the
 // exact unpadded base64url of SignatureBytes); Parse never verifies it. Verify
 // does verify it with ed25519.Verify against SigningBytes of the caller's
@@ -403,7 +403,7 @@ const (
 	// CreationPlanDomain is the domain bytes CreationPlanDigest hashes before
 	// the plan fields. The 0x00 that follows it in the preimage is not a part
 	// of this string.
-	CreationPlanDomain = "locklark.vault-creation-plan/v1"
+	CreationPlanDomain = "passme.vault-creation-plan/v1"
 
 	// MaxCreationPlanIDBytes is the maximum length in bytes of
 	// RootPin.VaultID and RootPin.OwnerRootKeyID. It is the public
@@ -559,7 +559,7 @@ func validCreationPlanSlug(s string) bool {
 
 // validCreationPlanName mirrors, without importing any internal server
 // package, the tenantauth.validDirectoryName rule shared by directory and
-// vault names (fixed at locklark-server commit
+// vault names (fixed at passme-server commit
 // 1a5167bbc4ec53334817b289f35eb54f84fb1d96): non-empty, at most
 // MaxCreationPlanNameBytes bytes of UTF-8, no control character, no Unicode Zl
 // or Zp, and no Cf except U+200C ZWNJ and U+200D ZWJ, with at least one rune

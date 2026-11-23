@@ -113,9 +113,9 @@ isolated virtual environment outside the checkout and do not install into the
 global interpreter:
 
 ```sh
-python3 -m venv /tmp/locklark-release-workflow-venv
-/tmp/locklark-release-workflow-venv/bin/pip install \
+python3 -m venv /tmp/passme-release-workflow-venv
+/tmp/passme-release-workflow-venv/bin/pip install \
   -r scripts/requirements-test.txt
-/tmp/locklark-release-workflow-venv/bin/python -m unittest \
+/tmp/passme-release-workflow-venv/bin/python -m unittest \
   scripts/test_desktop_release_workflow.py
 ```

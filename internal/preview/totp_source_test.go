@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/totp"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/totp"
 )
 
 // This is a test-only trusted read/calculation, not a production use endpoint.

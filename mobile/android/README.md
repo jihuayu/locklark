@@ -11,7 +11,7 @@ Use JDK 21, Android SDK platform 36, build-tools 36.0.0 and NDK
 8.13.2 and Kotlin 2.2.21 are pinned in the root build file. Build the real Go AAR
 first using the core's binding script, including `android/arm64` for phones and
 `android/amd64` for the x86_64 emulator. Its default location is
-`mobile/core/build/mobilecore.aar`; `LOCKLARK_MOBILE_AAR` can select another
+`mobile/core/build/mobilecore.aar`; `PASSME_MOBILE_AAR` can select another
 explicit artifact. Missing bindings fail the build.
 
 ```sh
@@ -25,7 +25,7 @@ the three mandatory native UI/core/autofill tests and privately scans their logs
 
 ```sh
 ANDROID_HOME=/path/to/android-sdk ANDROID_SERIAL=emulator-5554 \
-  LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
+  PASSME_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
 ```
 
 After the independent host UI gate has produced exactly one completed private
@@ -73,7 +73,7 @@ one-shot `PendingIntent` that is mutable from API 31 (`FLAG_MUTABLE` exists only
 there, so API 30 never receives it). The Activity claims that one-use record (a
 configuration-change restart cannot claim it again), revalidates the
 OS-attached structure, package, `AutofillId`s, client-state nonce and token,
-opens a brand-new vault on the app's own `noBackupFilesDir/personal.ll`, and
+opens a brand-new vault on the app's own `noBackupFilesDir/personal.pm`, and
 unlocks it only with the entered master password and Secret Key. It then lists
 active login metadata, and the user selects one visible title and presses a
 separate Approve. Approve revalidates the exact row ID/revision, reads only that
@@ -106,7 +106,7 @@ this checkpoint has no save support, credential provider or Passkey
 functionality.
 
 The instrumentation suite uses only a synthetic test-APK login target and a
-test-only `personal.ll` fixture created through the real mobilecore JNI APIs
+test-only `personal.pm` fixture created through the real mobilecore JNI APIs
 under the app's private target storage. It proves both flows against the real
 OS: the positive flow enters fresh synthetic factors, selects the row, presses
 Approve, observes Android offer and apply the returned Dataset, and asserts both
@@ -119,6 +119,6 @@ its prior `autofill_service`:
 
 ```sh
 ANDROID_HOME=/path/to/android-sdk ANDROID_SERIAL=emulator-5572 \
-  LOCKLARK_ANDROID_TEST_RESET=1 LOCKLARK_ANDROID_AUTOFILL_ONLY=1 \
+  PASSME_ANDROID_TEST_RESET=1 PASSME_ANDROID_AUTOFILL_ONLY=1 \
   mobile/android/scripts/test-emulator.sh
 ```

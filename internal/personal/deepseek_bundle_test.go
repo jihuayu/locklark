@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func TestDeepSeekCredentialChild(t *testing.T) {

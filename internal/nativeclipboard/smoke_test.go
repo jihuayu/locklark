@@ -14,12 +14,12 @@ import (
 )
 
 func TestNativeClipboardSmoke(t *testing.T) {
-	if os.Getenv("LOCKLARK_TEST_NATIVE_CLIPBOARD") != "1" {
+	if os.Getenv("PASSME_TEST_NATIVE_CLIPBOARD") != "1" {
 		t.Skip("native clipboard smoke requires explicit opt-in")
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	if mode := os.Getenv("LOCKLARK_CLIPBOARD_CHILD"); mode != "" {
+	if mode := os.Getenv("PASSME_CLIPBOARD_CHILD"); mode != "" {
 		smokeChild(t, mode)
 		return
 	}
@@ -65,7 +65,7 @@ func startSmokeChild(t *testing.T, mode string) func() {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeClipboardSmoke$", "-test.count=1")
-	command.Env = append(os.Environ(), "LOCKLARK_CLIPBOARD_CHILD="+mode)
+	command.Env = append(os.Environ(), "PASSME_CLIPBOARD_CHILD="+mode)
 	in, err := command.StdinPipe()
 	if err != nil {
 		cancel()

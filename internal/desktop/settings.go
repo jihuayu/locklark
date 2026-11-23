@@ -15,9 +15,9 @@ import (
 	"github.com/egoist/mygo/plugins/updater"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -72,7 +72,7 @@ type Settings struct {
 	KeepInTray bool `json:"app.keepInTray"`
 	// DefaultVaultForSaving is app.defaultVaultForSaving.
 	DefaultVaultForSaving string `json:"app.defaultVaultForSaving"`
-	// VaultPath is app.vaultPath. Only the local .ll file path is stored here;
+	// VaultPath is app.vaultPath. Only the local .pm file path is stored here;
 	// Secret Key and master passwords are never written to settings.
 	VaultPath string `json:"app.vaultPath,omitempty"`
 	// SystemUnlockEnabled records whether OS quick unlock has been enrolled for
@@ -152,7 +152,7 @@ type UsageError struct{}
 func (*UsageError) Error() string { return desktopSettingsUsage }
 
 // desktopSettingsUsage is the only command-line syntax the desktop accepts.
-const desktopSettingsUsage = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
+const desktopSettingsUsage = "usage: passme-desktop [--settings ABSOLUTE_PATH]"
 
 // ErrSettingsPath is returned for an unusable explicit settings path. The
 // error never includes the path itself.
@@ -224,7 +224,7 @@ func SettingsPath() string {
 	if err != nil || dir == "" {
 		dir = os.TempDir()
 	}
-	return filepath.Join(dir, "locklark", "settings.json")
+	return filepath.Join(dir, "passme", "settings.json")
 }
 
 // checkAutoLockMinutes validates security.autolock.minutes in its persisted
@@ -976,7 +976,7 @@ func (a *App) settingsView(c *ui.Context) {
 						a.onevraSidebarItem(c, "更新", lucide.Download(), section == settingsSectionUpdates, 0, func() {
 							a.selectSettingsSection(settingsSectionUpdates)
 						})
-						a.onevraSidebarItem(c, "关于 Locklark", lucide.Info(), section == settingsSectionAbout, 0, func() {
+						a.onevraSidebarItem(c, "关于 Passme", lucide.Info(), section == settingsSectionAbout, 0, func() {
 							a.selectSettingsSection(settingsSectionAbout)
 						})
 					})
@@ -1057,7 +1057,7 @@ func (a *App) settingsSectionHeader(c *ui.Context, section string) {
 	case settingsSectionUpdates:
 		title, subtitle = "更新", "查看应用版本与基于 Ed25519 公钥签名的离线/GitHub Releases 更新机制。"
 	case settingsSectionAbout:
-		title, subtitle = "关于 Locklark", "离线优先与零知识安全边界摘要及脱敏诊断信息。"
+		title, subtitle = "关于 Passme", "离线优先与零知识安全边界摘要及脱敏诊断信息。"
 	}
 	onevraPageHeader(c, title, subtitle)
 }
@@ -1081,7 +1081,7 @@ func (a *App) generalSettingsView(c *ui.Context) {
 				}
 			}
 		})
-		row("设备绑定管理", "可查看首次建库引导说明，或退出当前设备绑定（磁盘上的 .ll 文件会完整保留）。", func() {
+		row("设备绑定管理", "可查看首次建库引导说明，或退出当前设备绑定（磁盘上的 .pm 文件会完整保留）。", func() {
 			oneui.Button(c, "查看首次创建流程", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() {
 				a.Lock()
 				a.onboarding = true
@@ -1091,7 +1091,7 @@ func (a *App) generalSettingsView(c *ui.Context) {
 			oneui.Button(c, "退出当前设备…", oneui.ButtonOutline).TextColor(t.Danger).Disabled(a.uiBusy(c) || a.path == "").OnClick(func() {
 				a.confirmForgetDevice = true
 				a.forgetPassword = ""
-				a.status = "退出当前设备不会删除磁盘上的 .ll 金库文件"
+				a.status = "退出当前设备不会删除磁盘上的 .pm 金库文件"
 			})
 		})
 	})
@@ -1244,7 +1244,7 @@ func (a *App) securitySettingsView(c *ui.Context) {
 	})
 
 	onevraSettingsGroup(c, "剪贴板防护", func(row func(string, string, func())) {
-		row("复制后清理剪贴板", "到期后仅清除仍由 Locklark 写入的内容，不会覆盖你之后复制的其他内容。", func() {
+		row("复制后清理剪贴板", "到期后仅清除仍由 Passme 写入的内容，不会覆盖你之后复制的其他内容。", func() {
 			seconds := s.ClipboardClearSeconds
 			clipboardSelect := oneui.NativeSelect(c, &seconds, durationOptions(ClipboardClearPresets, seconds, "秒"))
 			clipboardSelect.Trigger.Label("剪贴板清理时间").Width(160)
@@ -1450,7 +1450,7 @@ func (a *App) developerSettingsView(c *ui.Context) {
 	onevraGroup(c, "开发者工具", func(row func(func())) {
 		row(func() {
 			oneui.Icon(c, lucide.Code()).Size(t.Space(4), t.Space(4)).TextColor(t.Accent)
-			oneui.Text(c, "这里只显示 Locklark 已经实现并可验证的本机集成，不渲染任何未接通的占位能力。").
+			oneui.Text(c, "这里只显示 Passme 已经实现并可验证的本机集成，不渲染任何未接通的占位能力。").
 				FontSize(t.Rem(.8)).TextColor(t.TextMuted).Grow(1).MinWidth(0).Wrap()
 			onevraPill(c, "仅本机", t.TextMuted)
 		})
@@ -1503,10 +1503,10 @@ func (a *App) developerSettingsView(c *ui.Context) {
 	})
 
 	onevraSettingsGroup(c, "命令行与自动化", func(row func(string, string, func())) {
-		row("Locklark CLI", "支持受控的建库、编辑、搜索、字段披露与导入导出。可执行命令示例：locklark --help", func() {
-			onevraKeyCap(c, "locklark --help")
+		row("Passme CLI", "支持受控的建库、编辑、搜索、字段披露与导入导出。可执行命令示例：passme --help", func() {
+			onevraKeyCap(c, "passme --help")
 			oneui.Button(c, "复制 CLI 命令", oneui.ButtonOutline).OnClick(func() {
-				if err := a.writeClipboard([]byte("locklark --help"), time.Now().Add(30*time.Second), func() bool { return true }); err != nil {
+				if err := a.writeClipboard([]byte("passme --help"), time.Now().Add(30*time.Second), func() bool { return true }); err != nil {
 					a.status = message(err)
 					return
 				}
@@ -1527,7 +1527,7 @@ func (a *App) developerSettingsView(c *ui.Context) {
 		row("受控 stdio 桥接", "仅通过已登记、带独立会话密钥与固定模块摘要的 stdio 配置启动，绝不向普通 Agent 暴露 Secret Key 或字段原值。", func() {
 			onevraPill(c, "受控配置", t.Accent)
 			oneui.Button(c, "查看开发者文档", oneui.ButtonOutline).OnClick(func() {
-				c.OpenURLThen("https://github.com/jihuayu/locklark#用-mcp-提交申请并在重启后查状态", func(err error) {
+				c.OpenURLThen("https://github.com/jihuayu/passme#用-mcp-提交申请并在重启后查状态", func(err error) {
 					if err != nil {
 						a.status = "开发者文档打开失败"
 					}
@@ -1605,7 +1605,7 @@ func (a *App) transferSettingsView(c *ui.Context) {
 			})
 		})
 		row(func() {
-			onevraSettingRow(c, "完整类别（含卡片/身份/笔记，实验）", "关闭时仅导入登录与纯文本备注；Locklark 不接收 1Password 主密码或 Secret Key。", func() {
+			onevraSettingRow(c, "完整类别（含卡片/身份/笔记，实验）", "关闭时仅导入登录与纯文本备注；Passme 不接收 1Password 主密码或 Secret Key。", func() {
 				if v, changed := onevraSwitch(c, "完整类别", a.importFull); changed && !a.busy {
 					a.importFull = v
 					a.planDigest = ""
@@ -1670,7 +1670,7 @@ func (a *App) transferSettingsView(c *ui.Context) {
 						path, e := mygo.Dialog.Save(mygo.SaveDialogOptions{
 							Parent:      win,
 							Title:       "导出加密 KDBX",
-							DefaultPath: "locklark-export.kdbx",
+							DefaultPath: "passme-export.kdbx",
 							Filters:     []mygo.FileFilter{{Name: "KeePass KDBX", Extensions: []string{"kdbx"}}},
 						})
 						return outcome{err: e, apply: func() {
@@ -1750,7 +1750,7 @@ func (a *App) aboutSettingsView(c *ui.Context) {
 				oneui.Icon(c, lucide.KeyRound()).Size(t.Space(5), t.Space(5)).TextColor(t.AccentText)
 			})
 			ui.Column(c).Grow(1).Gap(t.Space(.25)).Children(func() {
-				oneui.Text(c, "Locklark").FontSize(t.Rem(1.12)).Bold()
+				oneui.Text(c, "Passme").FontSize(t.Rem(1.12)).Bold()
 				oneui.Text(c, "离线优先 · 零知识本地金库与开发者凭据运行时").FontSize(t.Rem(.78)).TextColor(t.TextMuted)
 			})
 			onevraPill(c, desktopVersionLabel(), t.Accent)
@@ -1790,7 +1790,7 @@ func (a *App) desensitizedDiagnosticSummary() string {
 	brokerRunning := a.broker != nil
 	a.brokerMu.Unlock()
 	return fmt.Sprintf(
-		"Locklark Desktop %s (%s/%s)\ntheme=%s density=%s autolock_min=%d clipboard_sec=%d broker=%t ssh_agent=%t",
+		"Passme Desktop %s (%s/%s)\ntheme=%s density=%s autolock_min=%d clipboard_sec=%d broker=%t ssh_agent=%t",
 		desktopVersionLabel(), runtime.GOOS, runtime.GOARCH,
 		s.Theme, s.InterfaceDensity, s.AutoLockMinutes, s.ClipboardClearSeconds,
 		brokerRunning, a.sshService != nil,

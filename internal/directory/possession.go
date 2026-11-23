@@ -41,7 +41,7 @@ func NewConfigWithPossession(pins Pins) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := sha256.Sum256(append([]byte("locklark/team-directory/possession-required/v1\x00"), []byte(c.scope)...))
+	h := sha256.Sum256(append([]byte("passme/team-directory/possession-required/v1\x00"), []byte(c.scope)...))
 	c.scope = hex.EncodeToString(h[:])
 	c.requirePossession = true
 	return c, nil
@@ -55,11 +55,11 @@ func (c *Config) validEnrollment(e Enrollment) bool {
 }
 func (c Challenge) proof() []byte {
 	c.Signature = nil
-	return append([]byte("locklark/team-device/challenge/v1\x00"), encoded(c)...)
+	return append([]byte("passme/team-device/challenge/v1\x00"), encoded(c)...)
 }
 func (p Admission) proof() []byte {
 	p.Signature = nil
-	return append([]byte("locklark/team-device/response/v1\x00"), encoded(p)...)
+	return append([]byte("passme/team-device/response/v1\x00"), encoded(p)...)
 }
 
 // The trusted owner chooses a fresh unpredictable nonce and encrypts it to the

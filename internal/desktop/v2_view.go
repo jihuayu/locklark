@@ -4,9 +4,9 @@ import (
 	"fmt"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -441,7 +441,7 @@ func (a *App) v2WatchtowerView(c *ui.Context) {
 
 	report := a.v2.watchtower
 	if report == nil {
-		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).Children(func() {
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius * 1.25).Background(t.Surface).Children(func() {
 			onevraEmpty(c, lucide.ShieldCheck(), "尚未运行安全扫描", "点击右上角「运行本地检查」开始扫描弱密码、重复密码及 2FA 配置缺失。", nil)
 		})
 		return

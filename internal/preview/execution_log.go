@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -15,7 +15,7 @@ var useAnchor = []byte("local-journal-tip-v1")
 var tipKey = []byte("head")
 
 func tipMessage(n int, h [32]byte) []byte {
-	b := binary.BigEndian.AppendUint64([]byte("locklark/journal-tip/v1\x00"), uint64(n))
+	b := binary.BigEndian.AppendUint64([]byte("passme/journal-tip/v1\x00"), uint64(n))
 	return append(b, h[:]...)
 }
 func signTip(n int, h [32]byte, key ed25519.PrivateKey) []byte {
@@ -65,7 +65,7 @@ type useRecord struct {
 	Reply []byte `json:"reply,omitempty"`
 }
 
-func useBytes(u useRecord) []byte { return message("locklark/use/v1\x00", u) }
+func useBytes(u useRecord) []byte { return message("passme/use/v1\x00", u) }
 func useAction(u useRecord) string {
 	sum := sha256.Sum256(useBytes(u))
 	return "invoke." + u.ID + "." + hex.EncodeToString(sum[:])

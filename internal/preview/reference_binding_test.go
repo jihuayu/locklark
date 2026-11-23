@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/reference"
+	"github.com/jihuayu/passme/internal/reference"
 )
 
 func TestBindFixtureReferenceMetadata(t *testing.T) {

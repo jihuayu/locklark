@@ -19,7 +19,7 @@ python3 scripts/team_sync_acceptance.py --fixture-bin /private/path/team-sync-fi
 ```
 
 The runner prints booleans and classifications. It retains a unique 0700
-directory beneath `/tmp/locklark-validation` (or `--artifacts`) containing 0600
+directory beneath `/tmp/passme-validation` (or `--artifacts`) containing 0600
 synthetic keys, item canaries, exact ciphertext publications, full stdout/stderr,
 request/response bodies and the final `result.json`. Those private files are
 intentional test artifacts. No private fixture is added to the repository.

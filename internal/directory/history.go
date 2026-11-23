@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // History is signed public transition evidence and the encrypted head snapshot.

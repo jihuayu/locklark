@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -61,7 +61,7 @@ func TestSSHImportGenerationIdentityAndBackupRestore(t *testing.T) {
 	if !bytes.Equal(known.SSHSeed, private[:32]) {
 		t.Fatal("SSH import changed seed")
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, e := Backup(s.path, archive, "fixture", key)
 	if e != nil {
 		t.Fatal("SSH backup", e)
@@ -71,7 +71,7 @@ func TestSSHImportGenerationIdentityAndBackupRestore(t *testing.T) {
 		t.Fatal("fresh factor")
 	}
 	defer clear(fresh)
-	dest := filepath.Join(t.TempDir(), "restored.ll")
+	dest := filepath.Join(t.TempDir(), "restored.pm")
 	if Restore(archive, dest, "fixture", key, kit, fresh) != nil {
 		t.Fatal("SSH restore")
 	}

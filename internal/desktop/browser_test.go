@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type browserPipe struct {
@@ -26,7 +26,7 @@ func (p *browserPipe) Write(b []byte) (int, error) {
 }
 func (p *browserPipe) Close() error { return nil }
 func TestNativeBrowserLockDropsLateApproval(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "browser.ll")
+	path := filepath.Join(t.TempDir(), "browser.pm")
 	key := bytes.Repeat([]byte{4}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

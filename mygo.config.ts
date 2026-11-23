@@ -13,26 +13,26 @@
 const defineConfig = <T,>(config: T): T => config;
 
 const version =
-  process.env.LOCKLARK_VERSION?.trim().replace(/^v/, "") || "0.1.0";
-const signingIdentity = process.env.LOCKLARK_MACOS_SIGNING_IDENTITY || "-";
-const entitlements = process.env.LOCKLARK_MACOS_ENTITLEMENTS;
-const provisioningProfile = process.env.LOCKLARK_MACOS_PROVISIONING_PROFILE;
-const notaryProfile = process.env.LOCKLARK_NOTARY_PROFILE;
+  process.env.PASSME_VERSION?.trim().replace(/^v/, "") || "0.1.0";
+const signingIdentity = process.env.PASSME_MACOS_SIGNING_IDENTITY || "-";
+const entitlements = process.env.PASSME_MACOS_ENTITLEMENTS;
+const provisioningProfile = process.env.PASSME_MACOS_PROVISIONING_PROFILE;
+const notaryProfile = process.env.PASSME_NOTARY_PROFILE;
 const notaryKeychain = process.env.NOTARY_KEYCHAIN;
-const windowsCertificate = process.env.LOCKLARK_WINDOWS_CERTIFICATE_FILE;
-const windowsSignCommand = process.env.LOCKLARK_WINDOWS_SIGN_COMMAND;
+const windowsCertificate = process.env.PASSME_WINDOWS_CERTIFICATE_FILE;
+const windowsSignCommand = process.env.PASSME_WINDOWS_SIGN_COMMAND;
 
 export default defineConfig({
-  name: "Locklark",
-  slug: "locklark",
-  identifier: "app.locklark.desktop",
+  name: "Passme",
+  slug: "passme",
+  identifier: "app.passme.desktop",
   version,
-  copyright: "© 2026 Locklark contributors",
-  main: "./cmd/locklark-desktop",
+  copyright: "© 2026 Passme contributors",
+  main: "./cmd/passme-desktop",
   out: "out",
   windows: {
-    displayName: "Locklark",
-    installDirName: "Locklark",
+    displayName: "Passme",
+    installDirName: "Passme",
     ...(windowsSignCommand
       ? { signCommand: windowsSignCommand }
       : windowsCertificate
@@ -55,6 +55,6 @@ export default defineConfig({
   },
   updates: {
     publicKey: "yQcW8xlw7T2aQPOeiAzRuzH1LTkMyW+WDsI1PVD1w98=",
-    github: "jihuayu/locklark",
+    github: "jihuayu/passme",
   },
 });

@@ -82,7 +82,7 @@ func (f *fakeSecrets) Delete(key string) error {
 func fakeStore(f *fakeSecrets) *RefreshTokenStore { return &RefreshTokenStore{secrets: f} }
 
 func TestStoreNamespaceIsFixed(t *testing.T) {
-	if StoreNamespace != "app.locklark.onedrive.oauth.v1" {
+	if StoreNamespace != "app.passme.onedrive.oauth.v1" {
 		t.Fatalf("store namespace changed: %q", StoreNamespace)
 	}
 }

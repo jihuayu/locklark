@@ -2,7 +2,7 @@ package management
 
 import (
 	"encoding/json"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 	"io"
 	"net"
 	"net/url"

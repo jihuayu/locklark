@@ -281,7 +281,7 @@ const cardEventTarget = function (page, expectedOrigin, ...rest) {
   const { context } = makeSandbox([], { origin: page.origin });
   context.document.querySelectorAll = (selector) =>
     String(selector) === "input,select" ? page.controls : [];
-  context.LocklarkCheckoutFence = page.fence;
+  context.PassmeCheckoutFence = page.fence;
   context.Event = class extends Event {
     constructor(type, init = {}) {
       super(type, init);
@@ -1273,7 +1273,7 @@ function harness(options = {}) {
 
   const context = {
     chrome: api,
-    LocklarkCore: core,
+    PassmeCore: core,
     crypto: webcrypto,
     setTimeout: (fn, milliseconds) => {
       const handle = setTimeout(fn, milliseconds);

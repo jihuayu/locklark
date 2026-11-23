@@ -72,8 +72,8 @@ func initWinClipboard() bool {
 		return true
 	}
 	class, _ := windows.UTF16PtrFromString("STATIC")
-	name, _ := windows.UTF16PtrFromString("Locklark clipboard owner")
-	format, _ := windows.UTF16PtrFromString("org.locklark.clipboard.lease.v1")
+	name, _ := windows.UTF16PtrFromString("Passme clipboard owner")
+	format, _ := windows.UTF16PtrFromString("org.passme.clipboard.lease.v1")
 	clipFormat, _, _ = clipRegister.Call(uintptr(unsafe.Pointer(format)))
 	if clipFormat == 0 {
 		return false

@@ -78,7 +78,7 @@ func trustedRegistrationFile(path string, executable bool) error {
 }
 func createRegistrationDirectory(path string) error { return os.Mkdir(path, 0700) }
 func privateRegistrationTemp(dir string) (*os.File, error) {
-	return os.CreateTemp(dir, ".locklark-native-*")
+	return os.CreateTemp(dir, ".passme-native-*")
 }
 func publishRegistrationTemp(temp, target string, replace bool) error {
 	if replace {

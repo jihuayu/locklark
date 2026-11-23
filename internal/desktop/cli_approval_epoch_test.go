@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 type cliRunApprovalResult struct {
@@ -53,7 +53,7 @@ func TestCLIRunApprovalRefusedAfterEpochAdvance(t *testing.T) {
 	a.brokerMu.Unlock()
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
+		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.pm", browserhost.CLIRunScope{}, nil, s, epoch)
 		result <- cliRunApprovalResult{approved: approved, err: err}
 	}()
 	p := waitCLIRunApprovalPending(t, a)
@@ -94,7 +94,7 @@ func TestCLIRunApprovalRefusedLockedSession(t *testing.T) {
 	a.brokerMu.Unlock()
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
+		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.pm", browserhost.CLIRunScope{}, nil, s, epoch)
 		result <- cliRunApprovalResult{approved: approved, err: err}
 	}()
 	p := waitCLIRunApprovalPending(t, a)

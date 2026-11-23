@@ -19,7 +19,7 @@ import (
 // lock file, temporary files and data files are 0600 and are never followed
 // through symlinks.
 //
-//	<root>/vaultfile-backend/v1/.locklark-vaultfile.lock  shared lock inode
+//	<root>/vaultfile-backend/v1/.passme-vaultfile.lock  shared lock inode
 //	<root>/vaultfile-backend/v1/tmp/    write-once temporary files
 //	<root>/vaultfile-backend/v1/data/   one committed file per Name
 //
@@ -46,7 +46,7 @@ import (
 const (
 	dirSubdir = "vaultfile-backend"
 	dirVer    = "v1"
-	lockName  = ".locklark-vaultfile.lock"
+	lockName  = ".passme-vaultfile.lock"
 	tmpName   = "tmp"
 	dataName  = "data"
 
@@ -59,7 +59,7 @@ const (
 	// recordMagic and recordVersion frame the header that precedes the
 	// stored bytes: magic, length-prefixed version, length-prefixed digest,
 	// then the value itself.
-	recordMagic      = "LLVFREV1"
+	recordMagic      = "PMVFREV1"
 	recordVersionMax = 64
 	recordHeaderMax  = len(recordMagic) + 4 + recordVersionMax + 4 + sha256.Size
 )

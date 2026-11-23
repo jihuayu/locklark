@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 func managedValues(t *testing.T, s *Session, itemID string) map[string]ManagedPasskeyMetadata {

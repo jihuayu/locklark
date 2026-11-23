@@ -22,11 +22,11 @@ import native_acceptance_contract as contract
 import native_acceptance_driver as driver
 
 LABEL = "确认连接此扩展"
-TITLE = "Locklark · 浏览器原生确认"
+TITLE = "Passme · 浏览器原生确认"
 # The exact Python int PyObjC's ApplicationServices exports as kAXErrorNoValue
 # (documented: no accessibility object at the specified position).
 NO_VALUE = -25212
-EXE = "C:/Program Files/Locklark test/browser.exe" if os.name == "nt" else "/opt/locklark/test-browser"
+EXE = "C:/Program Files/Passme test/browser.exe" if os.name == "nt" else "/opt/passme/test-browser"
 WINDOW_RAW = {
     "id": 0x200003, "pid": 4242, "title": TITLE, "executable": EXE, "trusted": True,
     "visible": True, "onscreen": True, "secure": False,
@@ -886,7 +886,7 @@ class FakeWorkspaceAppKit:
         raise AssertionError("activation touched AppKit symbol " + name)
 
 
-def activation_api(path="/opt/locklark/locklark-desktop", uid=None, running=None):
+def activation_api(path="/opt/passme/passme-desktop", uid=None, running=None):
     """QuartzApi with ONLY process identity and one AppKit activation bound.
 
     Any other attribute (windows, AX elements, titles, controls, foreground,
@@ -923,7 +923,7 @@ def assert_named_activation_options(test, api, running):
 
 class MacActivationOnlyTests(unittest.TestCase):
     PID = 4242
-    EXE = "/opt/locklark/locklark-desktop"
+    EXE = "/opt/passme/passme-desktop"
 
     def run_driver(self, api):
         """Real MacAdapter + driver dispatch on an injected activation-only API."""
@@ -964,7 +964,7 @@ class MacActivationOnlyTests(unittest.TestCase):
     def test_identity_refusals_never_activate(self):
         # (process() answer, expected refusal). "" means the pid is absent.
         cases = (
-            (("/opt/locklark/other-desktop", True), "process-untrusted"),
+            (("/opt/passme/other-desktop", True), "process-untrusted"),
             ((self.EXE + "-copy", True), "process-untrusted"),
             (("", False), "activation-failed"),
             ((self.EXE, False), "process-untrusted"),
@@ -1094,7 +1094,7 @@ class ActivationReadinessTests(unittest.TestCase):
     """Bounded read-only readiness BEFORE exactly one OS activation."""
 
     PID = 4242
-    EXE = "/opt/locklark/locklark-desktop"
+    EXE = "/opt/passme/passme-desktop"
 
     def setUp(self):
         self.clock = ReadinessClock()
@@ -1178,7 +1178,7 @@ class ActivationReadinessTests(unittest.TestCase):
     def test_dead_process_refuses_before_any_readiness_or_activation(self):
         for answer, code in ((("", False), "activation-failed"),
                              ((self.EXE, False), "process-untrusted"),
-                             (("/opt/locklark/other-desktop", True), "process-untrusted")):
+                             (("/opt/passme/other-desktop", True), "process-untrusted")):
             with self.subTest(answer=answer):
                 self.clock.sleeps.clear()
                 api, running, calls = self.api(RegisteredApplication(), answers=[answer])
@@ -1190,7 +1190,7 @@ class ActivationReadinessTests(unittest.TestCase):
             (RegisteredApplication(appear_at=5),
              [(self.EXE, True)] * 3 + [("", False)], "activation-failed", 3),
             (RegisteredApplication(appear_at=5),
-             [(self.EXE, True)] * 2 + [("/opt/locklark/other-desktop", True)],
+             [(self.EXE, True)] * 2 + [("/opt/passme/other-desktop", True)],
              "process-untrusted", 2),
             (RegisteredApplication(appear_at=5),
              [(self.EXE, True)] * 2 + [(self.EXE, False)], "process-untrusted", 2),
@@ -1386,10 +1386,10 @@ class MacAdapterTests(unittest.TestCase):
         self.assertEqual(api.activations, 0)
 
     def test_preserve_focus_refuses_instead_of_stealing_focus(self):
-        api = FakeMacApi(windows_list=[dict(WINDOW_RAW, title="Locklark acceptance popup")], focus=999)
+        api = FakeMacApi(windows_list=[dict(WINDOW_RAW, title="Passme acceptance popup")], focus=999)
         adapter = macos.MacAdapter(api=api)
         with self.assertRaises(contract.ContractError) as error:
-            execute(adapter, document(title=None, title_prefix="Locklark acceptance", preserve_focus=True))
+            execute(adapter, document(title=None, title_prefix="Passme acceptance", preserve_focus=True))
         self.assertEqual(error.exception.code, "preserve-focus-lost")
         self.assertEqual(api.activations, 0)
         self.assertEqual(api.clicks, [])
@@ -1485,7 +1485,7 @@ class MacAdapterTests(unittest.TestCase):
             def __bool__(self):
                 raise AssertionError("hostile AX value was tested for truth")
 
-        for value in (HostileValue(), 7, b"Locklark", ["Locklark"], None):
+        for value in (HostileValue(), 7, b"Passme", ["Passme"], None):
             with self.subTest(value=type(value).__name__):
                 api, _ = self.real_quartz_api(value)
                 adapter = macos.MacAdapter(api=api)
@@ -1509,7 +1509,7 @@ class MacAdapterTests(unittest.TestCase):
                 raise AssertionError("hostile title was compared")
 
         adapter = macos.MacAdapter(api=FakeMacApi())
-        for value in (Hostile(), None, 7, b"Locklark", ["Locklark"]):
+        for value in (Hostile(), None, 7, b"Passme", ["Passme"]):
             with self.subTest(value=type(value).__name__):
                 window = adapter._normalise(dict(WINDOW_RAW, title=value, executable=value))
                 self.assertEqual(window["title"], "")
@@ -1553,7 +1553,7 @@ class MacProcessIdentityTests(unittest.TestCase):
     def api(self, pidinfo_result=0):
         class LibProc(object):
             def proc_pidpath(self, pid, buffer, size):
-                buffer.value = b"/opt/locklark/test-browser"
+                buffer.value = b"/opt/passme/test-browser"
                 return len(buffer.value)
 
             def proc_pidinfo(self, pid, flavor, argument, buffer, size):
@@ -1567,7 +1567,7 @@ class MacProcessIdentityTests(unittest.TestCase):
         api = self.api(pidinfo_result=0)
         with patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
             path, trusted = api.process(4242)
-        self.assertEqual(path, "/opt/locklark/test-browser")
+        self.assertEqual(path, "/opt/passme/test-browser")
         self.assertFalse(trusted)
 
     def test_same_process_uid_is_trusted_without_any_stat(self):
@@ -2261,7 +2261,7 @@ class MacWindowIdentityTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "a11y-unavailable")
 
     def test_title_mismatch_refuses_even_with_the_canonical_frame(self):
-        for title in (TITLE + " ", TITLE[:-1], TITLE.upper(), "", "Locklark"):
+        for title in (TITLE + " ", TITLE[:-1], TITLE.upper(), "", "Passme"):
             with self.subTest(title=title):
                 api = self.api([ax_window(title=title, frame=MEASURED_AX)])
                 self.refusal(api, "a11y-query")
@@ -2277,7 +2277,7 @@ class MacWindowIdentityTests(unittest.TestCase):
                 self.assertEqual(error.guard, {"ax": 2})
 
     def test_other_titles_leave_the_unique_exact_title_bindable(self):
-        api = self.api([ax_window(title="Locklark acceptance popup", frame=MEASURED_CG),
+        api = self.api([ax_window(title="Passme acceptance popup", frame=MEASURED_CG),
                         ax_window(frame=MEASURED_AX)])
         self.assertIs(api.window_element(dict(api.window_list[0])), self.ax_windows(api)[1])
 

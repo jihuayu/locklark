@@ -1,5 +1,5 @@
 {
-  "name": "locklark-browser-extension",
+  "name": "passme-browser-extension",
   "private": true,
   "scripts": {
     "test": "node --test test/*.test.js",

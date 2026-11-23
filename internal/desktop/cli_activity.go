@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 )
 
@@ -290,7 +290,7 @@ func (a *App) cliRequestActivityView(c *ui.Context) {
 		}
 		if len(entries) == 0 {
 			row(func() {
-				oneui.Text(c, "暂无 CLI 请求。通过 locklark cli run 或已连接工具请求字段后会显示在这里；也可在「CLI 集成」中完成工具绑定后测试运行。").TextColor(t.TextMuted).Wrap()
+				oneui.Text(c, "暂无 CLI 请求。通过 passme cli run 或已连接工具请求字段后会显示在这里；也可在「CLI 集成」中完成工具绑定后测试运行。").TextColor(t.TextMuted).Wrap()
 			})
 			return
 		}
@@ -405,7 +405,7 @@ func (a *App) cliRequestActivityView(c *ui.Context) {
 			}
 			if count == 0 {
 				row(func() {
-					oneui.Text(c, "暂无已加载的 CLI 执行事件；运行 locklark cli run 后刷新这里。").TextColor(t.TextMuted).Wrap()
+					oneui.Text(c, "暂无已加载的 CLI 执行事件；运行 passme cli run 后刷新这里。").TextColor(t.TextMuted).Wrap()
 				})
 			}
 		})

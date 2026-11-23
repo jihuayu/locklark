@@ -10,8 +10,8 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type fakeDeviceSecretStore struct {
@@ -36,7 +36,7 @@ func newFakeSystemUnlockStore() *fakeSystemUnlockStore {
 }
 
 func TestDeviceSecretKeyIsCompactAndDoesNotExposeVaultPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "private-vault-name.ll")
+	path := filepath.Join(t.TempDir(), "private-vault-name.pm")
 	key := deviceSecretKey(path)
 
 	if len(key) > 256 {
@@ -98,7 +98,7 @@ func (s *fakeSystemUnlockStore) Delete(key string) error {
 
 func TestLockedViewHidesSecretKeyWhenSavedForThisDevice(t *testing.T) {
 	a := New()
-	a.path = filepath.Join(t.TempDir(), "owner.ll")
+	a.path = filepath.Join(t.TempDir(), "owner.pm")
 	a.deviceSecrets = newFakeDeviceSecretStore()
 	a.showSecretFallback = false
 
@@ -155,9 +155,9 @@ func TestForgetDeviceStatFailureAbortsBeforeDestructiveCalls(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"permission", &os.PathError{Op: "stat", Path: "vault.ll", Err: os.ErrPermission}},
-		{"io", &os.PathError{Op: "stat", Path: "vault.ll", Err: syscall.EIO}},
-		{"not-a-directory", &os.PathError{Op: "stat", Path: "vault.ll", Err: syscall.ENOTDIR}},
+		{"permission", &os.PathError{Op: "stat", Path: "vault.pm", Err: os.ErrPermission}},
+		{"io", &os.PathError{Op: "stat", Path: "vault.pm", Err: syscall.EIO}},
+		{"not-a-directory", &os.PathError{Op: "stat", Path: "vault.pm", Err: syscall.ENOTDIR}},
 		{"unknown", errors.New("unexpected stat failure")},
 	}
 	for _, tc := range tests {
@@ -236,7 +236,7 @@ func TestForgetDeviceSystemUnlockDeleteFailureKeepsDeviceKeyAndBinding(t *testin
 		t.Fatal("quick-unlock failure lost the existing unlocked session")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("quick-unlock failure altered the .ll vault file: %v", err)
+		t.Fatalf("quick-unlock failure altered the .pm vault file: %v", err)
 	}
 }
 
@@ -245,7 +245,7 @@ func TestForgetDeviceAbsentQuickUnlockStillCompletes(t *testing.T) {
 	system.deleteErr = osunlock.ErrNotFound
 	a.forgetCurrentDevice()
 
-	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+	if a.status != "已退出当前设备；磁盘上的 .pm 金库文件已完整保留" {
 		t.Fatalf("already-absent quick unlock blocked logout: %q", a.status)
 	}
 	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
@@ -258,7 +258,7 @@ func TestForgetDeviceAbsentQuickUnlockStillCompletes(t *testing.T) {
 		t.Fatal("already-absent quick unlock did not return to onboarding")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("already-absent quick unlock altered the .ll vault file: %v", err)
+		t.Fatalf("already-absent quick unlock altered the .pm vault file: %v", err)
 	}
 }
 
@@ -296,12 +296,12 @@ func TestForgetDeviceSettingsSaveFailureKeepsBoundUI(t *testing.T) {
 		t.Fatalf("settings failure lost persisted VaultPath binding: %q", persisted.VaultPath)
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("settings failure altered the .ll vault file: %v", err)
+		t.Fatalf("settings failure altered the .pm vault file: %v", err)
 	}
 }
 
 func TestClassicForgetDeviceUsesSharedTwoStepConfirmation(t *testing.T) {
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "classic")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "classic")
 	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 	// Simulate a device where the stored Secret Key is already missing.
 	delete(secrets.values, deviceSecretKey(vaultPath))
@@ -323,7 +323,7 @@ func TestClassicForgetDeviceUsesSharedTwoStepConfirmation(t *testing.T) {
 	}
 
 	tester.Frame()
-	for _, want := range []string{"确认退出当前设备", "取消退出", "保留 .ll 文件"} {
+	for _, want := range []string{"确认退出当前设备", "取消退出", "保留 .pm 文件"} {
 		if !tester.HasText(want) {
 			t.Fatalf("classic confirmation missing %q", want)
 		}
@@ -351,7 +351,7 @@ func TestClassicForgetDeviceUsesSharedTwoStepConfirmation(t *testing.T) {
 	if err := tester.Click("确认退出当前设备"); err != nil {
 		t.Fatal(err)
 	}
-	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+	if a.status != "已退出当前设备；磁盘上的 .pm 金库文件已完整保留" {
 		t.Fatalf("classic two-step route did not finish forget-device: %q", a.status)
 	}
 	if system.deleteCalls != 1 || secrets.deleteCalls != 1 {
@@ -374,7 +374,7 @@ func TestClassicForgetDeviceUsesSharedTwoStepConfirmation(t *testing.T) {
 		t.Fatal("classic two-step route did not return to onboarding")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("classic two-step route altered the .ll vault file: %v", err)
+		t.Fatalf("classic two-step route altered the .pm vault file: %v", err)
 	}
 }
 
@@ -385,7 +385,7 @@ func TestForgetDeviceExplicitMissingVaultTakesAbsentPath(t *testing.T) {
 	}
 	a.forgetCurrentDevice()
 
-	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+	if a.status != "已退出当前设备；磁盘上的 .pm 金库文件已完整保留" {
 		t.Fatalf("unexpected missing-vault status: %q", a.status)
 	}
 	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
@@ -409,7 +409,7 @@ func TestForgetDeviceTwoStepDeletesCredentialsAndBinding(t *testing.T) {
 	a, _, vaultPath, secrets, system := prepareForgetDeviceTest(t)
 
 	a.forgetCurrentDevice()
-	if a.status != "已退出当前设备；磁盘上的 .ll 金库文件已完整保留" {
+	if a.status != "已退出当前设备；磁盘上的 .pm 金库文件已完整保留" {
 		t.Fatalf("two-step forget-device failed: %q", a.status)
 	}
 	if secrets.deleteCalls != 1 || system.deleteCalls != 1 {
@@ -432,7 +432,7 @@ func TestForgetDeviceTwoStepDeletesCredentialsAndBinding(t *testing.T) {
 		t.Fatal("two-step forget-device did not return to onboarding")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("two-step forget-device deleted the .ll vault file: %v", err)
+		t.Fatalf("two-step forget-device deleted the .pm vault file: %v", err)
 	}
 }
 
@@ -458,7 +458,7 @@ func createDeviceSecretTestVault(t *testing.T) (*App, string, string) {
 	t.Helper()
 	a := New()
 	a.launch = func(fn func()) { fn() }
-	a.path = filepath.Join(t.TempDir(), "owner.ll")
+	a.path = filepath.Join(t.TempDir(), "owner.pm")
 	key, err := personal.NewSecret()
 	if err != nil {
 		t.Fatal(err)

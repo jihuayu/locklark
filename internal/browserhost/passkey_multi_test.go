@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func canonicalCredential(seed byte) string {

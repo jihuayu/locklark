@@ -426,7 +426,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-bin", help="independently fixed fixture executable")
     parser.add_argument("--go", help="Go executable, used only when building fixture")
-    parser.add_argument("--artifacts", default="/tmp/locklark-validation", help="private artifact parent")
+    parser.add_argument("--artifacts", default="/tmp/passme-validation", help="private artifact parent")
     args = parser.parse_args()
     os.umask(0o077)
     acceptance = Acceptance(args)

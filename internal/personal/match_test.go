@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"path/filepath"
 	"testing"
@@ -35,12 +35,12 @@ func TestMatchLogins(t *testing.T) {
 	if _, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: revision, Field: "url", Value: "https://example.com?secret=hidden"}); err == nil {
 		t.Fatal("unsafe URL")
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	kit, err := Backup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(t.TempDir(), "restored.ll")
+	dest := filepath.Join(t.TempDir(), "restored.pm")
 	fresh := bytes.Repeat([]byte{8}, 16)
 	if err = Restore(archive, dest, "fixture", key, kit, fresh); err != nil {
 		t.Fatal(err)

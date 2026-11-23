@@ -7,7 +7,7 @@ from personal_acceptance import invoke
 def check(binary, legacy=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path = str(root / "owner.ll")
+        path = str(root / "owner.pm")
         pw = "synthetic-master-password"
         _, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw), ("重新输入刚保存的 Secret Key", None)], issue=True)
         factors = [("主密码", pw), ("Secret Key", key)]
@@ -23,9 +23,9 @@ def check(binary, legacy=None):
         assert invoke(binary, "references", path, factors)[0]["items"] == []
         if legacy:
             invoke(legacy, "list", path, factors, ok=False, expect_error="invalid personal vault")
-        backup = str(root / "backup.llb")
+        backup = str(root / "backup.pmb")
         _, kit = invoke(binary, "backup", path, factors + [("重新输入恢复码", None)], issue=True, options=("--out", backup))
-        restored = str(root / "restored.ll")
+        restored = str(root / "restored.pm")
         if legacy:
             invoke(legacy, "restore", backup, factors + [("此备份的恢复码", kit)], options=("--out", restored), ok=False, deny_issue=True)
         _, newkey = invoke(binary, "restore", backup, factors + [("此备份的恢复码", kit), ("重新输入新 Secret Key", None)], issue=True, options=("--out", restored))

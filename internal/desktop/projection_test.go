@@ -3,7 +3,7 @@ package desktop
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestLoginControlsExcludeNonLoginMetadataProjection(t *testing.T) {

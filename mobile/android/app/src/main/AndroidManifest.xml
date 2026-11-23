@@ -5,12 +5,12 @@
         android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false">
         <service android:name=".autofill.AutofillAuthService"
             android:exported="true"
-            android:label="@string/autofill_service_label"
+            android:label="@string/autofipm_service_label"
             android:permission="android.permission.BIND_AUTOFILL_SERVICE">
             <intent-filter>
                 <action android:name="android.service.autofill.AutofillService" />
             </intent-filter>
-            <meta-data android:name="android.autofill" android:resource="@xml/autofill_service" />
+            <meta-data android:name="android.autofill" android:resource="@xml/autofipm_service" />
         </service>
         <activity android:name=".autofill.AutofillAuthActivity"
             android:exported="false"

@@ -12,9 +12,9 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 	"github.com/oneo-me/onevra/source/shells/plain"
@@ -771,7 +771,7 @@ func (a *App) showApprovalWindow(id string) {
 	// then-current global pending into an older window.
 	popup := &cliApprovalPopup{id: id}
 	shell := plain.NewShell(plain.ShellOptions{
-		Title:     "Locklark · CLI 凭据请求审批",
+		Title:     "Passme · CLI 凭据请求审批",
 		Width:     560,
 		Height:    430,
 		MinWidth:  500,

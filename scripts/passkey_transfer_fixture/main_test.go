@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestParseSecretRoundTripAndRefusal(t *testing.T) {
@@ -25,7 +25,7 @@ func TestParseSecretRoundTripAndRefusal(t *testing.T) {
 	if err != nil || string(parsed) != string(key) {
 		t.Fatalf("parse secret round trip failed")
 	}
-	for _, bad := range []string{"", "LL1-", text + "A", "LL1-!!!!"} {
+	for _, bad := range []string{"", "PM1-", text + "A", "PM1-!!!!"} {
 		if _, err := parseSecret(bad); err == nil {
 			t.Fatalf("parse secret accepted malformed input")
 		}

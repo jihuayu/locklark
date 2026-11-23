@@ -123,7 +123,7 @@ func ExportFixture(bundle, device string, epoch uint64, out string) error {
 			return errFixture
 		}
 	}
-	f, err := os.CreateTemp(filepath.Dir(out), ".locklark-fixture-*")
+	f, err := os.CreateTemp(filepath.Dir(out), ".passme-fixture-*")
 	if err != nil {
 		return err
 	}

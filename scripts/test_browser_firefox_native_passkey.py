@@ -262,7 +262,7 @@ async function scenario(hit) {
 
     def test_gate_is_opt_in_and_keeps_default_flow(self):
         text = FIREFOX.read_text(encoding="utf-8")
-        gate = 'if (process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1") {'
+        gate = 'if (process.env.PASSME_TEST_FIREFOX_PASSKEY === "1") {'
         self.assertIn(gate, text)
         start = text.index(gate)
         block = text[start : text.index("\n    }\n", start)]
@@ -273,10 +273,10 @@ async function scenario(hit) {
 
     def test_only_mode_is_opt_in_and_scoped(self):
         text = FIREFOX.read_text(encoding="utf-8")
-        gate = 'process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY === "1"'
+        gate = 'process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY === "1"'
         self.assertIn(gate, text)
         self.assertIn(
-            'process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY !== "1" ||', text
+            'process.env.PASSME_TEST_FIREFOX_PASSKEY_ONLY !== "1" ||', text
         )
         self.assertIn('scope: "passkey-only"', text)
         self.assertIn('legacyFillSaveOtp: "not-run"', text)
@@ -324,7 +324,7 @@ async function scenario(hit) {
 const assert = require("node:assert/strict");
 (async () => {
  const { acceptConditionalSibling } = await import("./browser_conditional_passkey_acceptance.mjs");
- const origin = "https://login.locklark.test";
+ const origin = "https://login.passme.test";
  const first = { id: "first-sibling-public-id" };
  const second = { id: "second-sibling-id-public" };
  const events = [];
@@ -401,7 +401,7 @@ const assert = require("node:assert/strict");
  ]);
  assert.equal(actions.length, 6);
  assert.match(actions[5].click_label,
-  /^登录：login\.locklark\.test · login\.locklark\.test · passkey-test · passkey-test · 凭据 /);
+  /^登录：login\.passme\.test · login\.passme\.test · passkey-test · passkey-test · 凭据 /);
  console.log("conditional sibling driver order scenarios passed");
 })().catch((error) => { console.error(error.message); process.exitCode = 1; });
 """

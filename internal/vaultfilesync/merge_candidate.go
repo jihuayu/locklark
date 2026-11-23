@@ -15,11 +15,11 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/vaultmerge"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/vaultmerge"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
 )
 
 // This file adds the local, authenticated three-way merge-candidate builder for
@@ -736,8 +736,8 @@ func clearMergeCandidateItem(item *vault.Item) {
 // Binding domains. They are distinct from every protocol signature preimage and
 // from each other; the source and result bindings are never interchangeable.
 const (
-	mergeCandidateSourceDomain = "locklark vault-file merge candidate source v1\x00"
-	mergeCandidateResultDomain = "locklark vault-file merge candidate result v1\x00"
+	mergeCandidateSourceDomain = "passme vault-file merge candidate source v1\x00"
+	mergeCandidateResultDomain = "passme vault-file merge candidate result v1\x00"
 )
 
 // mergeCandidateSourceBinding hashes a domain-separated, length-framed

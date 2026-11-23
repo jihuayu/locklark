@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/personal"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -55,9 +55,9 @@ func setup(out string) error {
 		return err
 	}
 	f := fixture{
-		Path: filepath.Join(out, "synthetic.ll"), Password: "Daily-master-" + hex.EncodeToString(entropy[:8]),
+		Path: filepath.Join(out, "synthetic.pm"), Password: "Daily-master-" + hex.EncodeToString(entropy[:8]),
 		Secret: personal.FormatSecret(key), Username: "Daily-user-" + hex.EncodeToString(entropy[8:16]),
-		Value: "Daily-value-" + hex.EncodeToString(entropy[16:32]), URL: "https://daily.locklark.test/login",
+		Value: "Daily-value-" + hex.EncodeToString(entropy[16:32]), URL: "https://daily.passme.test/login",
 		OTPSeed: base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(entropy[32:52]), IDs: map[string]string{},
 		ProviderCanary: "Daily-provider-" + hex.EncodeToString(entropy[52:]),
 	}
@@ -139,7 +139,7 @@ func snapshot(source, destination string) (digest string, err error) {
 	}
 	defer f.Close()
 	err = db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("locklark.personal/v1"))
+		b := tx.Bucket([]byte("passme.personal/v1"))
 		if b == nil || len(b.Get([]byte("snapshot"))) == 0 {
 			return errors.New("missing snapshot")
 		}
@@ -172,7 +172,7 @@ func observe(f fixture, key []byte) error {
 		return err
 	}
 	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "snapshot.ll")
+	path := filepath.Join(dir, "snapshot.pm")
 	digest, err := snapshot(f.Path, path)
 	if err != nil {
 		return err
@@ -214,12 +214,12 @@ func observe(f fixture, key []byte) error {
 	out := observation{Snapshot: digest, Items: []item{}, Events: events, AuditSafe: true}
 	for _, group := range db.Content.Root.Groups {
 		for _, entry := range group.Entries {
-			id := entry.GetContent("Locklark.ID")
+			id := entry.GetContent("Passme.ID")
 			row, found := index[id]
 			if !found {
 				return errors.New("exported item mismatch")
 			}
-			out.Items = append(out.Items, item{row, entry.GetContent("URL"), entry.GetContent("UserName"), entry.GetContent("Password"), entry.GetContent("otp"), entry.GetContent("Notes"), entry.GetContent("Locklark.ImportSource")})
+			out.Items = append(out.Items, item{row, entry.GetContent("URL"), entry.GetContent("UserName"), entry.GetContent("Password"), entry.GetContent("otp"), entry.GetContent("Notes"), entry.GetContent("Passme.ImportSource")})
 		}
 	}
 	if len(out.Items) != len(rows) {
@@ -270,7 +270,7 @@ func run() error {
 	}
 	defer clear(raw)
 	var f fixture
-	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(*input), "synthetic.ll") {
+	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(*input), "synthetic.pm") {
 		return errors.New("invalid fixture path")
 	}
 	if *hold {

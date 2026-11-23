@@ -15,8 +15,8 @@ import (
 // seeds or passkey material. Cache entries are treated as immutable: callers
 // always receive clones of the revision map.
 const (
-	auditFingerprintDomain = "locklark/personal/audit-prefix/v1\x00"
-	auditArchiveDomain     = "locklark/personal/audit-archive/v1\x00"
+	auditFingerprintDomain = "passme/personal/audit-prefix/v1\x00"
+	auditArchiveDomain     = "passme/personal/audit-archive/v1\x00"
 	maxAuditEventBytes     = 8192
 )
 

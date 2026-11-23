@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // BuildInitial claims the protected owner before any challenge/signature and

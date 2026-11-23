@@ -21,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 
-PERSONAL_PACKAGE = "github.com/jihuayu/locklark/internal/personal"
+PERSONAL_PACKAGE = "github.com/jihuayu/passme/internal/personal"
 GROUP_TIMEOUT = "10m"
 TOP_LEVEL_CASE = re.compile(r"^(?:Test|Example|Fuzz)[A-Za-z0-9_]*$")
 
@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
         packages = list_packages()
         other_code = run_other_packages(packages)
         package_dir = package_directory(PERSONAL_PACKAGE)
-        with tempfile.TemporaryDirectory(prefix="locklark-personal-test-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="passme-personal-test-") as temporary:
             name = "personal.test.exe" if os.name == "nt" else "personal.test"
             binary = pathlib.Path(temporary) / name
             compile_test_binary(PERSONAL_PACKAGE, binary)

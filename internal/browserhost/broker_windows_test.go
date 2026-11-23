@@ -50,7 +50,7 @@ func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
 
 	// A failed dial keeps the platform error wrapped in dialLocalError so the
 	// client can classify absence; the wrapper itself is not the sentinel.
-	_, e := dialLocal(context.Background(), `\\.\pipe\Locklark-Browser-missing-test-pipe`)
+	_, e := dialLocal(context.Background(), `\\.\pipe\Passme-Browser-missing-test-pipe`)
 	var dialErr *dialLocalError
 	if !errors.As(e, &dialErr) || dialErr == nil {
 		t.Fatalf("missing pipe must be a *dialLocalError: %T %v", e, e)
@@ -61,7 +61,7 @@ func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
 	if !dialAbsent(e) {
 		t.Fatalf("missing pipe not classified as genuine absence: %v", e)
 	}
-	if strings.Contains(e.Error(), `Locklark-Browser-missing-test-pipe`) {
+	if strings.Contains(e.Error(), `Passme-Browser-missing-test-pipe`) {
 		t.Fatalf("dial error echoed the endpoint: %v", e)
 	}
 }

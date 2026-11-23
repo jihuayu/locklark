@@ -3,7 +3,7 @@ package remoteunlocktls
 import (
 	"crypto/ed25519"
 
-	"github.com/jihuayu/locklark/pkg/remoteunlock"
+	"github.com/jihuayu/passme/pkg/remoteunlock"
 )
 
 // VerifyPeerDeviceTransportBinding checks that the stable device transport

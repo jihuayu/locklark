@@ -48,13 +48,13 @@ class SafariPrebuiltBuilderTests(unittest.TestCase):
         self.env.update({
             "PATH": str(self.fake) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
             "FAKE_LOG": str(self.log),
-            "LOCKLARK_BROWSER_REQUIRE_PREBUILT": "1",
-            "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR": str(self.prepared),
-            "LOCKLARK_BROWSER_EXTENSION_CHROMIUM": str(self.root / "browser-extension/dist/chromium"),
-            "LOCKLARK_BROWSER_EXTENSION_FIREFOX": str(self.root / "browser-extension/dist/firefox"),
-            "LOCKLARK_BROWSER_EXTENSION_SAFARI": str(self.root / "browser-extension/dist/safari"),
-            "LOCKLARK_UNSIGNED_CI": "1",
-            "LOCKLARK_ALLOW_MISSING_HELPER": "1",
+            "PASSME_BROWSER_REQUIRE_PREBUILT": "1",
+            "PASSME_BROWSER_EXTENSION_PREPARED_DIR": str(self.prepared),
+            "PASSME_BROWSER_EXTENSION_CHROMIUM": str(self.root / "browser-extension/dist/chromium"),
+            "PASSME_BROWSER_EXTENSION_FIREFOX": str(self.root / "browser-extension/dist/firefox"),
+            "PASSME_BROWSER_EXTENSION_SAFARI": str(self.root / "browser-extension/dist/safari"),
+            "PASSME_UNSIGNED_CI": "1",
+            "PASSME_ALLOW_MISSING_HELPER": "1",
         })
 
     def run_builder(self, env=None):
@@ -77,17 +77,17 @@ class SafariPrebuiltBuilderTests(unittest.TestCase):
 
     def test_missing_partial_and_prebuilt_mismatch_never_run_node_or_xcode(self):
         # Flag omitted while prepared/product env is present: no fallback.
-        env = dict(self.env); env.pop("LOCKLARK_BROWSER_REQUIRE_PREBUILT")
+        env = dict(self.env); env.pop("PASSME_BROWSER_REQUIRE_PREBUILT")
         completed = self.run_builder(env)
         self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertEqual(self.calls(), [])
         # Explicit empty/bad flag and partial product env all reject before node.
         for value in ("", "yes"):
-            env = dict(self.env); env["LOCKLARK_BROWSER_REQUIRE_PREBUILT"] = value
+            env = dict(self.env); env["PASSME_BROWSER_REQUIRE_PREBUILT"] = value
             completed = self.run_builder(env)
             self.assertEqual(completed.returncode, 1, completed.stderr)
             self.assertEqual(self.calls(), [])
-        for key in ("LOCKLARK_BROWSER_EXTENSION_SAFARI", "LOCKLARK_BROWSER_EXTENSION_FIREFOX"):
+        for key in ("PASSME_BROWSER_EXTENSION_SAFARI", "PASSME_BROWSER_EXTENSION_FIREFOX"):
             env = dict(self.env); env.pop(key)
             completed = self.run_builder(env)
             self.assertEqual(completed.returncode, 1, completed.stderr)

@@ -44,7 +44,7 @@ def compare(expected):
         if not owner:
             return {"empty": True, "matches": [value == "" for value in expected]}
         window = x.XCreateSimpleWindow(display,x.XDefaultRootWindow(display),-100,-100,1,1,0,0,0)
-        target, property = connection.atom("UTF8_STRING"), connection.atom("LOCKLARK_NOTES_PRIVATE_READ")
+        target, property = connection.atom("UTF8_STRING"), connection.atom("PASSME_NOTES_PRIVATE_READ")
         deadline = time.monotonic()+1
         x.XConvertSelection(display,connection.selection,target,property,window,0)
         x.XFlush(display)

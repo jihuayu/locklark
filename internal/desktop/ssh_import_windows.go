@@ -3,7 +3,7 @@
 package desktop
 
 import (
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	"golang.org/x/sys/windows"
 	"os"
 	"path/filepath"

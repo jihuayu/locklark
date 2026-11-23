@@ -508,8 +508,8 @@ func TestRevisionPreimageFixedVector(t *testing.T) {
 const (
 	// Fixed values shared by the in-memory builder draft and the sealed
 	// vector (see testdata/vaultfile-v1-vectors.json, entry "v1-canonical").
-	fixedRevisionInputSHA256 = "e80510b9592680ec31a776ba0593edb00d0b080da788a42133cf20428e2767a3"
-	fixedRevisionID          = "930c61862a60a3070b4cef23cee7711e086913f678c861dbf25d63b0ff128b5d"
+	fixedRevisionInputSHA256 = "b6dc3abcec248ec95c72dc9084c1cfad8991454a0366feb29adcd06d0e76dca5"
+	fixedRevisionID          = "c1155be10ef02139d575643e1dede94df015f394db866fad7745624fb5eb648a"
 )
 
 // TestDraftRevisionIdentity pins the public preimage contract for every

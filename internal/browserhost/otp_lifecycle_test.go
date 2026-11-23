@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func lifecycleWait(t *testing.T, done <-chan struct{}) {

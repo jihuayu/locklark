@@ -1,16 +1,16 @@
 # 浏览器插件当前功能与 1:1 对照清单
 
-更新：2026-11-09。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。 本轮 UI、元数据刷新性能与安全修补从 main 38c8324 接续，见[专项验收](ui-performance-security-validation.md)；原未关闭范围已拆到 #50–#59，#39 仍开放。
+更新：2026-11-09。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/passme/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。 本轮 UI、元数据刷新性能与安全修补从 main 38c8324 接续，见[专项验收](ui-performance-security-validation.md)；原未关闭范围已拆到 #50–#59，#39 仍开放。
 
 旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。机器可读的 65 行映射见[证据映射](browser-parity-evidence.json)，由 `scripts/check_browser_parity_evidence.py` 校验；除 B13.3 的既有经确认差异外，参考状态仍为未对照。
 
 ## 状态与证据
 
-“实现存在”“Locklark 实际跑通”“与参考产品对照完成”是不同结论。保留设计规定的五种状态：`未实现`、`已实现未对照`、`已实测`、`平台不适用`、`经用户确认的差异`。本表的状态指参考行为对照；以下真实 Locklark 测试通过，不自动关闭全部参考版本对照。
+“实现存在”“Passme 实际跑通”“与参考产品对照完成”是不同结论。保留设计规定的五种状态：`未实现`、`已实现未对照`、`已实测`、`平台不适用`、`经用户确认的差异`。本表的状态指参考行为对照；以下真实 Passme 测试通过，不自动关闭全部参考版本对照。
 
 - 参考行为基线仍为历史记录的 1Password `8.12.44.33`；当前没有新的参考截图/安装版逐任务对照。只按行为清单开发，不复制其代码、品牌或素材。
 - PR #44 的最终开发 head `faf4732` 六项 CI 通过后 squash 合入上述 main；附件、显式清空、172 项扩展测试、206 项 E2E 以及真实 Chromium/Edge/Firefox 范围见[插件收尾验收](plugin-completion-validation.md)。以下 PR #43 的 run 保留为上一阶段证据。
-- [检查 run](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动 run](https://github.com/jihuayu/locklark/actions/runs/42315487747)。iOS 只覆盖保护能力不足时的拒绝路径；PR #69/#70 保持正向保护失败为红色的门槛检查也不等于完整真机成功。
+- [检查 run](https://github.com/jihuayu/passme/actions/runs/42315487787)、[移动 run](https://github.com/jihuayu/passme/actions/runs/42315487747)。iOS 只覆盖保护能力不足时的拒绝路径；PR #69/#70 保持正向保护失败为红色的门槛检查也不等于完整真机成功。
 - 对应实现与测试：`content.js`、`core.js`、`background.js`、`popup.js`、`options.js`、`test/m3_fill_v2.test.js`、`test/host_v2_contract.test.js`，以及 `internal/browserhost` / `internal/personal`。具体实际命令与边界见 [M6 集成验收](m6-integration-validation.md)。
 
 ## 当前逐项清单
@@ -88,7 +88,7 @@
 2026-11-10 以 REA 静态对照 1Password beta 8.12.46.26 后，补入两项粘贴期保护。它们**不在**上表 65 项稳定 ID 中：该合同锚定 8.12.44.33，扩表需要单独决定并同步 `scripts/check_browser_parity_evidence.py` 的 tripwire；在决定前只用本节记录，不改变 `browser-parity-evidence.json` 的 65 行。
 
 - **未关联站点粘贴密码前的钓鱼警告**：当前密码框粘贴时，若本页最近一次候选匹配明确报告“无已保存登录”，先显示关闭 Shadow DOM 的确认面板；取消则阻止本次粘贴。站点状态未知（未连接、锁定、有未完成原生请求、观测过期）不拦截。参考行为、决策表与差异见 [1Password beta 对照](browser-1password-beta-parity.md)。状态：已实现未对照，只有 Node DOM 测试。
-- **Locklark Secret Key 粘贴保护**：粘贴 `LL1-`、`LLR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
+- **Passme Secret Key 粘贴保护**：粘贴 `PM1-`、`PMR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
 - **两步验证二维码捕获并保存**：`BarcodeDetector` 可用时本地解码页面上的 `otpauth://totp` 二维码，显示 issuer/account，用户确认后把 OTP 配置写入当前来源的已有登录；种子不回传页面、不自动保存、不新增权限。与参考的 `autosave-qr-code-detected` 对应。状态：已实现未对照，只有 Node DOM 与 Go 单测，未在真实浏览器运行；Chromium 系以外不可用。见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
 
 - **金库外围能力**：弹窗“已归档”筛选与归档/取消归档、把当前网站追加到条目后填充、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、选项页诊断报告导出、Open & Fill 优先已保存的登录页路径。见[缺口盘点](browser-native-gap-inventory.md)。

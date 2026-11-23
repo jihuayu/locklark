@@ -46,7 +46,7 @@ def find_private_child_state(parent):
         children = [
             child
             for child in parent.iterdir()
-            if child.name.startswith("locklark-browser-acceptance-")
+            if child.name.startswith("passme-browser-acceptance-")
         ]
     except OSError:
         raise ValueError("privacy-state") from None
@@ -71,7 +71,7 @@ def find_private_child_state(parent):
     return child
 
 
-def create_private_state_parent(prefix="locklark-browser-otp-privacy-"):
+def create_private_state_parent(prefix="passme-browser-otp-privacy-"):
     """Create the wrapper's own parent and canonicalize only that new path.
 
     macOS temp paths commonly traverse a symlink such as /var -> /private/var.
@@ -115,8 +115,8 @@ def main():
     state = create_private_state_parent()
     environment = dict(
         os.environ,
-        LOCKLARK_TEST_FAILURE_STAGE="otp-page-arguments",
-        LOCKLARK_TEST_PRIVATE_STATE_PARENT=str(state),
+        PASSME_TEST_FAILURE_STAGE="otp-page-arguments",
+        PASSME_TEST_PRIVATE_STATE_PARENT=str(state),
     )
     first = time.time()
     with (state / "controller.log").open("xb") as log:
@@ -144,7 +144,7 @@ def main():
         # exclusive parent, so only that parent is inspected and validated.
         private = find_private_child_state(state)
     else:
-        marker = r"Private diagnostic files: (/tmp/locklark-firefox-native-[A-Za-z0-9]+)"
+        marker = r"Private diagnostic files: (/tmp/passme-firefox-native-[A-Za-z0-9]+)"
         match = re.search(marker, text)
         if not match:
             raise ValueError("privacy-state")
@@ -155,7 +155,7 @@ def main():
     if len(diagnostics) != 1 or any(diagnostics[0].glob("*.png")):
         raise ValueError("privacy-otp-screenshot")
     if args.engine == "firefox":
-        manifest = Path.home() / ".mozilla/native-messaging-hosts/org.locklark.browser.json"
+        manifest = Path.home() / ".mozilla/native-messaging-hosts/org.passme.browser.json"
         if manifest.exists() or manifest.is_symlink():
             raise ValueError("privacy-manifest")
     print("PASS: real " + args.engine + " OTP argument failure exits 1; full controller canary scan, no OTP screenshots")

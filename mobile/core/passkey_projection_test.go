@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/personal"
-	vaultpkg "github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/personal"
+	vaultpkg "github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/ssh"
 )
@@ -97,7 +97,7 @@ func encryptedPersonalItems(t *testing.T, path, password string, accountKey []by
 	}
 	var slotRaw, snapshotRaw []byte
 	err = db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("locklark.personal/v1"))
+		b := tx.Bucket([]byte("passme.personal/v1"))
 		if b == nil {
 			return fmt.Errorf("missing personal bucket")
 		}
@@ -461,7 +461,7 @@ func TestMobilePasskeyMetadataAndFieldBoundariesRefusePasskeyDisclosure(t *testi
 			t.Fatal("mixed passkey search inspected credential-only fields")
 		}
 	}
-	for _, field := range []string{"passkey", "private_key", "Locklark.Passkey", "credential"} {
+	for _, field := range []string{"passkey", "private_key", "Passme.Passkey", "credential"} {
 		f.active(t)
 		value, err := f.vault.RevealField(f.login.ID, f.login.Revision, field)
 		requireNoPasskeyDisclosure(t, value, err)

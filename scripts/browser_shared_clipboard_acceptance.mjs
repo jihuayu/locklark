@@ -21,7 +21,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 
-const DESKTOP_TITLE = "Locklark · 本地金库";
+const DESKTOP_TITLE = "Passme · 本地金库";
 // Product default: security.clipboard.clearAfterSeconds = 30.
 const CLIPBOARD_TTL_MS = 30000;
 const TTL_MARGIN_MS = 4000;
@@ -281,9 +281,9 @@ function desktopInspect(context, desktop) {
 // TMPDIR or an existing desktop broker endpoint. Go tooling keeps the original
 // environment because its install outputs are explicit paths.
 export function prepareSharedEnvironment(state, env) {
-  assert(process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1",
+  assert(process.env.PASSME_TEST_SHARED_CLIPBOARD === "1",
     "Shared clipboard mode must be requested explicitly");
-  assert(process.env.LOCKLARK_DESKTOP_HOST && process.env.LOCKLARK_DESKTOP_HOST.startsWith("/"),
+  assert(process.env.PASSME_DESKTOP_HOST && process.env.PASSME_DESKTOP_HOST.startsWith("/"),
     "Shared desktop host must be an absolute executable path");
   const base = join(state, "shared-environment");
   const home = join(base, "home");
@@ -300,7 +300,7 @@ export function prepareSharedEnvironment(state, env) {
   const socket = join(temporary, "b.sock");
   assert(!existsSync(socket), "A shared broker endpoint already exists in the private environment");
   const gocache = process.env.GOCACHE ||
-    join("/tmp", "locklark-shared-gocache-" + process.geteuid());
+    join("/tmp", "passme-shared-gocache-" + process.geteuid());
   return {
     ...env,
     HOME: home,
@@ -308,7 +308,7 @@ export function prepareSharedEnvironment(state, env) {
     XDG_CONFIG_HOME: join(home, ".config"),
     XDG_CACHE_HOME: join(home, ".cache"),
     XDG_DATA_HOME: join(home, ".local/share"),
-    LOCKLARK_BROWSER_SOCKET: socket,
+    PASSME_BROWSER_SOCKET: socket,
     GOCACHE: gocache,
   };
 }
@@ -317,10 +317,10 @@ export function prepareSharedEnvironment(state, env) {
 // desktop app and the browser-spawned native host derive it from the same
 // private TMPDIR (or the explicit driver variable).
 function brokerEndpoint(context) {
-  if (context.env.LOCKLARK_BROWSER_SOCKET) return context.env.LOCKLARK_BROWSER_SOCKET;
+  if (context.env.PASSME_BROWSER_SOCKET) return context.env.PASSME_BROWSER_SOCKET;
   const uid = typeof process.geteuid === "function" ? process.geteuid() : null;
   assert(uid !== null, "Shared acceptance requires a POSIX effective user id");
-  return join(context.env.TMPDIR || "/tmp", "locklark-brw-" + uid, "b.sock");
+  return join(context.env.TMPDIR || "/tmp", "passme-brw-" + uid, "b.sock");
 }
 
 function unlockDesktop(context, desktop) {
@@ -699,18 +699,18 @@ async function copyIsPasteable(context, clipboard) {
 // Chromium extension identity, the native host relays its normal port to the
 // live desktop broker, and the desktop app is the only clipboard owner.
 export async function acceptSharedClipboard(context) {
-  assert(process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1",
+  assert(process.env.PASSME_TEST_SHARED_CLIPBOARD === "1",
     "Shared clipboard mode must be requested explicitly");
-  assert(process.env.LOCKLARK_DESKTOP_HOST && process.env.LOCKLARK_DESKTOP_HOST.startsWith("/"),
+  assert(process.env.PASSME_DESKTOP_HOST && process.env.PASSME_DESKTOP_HOST.startsWith("/"),
     "Shared desktop host must be an absolute executable path");
-  const desktop = process.env.LOCKLARK_DESKTOP_HOST;
+  const desktop = process.env.PASSME_DESKTOP_HOST;
   assert(typeof context.fixture?.Path === "string" && context.fixture.Path.startsWith("/"),
     "Synthetic fixture vault path is required");
   assert(typeof context.fixture?.Value === "string" && context.fixture.Value.length > 0,
     "Synthetic fixture password is required");
   // Only the controlled private fixture and an empty private settings tree may
   // feed the actual app: no user vault, no persisted desktop preferences.
-  assert(context.fixture.Path === join(context.state, "vault", "synthetic.ll") &&
+  assert(context.fixture.Path === join(context.state, "vault", "synthetic.pm") &&
     existsSync(context.fixture.Path),
     "Shared acceptance requires the controlled synthetic fixture vault");
   assert(typeof context.env?.HOME === "string" &&
@@ -721,8 +721,8 @@ export async function acceptSharedClipboard(context) {
   assert(typeof context.env.XDG_CONFIG_HOME === "string" &&
     context.env.XDG_CONFIG_HOME.startsWith(context.state),
     "Private desktop settings directory must stay private");
-  assert(context.env.LOCKLARK_BROWSER_SOCKET &&
-    context.env.LOCKLARK_BROWSER_SOCKET.startsWith(context.state),
+  assert(context.env.PASSME_BROWSER_SOCKET &&
+    context.env.PASSME_BROWSER_SOCKET.startsWith(context.state),
     "Shared desktop broker endpoint must be private to this run");
   const receipts = {
     mode: "shared-desktop",

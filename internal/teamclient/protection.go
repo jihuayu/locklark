@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 // Public handles are copy-safe: all ownership and arbitration is shared.

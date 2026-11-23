@@ -31,9 +31,9 @@ import {
   recordNativeFailure,
 } from "./browser_native_failure_report.mjs";
 
-const TOP_ORIGIN = "https://login.locklark.test:8443";
+const TOP_ORIGIN = "https://login.passme.test:8443";
 const CARD_ORIGIN = TOP_ORIGIN;
-const DEFAULT_CARD_ORIGIN = "https://checkout.locklark.test:8443";
+const DEFAULT_CARD_ORIGIN = "https://checkout.passme.test:8443";
 const OTHER_ORIGIN = "https://checkout.other.test:8443";
 const TOP_LABEL = TOP_ORIGIN + "（当前页面）";
 const FRAME_SUFFIX = "（页面中的表单框架）";
@@ -61,7 +61,7 @@ function blankFormState() {
 
 test("default checkout fixture keeps the original host and no sandbox", () => {
   const html = checkoutTopHTML(8443);
-  assert.match(html, /src="https:\/\/checkout\.locklark\.test:8443\/card"/);
+  assert.match(html, /src="https:\/\/checkout\.passme\.test:8443\/card"/);
   assert.equal(countMatches(html, /sandbox=/g), 0);
   assert.match(html, /id="checkout-card-frame"/);
   assert.match(html, /id="top-card-pin"/);
@@ -71,11 +71,11 @@ test("default checkout fixture keeps the original host and no sandbox", () => {
 test("cross-site and sandbox variants are allowlisted exactly", () => {
   const cross = checkoutTopHTML(8443, { host: "checkout.other.test" });
   assert.match(cross, /src="https:\/\/checkout\.other\.test:8443\/card"/);
-  assert.doesNotMatch(cross, /checkout\.locklark\.test/);
+  assert.doesNotMatch(cross, /checkout\.passme\.test/);
   assert.equal(countMatches(cross, /sandbox=/g), 0);
 
   const sandbox = checkoutTopHTML(8443, { sandbox: true });
-  assert.match(sandbox, /src="https:\/\/checkout\.locklark\.test:8443\/card"/);
+  assert.match(sandbox, /src="https:\/\/checkout\.passme\.test:8443\/card"/);
   assert.equal(countMatches(sandbox, /sandbox="allow-scripts"/g), 1);
   assert.doesNotMatch(sandbox, /allow-same-origin/);
 
@@ -89,7 +89,7 @@ test("cross-site and sandbox variants are allowlisted exactly", () => {
 });
 
 test("variant options and ephemeral ports are strictly bounded", () => {
-  for (const bad of ["evil.test", "", "checkout.locklark.test.evil"])
+  for (const bad of ["evil.test", "", "checkout.passme.test.evil"])
     assert.throws(
       () => checkoutTopHTML(8443, { host: bad }),
       /Unsupported checkout card host/,
@@ -108,7 +108,7 @@ test("variant options and ephemeral ports are strictly bounded", () => {
       /Ephemeral checkout HTTPS port required/,
     );
   assert.throws(
-    () => checkoutFrameOrigin("http://login.locklark.test:8443"),
+    () => checkoutFrameOrigin("http://login.passme.test:8443"),
     /Checkout top origin must be an ephemeral HTTPS origin/,
   );
   assert.equal(
@@ -118,17 +118,17 @@ test("variant options and ephemeral ports are strictly bounded", () => {
 });
 
 test("same-origin variant embeds the exact top origin and port", () => {
-  const html = checkoutTopHTML(8443, { host: "login.locklark.test" });
-  assert.match(html, /src="https:\/\/login\.locklark\.test:8443\/card"/);
+  const html = checkoutTopHTML(8443, { host: "login.passme.test" });
+  assert.match(html, /src="https:\/\/login\.passme\.test:8443\/card"/);
   assert.equal(
-    countMatches(html, /https:\/\/login\.locklark\.test:8443/g),
+    countMatches(html, /https:\/\/login\.passme\.test:8443/g),
     1,
     "only the embedded child may reference the top origin",
   );
-  assert.doesNotMatch(html, /checkout\.(locklark|other)\.test/);
+  assert.doesNotMatch(html, /checkout\.(passme|other)\.test/);
   assert.equal(countMatches(html, /sandbox=/g), 0);
   assert.throws(
-    () => checkoutTopHTML(8443, { host: "login.locklark.test", sandbox: true }),
+    () => checkoutTopHTML(8443, { host: "login.passme.test", sandbox: true }),
     /Same-origin checkout variant cannot be sandboxed/,
   );
   // The child is still the shared card document with its own PIN selector.
@@ -139,17 +139,17 @@ test("same-origin variant embeds the exact top origin and port", () => {
 test("same-origin frame origin must equal the exact allowlisted top origin", () => {
   assert.equal(checkoutSameOrigin(TOP_ORIGIN), TOP_ORIGIN);
   assert.equal(
-    checkoutFrameOrigin(TOP_ORIGIN, { host: "login.locklark.test" }),
+    checkoutFrameOrigin(TOP_ORIGIN, { host: "login.passme.test" }),
     TOP_ORIGIN,
   );
   for (const bad of [
-    "https://login.locklark.test",
-    "https://login.locklark.test:8443/checkout",
-    "https://login.locklark.test:8443/",
-    "http://login.locklark.test:8443",
-    "https://checkout.locklark.test:8443",
+    "https://login.passme.test",
+    "https://login.passme.test:8443/checkout",
+    "https://login.passme.test:8443/",
+    "http://login.passme.test:8443",
+    "https://checkout.passme.test:8443",
     "https://evil.test:8443",
-    "https://login.locklark.test.evil:8443",
+    "https://login.passme.test.evil:8443",
   ])
     assert.throws(
       () => checkoutSameOrigin(bad),
@@ -178,7 +178,7 @@ test("fixture routing accepts only the known checkout query cases", () => {
   });
   assert.deepEqual(checkoutRouteCase("/checkout?variant=same-origin"), {
     kind: "checkout",
-    options: { host: "login.locklark.test" },
+    options: { host: "login.passme.test" },
   });
   // The fresh-page picker cancellation journey rides the allowed default
   // route (`/checkout?case=deny`); an invented "picker-cancel" variant is
@@ -188,11 +188,11 @@ test("fixture routing accepts only the known checkout query cases", () => {
   const route = checkoutRouteCase("/checkout?variant=same-origin");
   assert.match(
     checkoutTopHTML(8443, route.options),
-    /src="https:\/\/login\.locklark\.test:8443\/card"/,
+    /src="https:\/\/login\.passme\.test:8443\/card"/,
   );
   assert.match(
     checkoutTopHTML(8443, checkoutRouteCase("/checkout").options),
-    /src="https:\/\/checkout\.locklark\.test:8443\/card"/,
+    /src="https:\/\/checkout\.passme\.test:8443\/card"/,
   );
   assert.deepEqual(checkoutRouteCase("/card"), { kind: "card" });
   assert.deepEqual(checkoutRouteCase("/card?changed"), { kind: "card" });
@@ -232,7 +232,7 @@ function pickerPopup(labels, options = {}) {
     canceled: 0,
     async evaluate(expression) {
       this.evaluated.push(expression);
-      if (expression.includes("__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__")) {
+      if (expression.includes("__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__")) {
         return options.diagnosticLog ?? null;
       }
       return true;
@@ -1805,7 +1805,7 @@ test("route status trace keeps every #status write batched in one callback", () 
     return {
       document: isolatedDocument,
       statuses: () =>
-        JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", isolated))
+        JSON.parse(vm.runInContext("__passmeRouteStatusTraceRead()", isolated))
           .filter((entry) => entry.channel === "status")
           .map((entry) => entry.value),
       batch: (records) => {
@@ -1821,7 +1821,7 @@ test("route status trace keeps every #status write batched in one callback", () 
   assert.equal(observers.length, 1);
   // The main installation's observer (isolated contexts add their own).
   const mainObserver = observers[0];
-  const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", context));
+  const trace = () => JSON.parse(vm.runInContext("__passmeRouteStatusTraceRead()", context));
   const statuses = () =>
     trace().filter((entry) => entry.channel === "status").map((entry) => entry.value);
   const batch = (records) => {
@@ -1911,11 +1911,11 @@ test("route status trace keeps every #status write batched in one callback", () 
   }
 
   // Cleanup disconnects the observer and removes both hooks.
-  assert.equal(vm.runInContext("__locklarkRouteStatusTraceStop()", context), true);
+  assert.equal(vm.runInContext("__passmeRouteStatusTraceStop()", context), true);
   assert.equal(mainObserver.disconnected, true);
   assert.equal(
     vm.runInContext(
-      "typeof globalThis.__locklarkRouteStatusTraceRead + typeof globalThis.__locklarkRouteStatusTraceStop",
+      "typeof globalThis.__passmeRouteStatusTraceRead + typeof globalThis.__passmeRouteStatusTraceStop",
       context,
     ),
     "undefinedundefined",
@@ -2396,13 +2396,13 @@ test("route probes return only fixed booleans and wipe only on a revoked or fail
   );
   // The physical keys are the browser's own single-shot shortcuts; the
   // no-prompt bound is a fixed few seconds. Each key names its own browser
-  // window title: the source tab "Locklark acceptance", the route tab exactly
-  // "Locklark" (the route title does not start with a longer prefix).
+  // window title: the source tab "Passme acceptance", the route tab exactly
+  // "Passme" (the route title does not start with a longer prefix).
   assert.deepEqual(ROUTE_SWITCH_SOURCE, [{ key: "Control_L+Shift_L+Tab" }]);
   assert.deepEqual(ROUTE_RETURN, [{ key: "Control_L+Tab" }]);
   assert.deepEqual(ROUTE_RELOAD, [{ key: "Control_L+r" }]);
-  assert.equal(SOURCE_TITLE_PREFIX, "Locklark acceptance");
-  assert.equal(ROUTE_TITLE_PREFIX, "Locklark");
+  assert.equal(SOURCE_TITLE_PREFIX, "Passme acceptance");
+  assert.equal(ROUTE_TITLE_PREFIX, "Passme");
   assert.ok(Number.isInteger(ROUTE_NATIVE_ABSENT_LIMIT));
   assert.ok(ROUTE_NATIVE_ABSENT_LIMIT > 0 && ROUTE_NATIVE_ABSENT_LIMIT <= 5000);
 });
@@ -2545,7 +2545,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     /assert\(native !== false, "Native window input only"\);/,
   );
   // Each key is addressed to the title of the tab that is ACTIVE when it is
-  // sent: the active route page ("Locklark") for the switch away and the
+  // sent: the active route page ("Passme") for the switch away and the
   // Control_L+r reload, the source page for the return and the popup Escape /
   // open keys. Every default call is a single fixed action array, exactly once;
   // the popup keys belong to openPopup, the checkpoint sends only its three.
@@ -2589,7 +2589,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     /input\(\[\], true, \{\n\s+inspect: true,\n\s+title: ROUTE_NATIVE_TITLE,\n\s+preserve_focus: true,\n\s+\}\);/,
   );
   assert.equal(countMatches(source, /title: ROUTE_NATIVE_TITLE,/g), 1);
-  assert.match(source, /^const ROUTE_NATIVE_TITLE = "Locklark · 浏览器原生确认";$/m);
+  assert.match(source, /^const ROUTE_NATIVE_TITLE = "Passme · 浏览器原生确认";$/m);
   const inspection = at("nativeInspection()[ROUTE_COPY_REVIEW_LABEL]");
   assert.ok(inspection > failClosed);
   assert.doesNotMatch(
@@ -2640,7 +2640,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     1,
   );
   assert.match(checkpoint, /rejected === "Popup control must be available"/);
-  assert.doesNotMatch(source, /ROUTE_INPUT_COUNT_PROBE|__locklarkRouteInputCount|isTrusted|inputEvents/);
+  assert.doesNotMatch(source, /ROUTE_INPUT_COUNT_PROBE|__passmeRouteInputCount|isTrusted|inputEvents/);
   assert.match(source, /^const ROUTE_COPY_FIELD_SELECTOR =\n  '\[data-field-id="password"\] \[data-action="copy-field"\]';$/m);
   const wrapper = source.slice(
     source.indexOf("click: async (selector, { expectedRouteClose = false } = {}) => {"),
@@ -2956,8 +2956,8 @@ test("picker failure reads only sanitized diagnostic records", async () => {
     },
   );
   assert.equal(popup.evaluated.length, 2);
-  assert.match(popup.evaluated[0], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__/);
-  assert.match(popup.evaluated[1], /__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__/);
+  assert.match(popup.evaluated[0], /__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__/);
+  assert.match(popup.evaluated[1], /__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__/);
   assert.deepEqual(popup.clicked, ["#detail-fill"]);
 
   const bad = pickerPopup([TOP_LABEL], {

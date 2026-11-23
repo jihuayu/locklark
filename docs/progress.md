@@ -1,6 +1,6 @@
 > 2026-11-09（香港）更新：PR #61、#62、#67、#68、#70 已合并，当前主线 `20f3f25`；#63 typed SSH 文件导入和 #66 显式 HIBP 已关闭。多 Passkey 的真实 Edge/Firefox 完整旅程通过，PR #71 正在新 head 重新检查；共享桌面原生剪贴板的真实 Edge/Firefox 完整旅程通过，正在提交独立 PR。iOS 曾将正向保护预检失败转换为绿色状态，此结果不代表正向验收；已合并的 PR #70 修正 CI，缺少保护能力的运行环境与真实设备证据由 #69 跟踪。整合 E2E 原报告仍是 215 项：183 PASS、32 PENDING、0 FAIL；八项 F6 真实终端增量证据单列，未冒充全量重跑。CLI broker、跨设备导入和结算框架填充仍在实现。详见[遗留 issues 台账](all-issues-implementation-ledger.md)。
 
-# Locklark 开发进度
+# Passme 开发进度
 
 2026-11-10（香港）：补齐扩展与本机原生应用的运行时交互：连接失败分类为 `missing/forbidden/exited/timeout/outdated/error`，弹窗显示带注册命令的指引卡并支持重新连接，选项页新增原生连接区块（刷新/连接/请求桌面解锁），`native-unlock` 通过配对前允许的 `unlock-request` 请求桌面窗口聚焦；诊断报告增加原生状态。扩展 449 项 Node 测试、原生解锁协议测试通过；未在真实桌面端验证窗口聚焦与独立确认窗口。见[原生连接交互](browser-native-connection-ux.md)。
 
@@ -18,50 +18,50 @@
 
 本轮优化起点：main 38c8324（PR #49），日期 2026-11-07（香港）。已实现首屏搜索/可展开工具/深色对比度/键盘筛选、弹窗迟到秘密回复及锁定抢占保护、一次认证三份桌面元数据快照（保留三条原审计）、x/net 安全更新与持续扫描。301 Node、两浏览器各 32 组 DOM/组件及快照 race 通过；E2E 213 项为 177 通过、36 pending、0 失败，完整原生和最终 CI 回执见本批 PR。详见[UI、性能与安全验收](ui-performance-security-validation.md)。
 
-遗留范围现已拆成 [#50–#59](https://github.com/jihuayu/locklark/issues?q=is%3Aissue+is%3Aopen)，#39 继续作为总清单。DeepSeek 初始 HTTP 403，后续已实际恢复并完成 CSS/驱动/生命周期实现及定向静态检查；Luna max 复核，主代理设计并独立验收，恢复证据及凭据迁移/轮换遗留见 #58。以下前轮“仅 #39 开放”的数字为历史，不再是当前 issue 总数。
+遗留范围现已拆成 [#50–#59](https://github.com/jihuayu/passme/issues?q=is%3Aissue+is%3Aopen)，#39 继续作为总清单。DeepSeek 初始 HTTP 403，后续已实际恢复并完成 CSS/驱动/生命周期实现及定向静态检查；Luna max 复核，主代理设计并独立验收，恢复证据及凭据迁移/轮换遗留见 #58。以下前轮“仅 #39 开放”的数字为历史，不再是当前 issue 总数。
 
 ## 前轮交接记录
 
 
-本批已合并起点：main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)，2026-11-07 09:16:47 UTC），精确 head b2905ff 的六项 CI 全部成功，合并树与验证树一致。PR #46 已关闭 #24/#32/#33/#34/#36/#38，PR #47 关闭 #35；当前仅 #39 浏览器体验 epic 开放。旧段落为历史，不代表当前未合并 PR。
+本批已合并起点：main 9cbc34c（[PR #48](https://github.com/jihuayu/passme/pull/48)，2026-11-07 09:16:47 UTC），精确 head b2905ff 的六项 CI 全部成功，合并树与验证树一致。PR #46 已关闭 #24/#32/#33/#34/#36/#38，PR #47 关闭 #35；当前仅 #39 浏览器体验 epic 开放。旧段落为历史，不代表当前未合并 PR。
 
-2026-11-07 浏览器继续完成：条件式账户建议和其他提供者回退已经 PR #48 合并；本批补齐 native owner 确认的 Signal APIs、逐次新鲜系统 UV 入口、相关来源请求回退、可重复未签名发布包和公共站点精简兼容 fixture。主代理设计/独立验收，外部 DeepSeek workers 实现/并行复核。扩展 293 项通过，统一 E2E 212 项（176 通过、36 pending、0 失败），探针和组件单独统计；实际 Chromium/Edge/Firefox 完整原生交互及三浏览器公共站点组件通过；本批 [PR #49](https://github.com/jihuayu/locklark/pull/49) 的最终精确 head CI 与合并回执见该 PR。详见[本批综合验收](browser-completion-validation.md)及[条件式验收](conditional-passkey-validation.md)。真实 Hello/Touch ID、Windows/macOS 全链路、跨设备和签名商店分发仍未完成，不能关闭整个 #39。
+2026-11-07 浏览器继续完成：条件式账户建议和其他提供者回退已经 PR #48 合并；本批补齐 native owner 确认的 Signal APIs、逐次新鲜系统 UV 入口、相关来源请求回退、可重复未签名发布包和公共站点精简兼容 fixture。主代理设计/独立验收，外部 DeepSeek workers 实现/并行复核。扩展 293 项通过，统一 E2E 212 项（176 通过、36 pending、0 失败），探针和组件单独统计；实际 Chromium/Edge/Firefox 完整原生交互及三浏览器公共站点组件通过；本批 [PR #49](https://github.com/jihuayu/passme/pull/49) 的最终精确 head CI 与合并回执见该 PR。详见[本批综合验收](browser-completion-validation.md)及[条件式验收](conditional-passkey-validation.md)。真实 Hello/Touch ID、Windows/macOS 全链路、跨设备和签名商店分发仍未完成，不能关闭整个 #39。
 
 2026-11-07 全部 issues 接续：起始 8 项未关闭。#32/#33/#34/#36/#38 的主修复已在 PR #43 合并，正独立复核并补齐原始竞态回归；#35 历史验证性能与 #39 条件式 Passkey 在隔离工作区并行实现，#24 收录通知补 README 回链。逐项证据、关闭门槛和外部验收范围见 [issues 完成记录](issue-completion-validation.md)。
 
 2026-11-07 继续推进 Passkey 管理：弹窗筛选、RP/账号元数据、独立删除及并发撤销已实现；主代理独立 Chromium、Edge、Firefox 双账号旅程通过，删除后保留登录/密码/备注，另一账号重连后仍能签名。DeepSeek workers 完成实现并并行调研 CLI，主代理补审计动作回放并独立验收。完整测试与当前 PR/远端门槛见 [Passkey 管理验收](passkey-management-validation.md)；CLI broker 客户端/租约仍未闭环。
 
-2026-11-07 插件收尾（[PR #44](https://github.com/jihuayu/locklark/pull/44)）：附件上传/下载 SHA-256 校验/删除、备注及隐藏自定义字段显式清空、异步操作竞态修复已完成本地验收。扩展 172 项测试通过；更新后 E2E 为 206 项：170 通过、36 pending、0 失败，分开报告能力探测与组件契约。独立 Edge 与 Firefox Passkey 实测范围、剩余 CLI broker/旧文档兼容和远端回执见[本轮验收](plugin-completion-validation.md)。
+2026-11-07 插件收尾（[PR #44](https://github.com/jihuayu/passme/pull/44)）：附件上传/下载 SHA-256 校验/删除、备注及隐藏自定义字段显式清空、异步操作竞态修复已完成本地验收。扩展 172 项测试通过；更新后 E2E 为 206 项：170 通过、36 pending、0 失败，分开报告能力探测与组件契约。独立 Edge 与 Firefox Passkey 实测范围、剩余 CLI broker/旧文档兼容和远端回执见[本轮验收](plugin-completion-validation.md)。
 
 ## 历史阶段记录
 
-2026-11-07：从 main `eccd326` 接续唯一未合并的 [PR #43](https://github.com/jihuayu/locklark/pull/43)，完成集成缺陷修复并推进桌面、扩展与 CLI：共享持久化 v2 模型、原子浏览器编辑、真实 DTO 适配、OTP 序列化、锁库通知、受控 CLI 帮助路径与 DeepSeek profile。按本轮用户指令由主代理设计架构、DeepSeek 外部 worker 并行调研/实现。实际测试、独立复核范围、远端合并门槛与仍待 1:1 对照项见 [M6 集成验收](m6-integration-validation.md)；以下段落保留历史记录，不能覆盖此处较新的 PR 状态。
+2026-11-07：从 main `eccd326` 接续唯一未合并的 [PR #43](https://github.com/jihuayu/passme/pull/43)，完成集成缺陷修复并推进桌面、扩展与 CLI：共享持久化 v2 模型、原子浏览器编辑、真实 DTO 适配、OTP 序列化、锁库通知、受控 CLI 帮助路径与 DeepSeek profile。按本轮用户指令由主代理设计架构、DeepSeek 外部 worker 并行调研/实现。实际测试、独立复核范围、远端合并门槛与仍待 1:1 对照项见 [M6 集成验收](m6-integration-validation.md)；以下段落保留历史记录，不能覆盖此处较新的 PR 状态。
 
 团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。PR #37 当前仍为草稿：真实团队 TLS 与服务命令独立验收已通过；第七轮 Android 原生流程、独立外部界面、真实数据库签名审计及 KDBX 互通全部通过，新增系统认证验收发现 ATD 不提供安全锁屏，已切换完整 Google APIs 镜像继续；iOS 在官方 URL 接口实测后仍返回较弱保护，保持拒绝并准备真机验收。精确进展及失败证据见[团队与移动验收](team-mobile-validation.md)，不能把协议核心或构建成功当作完整手机/团队产品通过。
 
-登录备注 [PR #31](https://github.com/jihuayu/locklark/pull/31) 已在精确 head `9b11713` 的四项 CI（run `42146467829`）、Luna max产品/工具/测试复核及主代理独立 GUI/升级/对账验收后，正常 squash 合入 `9d8d574`。主代理核对完整远端日志中的八项真实 GUI/故障门槛；首轮 OTP 测试时钟失败已由仅测试修正关闭。
+登录备注 [PR #31](https://github.com/jihuayu/passme/pull/31) 已在精确 head `9b11713` 的四项 CI（run `42146467829`）、Luna max产品/工具/测试复核及主代理独立 GUI/升级/对账验收后，正常 squash 合入 `9d8d574`。主代理核对完整远端日志中的八项真实 GUI/故障门槛；首轮 OTP 测试时钟失败已由仅测试修正关闭。
 
-MyGo 快捷搜索 [PR #30](https://github.com/jihuayu/locklark/pull/30) 已经 Sol xhigh 实现、Luna max 复审、主代理固定构建独立 GUI 与精确 head `e12cc9ab` 的四项 CI（run `42138473111`）合入 main `87fcd7c`。下一项为[登录备注](login-notes-design.md)：迁入、加密保存、原生明确查看/编辑和独立 KDBX 对账；Sol实现、Luna max产品及工具复审、主代理固定v1独立旧桌面回归与完整备注GUI、真实旧CLI升级及独立PyKeePass对账已通过；全Go/race/vet/交叉编译通过，主代理与Sol的最终故障隐私也已通过，[PR #31](https://github.com/jihuayu/locklark/pull/31) 首轮macOS/Web成功，Ubuntu旧OTP版本检查测试撞到真实到期；已由Sol仅修正测试时钟，重复/race及Luna复核通过。产品不变，更新提交的精确head CI和正常合并门槛仍待核验。
+MyGo 快捷搜索 [PR #30](https://github.com/jihuayu/passme/pull/30) 已经 Sol xhigh 实现、Luna max 复审、主代理固定构建独立 GUI 与精确 head `e12cc9ab` 的四项 CI（run `42138473111`）合入 main `87fcd7c`。下一项为[登录备注](login-notes-design.md)：迁入、加密保存、原生明确查看/编辑和独立 KDBX 对账；Sol实现、Luna max产品及工具复审、主代理固定v1独立旧桌面回归与完整备注GUI、真实旧CLI升级及独立PyKeePass对账已通过；全Go/race/vet/交叉编译通过，主代理与Sol的最终故障隐私也已通过，[PR #31](https://github.com/jihuayu/passme/pull/31) 首轮macOS/Web成功，Ubuntu旧OTP版本检查测试撞到真实到期；已由Sol仅修正测试时钟，重复/race及Luna复核通过。产品不变，更新提交的精确head CI和正常合并门槛仍待核验。
 
-浏览器逐次原生批准OTP [PR #29](https://github.com/jihuayu/locklark/pull/29) 已由Sol xhigh实现，Luna max复审、主代理固定构建的两浏览器完整GUI与故障隐私验收通过；精确head `ced61e5` 的四项CI（run `42133038819`）全部通过，合入 main `20e27aa`。继续从此主线实现[MyGo快捷搜索](desktop-quick-search-design.md)，同样保留Sol实现、Luna review及主代理设计/验收分工；固定v2已通过主代理完整日常回归与真实全局快捷搜索验收，精确head远端CI和合并门槛待完成。
+浏览器逐次原生批准OTP [PR #29](https://github.com/jihuayu/passme/pull/29) 已由Sol xhigh实现，Luna max复审、主代理固定构建的两浏览器完整GUI与故障隐私验收通过；精确head `ced61e5` 的四项CI（run `42133038819`）全部通过，合入 main `20e27aa`。继续从此主线实现[MyGo快捷搜索](desktop-quick-search-design.md)，同样保留Sol实现、Luna review及主代理设计/验收分工；固定v2已通过主代理完整日常回归与真实全局快捷搜索验收，精确head远端CI和合并门槛待完成。
 
-桌面日常生成/TOTP与系统剪贴板所有权 [PR #28](https://github.com/jihuayu/locklark/pull/28) 已经Sol xhigh实现、Luna/max复审、主代理独立完整GUI与精确head `85b400ff` 的四项CI（run `42120014509`）合入 main `4f37d8c`。Windows部分写入失败通过先发布nonce再发布文本修复，Windows/macOS原生smoke均实际通过。继续从此主线实现浏览器逐次原生批准的验证码填充，见[浏览器OTP架构](browser-otp-design.md)与[验收](browser-otp-validation.md)；同样按主代理设计/验收、Sol xhigh实现、Luna max review分工；浏览器OTP已完成固定构建的两引擎真实GUI及本地回归，Luna无阻塞，PR与精确head CI合并门槛仍待完成。
+桌面日常生成/TOTP与系统剪贴板所有权 [PR #28](https://github.com/jihuayu/passme/pull/28) 已经Sol xhigh实现、Luna/max复审、主代理独立完整GUI与精确head `85b400ff` 的四项CI（run `42120014509`）合入 main `4f37d8c`。Windows部分写入失败通过先发布nonce再发布文本修复，Windows/macOS原生smoke均实际通过。继续从此主线实现浏览器逐次原生批准的验证码填充，见[浏览器OTP架构](browser-otp-design.md)与[验收](browser-otp-validation.md)；同样按主代理设计/验收、Sol xhigh实现、Luna max review分工；浏览器OTP已完成固定构建的两引擎真实GUI及本地回归，Luna无阻塞，PR与精确head CI合并门槛仍待完成。
 
-浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 已经 Luna/max、主代理独立两浏览器完整验收及精确head `8d63fd6` 的四项CI（run `42089993817`）合入 main `c9d4a5d`。继续从该主线实施MyGo原生强密码生成和TOTP日常操作，见[桌面架构](desktop-daily-design.md)与[桌面验收](desktop-daily-validation.md)，仍由Sol xhigh实现、主代理设计验收、Luna max审阅。 桌面生成/OTP核心及竞态测试已通过；真实GUI发现锁定同步读取foreign剪贴板会阻塞，已改为系统ownership lease。最终v4已通过主代理独立完整GUI、故障隐私扫描、53项工具测试及Luna/max复审；锁定foreign-owner场景647ms发布界面、零读取请求。[PR #28](https://github.com/jihuayu/locklark/pull/28) 首轮CI已通过macOS原生剪贴板，Windows部分写入清理出现真实失败，已完成凭证先于文本发布的窄修并经Luna复核；新head须四项CI全部通过再合并。
+浏览器保存/更新 [PR #27](https://github.com/jihuayu/passme/pull/27) 已经 Luna/max、主代理独立两浏览器完整验收及精确head `8d63fd6` 的四项CI（run `42089993817`）合入 main `c9d4a5d`。继续从该主线实施MyGo原生强密码生成和TOTP日常操作，见[桌面架构](desktop-daily-design.md)与[桌面验收](desktop-daily-validation.md)，仍由Sol xhigh实现、主代理设计验收、Luna max审阅。 桌面生成/OTP核心及竞态测试已通过；真实GUI发现锁定同步读取foreign剪贴板会阻塞，已改为系统ownership lease。最终v4已通过主代理独立完整GUI、故障隐私扫描、53项工具测试及Luna/max复审；锁定foreign-owner场景647ms发布界面、零读取请求。[PR #28](https://github.com/jihuayu/passme/pull/28) 首轮CI已通过macOS原生剪贴板，Windows部分写入清理出现真实失败，已完成凭证先于文本发布的窄修并经Luna复核；新head须四项CI全部通过再合并。
 
-浏览器原生配对与登录填充 [PR #26](https://github.com/jihuayu/locklark/pull/26) 已经 Luna/max、主代理独立 Chromium/Firefox 完整 GUI 验收及精确 head `6c649d9` 的四项 CI（run `42073803355`）合入 main `0f38177`。当前从该主线开始显式保存新登录/更新已有登录，按 [保存架构约定](browser-save-design.md) 继续由 Sol xhigh 实现、主代理设计验收、Luna max review。
+浏览器原生配对与登录填充 [PR #26](https://github.com/jihuayu/passme/pull/26) 已经 Luna/max、主代理独立 Chromium/Firefox 完整 GUI 验收及精确 head `6c649d9` 的四项 CI（run `42073803355`）合入 main `0f38177`。当前从该主线开始显式保存新登录/更新已有登录，按 [保存架构约定](browser-save-design.md) 继续由 Sol xhigh 实现、主代理设计验收、Luna max review。
 
 显式保存/更新实现已完成 Luna/max 最终增量 review、全仓 Go/定向 race、35项扩展测试及主代理独立 Chromium/Firefox v4 完整 GUI 验收。独立验收发现并修复 popup 刷新旧候选操作窗口与外部 AT-SPI 瞬态查询失败，证据见 [保存与更新验收](browser-save-validation.md)。当前准备精确 head PR/CI，尚未据此标记合入；下一候选为 MyGo 日常生成密码和原生TOTP。
 
 Next.js 本机只读管理 PR #25 已经 Luna/max 复审和精确 head `f67f34e` 四平台/浏览器 CI（run 42060380427）通过，squash 到 main `dcc52d0`。后续浏览器切片已同步此基线；按用户要求由主代理负责架构/验收，Sol xhigh 实现，Luna max 审阅。真实 Chromium 扩展 → MyGo 解锁/配对/批准 → HTTPS 登录填充及拒绝/导航/锁库流程已实跑；独立审阅修复与最终 CI 继续推进，见 [浏览器验收](browser-native-validation.md)。真实 Firefox 157 完整填充链路也已由主代理独立复跑；首轮 CI 发现的 Windows 测试路径与中文字体坐标问题已定位并修复，新增无障碍恢复与稳定的真实控件验收继续复审。保存/更新、Safari/移动、完整迁移和团队同步仍未完成。
 
-原生 MyGo 桌面与系统快捷解锁 [PR #23](https://github.com/jihuayu/locklark/pull/23) 经 Luna/max 最终复审及 Ubuntu/Windows/macOS CI（run 42044135997，head `bb59657`）合入 main `de7ba5a`。系统 Hello/Touch ID/Secret Service 真机行为继续单列。当前接 Next.js 本机只读团队管理和固定 Go 元数据接口，见 [Web 验收](nextjs-management-validation.md)；完整迁移、扩展、团队/同步和手机范围仍持续推进。
+原生 MyGo 桌面与系统快捷解锁 [PR #23](https://github.com/jihuayu/passme/pull/23) 经 Luna/max 最终复审及 Ubuntu/Windows/macOS CI（run 42044135997，head `bb59657`）合入 main `de7ba5a`。系统 Hello/Touch ID/Secret Service 真机行为继续单列。当前接 Next.js 本机只读团队管理和固定 Go 元数据接口，见 [Web 验收](nextjs-management-validation.md)；完整迁移、扩展、团队/同步和手机范围仍持续推进。
 
-个人开发者环境注入 [PR #22](https://github.com/jihuayu/locklark/pull/22) 已合入 `5b0ce38`，精确 head `40aba12` 的 Ubuntu/Windows CI（run 42009389353）通过。
+个人开发者环境注入 [PR #22](https://github.com/jihuayu/passme/pull/22) 已合入 `5b0ce38`，精确 head `40aba12` 的 Ubuntu/Windows CI（run 42009389353）通过。
 
-第八批标题搜索 [PR #21](https://github.com/jihuayu/locklark/pull/21) 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `b9edaa8`（run 42004280736，head `5dd722c`）。第九批接个人开发者 `run-env`：固定条目/修订/字段、人工确认、意图先提交、最小子环境和无子进程文本回流，见[环境注入验收](personal-run-env-validation.md)。这是向本地可信程序披露，不能代替 invoke 机器授权或第三方沙箱；SSH 与 op 对照仍待完成。
+第八批标题搜索 [PR #21](https://github.com/jihuayu/passme/pull/21) 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `b9edaa8`（run 42004280736，head `5dd722c`）。第九批接个人开发者 `run-env`：固定条目/修订/字段、人工确认、意图先提交、最小子环境和无子进程文本回流，见[环境注入验收](personal-run-env-validation.md)。这是向本地可信程序披露，不能代替 invoke 机器授权或第三方沙箱；SSH 与 op 对照仍待完成。
 
-第七批签名插件目录 [PR #20](https://github.com/jihuayu/locklark/pull/20) 已经 Luna/max、全量 Go/竞态和 Ubuntu/Windows CI 合入 main `1dfc8b0`（run 42001953615，head `6e5b315`）。第八批接个人 CLI 隐藏查询的标题搜索：Unicode 匹配、状态范围、同名保留、事务审计与无原始查询绑定，见[标题搜索验收](personal-title-search-validation.md)。桌面、浏览器/手机、远端同步及其他产品缺口仍按七条范围保留。
+第七批签名插件目录 [PR #20](https://github.com/jihuayu/passme/pull/20) 已经 Luna/max、全量 Go/竞态和 Ubuntu/Windows CI 合入 main `1dfc8b0`（run 42001953615，head `6e5b315`）。第八批接个人 CLI 隐藏查询的标题搜索：Unicode 匹配、状态范围、同名保留、事务审计与无原始查询绑定，见[标题搜索验收](personal-title-search-validation.md)。桌面、浏览器/手机、远端同步及其他产品缺口仍按七条范围保留。
 
 第六批个人 GitHub 实时查询 PR #19 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `8659bb9`（run 41994363160，head `0fcf57d`）。继续第六条产品线的离线签名插件目录：独立公钥配置、包摘要确认、安装/升级/永久撤销、checkpoint 与原子事件，见[签名插件目录验收](signed-plugin-catalog-validation.md)。这批只管理静态签名数据，第三方执行仍关闭，操作系统沙箱和管理 UI 尚未完成。
 
@@ -77,9 +77,9 @@ Next.js 本机只读管理 PR #25 已经 Luna/max 复审和精确 head `f67f34e`
 
 用户要求完成七条产品线，持续范围见 [七条交付](seven-track-delivery.md)。从 main `d932f51` 接续第一批认证 1PUX 登录导入：摘要绑定计划、同事务整批写入/逐项审计、加密来源记录及独立导出对账；详细范围见 [导入验收](personal-import-validation.md)。完整迁移及其他六条仍按清单逐项推进，不能将本批窄 profile 计为全部完成。
 
-从 main `65b3f3d` 接续个人回收站/恢复：保留原活动或归档状态、版本冲突与固定拒绝审计、阻止回收站值披露/编辑/生成、备份及 KDBX 状态保留，见 [回收站验收](personal-trash-validation.md)。Luna/max 最终复核、完整 Go 与定向 race 已通过；最终 head、双平台 CI 与合并状态见 [PR #13](https://github.com/jihuayu/locklark/pull/13)。永久清空、保留期和安全擦除仍未实现。
+从 main `65b3f3d` 接续个人回收站/恢复：保留原活动或归档状态、版本冲突与固定拒绝审计、阻止回收站值披露/编辑/生成、备份及 KDBX 状态保留，见 [回收站验收](personal-trash-validation.md)。Luna/max 最终复核、完整 Go 与定向 race 已通过；最终 head、双平台 CI 与合并状态见 [PR #13](https://github.com/jihuayu/passme/pull/13)。永久清空、保留期和安全擦除仍未实现。
 
-2026-11-05（香港时区）四线交接：独立密码 KDBX 迁出 [PR #9](https://github.com/jihuayu/locklark/pull/9)、归档日常操作 [PR #10](https://github.com/jihuayu/locklark/pull/10)、HTTPS 来源候选与共享向量 [PR #11](https://github.com/jihuayu/locklark/pull/11)、签名团队目录/撤销/冻结核心 [PR #12](https://github.com/jihuayu/locklark/pull/12)。四批均有 Luna/max 独立复核、针对性失败/成功测试与双平台 CI 证据；最终 head/合并状态以对应 PR 为准。后两项是平台/团队基础核心，真实浏览器与手机接入、设备持有证明/权限执行及网络同步仍待完成。
+2026-11-05（香港时区）四线交接：独立密码 KDBX 迁出 [PR #9](https://github.com/jihuayu/passme/pull/9)、归档日常操作 [PR #10](https://github.com/jihuayu/passme/pull/10)、HTTPS 来源候选与共享向量 [PR #11](https://github.com/jihuayu/passme/pull/11)、签名团队目录/撤销/冻结核心 [PR #12](https://github.com/jihuayu/passme/pull/12)。四批均有 Luna/max 独立复核、针对性失败/成功测试与双平台 CI 证据；最终 head/合并状态以对应 PR 为准。后两项是平台/团队基础核心，真实浏览器与手机接入、设备持有证明/权限执行及网络同步仍待完成。
 
 四线第 3 批 PR #11 已合并 main `c8bf4fd`，Luna/max 与双平台 CI 通过。第 4 批签名团队目录/可信本地排序、持久原子版本提交、撤销墓碑与冻结见 [团队核心验收](team-directory-validation.md)。本轮四条线均有代码/验收推进；平台应用和完整团队网络产品仍未完成。
 
@@ -133,7 +133,7 @@ KDBX 互操作已在 Windows 和 WSL Linux 使用 PyKeePass 4.2.0 验收。上�
 
 当前交付为离线个人库预览与合成网关演练。正式使用仍需要独立安全评审、干净机器恢复、移动真机与逐平台 1Password 行为对照。
 
-Cloud 恢复安全修复已提交为 `43c6732`，在 PR #1 的原 `codex/first-preview` 分支接续；main 核对为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`。恢复验证及目标预检先于新 Secret Key，发布仍原子拒绝覆盖；LLR2 独立离线材料固定整份签名备份检查点，旧 LLR1/版本 1 明确拒绝。Linux 真实 PTY 的错误恢复码、损坏备份、已有目标、旧格式及迟到目标负测通过，完整重签历史负测通过，容量与历史段数错误已区分。实跑检查、失败测试及复核/CI 门槛详见 [recovery-validation.md](recovery-validation.md)。尚未合并，不能把本地结果计为 GitHub 通过；后续从更新 main 实现受控人工单字段披露。
+Cloud 恢复安全修复已提交为 `43c6732`，在 PR #1 的原 `codex/first-preview` 分支接续；main 核对为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`。恢复验证及目标预检先于新 Secret Key，发布仍原子拒绝覆盖；PMR2 独立离线材料固定整份签名备份检查点，旧 PMR1/版本 1 明确拒绝。Linux 真实 PTY 的错误恢复码、损坏备份、已有目标、旧格式及迟到目标负测通过，完整重签历史负测通过，容量与历史段数错误已区分。实跑检查、失败测试及复核/CI 门槛详见 [recovery-validation.md](recovery-validation.md)。尚未合并，不能把本地结果计为 GitHub 通过；后续从更新 main 实现受控人工单字段披露。
 
 恢复来源复查在 `7054bf5` 上复现 FIFO 与 FIFO 符号链接打开时阻塞，`888944e` 改为 Unix 非阻塞打开并在读前核验句柄，非普通文件明确拒绝。Linux 单测、全量 Go、个人库竞态、真实 PTY、MCP/Bun 及 Windows/macOS 交叉编译通过；正常备份文件符号链接的恢复审计正例通过。原生 Windows/macOS 特殊文件行为及独立复核仍未完成，PR #1 合并门槛继续保留。main 仍为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`；本轮命令、失败证据和后续工作见 [recovery-file-source-validation.md](recovery-file-source-validation.md)。
 
@@ -157,6 +157,6 @@ TOTP 核心 `295e8c35601941ca02c13e4afd8c203ebbb5f0a7` 从实际 head `8d5d81d` 
 
 Windows CI 恢复实际运行后，`38b308d` 的 Ubuntu 成功，Windows 在个人 backup 的 ConPTY JSON 读取失败；不再沿用付款/额度阻塞结论。已用合成传输失败测试复现并在 `45f2e79` 修复子进程退出后的输出排空，`020622f` 将回归加入双平台 CI。Windows 原生运行又发现传输不发 EOF，`dd68eef` 改为完整响应加输出静默并保留截止时间；延迟输出、延迟秘密回显、不发 EOF 三项本地测试通过；原生结果与独立复核单独记录，main 未变，详见 [conpty-drain-validation.md](conpty-drain-validation.md)。
 
-ConPTY 修正版 `dd68eefdb0dc744436403299b382b3ebfbeb1fa5` 的 [run 41943464262](https://github.com/jihuayu/locklark/actions/runs/41943464262) Ubuntu/Windows 均成功，个人终端恢复、审计及 MCP 验收通过，关闭本批真实 CI 失败。该结果不是全平台产品验收；PR #1 独立复核仍待完成，未合并 main。
+ConPTY 修正版 `dd68eefdb0dc744436403299b382b3ebfbeb1fa5` 的 [run 41943464262](https://github.com/jihuayu/passme/actions/runs/41943464262) Ubuntu/Windows 均成功，个人终端恢复、审计及 MCP 验收通过，关闭本批真实 CI 失败。该结果不是全平台产品验收；PR #1 独立复核仍待完成，未合并 main。
 
 PR #1 的 `f0c58e3` 已完成三个经用户授权的 Luna/max 独立代码复核：恢复与个人审计、MCP/Gateway执行回执、引用/生成/1PUX/ConPTY 基础模块，均未确认阻塞当前预览合并的可复现缺陷。审查者实跑定向单测、关键路径 race、PTY/MCP；完整 preview race 仍未完成。具体范围及命令见 [pr1-independent-review.md](pr1-independent-review.md)，本记录更新上述范围的历史“待独立复核”状态；不关闭外部密码评审、整库/决策库独立回滚见证、真实平台及全部设计验收。main 仍为 `3901bc8`，合并前须核对本交接提交的双平台检查。用户已持续授权 Luna/max 子代理复核及满足门槛后的正常 squash 合并，无需重复确认。

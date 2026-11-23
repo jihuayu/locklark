@@ -1,11 +1,11 @@
 package preview
 
 import (
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
-const fixtureReferenceProfile = "locklark/synthetic/native-fixture/v1"
+const fixtureReferenceProfile = "passme/synthetic/native-fixture/v1"
 
 // BindFixtureReferenceMetadata only maps the built-in source profile to native
 // slots. The caller must authenticate all inputs together, as for projection.

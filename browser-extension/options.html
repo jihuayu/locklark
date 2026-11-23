@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Locklark 设置</title>
+    <title>Passme 设置</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <header class="page-header">
-      <h1>Locklark 扩展设置</h1>
+      <h1>Passme 扩展设置</h1>
       <p class="muted">
-        偏好设置保存在本机浏览器扩展存储中。金库数据始终由本地 Locklark 桌面端解密，浏览器扩展绝不缓存明文密码。
+        偏好设置保存在本机浏览器扩展存储中。金库数据始终由本地 Passme 桌面端解密，浏览器扩展绝不缓存明文密码。
       </p>
       <p id="options-status" class="status" role="status" aria-live="polite"></p>
     </header>
@@ -21,7 +21,7 @@
         <h2 id="general-heading">桌面端联动</h2>
         <label class="row">
           <input id="opt-shared-session" type="checkbox" />
-          <span>与 Locklark 桌面端同步解锁与锁定状态</span>
+          <span>与 Passme 桌面端同步解锁与锁定状态</span>
         </label>
         <label class="row">
           <input id="opt-biometric" type="checkbox" />
@@ -32,7 +32,7 @@
           <span>在扩展图标上显示当前网站的匹配条目数</span>
         </label>
         <p id="connection-status" class="muted">
-          存储说明：修改会立即写入本机扩展存储（storage.local）并实时生效。本地宿主连接与金库解锁状态可在 Locklark 弹窗中查看。
+          存储说明：修改会立即写入本机扩展存储（storage.local）并实时生效。本地宿主连接与金库解锁状态可在 Passme 弹窗中查看。
         </p>
       </section>
 
@@ -56,12 +56,12 @@
         </label>
         <label class="row">
           <input id="opt-offer-passkeys" type="checkbox" />
-          <span>允许使用 Locklark 中的 Passkey 登录网站</span>
+          <span>允许使用 Passme 中的 Passkey 登录网站</span>
         </label>
         <label class="row">
           <input id="opt-paste-protection" type="checkbox" />
           <span
-            >粘贴保护：在未保存登录的网站粘贴密码，或粘贴 Locklark Secret Key
+            >粘贴保护：在未保存登录的网站粘贴密码，或粘贴 Passme Secret Key
             时先确认</span
           >
         </label>
@@ -75,7 +75,7 @@
         </label>
         <label class="row">
           <input id="opt-offer-save-passkeys" type="checkbox" />
-          <span>注册通行密钥时提示保存新 Passkey 到 Locklark</span>
+          <span>注册通行密钥时提示保存新 Passkey 到 Passme</span>
         </label>
         <label class="row">
           <input id="opt-inline-generator" type="checkbox" />
@@ -244,14 +244,14 @@
       <section aria-labelledby="native-heading">
         <h2 id="native-heading">原生连接</h2>
         <p class="muted">
-          扩展通过本机原生宿主与 Locklark 桌面端通信。这里只显示连接状态与能力，
+          扩展通过本机原生宿主与 Passme 桌面端通信。这里只显示连接状态与能力，
           不读取金库内容。
         </p>
         <p id="native-status" class="muted" role="status">尚未检测</p>
         <div class="actions">
           <button id="native-refresh" type="button">刷新状态</button>
           <button id="native-connect" type="button">连接或重新连接</button>
-          <button id="native-unlock" type="button">在 Locklark 中解锁</button>
+          <button id="native-unlock" type="button">在 Passme 中解锁</button>
         </div>
         <p id="native-detail" class="muted"></p>
       </section>

@@ -1,3 +1,3 @@
-module locklark-desktop-release-identity
+module passme-desktop-release-identity
 
 go 1.21

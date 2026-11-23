@@ -175,7 +175,7 @@ func TestCurrentTTYIdentityRejectsMismatchedHandle(t *testing.T) {
 	if _, _, e := CurrentTTYIdentity(); !errors.Is(e, errCLIRunUnavailable) {
 		t.Fatalf("no terminal: %v", e)
 	}
-	withTTYSeams(t, "/dev/locklark-fixture-tty", brokerTTYForeignDev(), true, openTTYNode)
+	withTTYSeams(t, "/dev/passme-fixture-tty", brokerTTYForeignDev(), true, openTTYNode)
 	if _, _, e := CurrentTTYIdentity(); !errors.Is(e, errCLIRunUnavailable) {
 		t.Fatalf("unnameable device: %v", e)
 	}
@@ -235,7 +235,7 @@ func TestCurrentTTYIdentityRejectsChangedAttestation(t *testing.T) {
 // declared name's device with the authenticated peer's kernel controlling
 // terminal, and refuses every declared value that only looks right.
 func TestVerifyCLIRunTTYMatchesAuthenticatedPeer(t *testing.T) {
-	peer := Peer{User: "UID 501", PID: 991, Process: "/fixture/bin/locklark"}
+	peer := Peer{User: "UID 501", PID: 991, Process: "/fixture/bin/passme"}
 	if !peerTTYAttestationAvailable {
 		// A platform without a peer-CTTY proof (Linux, Android on the Linux
 		// build, and unsupported platforms) has no kernel-backed association
@@ -292,7 +292,7 @@ func TestVerifyCLIRunTTYMatchesAuthenticatedPeer(t *testing.T) {
 // kernel controlling terminal, or a kernel value the node does not confirm, is
 // explicitly unavailable (not a refusal) before approval.
 func TestVerifyCLIRunTTYUnavailableWithoutKernelIdentity(t *testing.T) {
-	peer := Peer{User: "UID 501", PID: 992, Process: "/fixture/bin/locklark"}
+	peer := Peer{User: "UID 501", PID: 992, Process: "/fixture/bin/passme"}
 	node, dev := trustableTTYNode(t)
 	for name, setup := range map[string]func(){
 		"no kernel terminal": func() { withTTYSeams(t, "", 0, false, nil) },
@@ -308,8 +308,8 @@ func TestVerifyCLIRunTTYUnavailableWithoutKernelIdentity(t *testing.T) {
 	}
 	// A syntactically valid but nonexistent node is unavailable too; the
 	// kernel lookup (and so attestation) accepts nothing for a missing node.
-	withTTYSeams(t, "/dev/locklark-untrusted-tty-node", dev, true, nil)
-	if e := verifyCLIRunTTY(peer, "/dev/locklark-untrusted-tty-node", CLIRunTTYPlatform(), ""); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) {
+	withTTYSeams(t, "/dev/passme-untrusted-tty-node", dev, true, nil)
+	if e := verifyCLIRunTTY(peer, "/dev/passme-untrusted-tty-node", CLIRunTTYPlatform(), ""); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) {
 		t.Fatalf("missing node: verify: %v", e)
 	}
 	withTTYSeams(t, node, dev, true, nil)
@@ -325,9 +325,9 @@ func TestVerifyCLIRunTTYUnavailableWithoutKernelIdentity(t *testing.T) {
 // attestation every checkpoint reports unavailable and nothing is opened, so a
 // declared string can never stand in for a kernel identity.
 func TestTTYUnsupportedPlatformFailsClosed(t *testing.T) {
-	peer := Peer{User: "UID 501", PID: 993, Process: "/fixture/bin/locklark"}
+	peer := Peer{User: "UID 501", PID: 993, Process: "/fixture/bin/passme"}
 	opened := 0
-	withTTYSeamsPlatform(t, "/dev/locklark-fixture-tty", brokerTTYForeignDev(), true, func(string) (*os.File, error) {
+	withTTYSeamsPlatform(t, "/dev/passme-fixture-tty", brokerTTYForeignDev(), true, func(string) (*os.File, error) {
 		opened++
 		return nil, errCLIRunUnavailable
 	}, false)
@@ -337,7 +337,7 @@ func TestTTYUnsupportedPlatformFailsClosed(t *testing.T) {
 	if _, e := AttestCLIRunTTY(peer); !errors.Is(e, errCLIRunUnavailable) {
 		t.Fatalf("attest: %v", e)
 	}
-	if e := verifyCLIRunTTY(peer, "/dev/locklark-fixture-tty", CLIRunTTYPlatform(), ""); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) {
+	if e := verifyCLIRunTTY(peer, "/dev/passme-fixture-tty", CLIRunTTYPlatform(), ""); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) {
 		t.Fatalf("verify: %v", e)
 	}
 	if opened != 0 {

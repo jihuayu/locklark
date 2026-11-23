@@ -53,8 +53,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/remoteunlock"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/remoteunlock"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // testNoBytesWindow bounds the read that proves a rejected request produced

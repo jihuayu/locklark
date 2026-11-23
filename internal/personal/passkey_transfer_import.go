@@ -13,18 +13,18 @@ import (
 	"unicode/utf8"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
 	passkeyTransferItemAction = "item.passkey.transfer"
 
-	passkeyTransferGroupDomain     = "locklark/personal/passkey-transfer/group/v1\x00"
-	passkeyTransferPlanDomain      = "locklark/personal/passkey-transfer/plan/v1\x00"
-	passkeyTransferApplyLinkDomain = "locklark/personal/passkey-transfer/apply/v1\x00"
+	passkeyTransferGroupDomain     = "passme/personal/passkey-transfer/group/v1\x00"
+	passkeyTransferPlanDomain      = "passme/personal/passkey-transfer/plan/v1\x00"
+	passkeyTransferApplyLinkDomain = "passme/personal/passkey-transfer/apply/v1\x00"
 
 	maxPasskeyTransferCandidates = 100
 	maxPasskeyTransferPlanBytes  = 192 << 10

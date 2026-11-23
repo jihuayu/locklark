@@ -14,13 +14,13 @@ import (
 	"path/filepath"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 )
 
 var errInvoke = errors.New("invocation invalid, not authorized, already used, or result unavailable")
 
-const invokeDomain = "locklark/invoke-ticket/v1\x00"
-const replyDomain = "locklark/invoke-reply/v1\x00"
+const invokeDomain = "passme/invoke-ticket/v1\x00"
+const replyDomain = "passme/invoke-reply/v1\x00"
 
 type invocation struct {
 	Purpose                                             string `json:"purpose,omitempty"`
@@ -34,7 +34,7 @@ func message(domain string, v any) []byte {
 }
 func (t invocation) domain() string {
 	if t.Purpose == statusPurpose {
-		return "locklark/status-ticket/v1\x00"
+		return "passme/status-ticket/v1\x00"
 	}
 	return invokeDomain
 }

@@ -12,7 +12,7 @@ import (
 // representation of that explicit choice, while tiny positive values and
 // intervals above the bound remain refused so a typo cannot disable auto-lock.
 func TestSessionIdleSupportsExplicitNever(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "idle.ll")
+	path := filepath.Join(t.TempDir(), "idle.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestSessionIdleSupportsExplicitNever(t *testing.T) {
 }
 
 func TestSessionSetIdleTimeoutAppliesToLiveSession(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "idle-live.ll")
+	path := filepath.Join(t.TempDir(), "idle-live.pm")
 	key := bytes.Repeat([]byte{8}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)

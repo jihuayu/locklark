@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 const (

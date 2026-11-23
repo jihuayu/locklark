@@ -36,7 +36,7 @@ const BUILD_SOURCE_FILES = [
 ];
 
 function createBuildFixture() {
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "locklark-popup-build-"));
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "passme-popup-build-"));
   const buildRoot = path.join(fixture, "browser-extension");
   try {
     fs.mkdirSync(buildRoot, { mode: 0o700 });
@@ -528,7 +528,7 @@ test("rich icons and diagnostics stay bounded to the current site", () => {
   assert.match(popupJS, /preferredFillURL/);
   assert.match(popupJS, /sign-\?in/);
   assert.match(optionsHTML, /id="diagnostics-export"/);
-  assert.match(optionsJS, /locklark-diagnostics\.json/);
+  assert.match(optionsJS, /passme-diagnostics\.json/);
   assert.match(backgroundJS, /async function diagnosticsSnapshot/);
 });
 
@@ -565,7 +565,7 @@ test("native host guidance is actionable from popup and options", () => {
   ])
     assert.match(popupHTML, new RegExp(`id="${id}"`));
   assert.match(popupJS, /renderNativeGuidance/);
-  assert.match(popupJS, /locklark-browser-register --browser chromium/);
+  assert.match(popupJS, /passme-browser-register --browser chromium/);
   assert.match(popupJS, /native-unlock/);
   for (const id of ["native-heading", "native-status", "native-refresh", "native-connect", "native-unlock", "native-detail"])
     assert.match(optionsHTML, new RegExp(`id="${id}"`));

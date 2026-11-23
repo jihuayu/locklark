@@ -1,4 +1,4 @@
-module github.com/jihuayu/locklark
+module github.com/jihuayu/passme
 
 go 1.27.3
 

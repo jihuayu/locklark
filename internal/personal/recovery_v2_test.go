@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -35,7 +35,7 @@ func recoveryV2Session(t *testing.T, path, pw string, key []byte) *Session {
 
 func TestRecoveryRoundTripPreservesV2AttachmentBytes(t *testing.T) {
 	dir := t.TempDir()
-	src, archive, restored := filepath.Join(dir, "source.ll"), filepath.Join(dir, "backup.llb"), filepath.Join(dir, "restored.ll")
+	src, archive, restored := filepath.Join(dir, "source.pm"), filepath.Join(dir, "backup.pmb"), filepath.Join(dir, "restored.pm")
 	pw, key, fresh := "synthetic-recovery-attachment", bytes.Repeat([]byte{0x31}, 16), bytes.Repeat([]byte{0x32}, 16)
 	s := recoveryV2Session(t, src, pw, key)
 
@@ -101,7 +101,7 @@ func TestRecoveryRoundTripPreservesV2AttachmentBytes(t *testing.T) {
 
 func TestRecoveryRoundTripPreservesCustomSubVaults(t *testing.T) {
 	dir := t.TempDir()
-	src, archive, restored := filepath.Join(dir, "source.ll"), filepath.Join(dir, "backup.llb"), filepath.Join(dir, "restored.ll")
+	src, archive, restored := filepath.Join(dir, "source.pm"), filepath.Join(dir, "backup.pmb"), filepath.Join(dir, "restored.pm")
 	pw, key, fresh := "synthetic-recovery-vault", bytes.Repeat([]byte{0x41}, 16), bytes.Repeat([]byte{0x42}, 16)
 	s := recoveryV2Session(t, src, pw, key)
 	sub, err := s.CreateVault("Synthetic Lab", "isolated sub-vault", "lab", v2Gate(t, s))
@@ -202,7 +202,7 @@ func rewriteRecoveryArchive(t *testing.T, path, kit, pw string, key []byte, i id
 
 func TestRecoveryRejectsDroppedOrAlteredBackupAttachments(t *testing.T) {
 	dir := t.TempDir()
-	src, archive := filepath.Join(dir, "source.ll"), filepath.Join(dir, "backup.llb")
+	src, archive := filepath.Join(dir, "source.pm"), filepath.Join(dir, "backup.pmb")
 	pw, key, fresh := "synthetic-recovery-tamper", bytes.Repeat([]byte{0x51}, 16), bytes.Repeat([]byte{0x52}, 16)
 	s := recoveryV2Session(t, src, pw, key)
 	content := []byte{0x00, 0x10, 0x20, 0xff, 0x7f, 0x41}
@@ -250,9 +250,9 @@ func TestRecoveryRejectsDroppedOrAlteredBackupAttachments(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.mutate(p)
-			forged := filepath.Join(t.TempDir(), "forged.llb")
+			forged := filepath.Join(t.TempDir(), "forged.pmb")
 			forgedKit := rewriteRecoveryArchive(t, forged, kit, pw, key, i, *p)
-			dest := filepath.Join(t.TempDir(), "restored.ll")
+			dest := filepath.Join(t.TempDir(), "restored.pm")
 			if err = Restore(forged, dest, pw, key, forgedKit, fresh); err == nil {
 				t.Fatal("accepted a re-signed backup with inconsistent attachment metadata")
 			}
@@ -315,7 +315,7 @@ type legacySignedBackup struct {
 
 func TestRecoveryStillRestoresPre99ArchiveShape(t *testing.T) {
 	dir := t.TempDir()
-	src, archive, restored := filepath.Join(dir, "source.ll"), filepath.Join(dir, "backup.llb"), filepath.Join(dir, "restored.ll")
+	src, archive, restored := filepath.Join(dir, "source.pm"), filepath.Join(dir, "backup.pmb"), filepath.Join(dir, "restored.pm")
 	pw, key, fresh := "synthetic-recovery-legacy", bytes.Repeat([]byte{0x61}, 16), bytes.Repeat([]byte{0x62}, 16)
 	s := recoveryV2Session(t, src, pw, key)
 	id, _, err := s.AddItem(vault.Item{
@@ -374,7 +374,7 @@ func TestRecoveryStillRestoresPre99ArchiveShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyPath := filepath.Join(dir, "legacy.llb")
+	legacyPath := filepath.Join(dir, "legacy.pmb")
 	if err = os.WriteFile(legacyPath, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +393,7 @@ func TestRecoveryStillRestoresPre99ArchiveShape(t *testing.T) {
 // pre-#99 signed payload shape, without Vaults or attachment records.
 func pre99Archive(t *testing.T, src, pw string, key []byte, mutate func(*payload)) (string, string) {
 	t.Helper()
-	archive := filepath.Join(t.TempDir(), "pre99.llb")
+	archive := filepath.Join(t.TempDir(), "pre99.pmb")
 	kit, err := Backup(src, archive, pw, key)
 	if err != nil {
 		t.Fatal(err)
@@ -444,7 +444,7 @@ func pre99Archive(t *testing.T, src, pw string, key []byte, mutate func(*payload
 
 func TestRecoveryRejectsItemsReferencingMissingSubVault(t *testing.T) {
 	dir := t.TempDir()
-	src := filepath.Join(dir, "source.ll")
+	src := filepath.Join(dir, "source.pm")
 	pw, key := "synthetic-recovery-orphan", bytes.Repeat([]byte{0x72}, 16)
 	s := recoveryV2Session(t, src, pw, key)
 	sub, err := s.CreateVault("Synthetic Orphan", "", "", v2Gate(t, s))
@@ -475,7 +475,7 @@ func TestRecoveryRejectsItemsReferencingMissingSubVault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(dir, "restored.ll")
+	dest := filepath.Join(dir, "restored.pm")
 	if _, err = PrepareRestore(archive, dest, pw, key, kit); !errors.Is(err, ErrBackupMissingSubVault) {
 		t.Fatalf("orphan sub-vault reference was not refused explicitly: %v", err)
 	}
@@ -519,7 +519,7 @@ func seedRecoverySource(t *testing.T, src, pw string, key []byte) (id string, er
 // encodeArchive path the writer uses.
 func currentFormatArchive(t *testing.T, src, pw string, key []byte, mutate func(*payload)) (string, string) {
 	t.Helper()
-	archive := filepath.Join(t.TempDir(), "current.llb")
+	archive := filepath.Join(t.TempDir(), "current.pmb")
 	kit, err := Backup(src, archive, pw, key)
 	if err != nil {
 		t.Fatal(err)
@@ -541,7 +541,7 @@ func currentFormatArchive(t *testing.T, src, pw string, key []byte, mutate func(
 
 func TestRecoveryVaultRefsMatchRuntimeExactIDs(t *testing.T) {
 	dir := t.TempDir()
-	src := filepath.Join(dir, "source.ll")
+	src := filepath.Join(dir, "source.pm")
 	pw, key, fresh := "synthetic-recovery-case", bytes.Repeat([]byte{0x74}, 16), bytes.Repeat([]byte{0x75}, 16)
 	id, err := seedRecoverySource(t, src, pw, key)
 	if err != nil {
@@ -580,7 +580,7 @@ func TestRecoveryVaultRefsMatchRuntimeExactIDs(t *testing.T) {
 	// Exact-case metadata and reference restore and stay editable through the
 	// same vaultExists rule.
 	archive, kit = sign(upper)
-	restored := filepath.Join(dir, "case-ok.ll")
+	restored := filepath.Join(dir, "case-ok.pm")
 	if err = Restore(archive, restored, pw, key, kit, fresh); err != nil {
 		t.Fatalf("exact-case sub-vault reference was refused: %v", err)
 	}

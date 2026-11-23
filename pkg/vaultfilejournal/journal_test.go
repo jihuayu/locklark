@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 func openAt(t *testing.T, dir string) *Journal {

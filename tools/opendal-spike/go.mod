@@ -1,4 +1,4 @@
-module github.com/locklark/locklark/tools/opendal-spike
+module github.com/passme/passme/tools/opendal-spike
 
 go 1.22.4
 

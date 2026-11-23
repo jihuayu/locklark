@@ -45,7 +45,7 @@ func (f *fakeRangeLookup) prefixes() []string {
 
 func watchtowerFixture(t *testing.T) (string, []byte, *Session) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "watchtower.ll")
+	path := filepath.Join(t.TempDir(), "watchtower.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)

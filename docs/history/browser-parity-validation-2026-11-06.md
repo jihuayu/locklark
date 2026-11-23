@@ -5,7 +5,7 @@
 This development change adds inline password selection, opt-in quick native
 pairing, configurable automatic submission, and software Passkey creation and
 assertion. It is **not complete 1Password parity**. Chrome/Edge share the Chromium
-build; an actual Edge run is still required before claiming Edge validation. Remaining work is tracked in [issue #39](https://github.com/jihuayu/locklark/issues/39).
+build; an actual Edge run is still required before claiming Edge validation. Remaining work is tracked in [issue #39](https://github.com/jihuayu/passme/issues/39).
 
 The behavior references are 1Password's public [save and fill](https://support.1password.com/save-fill-passwords/),
 [Passkey](https://support.1password.com/save-use-passkeys/), and
@@ -70,10 +70,10 @@ Permissions Policy checks intentionally preserve the current boundary.
   creation, verified assertion and AbortSignal. The relying-party verifier uses
   the returned public key to check the signature independently.
 
-The native UI script accepts `LOCKLARK_TEST_BROWSER_PARITY=1` to run this new
+The native UI script accepts `PASSME_TEST_BROWSER_PARITY=1` to run this new
 journey independently of the longer legacy save/OTP scenarios. It still uses the
 actual product binary and native UI; there is no test approval flag. Optional
-`LOCKLARK_TEST_WEBAUTHN_SERVER` points to an installed `@simplewebauthn/server`
+`PASSME_TEST_WEBAUTHN_SERVER` points to an installed `@simplewebauthn/server`
 package for independent CBOR/COSE and WebAuthn registration/assertion validation.
 Test dependencies and synthetic vaults belong in temporary private directories.
 

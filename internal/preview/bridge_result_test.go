@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 )
 
 func TestBridgeCollectRequiresOriginalRecipient(t *testing.T) {

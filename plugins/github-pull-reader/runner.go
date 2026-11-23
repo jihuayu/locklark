@@ -28,7 +28,7 @@ func Propose(ctx context.Context, bun, repo string, number int) ([]byte, error) 
 	if !filepath.IsAbs(bun) {
 		return nil, bad
 	}
-	dir, e := os.MkdirTemp("", "locklark-builtin-")
+	dir, e := os.MkdirTemp("", "passme-builtin-")
 	if e != nil {
 		return nil, bad
 	}

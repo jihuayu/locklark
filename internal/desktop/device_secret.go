@@ -11,15 +11,15 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 )
 
 const (
-	deviceSecretService      = "app.locklark.device-secret-key.v1"
+	deviceSecretService      = "app.passme.device-secret-key.v1"
 	forgetDeviceStatError    = "无法确认金库文件状态；已取消退出当前设备，未删除任何凭据。"
-	forgetDeviceCleanupError = "退出当前设备未完成；本地凭据可能已部分移除，金库绑定仍保留，请检查权限后重试。磁盘上的 .ll 金库文件未被删除。"
+	forgetDeviceCleanupError = "退出当前设备未完成；本地凭据可能已部分移除，金库绑定仍保留，请检查权限后重试。磁盘上的 .pm 金库文件未被删除。"
 )
 
 // statVaultFile is a test seam for filesystem status failures. Only an
@@ -61,7 +61,7 @@ func deviceSecretKey(path string) string {
 		normalized = strings.ToLower(normalized)
 	}
 	sum := sha256.Sum256([]byte(normalized))
-	return "locklark-secret-key/" + stringHex(sum[:])
+	return "passme-secret-key/" + stringHex(sum[:])
 }
 
 func stringHex(value []byte) string {
@@ -154,7 +154,7 @@ func nextAvailableVaultPath(defaultPath string) string {
 	dir := filepath.Dir(trimmed)
 	ext := filepath.Ext(trimmed)
 	if ext == "" {
-		ext = ".ll"
+		ext = ".pm"
 	}
 	stem := strings.TrimSuffix(filepath.Base(trimmed), ext)
 	for i := 2; i <= 100; i++ {
@@ -168,7 +168,7 @@ func nextAvailableVaultPath(defaultPath string) string {
 
 // forgetCurrentDevice unbinds this device after a two-step confirmation by
 // removing quick unlock, the device Secret Key (if present), and VaultPath
-// binding. The .ll vault file on disk is never deleted.
+// binding. The .pm vault file on disk is never deleted.
 func (a *App) forgetCurrentDevice() {
 	if a.busy {
 		return
@@ -189,7 +189,7 @@ func (a *App) forgetCurrentDevice() {
 		// Cleanup is ordered and intentionally not transactional. Remove quick
 		// unlock first, then the device Secret Key, then the persisted binding.
 		// This keeps the UI bound on every failure and preserves the local
-		// Secret Key when quick-unlock removal fails. The .ll file is never touched.
+		// Secret Key when quick-unlock removal fails. The .pm file is never touched.
 		if sysStore != nil {
 			// An already-absent quick-unlock item is a successful removal.
 			if err := personal.DisableSystemUnlock(path, sysStore); err != nil && !errors.Is(err, osunlock.ErrNotFound) {
@@ -221,20 +221,20 @@ func (a *App) forgetCurrentDevice() {
 			a.showSecretFallback = false
 			a.onboarding = true
 			a.create = false
-			a.status = "已退出当前设备；磁盘上的 .ll 金库文件已完整保留"
+			a.status = "已退出当前设备；磁盘上的 .pm 金库文件已完整保留"
 		}}
 	})
 }
 
 func (a *App) forgetDeviceConfirmView(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).FillWidth().Border(1, t.Danger.Alpha(.45)).Radius(t.Radius*1.25).Background(t.Danger.Alpha(.06)).
+	ui.Column(c).FillWidth().Border(1, t.Danger.Alpha(.45)).Radius(t.Radius * 1.25).Background(t.Danger.Alpha(.06)).
 		Padding(t.Space(3.5)).Gap(t.Space(2.5)).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
 			oneui.Text(c, "退出当前设备？").Bold().TextColor(t.Danger).Grow(1)
-			onevraPill(c, "保留 .ll 文件", t.Warning)
+			onevraPill(c, "保留 .pm 文件", t.Warning)
 		})
-		oneui.Text(c, "确认后会移除此设备保存的 Secret Key、停用系统快捷解锁，并解除当前设备与该金库路径的绑定；磁盘上的 .ll 金库文件不会被删除。重新绑定此金库时需使用主密码与应急文件中的 Secret Key。").
+		oneui.Text(c, "确认后会移除此设备保存的 Secret Key、停用系统快捷解锁，并解除当前设备与该金库路径的绑定；磁盘上的 .pm 金库文件不会被删除。重新绑定此金库时需使用主密码与应急文件中的 Secret Key。").
 			FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
 		ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
 			oneui.Button(c, "确认退出当前设备", oneui.ButtonOutline).

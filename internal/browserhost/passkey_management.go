@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // BrowserPasskey is the public metadata projection attached to popup list and

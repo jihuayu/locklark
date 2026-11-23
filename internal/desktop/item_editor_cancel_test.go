@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // openEditorFixture adds one real login through the unlocked session, selects

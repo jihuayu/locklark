@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func TestSSHStateMutationCancelsOutputInsideSessionArbitration(t *testing.T) {

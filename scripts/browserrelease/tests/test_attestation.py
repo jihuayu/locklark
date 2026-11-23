@@ -241,7 +241,7 @@ class AttestationTests(unittest.TestCase):
     def test_rejects_duplicate_and_case_alias_fields(self):
         document = json.loads(self.attestation_path.read_text(encoding="utf-8"))
         encoded = json.dumps(document)
-        duplicate = encoded[:-1] + ',"repo":"jihuayu/locklark"}'
+        duplicate = encoded[:-1] + ',"repo":"jihuayu/passme"}'
         self.attestation_path.write_text(duplicate, encoding="utf-8")
         self.assert_refused(message="duplicate")
 
@@ -263,7 +263,7 @@ class AttestationTests(unittest.TestCase):
 
     def test_rejects_invalid_schema_repository_and_product(self):
         for field, value, message in (
-            ("schema", "locklark-browser-release-attestation/v2", "schema"),
+            ("schema", "passme-browser-release-attestation/v2", "schema"),
             ("repo", "someone/else", "repository"),
             ("product", "edge", "product"),
         ):
@@ -485,9 +485,9 @@ class AttestationTests(unittest.TestCase):
 
     def test_canonical_bytes_are_domain_separated_and_field_ordered(self):
         encoded = attestation.canonical_bytes(self.payload)
-        self.assertTrue(encoded.startswith(b"locklark-browser-release-attestation/v1\n"))
+        self.assertTrue(encoded.startswith(b"passme-browser-release-attestation/v1\n"))
         self.assertEqual(encoded.count(b"\n"), 7)
-        self.assertIn(b"repo=jihuayu/locklark\n", encoded)
+        self.assertIn(b"repo=jihuayu/passme\n", encoded)
         self.assertNotIn(b"signature=", encoded)
         changed = dict(self.payload)
         changed["version"] = "0.2.0"

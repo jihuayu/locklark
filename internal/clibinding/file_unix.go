@@ -100,7 +100,7 @@ func writePrivateBindingFile(path string, data []byte) error {
 		if suffixErr != nil {
 			return suffixErr
 		}
-		temp = filepath.Join(dir, ".locklark-cli-"+suffix+".tmp")
+		temp = filepath.Join(dir, ".passme-cli-"+suffix+".tmp")
 		file, err = os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
 		if errors.Is(err, os.ErrExist) {
 			continue

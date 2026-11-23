@@ -230,7 +230,7 @@ func renderFile(file FileSpec, known map[string]Slot, slots map[string][]byte, r
 	case file.Format == "git-askpass-secret-v1":
 		return renderAskpassSecret(slots)
 	case file.Format == "git-askpass-helper-v1":
-		return []byte("#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$LOCKLARK_GIT_SECRET_FILE\" ;;\nesac\n"), nil
+		return []byte("#!/bin/sh\ncase \"$1\" in\n*Username*|*username*) sed -n '1p' \"$PASSME_GIT_SECRET_FILE\" ;;\n*) sed -n '2p' \"$PASSME_GIT_SECRET_FILE\" ;;\nesac\n"), nil
 	case file.Format == "git-credentials-v1":
 		return renderGitCredentials(slots)
 	case file.Format == "git-config-store-v1":

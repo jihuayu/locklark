@@ -3,7 +3,7 @@ package passkeytransfer
 import (
 	"encoding/base64"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 // validateRevision accepts only the canonical opaque revision digest: exactly

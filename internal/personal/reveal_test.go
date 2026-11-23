@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -21,7 +21,7 @@ func (f disclosureWriter) Write(p []byte) (int, error) { return f(p) }
 
 func revealFixture(t *testing.T) (string, []byte, RevealTarget) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "owner.ll")
+	path := filepath.Join(t.TempDir(), "owner.pm")
 	key := bytes.Repeat([]byte{4}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestRevealConcurrentEditAndRecovery(t *testing.T) {
 	if _, err = RevealLogin(path, "fixture", key, target, &output); err != nil || output.String() != "\"fixture-user\"\r\n" {
 		t.Fatal("username not disclosed", err)
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	backup, err := PrepareBackup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +163,7 @@ func TestRevealConcurrentEditAndRecovery(t *testing.T) {
 	if err = backup.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	recovery, err := PrepareRestore(archive, restored, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)

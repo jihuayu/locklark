@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // cliRunPreparedProof retains the exact callback-owned prepared map and its

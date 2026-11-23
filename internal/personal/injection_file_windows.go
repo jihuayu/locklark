@@ -26,7 +26,7 @@ func createInjectionTemp(dir string) (*os.File, error) {
 		if err != nil {
 			return nil, err
 		}
-		path := filepath.Join(dir, ".locklark-inject-"+id)
+		path := filepath.Join(dir, ".passme-inject-"+id)
 		name, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			return nil, err

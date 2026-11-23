@@ -310,7 +310,7 @@ def record(line):
     return json.loads(line[len(desktop.OTP_DIAGNOSTIC_PREFIX):])
 
 
-PRIVATE = ("Synthetic-Private-OTP-19384756-SeedJBSWY3DPEHPK3PXP-Locklark · 本地金库")
+PRIVATE = ("Synthetic-Private-OTP-19384756-SeedJBSWY3DPEHPK3PXP-Passme · 本地金库")
 UNAVAILABLE = {"copy_window_delta":"unavailable", "failure_window_delta":"unavailable",
                "clipboard_empty":"unavailable"}
 
@@ -892,7 +892,7 @@ class ForeignObservationWriteIsolationTests(unittest.TestCase):
 
     def test_ownership_write_failure_on_success_keeps_exit_zero(self):
         # The write is best-effort; it never turns success into failure.
-        environment = {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}
+        environment = {"PASSME_TEST_SCENARIO": "foreign-owner"}
         acceptance = self.acceptance()
         acceptance.foreign_lock_case = Mock()
         with patch("builtins.print") as output, self.only_ownership_open_fails(), \

@@ -47,7 +47,7 @@ class CliSmokeFailureTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX executable bit is not portable to Windows")
     def test_non_executable_file_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            candidate = pathlib.Path(directory) / "locklark"
+            candidate = pathlib.Path(directory) / "passme"
             candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             candidate.chmod(0o600)
             result, stderr = self.invoke("--cli", str(candidate))
@@ -57,11 +57,11 @@ class CliSmokeFailureTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX executable bit is not portable to Windows")
     def test_nonzero_command_failure_does_not_echo_child_output(self):
         with tempfile.TemporaryDirectory() as directory:
-            candidate = pathlib.Path(directory) / "locklark"
+            candidate = pathlib.Path(directory) / "passme"
             candidate.write_text(
                 "#!/bin/sh\n"
                 "if [ \"$1\" = \"--help\" ]; then\n"
-                "  printf 'Locklark help\\n'\n"
+                "  printf 'Passme help\\n'\n"
                 "  exit 0\n"
                 "fi\n"
                 "printf 'private child output\\n' >&2\n"
@@ -83,7 +83,7 @@ class CliSmokeOutputFailureTests(unittest.TestCase):
     """
 
     def cli(self, directory: str, script: str) -> pathlib.Path:
-        candidate = pathlib.Path(directory) / "locklark"
+        candidate = pathlib.Path(directory) / "passme"
         candidate.write_text("#!/bin/sh\n" + script, encoding="utf-8")
         candidate.chmod(0o700)
         return candidate
@@ -100,7 +100,7 @@ class CliSmokeOutputFailureTests(unittest.TestCase):
 
     def test_directory_cli_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            candidate = pathlib.Path(directory) / "locklark"
+            candidate = pathlib.Path(directory) / "passme"
             candidate.mkdir()
             candidate.chmod(0o700)
             completed = self.run_smoke(candidate)
@@ -119,7 +119,7 @@ class CliSmokeOutputFailureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             candidate = self.cli(
                 directory,
-                "if [ \"$1\" = \"--help\" ]; then printf 'Locklark help\\n'; exit 0; fi\n"
+                "if [ \"$1\" = \"--help\" ]; then printf 'Passme help\\n'; exit 0; fi\n"
                 "printf 'not-json-private\\n'\n",
             )
             completed = self.run_smoke(candidate)
@@ -138,7 +138,7 @@ class CliSmokeOutputFailureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             candidate = self.cli(
                 directory,
-                "if [ \"$1\" = \"--help\" ]; then printf 'Locklark help\\n'; exit 0; fi\n"
+                "if [ \"$1\" = \"--help\" ]; then printf 'Passme help\\n'; exit 0; fi\n"
                 "if [ \"$1\" = \"demo\" ]; then\n"
                 f"  printf '%s\\n' '{json.dumps({'epochs': [1, 2, 3], 'synthetic': True})}'\n"
                 "  exit 0\n"

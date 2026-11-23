@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 

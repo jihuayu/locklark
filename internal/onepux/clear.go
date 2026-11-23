@@ -1,6 +1,6 @@
 package onepux
 
-import "github.com/jihuayu/locklark/internal/vault"
+import "github.com/jihuayu/passme/internal/vault"
 
 // releaseMappedItems wipes items the mapper still owns after a failure, then
 // resets the result to an empty mapping. Ownership only transfers on a

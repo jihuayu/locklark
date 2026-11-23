@@ -32,7 +32,7 @@ func newPrivateRoot() (string, error) {
 	if _, err = rand.Read(value[:]); err != nil {
 		return "", err
 	}
-	path := filepath.Join(parent, "locklark-run-cli-acceptance-"+hex.EncodeToString(value[:]))
+	path := filepath.Join(parent, "passme-run-cli-acceptance-"+hex.EncodeToString(value[:]))
 	wide, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return "", err
@@ -58,7 +58,7 @@ func privateRoot(root string) error {
 	return privateRootAt(root, parent)
 }
 func privateRootAt(root, parent string) error {
-	if !filepath.IsAbs(root) || !filepath.IsAbs(parent) || filepath.Clean(root) != root || filepath.Clean(parent) != parent || filepath.Dir(root) != parent || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-acceptance-") {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(parent) || filepath.Clean(root) != root || filepath.Clean(parent) != parent || filepath.Dir(root) != parent || !strings.HasPrefix(filepath.Base(root), "passme-run-cli-acceptance-") {
 		return privatePolicyError("known-folder-parent")
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

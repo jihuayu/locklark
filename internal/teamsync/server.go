@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 type server struct {

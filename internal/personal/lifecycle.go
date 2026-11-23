@@ -2,7 +2,7 @@ package personal
 
 import (
 	"errors"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrAlreadyArchived = errors.New("login is already archived")

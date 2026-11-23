@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // basePlan has distinct, valid values in every bound field.
@@ -20,7 +20,7 @@ func basePlan() CreationPlan {
 		pdig[i] = byte(0x80 + i)
 	}
 	return CreationPlan{
-		GenesisBytes: []byte("locklark-creation-plan-vector-genesis\n"),
+		GenesisBytes: []byte("passme-creation-plan-vector-genesis\n"),
 		RootPin: vaultfile.PolicyCheckpoint{
 			VaultID:            "vault:01j0vector",
 			OwnerRootKeyID:     "owner-root.0",
@@ -57,8 +57,8 @@ func TestCreationPlanDigestFixedVector(t *testing.T) {
 	// The expected digest was computed independently, outside this package
 	// (a separate SHA-256 implementation fed struct-packed fields), over:
 	//
-	//   "locklark.vault-creation-plan/v1" || 0x00
-	//   || u32be(38) || "locklark-creation-plan-vector-genesis\n"
+	//   "passme.vault-creation-plan/v1" || 0x00
+	//   || u32be(38) || "passme-creation-plan-vector-genesis\n"
 	//   || u32be(16) || "vault:01j0vector"
 	//   || u32be(12) || "owner-root.0"
 	//   || 0x20,0x21,...,0x3f                          (32 raw bytes)
@@ -67,9 +67,9 @@ func TestCreationPlanDigestFixedVector(t *testing.T) {
 	//   || u32be(44) || "objectstore://tenant-7/region-eu-1/bucket/v1"
 	//   || u32be(10) || "team-notes"
 	//   || u32be(10) || "Team Notes"
-	const want = "8cb18ede1a2b4c9a2591ef34d51353a327570aa2eab23b373a63c632e56b6ca6"
+	const want = "0ffcf903478d11792d19500148368ab521cc3858a0ed9ba3cc7c12441fe5bd74"
 	plan := basePlan()
-	if got := hex.EncodeToString(plan.GenesisBytes); got != hex.EncodeToString([]byte("locklark-creation-plan-vector-genesis\n")) || len(plan.BackendLocator) != 44 {
+	if got := hex.EncodeToString(plan.GenesisBytes); got != hex.EncodeToString([]byte("passme-creation-plan-vector-genesis\n")) || len(plan.BackendLocator) != 44 {
 		t.Fatalf("vector plan drifted: genesis %d bytes, locator %d bytes", len(plan.GenesisBytes), len(plan.BackendLocator))
 	}
 	d := mustPlanDigest(t, plan)

@@ -13,9 +13,9 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
 )
 
 // Sentinel errors classify the failure of UpdateWorkingItems; callers test them

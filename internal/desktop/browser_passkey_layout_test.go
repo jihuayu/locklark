@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // desktopCreateReviewFixture extends the two-credential fixture with a pending
@@ -106,7 +106,7 @@ func TestNativePasskeyCreateChoiceClickableInDefaultWindow(t *testing.T) {
 func TestNativePasskeyChoicePanelScrollsWithCancelPinned(t *testing.T) {
 	view := browserhost.PasskeyView{
 		ID: strings.Repeat("b", 32), Create: true,
-		Origin: "https://login.locklark.test", RPID: "login.locklark.test", Username: "passkey-test",
+		Origin: "https://login.passme.test", RPID: "login.passme.test", Username: "passkey-test",
 	}
 	for n := 0; n < 50; n++ {
 		view.Choices = append(view.Choices, personal.PasskeyChoice{

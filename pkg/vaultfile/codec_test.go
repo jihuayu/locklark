@@ -192,7 +192,7 @@ func TestStrictJSON(t *testing.T) {
 		{"trailing garbage", append(append([]byte{}, enc...), []byte(` x`)...), CodeTrailingData},
 		{"leading junk", append([]byte(`x`), enc...), CodeInvalidJSON},
 		{"unknown top-level", []byte(strings.Replace(string(enc), `"format":`, `"extra":1,"format":`, 1)), CodeUnknownField},
-		{"duplicate top-level", []byte(strings.Replace(string(enc), `"format":`, `"format":"locklark.vault-file","format":`, 1)), CodeDuplicateField},
+		{"duplicate top-level", []byte(strings.Replace(string(enc), `"format":`, `"format":"passme.vault-file","format":`, 1)), CodeDuplicateField},
 		{"unknown nested", []byte(strings.Replace(string(enc), `"vault_id":`, `"nope":1,"vault_id":`, 1)), CodeUnknownField},
 		{"duplicate nested", []byte(strings.Replace(string(enc), `"vault_id":`, `"vault_id":"vault-01","vault_id":`, 1)), CodeDuplicateField},
 		{"missing member", []byte(strings.Replace(string(enc), `,"op_id":"op-0042"`, ``, 1)), CodeMissingField},
@@ -307,7 +307,7 @@ func TestPolicyDocumentBinding(t *testing.T) {
 	wantCode(t, err, CodePolicyMismatch)
 
 	f = buildFile(t)
-	rebindProof(f, []byte(`{"format":"locklark.vault-file","version":1}`), "owner-root-01", PolicySigAlgEd25519)
+	rebindProof(f, []byte(`{"format":"passme.vault-file","version":1}`), "owner-root-01", PolicySigAlgEd25519)
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeMissingField)
 

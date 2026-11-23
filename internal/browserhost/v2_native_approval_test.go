@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // nonQuickFixture is a real manual pairing: the owner approved the extension
@@ -18,7 +18,7 @@ import (
 // the native approval surface.
 func nonQuickFixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "approval.ll")
+	path := filepath.Join(t.TempDir(), "approval.pm")
 	key := bytes.Repeat([]byte{11}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

@@ -19,8 +19,8 @@ import native_acceptance_contract as contract
 LABEL = "确认连接此扩展"
 OTHER_LABEL = "解锁"
 PRIVATE = "synthetic-private-canary-value"
-TITLE = "Locklark · 浏览器原生确认"
-EXE = "/opt/locklark/test-browser"
+TITLE = "Passme · 浏览器原生确认"
+EXE = "/opt/passme/test-browser"
 WINDOW = {"id": 0x200003, "pid": 4242, "title": TITLE, "executable": EXE, "trusted": True,
           "visible": True, "onscreen": True, "secure": False,
           "bounds": {"x": 100, "y": 100, "width": 800, "height": 600},
@@ -132,9 +132,9 @@ class RequestValidationTests(unittest.TestCase):
 
     def test_title_prefix_popup_form_and_preserve_focus(self):
         plan = contract.parse_request(json.dumps(
-            {"title_prefix": "Locklark acceptance", "actions": [{"key": "Escape"}],
+            {"title_prefix": "Passme acceptance", "actions": [{"key": "Escape"}],
              "preserve_focus": True}))
-        self.assertEqual(plan["title_prefix"], "Locklark acceptance")
+        self.assertEqual(plan["title_prefix"], "Passme acceptance")
         self.assertEqual(plan["actions"][0]["key"], ("Escape",))
 
     def test_exact_title_preserve_focus_is_a_read_only_observation(self):
@@ -159,7 +159,7 @@ class RequestValidationTests(unittest.TestCase):
         # read-only form. The refusal stays the fixed request-invalid guard.
         no_prompt = {"title": TITLE, "executable": EXE, "actions": [],
                      "inspect": True, "preserve_focus": True}
-        for change in ({"title": None, "title_prefix": "Locklark"},
+        for change in ({"title": None, "title_prefix": "Passme"},
                        {"title": None},
                        {"executable": None},
                        {"executable": "relative/browser"},
@@ -249,7 +249,7 @@ class RequestValidationTests(unittest.TestCase):
             {"title": TITLE, "executable": "relative/browser"},
             {"title": TITLE, "actions": "click"},
             {"title": TITLE, "inspect": "yes"},
-            {"title": TITLE, "title_prefix": "Locklark"},
+            {"title": TITLE, "title_prefix": "Passme"},
             {"actions": [{"click_label": LABEL}]},
         ]
         for document in cases:
@@ -350,7 +350,7 @@ class ActivationRequestTests(unittest.TestCase):
         self.assertEqual(contract.parse_request(activation(pid=2))["activation"]["pid"], 2)
 
     def test_executable_must_be_absolute_and_exact(self):
-        for executable in ("locklark-desktop", "", "/opt//locklark", None, ["/opt/x"]):
+        for executable in ("passme-desktop", "", "/opt//passme", None, ["/opt/x"]):
             with self.subTest(executable=executable):
                 with self.assertRaises(contract.ContractError) as error:
                     contract.parse_request(activation(executable=executable))
@@ -360,7 +360,7 @@ class ActivationRequestTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "activation-invalid")
 
     def test_title_action_inspect_and_window_fields_are_rejected(self):
-        extras = ({"title": TITLE}, {"title_prefix": "Locklark"},
+        extras = ({"title": TITLE}, {"title_prefix": "Passme"},
                   {"actions": [{"click_label": LABEL}]}, {"inspect": False},
                   {"wait_absent": True}, {"preserve_focus": True},
                   {"window": 0x200003}, {"value": PRIVATE})
@@ -723,9 +723,9 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result["clicks"][0]["evidence"], "posted")
 
     def test_preserve_focus_never_steals_focus(self):
-        adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")], focus=999)
+        adapter = SpyAdapter(windows=[dict(WINDOW, title="Passme acceptance popup")], focus=999)
         self.assert_refused(adapter, "preserve-focus-lost", title=None,
-                            title_prefix="Locklark acceptance", preserve_focus=True)
+                            title_prefix="Passme acceptance", preserve_focus=True)
         self.assertEqual(adapter.activations, 0)
 
     def test_capability_refusal_precedes_every_observation(self):
@@ -806,7 +806,7 @@ class ExecutableScopedDiscoveryTests(unittest.TestCase):
 
     def test_foreign_same_title_window_plus_target_selects_only_target(self):
         # The other process owns an exact-title window with its own PID and id.
-        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/passme")
         adapter = ChurningAdapter([[foreign], [foreign, dict(WINDOW)]])
         result = contract.execute(contract.parse_request(request()), adapter)
         self.assertEqual(result["window"], hex(WINDOW["id"]))
@@ -826,7 +826,7 @@ class ExecutableScopedDiscoveryTests(unittest.TestCase):
                 self.assertEqual(self.clicks(adapter), [])
 
     def test_wrong_executable_only_snapshot_is_absent_and_never_selected(self):
-        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/passme")
         adapter = ChurningAdapter([[foreign]])
         plan = contract.parse_request(request())
         with patch.object(contract, "DISCOVER_TIMEOUT", -1):
@@ -841,7 +841,7 @@ class ExecutableScopedDiscoveryTests(unittest.TestCase):
         self.assertEqual(adapter.activations, 0)
 
     def test_no_executable_request_keeps_title_only_ambiguity(self):
-        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/passme")
         adapter = SpyAdapter(windows=[dict(WINDOW), foreign])
         with self.assertRaises(contract.ContractError) as error:
             contract.execute(contract.parse_request(request(executable=None)), adapter)
@@ -1138,14 +1138,14 @@ class OutputSafetyTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, out)
 
     def test_success_output_contains_no_request_title_or_prefix(self):
-        adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")])
+        adapter = SpyAdapter(windows=[dict(WINDOW, title="Passme acceptance popup")])
         with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
             status, out, err = self.run_driver(
                 adapter,
-                request(title=None, title_prefix="Locklark acceptance").encode())
+                request(title=None, title_prefix="Passme acceptance").encode())
         self.assertEqual(status, 0, err)
         self.assertNotIn("title", json.loads(out))
-        self.assertNotIn("Locklark acceptance", out)
+        self.assertNotIn("Passme acceptance", out)
 
     def test_unknown_platform_name_in_failure_line_is_neutralised(self):
         line = contract.failure_line(contract.ContractError("request-invalid"), PRIVATE, PRIVATE, PRIVATE)

@@ -8,9 +8,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/totp"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/totp"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/ssh"
 )
@@ -385,7 +385,7 @@ func validVaultMeta(v vault.VaultMeta) bool {
 }
 
 var vaultsKey = []byte("vaults-v2")
-var vaultsLabel = []byte("locklark/personal/vaults/v2\x00")
+var vaultsLabel = []byte("passme/personal/vaults/v2\x00")
 
 func loadVaults(b *bolt.Bucket, i identity) ([]vault.VaultMeta, error) {
 	raw := b.Get(vaultsKey)
@@ -697,8 +697,8 @@ func itemSubtitle(it vault.Item) string {
 }
 
 const (
-	internalMetaSectionID = "_locklark_meta"
-	internalIconFieldID   = "_locklark_icon"
+	internalMetaSectionID = "_passme_meta"
+	internalIconFieldID   = "_passme_icon"
 	maxCustomIconBytes    = 32768
 )
 

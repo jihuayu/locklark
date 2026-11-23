@@ -18,7 +18,7 @@ const (
 	// exporterLabel is the package-specific RFC 5705 / RFC 8446 exporter
 	// label. Exported keying material from this package must never be reused
 	// with a different label.
-	exporterLabel = "EXPORTER-LockLark-Remote-Unlock-Channel-Binding-v1"
+	exporterLabel = "EXPORTER-Passme-Remote-Unlock-Channel-Binding-v1"
 
 	// ChannelBindingSize is the fixed length, in bytes, of a channel binding.
 	ChannelBindingSize = 32

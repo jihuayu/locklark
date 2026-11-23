@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestConnectionMetadataRefusalKeepsPairing(t *testing.T) {
@@ -74,7 +74,7 @@ func (b *memoryPipe) responses(t *testing.T) []Response {
 func reqID(n int) string { return fmt.Sprintf("%032x", n) }
 func paired(t *testing.T) (*Connection, *personal.Session, *memoryPipe, Request) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "host.ll")
+	path := filepath.Join(t.TempDir(), "host.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -321,7 +321,7 @@ func TestConnectionSlowWriteLockIsImmediate(t *testing.T) {
 // losing its pipe must revoke only that connection, never request a lock on the
 // owner's shared *personal.Session.
 func TestSharedConnectionCloseDoesNotLockDesktopSession(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "shared-close.ll")
+	path := filepath.Join(t.TempDir(), "shared-close.pm")
 	key := bytes.Repeat([]byte{6}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -351,7 +351,7 @@ func (failingPipe) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 func (failingPipe) Close() error              { return nil }
 
 func TestSharedPipeFailureDoesNotLockDesktopSession(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "shared-write.ll")
+	path := filepath.Join(t.TempDir(), "shared-write.pm")
 	key := bytes.Repeat([]byte{8}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -379,7 +379,7 @@ func TestSharedPipeFailureDoesNotLockDesktopSession(t *testing.T) {
 // capability. An unauthenticated frame must not even reach the native lock
 // callback.
 func TestUnauthenticatedLockIsRefused(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lock-cap.ll")
+	path := filepath.Join(t.TempDir(), "lock-cap.pm")
 	key := bytes.Repeat([]byte{10}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -422,7 +422,7 @@ func TestUnauthenticatedLockIsRefused(t *testing.T) {
 // asynchronous App/UI lock dispatch runs. Disconnect and pipe failure paths
 // remain per-connection and are covered separately.
 func TestAuthenticatedLockBlocksOtherSharedConnectionsBeforeDispatch(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "shared-lock.ll")
+	path := filepath.Join(t.TempDir(), "shared-lock.pm")
 	key := bytes.Repeat([]byte{12}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -492,7 +492,7 @@ func TestAuthenticatedLockBlocksOtherSharedConnectionsBeforeDispatch(t *testing.
 // connection must not silently reissue a quick capability; only a fresh native
 // approval can do that.
 func TestBrokeredLockRevokesPairingConsentUntilFreshApproval(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consent.ll")
+	path := filepath.Join(t.TempDir(), "consent.pm")
 	key := bytes.Repeat([]byte{14}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -634,7 +634,7 @@ func waitPaired(t *testing.T, c *Connection) {
 // slot and its deadline are created by production code alone.
 func pairFixture(t *testing.T, b *Broker, now *time.Time) (*Connection, *memoryPipe, *personal.Session) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "late-pair.ll")
+	path := filepath.Join(t.TempDir(), "late-pair.pm")
 	key := bytes.Repeat([]byte{16}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -749,7 +749,7 @@ func TestBrokeredLateApprovalAfterHelloDeadlineGrantsNothing(t *testing.T) {
 // Closing one brokered connection revokes only that connection; the other
 // paired connection and the desktop session stay usable.
 func TestBrokeredCloseDoesNotRevokeOtherPairing(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "close-peer.ll")
+	path := filepath.Join(t.TempDir(), "close-peer.pm")
 	key := bytes.Repeat([]byte{15}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

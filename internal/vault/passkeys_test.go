@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/passkey"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 func testPasskeyRecord(t *testing.T) []byte {
@@ -79,7 +79,7 @@ func TestPasskeyCollectionKDBXAndEncryptedRoundTrip(t *testing.T) {
 	if slotIdx < 0 {
 		t.Fatal("missing collection slot")
 	}
-	g.Entries[1].Values = append(g.Entries[1].Values, slot("Locklark.PasskeysUnknown", "x", true))
+	g.Entries[1].Values = append(g.Entries[1].Values, slot("Passme.PasskeysUnknown", "x", true))
 	if _, _, err = readItems(db, g); err == nil {
 		t.Fatal("accepted unknown protected slot")
 	}
@@ -240,7 +240,7 @@ func TestReadItemsRejectsInvalidKDBXAfterCollectionDecode(t *testing.T) {
 
 	// An unknown UNPROTECTED field is rejected only after the collection slot of
 	// the second item has already been decoded successfully.
-	g.Entries[2].Values = append(g.Entries[2].Values, slot("Locklark.Extra", "x", false))
+	g.Entries[2].Values = append(g.Entries[2].Values, slot("Passme.Extra", "x", false))
 	metadata, items, err := readItems(db, g)
 	if err != ErrSnapshot || metadata != nil || items != nil {
 		t.Fatalf("unknown unprotected field after decode returned partial data: %v, %d items", err, len(items))

@@ -110,9 +110,9 @@ func TestTransportNeverUsesImplicitNetworkConfiguration(t *testing.T) {
 	}
 }
 func TestBuiltinBunToGoHost(t *testing.T) {
-	exe := os.Getenv("LOCKLARK_TEST_BUN")
+	exe := os.Getenv("PASSME_TEST_BUN")
 	if exe == "" {
-		t.Skip("set LOCKLARK_TEST_BUN to the Bun executable to run the two-process test")
+		t.Skip("set PASSME_TEST_BUN to the Bun executable to run the two-process test")
 	}
 	src, err := filepath.Abs("../../plugins/github-pull-reader/index.ts")
 	if err != nil {

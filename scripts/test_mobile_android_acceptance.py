@@ -332,8 +332,8 @@ class IndependentOracleTests(unittest.TestCase):
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             self.assertTrue(result.returncode == 0)
             site = pathlib.Path(result.stdout.decode().strip())
-            (site / "locklark_private_peer_probe.py").write_text("available = True\n")
-            code = "import locklark_private_peer_probe; assert locklark_private_peer_probe.available"
+            (site / "passme_private_peer_probe.py").write_text("available = True\n")
+            code = "import passme_private_peer_probe; assert passme_private_peer_probe.available"
             configured = subprocess.run([acceptance.peer_executable(python), "-c", code],
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             bypassed = subprocess.run([str(python.resolve()), "-c", code],
@@ -419,8 +419,8 @@ class BackgroundTransitionTests(unittest.TestCase):
         top_token, top_task = ("abc123", "4") if foreground == acceptance.COMPONENT else ("fed789", "1")
         return ("ACTIVITY MANAGER ACTIVITIES\n"
                 " * Task{app-task}\n"
-                "   * Hist #0: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
-                "     packageName=org.locklark.android\n"
+                "   * Hist #0: ActivityRecord{abc123 u0 org.passme.android/.MainActivity t4}\n"
+                "     packageName=org.passme.android\n"
                 f"     state={state} stopped={'true' if state == 'STOPPED' else 'false'}\n"
                 f" topResumedActivity=ActivityRecord{{{top_token} u0 {foreground} t{top_task}}}\n").encode()
 
@@ -442,7 +442,7 @@ class BackgroundTransitionTests(unittest.TestCase):
             self.assertFalse(acceptance.background_is_stopped(state))
 
     def test_other_task_state_cannot_supply_missing_app_stopped_evidence(self):
-        raw = (b" * Hist #0: ActivityRecord{app u0 org.locklark.android/.MainActivity t4}\n"
+        raw = (b" * Hist #0: ActivityRecord{app u0 org.passme.android/.MainActivity t4}\n"
                b" * Task{other-task}\n state=STOPPED\n"
                b" topResumedActivity=ActivityRecord{other u0 com.android.launcher3/.Launcher t1}\n")
         parsed = acceptance.lifecycle_state(raw)
@@ -580,7 +580,7 @@ class BackgroundTransitionTests(unittest.TestCase):
 
     def test_explicit_null_top_field_cannot_fall_back_to_stale_legacy_app(self):
         history = self.activity_dump("RESUMED", acceptance.COMPONENT).split(b" topResumedActivity", 1)[0]
-        stale = b" mResumedActivity: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
+        stale = b" mResumedActivity: ActivityRecord{abc123 u0 org.passme.android/.MainActivity t4}\n"
         for field in (b"mTopResumedActivity", b"topResumedActivity"):
             with self.subTest(field=field):
                 raw = history + b" " + field + b"=null\n" + stale
@@ -589,10 +589,10 @@ class BackgroundTransitionTests(unittest.TestCase):
                 self.assertEqual(acceptance.lifecycle_state(raw)["foreground"], "none")
 
     def test_legacy_fallback_requires_absent_not_unknown_or_conflicting_top_field(self):
-        legacy = b" mResumedActivity: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
+        legacy = b" mResumedActivity: ActivityRecord{abc123 u0 org.passme.android/.MainActivity t4}\n"
         self.assertEqual(acceptance.top_activity_identity(legacy), ("abc123", "4"))
         for top in (b" mTopResumedActivity=<unavailable>\n", b" topResumedActivity=\n",
-                    b" mTopResumedActivity=null\n topResumedActivity=ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"):
+                    b" mTopResumedActivity=null\n topResumedActivity=ActivityRecord{abc123 u0 org.passme.android/.MainActivity t4}\n"):
             with self.subTest(top=top):
                 self.assertEqual(acceptance.top_resumed_record(top + legacy), (None, False))
                 self.assertIsNone(acceptance.top_activity_identity(top + legacy))

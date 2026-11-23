@@ -131,15 +131,15 @@ test("the idle-expiry mode is a strict opt-in paired with the route detail flag"
     routeDetailRead: false,
     routeIdleTtl: false,
   });
-  assert.deepEqual(evaluateHead({ LOCKLARK_TEST_ROUTE_DETAIL_READ: "1" }), {
+  assert.deepEqual(evaluateHead({ PASSME_TEST_ROUTE_DETAIL_READ: "1" }), {
     routeDetailRead: true,
     routeIdleTtl: false,
   });
   // Both flags, exactly "1": the opt-in mode.
   assert.deepEqual(
     evaluateHead({
-      LOCKLARK_TEST_ROUTE_DETAIL_READ: "1",
-      LOCKLARK_TEST_ROUTE_IDLE_TTL: "1",
+      PASSME_TEST_ROUTE_DETAIL_READ: "1",
+      PASSME_TEST_ROUTE_IDLE_TTL: "1",
     }),
     { routeDetailRead: true, routeIdleTtl: true },
   );
@@ -147,9 +147,9 @@ test("the idle-expiry mode is a strict opt-in paired with the route detail flag"
   // any other value, the run fails closed before anything is launched.
   const closed = (pattern) => (error) => pattern.test(error.message);
   for (const env of [
-    { LOCKLARK_TEST_ROUTE_IDLE_TTL: "1" },
-    { LOCKLARK_TEST_ROUTE_DETAIL_READ: "0", LOCKLARK_TEST_ROUTE_IDLE_TTL: "1" },
-    { LOCKLARK_TEST_ROUTE_IDLE_TTL: "1", LOCKLARK_TEST_CHECKOUT_FRAMES: "1" },
+    { PASSME_TEST_ROUTE_IDLE_TTL: "1" },
+    { PASSME_TEST_ROUTE_DETAIL_READ: "0", PASSME_TEST_ROUTE_IDLE_TTL: "1" },
+    { PASSME_TEST_ROUTE_IDLE_TTL: "1", PASSME_TEST_CHECKOUT_FRAMES: "1" },
   ])
     assert.throws(
       () => evaluateHead(env),
@@ -159,9 +159,9 @@ test("the idle-expiry mode is a strict opt-in paired with the route detail flag"
   // Any value that is not exactly "1" never enables the idle journey, and is
   // refused rather than silently ignored.
   for (const [name, env] of [
-    ["zero", { LOCKLARK_TEST_ROUTE_DETAIL_READ: "1", LOCKLARK_TEST_ROUTE_IDLE_TTL: "0" }],
-    ["word", { LOCKLARK_TEST_ROUTE_DETAIL_READ: "1", LOCKLARK_TEST_ROUTE_IDLE_TTL: "true" }],
-    ["empty", { LOCKLARK_TEST_ROUTE_DETAIL_READ: "1", LOCKLARK_TEST_ROUTE_IDLE_TTL: "" }],
+    ["zero", { PASSME_TEST_ROUTE_DETAIL_READ: "1", PASSME_TEST_ROUTE_IDLE_TTL: "0" }],
+    ["word", { PASSME_TEST_ROUTE_DETAIL_READ: "1", PASSME_TEST_ROUTE_IDLE_TTL: "true" }],
+    ["empty", { PASSME_TEST_ROUTE_DETAIL_READ: "1", PASSME_TEST_ROUTE_IDLE_TTL: "" }],
   ])
     assert.throws(
       () => evaluateHead(env),
@@ -179,7 +179,7 @@ test("the idle-expiry mode is a strict opt-in paired with the route detail flag"
     SOURCE.includes('assert(browserName === "chromium", "Route detail mode requires Chromium");'),
   );
   // The strict pairing and the fail-closed reasons are asserted at import.
-  assert.match(SOURCE, /^const routeIdleValue = process\.env\.LOCKLARK_TEST_ROUTE_IDLE_TTL;$/m);
+  assert.match(SOURCE, /^const routeIdleValue = process\.env\.PASSME_TEST_ROUTE_IDLE_TTL;$/m);
   assert.match(SOURCE, /^const routeIdleTtl = routeIdleValue === "1";$/m);
   assert.match(
     SOURCE,
@@ -295,7 +295,7 @@ test("the idle helper reaches the stale-close wait and the actual /login source 
   // The real driver keeps the origin bare and opens the controlled source page
   // at origin + "/login"; the helper must derive the path from that page, not
   // from the origin (whose pathname is "/").
-  const originURL = "https://login.locklark.test:8443";
+  const originURL = "https://login.passme.test:8443";
   const sourcePageURL = originURL + "/login";
   const closeKey = Object.freeze([{ key: "Control_L+w" }]);
   const stop = new Error("stop at the next action-popup call");
@@ -351,7 +351,7 @@ test("the idle helper reaches the stale-close wait and the actual /login source 
     origin: originURL,
     ROUTE_PAGE: /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/,
     ACTION_POPUP: /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/,
-    ROUTE_TITLE_PREFIX: "Locklark",
+    ROUTE_TITLE_PREFIX: "Passme",
     ROUTE_IDLE_CLOSE_STALE: closeKey,
     routeIdleObservation: null,
     routeIdleCloseStaleObservation: null,
@@ -460,7 +460,7 @@ test("the idle helper reaches the stale-close wait and the actual /login source 
   ]);
   assert.equal(keyCalls.length, 1);
   assert.equal(keyCalls[0][0], closeKey);
-  assert.equal(keyCalls[0][1], "Locklark");
+  assert.equal(keyCalls[0][1], "Passme");
 });
 
 test("the idle journey closes only the stale route tab with one physical key", () => {
@@ -1276,8 +1276,8 @@ const DOWNLOAD_LINUX_BINARIES = "Download Linux primary binaries";
 const BROWSER_WRAPPER =
   "dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24'";
 const ROUTE_FLAGS = [
-  "LOCKLARK_TEST_ROUTE_DETAIL_READ",
-  "LOCKLARK_TEST_ROUTE_IDLE_TTL",
+  "PASSME_TEST_ROUTE_DETAIL_READ",
+  "PASSME_TEST_ROUTE_IDLE_TTL",
 ];
 
 // The lines of one top-level job, from its exact `  <name>:` line to the next
@@ -1416,8 +1416,8 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   const native = `${BROWSER_WRAPPER} node scripts/browser_native_acceptance.mjs`;
   const otp = `${BROWSER_WRAPPER} python3 scripts/browser_otp_privacy_acceptance.py chromium`;
   const route =
-    `${BROWSER_WRAPPER} env -u LOCKLARK_TEST_POPUP_VAULT ` +
-    "LOCKLARK_TEST_ROUTE_DETAIL_READ=1 LOCKLARK_TEST_ROUTE_IDLE_TTL=1 " +
+    `${BROWSER_WRAPPER} env -u PASSME_TEST_POPUP_VAULT ` +
+    "PASSME_TEST_ROUTE_DETAIL_READ=1 PASSME_TEST_ROUTE_IDLE_TTL=1 " +
     "node scripts/browser_native_acceptance.mjs";
   assert.deepEqual(
     stepRun(chromium.lines),
@@ -1428,17 +1428,17 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   // The route mode refuses the step-level popup-vault override, so exactly the
   // third command clears it; the opt-ins stay on that command only.
   assert.ok(
-    route.includes("env -u LOCKLARK_TEST_POPUP_VAULT "),
+    route.includes("env -u PASSME_TEST_POPUP_VAULT "),
     "the route command must clear the popup-vault override",
   );
   for (const command of [native, otp])
     assert.ok(
-      !command.includes("env -u LOCKLARK_TEST_POPUP_VAULT"),
+      !command.includes("env -u PASSME_TEST_POPUP_VAULT"),
       "the original commands must not clear the popup-vault override",
     );
   const env = stepMapping(chromium.lines, "env");
   assert.equal(
-    env.LOCKLARK_TEST_POPUP_VAULT,
+    env.PASSME_TEST_POPUP_VAULT,
     "1",
     "the Chromium step must keep its default popup-vault coverage",
   );
@@ -1458,19 +1458,19 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   // The binaries still come from the shared runner temp directory.
   assert.deepEqual(
     {
-      LOCKLARK_BROWSER_HOST: env.LOCKLARK_BROWSER_HOST,
-      LOCKLARK_BROWSER_REGISTER: env.LOCKLARK_BROWSER_REGISTER,
-      LOCKLARK_BROWSER_FIXTURE: env.LOCKLARK_BROWSER_FIXTURE,
+      PASSME_BROWSER_HOST: env.PASSME_BROWSER_HOST,
+      PASSME_BROWSER_REGISTER: env.PASSME_BROWSER_REGISTER,
+      PASSME_BROWSER_FIXTURE: env.PASSME_BROWSER_FIXTURE,
     },
     {
-      LOCKLARK_BROWSER_HOST:
-        "${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}",
-      LOCKLARK_BROWSER_REGISTER:
-        "${{ runner.temp }}/locklark-bin/locklark-browser-register",
-      LOCKLARK_BROWSER_FIXTURE:
-        "${{ runner.temp }}/locklark-bin/browser-acceptance-fixture",
+      PASSME_BROWSER_HOST:
+        "${{ runner.temp }}/passme-bin/passme-browser-${{ matrix.browser }}",
+      PASSME_BROWSER_REGISTER:
+        "${{ runner.temp }}/passme-bin/passme-browser-register",
+      PASSME_BROWSER_FIXTURE:
+        "${{ runner.temp }}/passme-bin/browser-acceptance-fixture",
     },
-    "the Chromium step must keep its binaries under $RUNNER_TEMP/locklark-bin",
+    "the Chromium step must keep its binaries under $RUNNER_TEMP/passme-bin",
   );
   const download = stepBlock(browsers, DOWNLOAD_LINUX_BINARIES);
   assert.ok(
@@ -1484,8 +1484,8 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
   );
   assert.deepEqual(
     stepMapping(download.lines, "with"),
-    { name: "locklark-linux-bin", path: "${{ runner.temp }}/locklark-bin" },
-    "the shared binaries must still be downloaded as locklark-linux-bin into $RUNNER_TEMP/locklark-bin",
+    { name: "passme-linux-bin", path: "${{ runner.temp }}/passme-bin" },
+    "the shared binaries must still be downloaded as passme-linux-bin into $RUNNER_TEMP/passme-bin",
   );
 
   // Firefox keeps its original native/OTP scope and never receives the route

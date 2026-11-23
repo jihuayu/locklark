@@ -11,7 +11,7 @@ import (
 
 	"filippo.io/age"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // rotationFixture is a real old file, a real KDBX database sealed into it, and

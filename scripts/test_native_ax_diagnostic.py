@@ -16,11 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import browser_native_macos as macos
 import native_acceptance_contract as contract
 
-TITLE = "Locklark · 浏览器原生确认"
+TITLE = "Passme · 浏览器原生确认"
 NO_VALUE, UNSUPPORTED, UNKNOWN = -25212, -25205, -25999
 FRAME = {"x": 313, "y": 75, "width": 1102, "height": 822}
 CANARY = "private title=" + TITLE + " label=确认连接此扩展 path=/tmp/llcb-unit"
-WINDOW = {"id": 1, "pid": 4242, "title": TITLE, "executable": "/opt/locklark/desktop",
+WINDOW = {"id": 1, "pid": 4242, "title": TITLE, "executable": "/opt/passme/desktop",
           "trusted": True, "visible": True, "onscreen": True, "secure": False,
           "bounds": dict(FRAME), "client": dict(FRAME)}
 FOUR_FIELD = re.compile(r"Native acceptance input failed \[code=([a-zA-Z0-9-]+) "

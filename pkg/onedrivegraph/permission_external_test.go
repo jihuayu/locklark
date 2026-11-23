@@ -3,7 +3,7 @@ package onedrivegraph_test
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/onedrivegraph"
+	"github.com/jihuayu/passme/pkg/onedrivegraph"
 )
 
 // Callers outside the package must be able to use the documented fixed roles

@@ -12,9 +12,9 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
 )
 
 // workingItems is the complete new item list used by the positive paths. It

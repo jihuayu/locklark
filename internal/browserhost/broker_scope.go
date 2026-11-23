@@ -11,8 +11,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // Bounds for the one-time CLI-run execution scope. They are enforced on the

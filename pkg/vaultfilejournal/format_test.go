@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -193,7 +193,7 @@ func TestDecodeBoundsBeforeAllocation(t *testing.T) {
 	}
 }
 
-// hostileWrappedLengthRecord builds a 54-byte, checksum-valid LLVJ v1 record
+// hostileWrappedLengthRecord builds a 54-byte, checksum-valid PMVJ v1 record
 // whose header declares operation ID length 1, expected revision length 1 and
 // proposal length math.MaxUint32, so the declared lengths sum to -1 once
 // converted to a 32-bit int. The domain-separated digest is computed over the

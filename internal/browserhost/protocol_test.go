@@ -42,7 +42,7 @@ func TestStartupIdentity(t *testing.T) {
 	if ValidateLaunch(Firefox, []string{filepath.Join(t.TempDir(), HostName+".json"), FirefoxID}) != nil {
 		t.Fatal("Firefox")
 	}
-	if runtime.GOOS == "windows" && ValidateLaunch(Firefox, []string{`C:org.locklark.browser.json`, FirefoxID}) == nil {
+	if runtime.GOOS == "windows" && ValidateLaunch(Firefox, []string{`C:org.passme.browser.json`, FirefoxID}) == nil {
 		t.Fatal("drive-relative Firefox manifest")
 	}
 }

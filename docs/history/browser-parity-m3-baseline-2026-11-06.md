@@ -5,7 +5,7 @@
 > **Status:** living checklist. This document records what must be compared, what has been compared, and what evidence is still missing. It does not claim that M3 is complete.
 >
 > **Reference baseline:** 1Password 8.12.44.33 (desktop app + Chromium MV3 extension).
-> **Locklark baseline:** `main` `8e61dc1`.
+> **Passme baseline:** `main` `8e61dc1`.
 > **Reference implementation captured for comparison:** PR #40 `codex/browser-parity` head `f6e42c3`.
 > **Delivery branches:** `feat/browser-save-generator` (M3.1), `feat/browser-popup-vault` (M3.2), `feat/browser-fill-v2` (M3.3), `feat/browser-watchtower` (M3.4).
 > **Last updated:** 2026-11-06.
@@ -25,8 +25,8 @@ The checklist is organized by the four M3 mining areas, then by the sub-mileston
 | Reference product | 1Password 8 desktop app and browser extension `8.12.44.33` |
 | Reference browser package | Chromium MV3 CRX `aeblfdkhhhdcdjpifhhbdiojplfjncoa`; SHA-256 `4dee63a377abd8ab59a0f90f4c7a6ccef92ab2938c0e4d7eba857895195b7a43` |
 | Reference artifacts | Kept in an external analysis workspace, never added to this repository |
-| Locklark baseline for “already on main” statements | `main` `8e61dc1` |
-| Locklark reference implementation | PR #40 `codex/browser-parity` head `f6e42c3` (open draft when evidence was captured) |
+| Passme baseline for “already on main” statements | `main` `8e61dc1` |
+| Passme reference implementation | PR #40 `codex/browser-parity` head `f6e42c3` (open draft when evidence was captured) |
 | Analysis host | Linux; REA static reconstruction plus public 1Password documentation |
 | Browsers with retained E3/E4 evidence | Chromium 143 and 156; Firefox 157; Firefox fill/save/OTP path only |
 | Browsers not yet run | Microsoft Edge binary; Safari (macOS only); Windows and macOS native UI flows |
@@ -51,7 +51,7 @@ The English labels map to the Chinese states, not to a separate maturity scale. 
 
 | Level | Evidence | What it can prove | What it cannot prove |
 | --- | --- | --- | --- |
-| E0 | Public documentation and observed reference behavior | The behavior exists and what a user sees | That Locklark implements it |
+| E0 | Public documentation and observed reference behavior | The behavior exists and what a user sees | That Passme implements it |
 | E1 | REA static reconstruction (`analyze-javascript-application`, focused views) | Entry points, message paths, permissions, state names, and obligation families | Runtime behavior on a real page |
 | E2 | Unit/policy tests (`node --test`, `go test`) | Parsers, validators, state transitions, scoring, and refusal rules | Browser integration, native approval, or real DOM behavior |
 | E3 | Controlled browser DOM/E2E (Playwright, synthetic HTTPS fixtures) | Focus, injection, events, navigation, iframe/shadow behavior, and negative cases | Native host, OS unlock, biometrics, or real vault persistence |
@@ -73,7 +73,7 @@ A row is `已实测` only with E3 or E4 at the exact head. E1/E2 alone cap the r
 
 The user decision of **2026-11-06T11:41Z** allows REA analysis of 1Password’s browser extension and desktop app **strictly to list behaviors**, with **zero code copied**.
 
-**Allowed:** behavior names, user-visible states, public documentation, functional protocol facts (message names, permission names, algorithm identifiers), UI labels translated into Locklark’s own wording, and synthetic test fixtures.
+**Allowed:** behavior names, user-visible states, public documentation, functional protocol facts (message names, permission names, algorithm identifiers), UI labels translated into Passme’s own wording, and synthetic test fixtures.
 
 **Forbidden:** copying source code, comments, identifiers, CSS, HTML structure, icons, images, fonts, locale catalogs, or branding; committing any file from the external reference workspace; committing the reference evidence bundle or the full REA ledger JSON (they embed reference paths and extracted content).
 
@@ -104,7 +104,7 @@ The full REA JSON ledgers remain outside the repository. This document retains o
 
 **Where the verified rows live.** Only B10.1 (`_execute_action` shortcut) is verified on `main`. The other 14 verified rows are on PR #40 and must land with M1a before they can be claimed for `main`. PR #40 is an implementation reference, not a merged baseline.
 
-**Highest-risk gaps.** Post-submit save/update and generator recovery (Area 2), popup vault search/detail/CRUD (Area 3), identity/card item model and fill (Area 4), Watchtower browser surfaces and privacy boundary (Area 3), and shared desktop↔extension session (Area 4). These are the rows most likely to produce a user-visible “1Password does this, Locklark does not” gap even after the smaller UI rows close.
+**Highest-risk gaps.** Post-submit save/update and generator recovery (Area 2), popup vault search/detail/CRUD (Area 3), identity/card item model and fill (Area 4), Watchtower browser surfaces and privacy boundary (Area 3), and shared desktop↔extension session (Area 4). These are the rows most likely to produce a user-visible “1Password does this, Passme does not” gap even after the smaller UI rows close.
 
 ### 1.2 Blockers and dependencies
 
@@ -135,9 +135,9 @@ The full REA JSON ledgers remain outside the repository. This document retains o
 | 1Password focused notification view | `inline/notification` entry points | Evidence `ev_c216e8759940dc13169aaeed92ce27e7b1b4438b6bda4739cdfe4c31afeba688`; root SHA-256 `89e82104f33120a8207903864a639c9fc00650075dfcac1f9acd7a523ffae503` | 2 files; 428 findings | Post-submit save/update banner and actions |
 | 1Password WebAuthn view | `webauthn` listeners, isolated bridge, modal | Evidence `ev_c8af7029f705f5b0ef471f32bb441fc743f31847e8f497a314eabe1d6445fa23`; view `ev_56c3494a3af56cd8fcdbac45432278abadc17eeff6cd18a13a3a2059735094b5` | 43,636 AST nodes; 238 findings; 1,546 call-flow relations; 136 promise-ownership relations; 56 boundary validations | Passkey create/get, conditional UI, UV, fallback |
 | 1Password English string catalog | `messages.i18n-*` extraction | `1p-i18n-en-strings.json` (external) | 19 KB of message keys and English labels | Enumerating UI states; no strings copied into the product |
-| Locklark PR #40 analysis | `browser-extension/dist/chromium` | Evidence `ev_16cb7c0804046a1e6287e20e4bc956c06492710fbd6810b53fe877726b3fbb25` | 12 MB analysis; 12 MB bundle | Current implementation obligations |
-| Locklark obligation ledger | `build-reconstruction-obligation-ledger` | `rol_aed53d6482a0ec835059d5cc919c1070ed84c03fb2a8a3b9b2988ed1d352bd0b` | 111 obligations: 9 protocol, 98 runtime, 4 application | Current ledger counts and classes |
-| Coverage evaluation | Boundary `locklark-browser-parity-m3` | `evaluate-reconstruction-coverage` output (external) | 5 surfaces, 1 claim, 6 open reasons | Coverage disposition and open-reason grouping |
+| Passme PR #40 analysis | `browser-extension/dist/chromium` | Evidence `ev_16cb7c0804046a1e6287e20e4bc956c06492710fbd6810b53fe877726b3fbb25` | 12 MB analysis; 12 MB bundle | Current implementation obligations |
+| Passme obligation ledger | `build-reconstruction-obligation-ledger` | `rol_aed53d6482a0ec835059d5cc919c1070ed84c03fb2a8a3b9b2988ed1d352bd0b` | 111 obligations: 9 protocol, 98 runtime, 4 application | Current ledger counts and classes |
+| Coverage evaluation | Boundary `passme-browser-parity-m3` | `evaluate-reconstruction-coverage` output (external) | 5 surfaces, 1 claim, 6 open reasons | Coverage disposition and open-reason grouping |
 
 The 15 MB and 1.6 MB ledger JSON files are deliberately **not** committed: they embed extracted reference paths and content, and committing them would violate the clean-room boundary. The IDs and aggregate counts above are sufficient to reproduce the analysis with the commands in §8.1.
 
@@ -148,14 +148,14 @@ REA’s atomic obligations are per-file and per-call-path. A single user-visible
 | Layer | Atomic obligations | Protocol | Runtime | Application | How it is used here |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 1Password reference ledger `rol_0cc…` | 163 | 8 | 84 | 71 | Enumerates reference behavior and protocol surface |
-| Locklark ledger `rol_aed…` | 111 | 9 | 98 | 4 | Enumerates current implementation surface |
+| Passme ledger `rol_aed…` | 111 | 9 | 98 | 4 | Enumerates current implementation surface |
 | Consolidated checklist families | 27 | 15 | 7 | 5 | Closure units in §2.4–§2.7 |
 
 Counting rules: “protocol” means a cross-process or native-messaging boundary; “runtime” means DOM, worker state, UI behavior, or in-extension policy; “application” means manifest, build, permissions, commands, options, or registration. Mixed families are counted by their dominant boundary. The totals are **not** directly comparable: 163 atomic reference obligations collapse into 27 user-visible families, while 65 checklist rows cover both the reference behavior and the current substitute evidence.
 
 ### 2.3 Coverage evaluation and open reasons
 
-`evaluate-reconstruction-coverage` evaluated boundary `locklark-browser-parity-m3` over five surfaces and one claim. It recorded **6 open reasons**; the raw output is external. The spec miners additionally identified sub-gaps inside otherwise-covered surfaces. The consolidated closure themes are:
+`evaluate-reconstruction-coverage` evaluated boundary `passme-browser-parity-m3` over five surfaces and one claim. It recorded **6 open reasons**; the raw output is external. The spec miners additionally identified sub-gaps inside otherwise-covered surfaces. The consolidated closure themes are:
 
 | # | Consolidated open reason | Affected rows | Closure owner |
 | ---: | --- | --- | --- |
@@ -192,7 +192,7 @@ The `A1-OBL-*` … `A4-OBL-*` identifiers are **checklist-local family IDs**, no
 | Family | Obligation family | Class | Parity rows | Reference evidence | Disposition | Closure / owner |
 | --- | --- | --- | --- | --- | --- | --- |
 | `A1-OBL-01` | Inline menu host, positioning, keyboard, suppression | runtime | B1.1–B1.4 | Focused `inline/menu` REA `ev_c153…` (3 files, 319 findings); i18n menu states | B1.1/B1.2 closed on PR #40; B1.3/B1.4 open | M3.1; E3 scroll/resize and ignore-attribute fixtures |
-| `A1-OBL-02` | Origin-bound candidate match, fill, guarded auto-submit | protocol + runtime | B1.5, B2.1–B2.2 | Locklark protocol ledger `rol_aed…`; `protocol.go`; PR #40 DOM evidence | Closed on PR #40 | M1a; retain E3/E4 and refusal paths |
+| `A1-OBL-02` | Origin-bound candidate match, fill, guarded auto-submit | protocol + runtime | B1.5, B2.1–B2.2 | Passme protocol ledger `rol_aed…`; `protocol.go`; PR #40 DOM evidence | Closed on PR #40 | M1a; retain E3/E4 and refusal paths |
 | `A1-OBL-03` | Multi-step login session | runtime | B7.1–B7.3 | 1Password fill-session behavior; PR #40 statelessness | B7.1 closed; B7.2/B7.3 open | M3.3; 3-step E3 plus TTL/invalidation unit tests |
 | `A1-OBL-04` | OTP target discovery and fill | runtime | B12a.1–B12a.2 | 1Password OTP behavior; focused inline-menu REA; PR #40 single-field limit | B12a.1 closed; B12a.2 open | M3.3; 6-box and 8-box E3 |
 | `A1-OBL-05` | Frame and shadow-DOM trust boundary | protocol + runtime | B12b.1–B12b.3 | 1Password `all_frames` manifest; `docs/design.md:93` negative tests; coverage open reason | B12b.2 partial; B12b.1/B12b.3 open | M3.3; same-origin/same-site/cross-site and shadow fixtures |
@@ -231,7 +231,7 @@ The `A1-OBL-*` … `A4-OBL-*` identifiers are **checklist-local family IDs**, no
 | `A4-OBL-04` | Conditional UI, passkey management, advanced extensions | runtime + application | B13.1–B13.3 | 1Password conditional mediation; public docs | Partial; B13.3 accepted difference | Post-M3; management UI in M3.2 |
 | `A4-OBL-05` | User verification and biometric delegation | protocol | B14.1–B14.2 | 1Password biometric native messaging; `internal/osunlock` | B14.1 closed; B14.2 open | M2.3 + hardware E4 |
 | `A4-OBL-06` | Shared desktop session and lock propagation | protocol | B4.1–B4.4 | 1Password shared-lock/session and native-messaging behavior | Partial: host→extension lock only; separate session | M2.3 + M3.2; E4 |
-| `A4-OBL-07` | Cross-browser manifest and acceptance | application | B16.1–B16.3 | 1Password manifest (`gecko`, Safari target); Locklark `build.js` | Partial: Chromium/Firefox; Edge/Safari gaps | M1a/M5; per-browser E4 |
+| `A4-OBL-07` | Cross-browser manifest and acceptance | application | B16.1–B16.3 | 1Password manifest (`gecko`, Safari target); Passme `build.js` | Partial: Chromium/Firefox; Edge/Safari gaps | M1a/M5; per-browser E4 |
 | `A4-OBL-08` | Commands, pairing UX, onboarding | application | B17.1–B17.2 | 1Password commands and connection states | Partial: `_execute_action` only; minimal popup | M3.2/M5; manifest and E3 |
 
 ### 2.8 Ledger roll-up
@@ -260,7 +260,7 @@ The `A1-OBL-*` … `A4-OBL-*` identifiers are **checklist-local family IDs**, no
 | One-time code | `autocomplete="one-time-code"` or OTP/TOTP/2FA/MFA/verification-code heuristics | Inline OTP candidate and fill action; split boxes are supported in the reference |
 | Passkey | WebAuthn `create`/`get`, including conditional mediation | Passkey modal or conditional suggestion; see Area 4 |
 
-Fields marked with the reference product’s ignore attribute, and fields that are hidden, disabled, read-only, inert, or zero-sized, do not trigger the menu. A per-site “never show here” setting suppresses the menu on that origin. These are functional behaviors; Locklark uses its own attribute name (`data-locklark-ignore`) and its own wording.
+Fields marked with the reference product’s ignore attribute, and fields that are hidden, disabled, read-only, inert, or zero-sized, do not trigger the menu. A per-site “never show here” setting suppresses the menu on that origin. These are functional behaviors; Passme uses its own attribute name (`data-passme-ignore`) and its own wording.
 
 **3.1.2 UI isolation and positioning.** The reference renders the menu in a closed shadow root, anchored below the focused input (above when near the viewport bottom), with page CSS unable to bleed in and page scripts unable to inspect or spoof candidate rows. It repositions on scroll and resize, and dismisses when the anchor disconnects, hides, or leaves the viewport.
 
@@ -287,12 +287,12 @@ Fields marked with the reference product’s ignore attribute, and fields that a
 
 Status column is as of PR #40 `f6e42c3` where the behavior exists there; `main` `8e61dc1` is shown separately. A verified row that exists only on PR #40 is not a `main` claim.
 
-| ID | Capability / user action | 1Password 8.12.44.33 observable result | Locklark `main` `8e61dc1` | Locklark PR #40 `f6e42c3` | Status | Gap and target |
+| ID | Capability / user action | 1Password 8.12.44.33 observable result | Passme `main` `8e61dc1` | Passme PR #40 `f6e42c3` | Status | Gap and target |
 | --- | --- | --- | --- | --- | --- | --- |
 | **B1.1** | Closed-shadow inline menu on focus | Closed-shadow panel anchored to the focused username/password/OTP/passkey input; page cannot inspect candidate titles or actions | Popup only; no page inline UI | `content.js` renders a closed-shadow panel on `focusin` | `已实测` (Verified) | Keep through M1a; add reposition/ignore attributes in M3.1 |
 | **B1.2** | Keyboard navigation | `ArrowDown` enters, `ArrowUp`/`ArrowDown` cycle, `Enter` activates, `Escape` dismisses and refocuses | None | `content.js` handles `ArrowDown`, `ArrowUp`, `Escape`, and button `Enter` | `已实测` (Verified) | Keep through M1a |
 | **B1.3** | Reposition on scroll/resize; hide when anchor hides | Menu follows the anchor and dismisses if the input is hidden, removed, or scrolled out of view | None | Panel position is computed once; no scroll/resize observer | `已实现未对照` (Partial) | M3.1; add passive scroll/resize listeners and disconnect/zero-rect dismissal |
-| **B1.4** | Ignore attribute and per-site suppression | Inputs/forms marked ignore, and origins on the never-show list, do not open the menu | None | Checks disabled/readOnly/hidden only; no ignore attribute or origin list | `未实现` (Tracked) | M3.1 + M3.2 options; add `data-locklark-ignore` and disabled-inline origin list |
+| **B1.4** | Ignore attribute and per-site suppression | Inputs/forms marked ignore, and origins on the never-show list, do not open the menu | None | Checks disabled/readOnly/hidden only; no ignore attribute or origin list | `未实现` (Tracked) | M3.1 + M3.2 options; add `data-passme-ignore` and disabled-inline origin list |
 | **B1.5** | Origin/domain/port candidate filtering and sender verification | Candidates match the tab URL by the configured mode; sender frame/document/origin is re-verified before fill | `core.originFromURL` and `match` | `contentSender`, `contentContext`, and `inline-match` verify sender and document | `已实测` (Verified) | Keep through M1a; add same-site frame policy in M3.3 |
 | **B2.1** | Global and per-login auto-submit toggle | Global “sign in automatically” plus per-item override | None | `background.js` and `popup.js` persist `autoLogin` and `loginOverrides` | `已实测` (Verified) | Keep through M1a |
 | **B2.2** | Guarded POST `requestSubmit` | Submits only eligible POST forms, rechecks action/formaction after fill events, uses `requestSubmit` | None | `core.fillDocument` rechecks after `input`/`change` and calls `requestSubmit` | `已实测` (Verified) | Keep through M1a; extend to step-specific forms in M3.3 |
@@ -400,7 +400,7 @@ The reference keeps a short-lived snapshot of the last edited credential so a fi
 | Outcome | Condition | User-visible result |
 | --- | --- | --- |
 | Unchanged | The submitted username/password exactly match the credential just autofilled, and this is not a password-change form | No prompt; the credential is already saved |
-| New | No saved login for the origin matches the username, or the origin has no saved logins | “Save in Locklark”, with editable title, username, and concealed password preview |
+| New | No saved login for the origin matches the username, or the origin has no saved logins | “Save in Passme”, with editable title, username, and concealed password preview |
 | Update | A saved login matches the username but the password differs, or a change-password form has an existing login for the origin | “Update existing login”; the **new** password is saved, never the old `current-password`; “Save as new login” remains available |
 | Never | The origin is on the never-save list, or the global save-offer setting is disabled | No prompt; manual save remains possible |
 
@@ -422,7 +422,7 @@ The reference displays a live preview, an entropy/strength indicator, a regenera
 
 ### 4.2 Parity table
 
-| ID | Capability / user action | 1Password 8.12.44.33 observable result | Locklark `main` `8e61dc1` | Locklark PR #40 `f6e42c3` | Status | Gap and target |
+| ID | Capability / user action | 1Password 8.12.44.33 observable result | Passme `main` `8e61dc1` | Passme PR #40 `f6e42c3` | Status | Gap and target |
 | --- | --- | --- | --- | --- | --- | --- |
 | **B5.1** | Detect form submission | Captures credentials on submit, Enter, submit-button click, or SPA field removal | Manual popup save only | Manual inline/popup save; no submission observer | `未实现` (Tracked) | M3.1; add capture-phase submit, Enter, click, and SPA snapshot |
 | **B5.2** | Stage pending save across navigation and show a post-submit banner | Stages in memory with a TTL; shows a top-right banner and a popup banner on the next page | None; navigation clears state | None; navigation cancels the pending save | `未实现` (Tracked) | M3.1; add `stagedSaves` keyed by tab/origin and a closed-shadow banner |
@@ -504,7 +504,7 @@ sequenceDiagram
 | `memorable` | 3–10 words | 4; hyphen separator; capitalize on; digits off | Curated ASCII word list; separator choices `hyphens`, `spaces`, `periods`, `commas`, `underscores`, `numbers`, `numbers-and-symbols`; no offensive or ambiguous words |
 | `pin` | 4–12 digits | 6 | Digits only; CSPRNG; no leading-zero special case unless the site requires it |
 
-The reference UI bounds are 16–64 random characters, 3–10 words, and 4–12 PIN digits (§4.1.5). Locklark may widen random generation to 8–256 only with an explicit entropy floor and UI bounds that still pass site policies.
+The reference UI bounds are 16–64 random characters, 3–10 words, and 4–12 PIN digits (§4.1.5). Passme may widen random generation to 8–256 only with an explicit entropy floor and UI bounds that still pass site policies.
 
 Return `{ password, profile: { mode, length, alphabet_size, entropy_bits_floor } }`. The profile is metadata, not a secret. The UI shows the mode, length/word count, digit/symbol/capitalize controls, a live preview, an entropy badge, regenerate, and fill.
 
@@ -562,7 +562,7 @@ The extension must probe capabilities from the `paired`/`status` response and de
 | Item editor | Create/edit Login, Password, Secure Note, Identity, and Credit Card; custom fields, URLs, tags, favorite; revision-checked save |
 | Lock | Immediate lock action in the header; lock also wipes revealed fields and drafts |
 
-**5.1.2 Search and sorting.** Search is keyboard-first: the input is focused when the unlocked popup opens; arrow keys move through results; Enter selects or fills; Escape clears the search or leaves the menu. Reference sort modes include most relevant, title, modified, created, recently used, and frequently used. Locklark can start with relevance/title/modified and add the rest only when the host exposes the metadata.
+**5.1.2 Search and sorting.** Search is keyboard-first: the input is focused when the unlocked popup opens; arrow keys move through results; Enter selects or fills; Escape clears the search or leaves the menu. Reference sort modes include most relevant, title, modified, created, recently used, and frequently used. Passme can start with relevance/title/modified and add the rest only when the host exposes the metadata.
 
 **5.1.3 Item detail.** Concealed fields are masked by default and revealed only on explicit action; reveal resets on view exit, popup close, or lock. Copy actions give immediate visual feedback and may use a native clipboard lease with auto-clear. “Open & Fill” opens the item’s URL and queues a fill after the new document reaches the expected origin. A domain-mismatch warning appears when the item’s URL does not match the active site.
 
@@ -580,7 +580,7 @@ The extension must probe capabilities from the `paired`/`status` response and de
 
 ### 5.2 Parity table
 
-| ID | Capability / user action | 1Password 8.12.44.33 observable result | Locklark `main` `8e61dc1` | Locklark PR #40 `f6e42c3` | Status | Gap and target |
+| ID | Capability / user action | 1Password 8.12.44.33 observable result | Passme `main` `8e61dc1` | Passme PR #40 `f6e42c3` | Status | Gap and target |
 | --- | --- | --- | --- | --- | --- | --- |
 | **B9.1** | Popup vault search bar | Real-time search across title, username, URL, tag, category; keyboard navigation | No search bar | No search bar | `未实现` (Tracked) | M3.2; add search input and host-backed filtering |
 | **B9.2** | Suggested / All Items / Favorites / Categories tabs | Suggestions for the active tab plus browse/filter views | Only current-origin candidates after manual refresh | Current-origin candidates; auto-match in quick mode; no tabs | `未实现` (Tracked) | M3.2; add tab state and vault metadata views |
@@ -650,8 +650,8 @@ stateDiagram-v2
 
 | State | Menu items |
 | --- | --- |
-| Locked/disconnected | `Locklark` root → Unlock/connect, Settings |
-| Unlocked | `Locklark` root → Fill Login (submenu), Fill Identity (submenu), Fill Card (submenu), separator, Generate Password, Save Login for This Site, separator, Disable Inline Menu on This Site (checkbox), Lock, Settings |
+| Locked/disconnected | `Passme` root → Unlock/connect, Settings |
+| Unlocked | `Passme` root → Fill Login (submenu), Fill Identity (submenu), Fill Card (submenu), separator, Generate Password, Save Login for This Site, separator, Disable Inline Menu on This Site (checkbox), Lock, Settings |
 
 Every fill item carries the item id and revision; a stale revision is refused, not silently refreshed. “Save Login” captures only the current page’s visible credential fields and still requires the normal approval path.
 
@@ -659,10 +659,10 @@ Every fill item carries the item id and revision; a stale revision is refused, n
 
 | State | Badge text | Background | Tooltip |
 | --- | --- | --- | --- |
-| Locked/disconnected | `L` or a lock glyph | Amber `#d97706` | “Locklark — locked” |
-| Unconfirmed save/OTP/fill/passkey | `!` | Red `#dc2626` | “Locklark — unconfirmed operation” |
-| Unlocked, matching count > 0 | `N`, or `99+` above 99 | Teal `#0f766e` | “Locklark — N matching logins” |
-| Unlocked, zero matches | empty | — | “Locklark — unlocked” |
+| Locked/disconnected | `L` or a lock glyph | Amber `#d97706` | “Passme — locked” |
+| Unconfirmed save/OTP/fill/passkey | `!` | Red `#dc2626` | “Passme — unconfirmed operation” |
+| Unlocked, matching count > 0 | `N`, or `99+` above 99 | Teal `#0f766e` | “Passme — N matching logins” |
+| Unlocked, zero matches | empty | — | “Passme — unlocked” |
 
 Update on `tabs.onActivated`, `tabs.onUpdated`, `windows.onFocusChanged`, lock/unlock, and item changes. If the user disables the count, keep the locked/alert indicator but hide the count.
 
@@ -678,7 +678,7 @@ Update on `tabs.onActivated`, `tabs.onUpdated`, `windows.onFocusChanged`, lock/u
 
 ### 5.5 Watchtower checks and privacy boundary for M3.4
 
-**5.5.1 Local scoring.** Keep scoring in `internal/personal` (the trusted native side). The extension receives only bounded, non-secret metadata. A clean-room 0–100 score can use rune length, character-class pool size, distinct-rune ratio, common-pattern penalties, and sequential/low-variety penalties. The exact formula is a Locklark design choice; it must be versioned (`watchtower-v2`) so a score change is visible in the checklist.
+**5.5.1 Local scoring.** Keep scoring in `internal/personal` (the trusted native side). The extension receives only bounded, non-secret metadata. A clean-room 0–100 score can use rune length, character-class pool size, distinct-rune ratio, common-pattern penalties, and sequential/low-variety penalties. The exact formula is a Passme design choice; it must be versioned (`watchtower-v2`) so a score change is visible in the checklist.
 
 | Entropy band | Normalized score | Category | Weak flag |
 | --- | ---: | --- | --- |
@@ -747,7 +747,7 @@ The extension must not implement full vault browsing by caching decrypted items.
 - **Clipboard exposure.** Copy feedback is not a security control. Use the shortest feasible clipboard lease and clear on lock; document that other applications can read the clipboard.
 - **Context-menu races.** Rebuild is asynchronous; a click can arrive for a stale item. Always revalidate item id/revision before filling.
 - **Badge privacy.** A count can reveal how many accounts a user has for a site. The count is optional; the locked/alert indicator is not.
-- **Watchtower scoring differences.** The reference’s exact score is not a documented public contract; Locklark’s clean-room score will not match numerically. Mark the model version and compare category/action behavior, not exact numbers.
+- **Watchtower scoring differences.** The reference’s exact score is not a documented public contract; Passme’s clean-room score will not match numerically. Mark the model version and compare category/action behavior, not exact numbers.
 - **HIBP privacy.** The prefix is still a network request. Keep it opt-in, audited, cookie-free, padded, and host-side; never send a full hash or password.
 - **Draft secrets.** Popup editors are a secret-bearing DOM surface. Wipe on every exit path, including native lock, tab close, and extension reload.
 - **Open & Fill redirects.** A login URL can redirect to SSO, a different origin, or a dead page. The pending fill is single-use and TTL-bound; do not chase redirects.
@@ -769,7 +769,7 @@ The extension must not implement full vault browsing by caching decrypted items.
 
 ### 6.2 Parity table
 
-| ID | Capability / user action | 1Password 8.12.44.33 observable result | Locklark `main` `8e61dc1` | Locklark PR #40 `f6e42c3` | Status | Gap and target |
+| ID | Capability / user action | 1Password 8.12.44.33 observable result | Passme `main` `8e61dc1` | Passme PR #40 `f6e42c3` | Status | Gap and target |
 | --- | --- | --- | --- | --- | --- | --- |
 | **B8.1** | Identity item category and field storage | Structured name, address, phone, email, organization, birth date | Login + SSH Key only | Login (+ Passkey) + SSH Key only | `未实现` (Tracked) | M2 item model v2 + M3.3 |
 | **B8.2** | Identity field detection and multi-field fill | 34 autocomplete tokens plus label/name/id heuristics; fills `<input>` and `<select>` | Login username/password and one OTP only | Same; no identity fields | `未实现` (Tracked) | M3.3; add classifier and `fillIdentityDocument` |
@@ -800,7 +800,7 @@ The extension must not implement full vault browsing by caching decrypted items.
 
 **6.3.1 Identity tokens (34).** Strip `section-*` and `shipping`/`billing`/`home`/`work`/`mobile`/`fax`/`pager` modifiers, then map the final token.
 
-| Group | `autocomplete` tokens | Locklark v2 field keys |
+| Group | `autocomplete` tokens | Passme v2 field keys |
 | --- | --- | --- |
 | Personal name (7) | `name`, `honorific-prefix`, `given-name`, `additional-name`, `family-name`, `honorific-suffix`, `nickname` | `id.full_name`, `id.title`, `id.first_name`, `id.middle_name`, `id.last_name`, `id.suffix`, `id.nickname` |
 | Organization (2) | `organization`, `organization-title` | `id.company`, `id.job_title` |
@@ -810,7 +810,7 @@ The extension must not implement full vault browsing by caching decrypted items.
 
 **6.3.2 Credit Card tokens (10).**
 
-| Group | `autocomplete` tokens | Locklark v2 field keys |
+| Group | `autocomplete` tokens | Passme v2 field keys |
 | --- | --- | --- |
 | Cardholder name (4) | `cc-name`, `cc-given-name`, `cc-additional-name`, `cc-family-name` | `cc.cardholder_name`, `cc.given_name`, `cc.additional_name`, `cc.family_name` |
 | Number and security code (2) | `cc-number`, `cc-csc` | `cc.number`, `cc.cvv` |
@@ -846,7 +846,7 @@ Field keys above are the proposed M2 item-model v2 names; the final M2 schema is
 
 ### 6.5 Shared desktop session and native messaging IPC (M2.3 contract)
 
-**6.5.1 Channel and state.** The extension connects to the registered native host (`org.locklark.browser`) over `runtime.connectNative`. The connection state machine is `Start → Connecting → Connected` or `Disconnected`; the host owns its own vault session and capability.
+**6.5.1 Channel and state.** The extension connects to the registered native host (`org.passme.browser`) over `runtime.connectNative`. The connection state machine is `Start → Connecting → Connected` or `Disconnected`; the host owns its own vault session and capability.
 
 | Behavior | v2 contract request | v1 fallback |
 | --- | --- | --- |
@@ -962,9 +962,9 @@ npx -y rea-agents@latest analyze-javascript-application <external>/1p-ext \
   --source-path inline/notification/notification.html --source-path inline/modal/modal.html \
   --detail summary --format json --evidence_output <external>/1p-evidence
 
-# Locklark extension (small tree: complete inline analysis)
-npx -y rea-agents@latest analyze-javascript-application <external>/locklark-ext/dist/chromium \
-  --format json --evidence_output <external>/locklark-evidence
+# Passme extension (small tree: complete inline analysis)
+npx -y rea-agents@latest analyze-javascript-application <external>/passme-ext/dist/chromium \
+  --format json --evidence_output <external>/passme-evidence
 
 # Ledger and coverage (inputs are the JSON objects described by REA)
 npx -y rea-agents@latest build-reconstruction-obligation-ledger <external>/ledger-input.json --format json
@@ -989,11 +989,11 @@ These links are used for behavioral comparison. Do not copy their text, screensh
 ### 8.3 Clean-room review checklist
 
 - [ ] No 1Password source, comments, identifiers, CSS, HTML structure, icons, fonts, or locale strings were copied.
-- [ ] No 1Password branding or product name appears in Locklark UI; “1Password” appears only in comparison documents.
+- [ ] No 1Password branding or product name appears in Passme UI; “1Password” appears only in comparison documents.
 - [ ] Protocol constants and API names are functional facts, not creative expression.
 - [ ] No file from the external reference workspace is tracked: `git ls-files | grep -E '(^|/)(1p-ext|rea-m3|tmp/ref)'` is empty.
 - [ ] The full REA ledger/evidence JSON is not committed.
-- [ ] Tests use synthetic fixtures and original Locklark code.
+- [ ] Tests use synthetic fixtures and original Passme code.
 - [ ] Public documentation is cited, not reproduced.
 - [ ] A second reviewer signs off on the diff and the evidence.
 

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
-	"github.com/jihuayu/locklark/pkg/vaultfilepublish"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/pkg/vaultfilepublish"
 )
 
 // TestPipelineResumePreparedLateAckKeepsWorkingEdit is the late-acknowledgement

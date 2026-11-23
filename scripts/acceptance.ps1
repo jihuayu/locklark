@@ -9,14 +9,14 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
 Push-Location $repo
 try {
-    $work = Join-Path ([IO.Path]::GetTempPath()) ("locklark-check-" + [Guid]::NewGuid().ToString("N"))
+    $work = Join-Path ([IO.Path]::GetTempPath()) ("passme-check-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $work | Out-Null
     if ($Cli) {
         if (-not (Test-Path -LiteralPath $Cli -PathType Leaf)) { throw "CLI executable unavailable" }
         $exe = (Resolve-Path -LiteralPath $Cli).Path
     } else {
-        $exe = Join-Path $work "locklark.exe"
-        go build -trimpath -o $exe ./cmd/locklark
+        $exe = Join-Path $work "passme.exe"
+        go build -trimpath -o $exe ./cmd/passme
         if ($LASTEXITCODE -ne 0) { throw "Go build failed" }
     }
     function Invoke-Ok([string[]]$argv) {

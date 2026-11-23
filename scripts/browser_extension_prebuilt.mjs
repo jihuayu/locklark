@@ -7,11 +7,11 @@ import { isAbsolute, join, resolve } from "node:path";
 
 export const PREBUILT_ERROR = "prebuilt browser extension input rejected";
 export const NATIVE_REGISTER_ERROR = "native register input rejected";
-export const PREPARED_DIR_ENV = "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR";
-export const CHROMIUM_ENV = "LOCKLARK_BROWSER_EXTENSION_CHROMIUM";
-export const FIREFOX_ENV = "LOCKLARK_BROWSER_EXTENSION_FIREFOX";
-export const SAFARI_ENV = "LOCKLARK_BROWSER_EXTENSION_SAFARI";
-export const FLAG_ENV = "LOCKLARK_BROWSER_REQUIRE_PREBUILT";
+export const PREPARED_DIR_ENV = "PASSME_BROWSER_EXTENSION_PREPARED_DIR";
+export const CHROMIUM_ENV = "PASSME_BROWSER_EXTENSION_CHROMIUM";
+export const FIREFOX_ENV = "PASSME_BROWSER_EXTENSION_FIREFOX";
+export const SAFARI_ENV = "PASSME_BROWSER_EXTENSION_SAFARI";
+export const FLAG_ENV = "PASSME_BROWSER_REQUIRE_PREBUILT";
 const PREBUILT_KEYS = [FLAG_ENV, PREPARED_DIR_ENV, CHROMIUM_ENV, FIREFOX_ENV, SAFARI_ENV];
 
 function fail() {
@@ -19,7 +19,7 @@ function fail() {
 }
 
 export function validateNativeRegister(env = process.env) {
-  const raw = env.LOCKLARK_BROWSER_REGISTER;
+  const raw = env.PASSME_BROWSER_REGISTER;
   try {
     if (!raw || !isAbsolute(raw)) throw Error();
     const info = lstatSync(raw);

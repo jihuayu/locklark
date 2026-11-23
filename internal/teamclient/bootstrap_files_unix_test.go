@@ -77,7 +77,7 @@ func TestBootstrapIdentityLeaseSurvivesPublicDBInodeReplacement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBootstrapIdentityLeaseChild$")
-	cmd.Env = append(os.Environ(), "LOCKLARK_TEST_PROFILE_LEASE="+path)
+	cmd.Env = append(os.Environ(), "PASSME_TEST_PROFILE_LEASE="+path)
 	if out, e := cmd.CombinedOutput(); e != nil || string(out) != "PASS\n" {
 		t.Fatal("replaced DB inode bypassed fixed identity lease")
 	}

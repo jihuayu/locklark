@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func brokerTestSocket(t *testing.T) string {
@@ -35,13 +35,13 @@ func brokerTestSocket(t *testing.T) string {
 	trustedBrokerParent = func(string) (string, error) { return dir, nil }
 	t.Cleanup(func() { trustedBrokerParent = old })
 	sock := filepath.Join(dir, "b.sock")
-	t.Setenv("LOCKLARK_BROWSER_SOCKET", sock)
+	t.Setenv("PASSME_BROWSER_SOCKET", sock)
 	return sock
 }
 
 func brokerTestSession(t *testing.T) (*personal.Session, personal.Row) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "broker.ll")
+	path := filepath.Join(t.TempDir(), "broker.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)
@@ -286,7 +286,7 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	// A valid absolute path that no session under test uses: it passes the
 	// client's scope check, so the callback sees it with no session yet and
 	// answers with the explicit, non-fallback unavailable.
-	req.VaultPath = filepath.Join(cliRunFixturePaths.base, "no-session-vault.ll")
+	req.VaultPath = filepath.Join(cliRunFixturePaths.base, "no-session-vault.pm")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
@@ -825,7 +825,7 @@ func TestCLIRunInvalidRequestIsNotFallbackEligible(t *testing.T) {
 		// The scope is mandatory and must validate on the client too.
 		{V: 1, VaultPath: valid.VaultPath, Targets: valid.Targets},
 		{V: 1, VaultPath: valid.VaultPath, Scope: CLIRunScope{}, Targets: valid.Targets},
-		{V: 1, VaultPath: "relative/vault.ll", Scope: valid.Scope, Targets: valid.Targets},
+		{V: 1, VaultPath: "relative/vault.pm", Scope: valid.Scope, Targets: valid.Targets},
 		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "", ID: reqID(1), Revision: reqRevision(2), Field: "password"}}},
 		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "password"}, {Slot: "token", ID: reqID(3), Revision: reqRevision(4), Field: "password"}}},
 		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "elsewhere", ID: reqID(1), Revision: reqRevision(2), Field: "password"}}},
@@ -887,7 +887,7 @@ func TestBrokerBrowserPairingIsExplicitAndRefusable(t *testing.T) {
 	}
 }
 
-// The peer must be the desktop's own canonical executable or an exact Locklark
+// The peer must be the desktop's own canonical executable or an exact Passme
 // host basename at any absolute install directory, provided the file is a
 // trusted regular executable owned by the authenticated user. Prefixes, bare
 // names, arbitrary executables and writable/unowned/non-executable files are
@@ -910,23 +910,23 @@ func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
 		}
 		return path
 	}
-	self := write(filepath.Join(dir, "bin", "locklark-desktop"), 0)
-	host := write(filepath.Join(dir, "bin", "locklark-browser-chromium"), 0)
-	installed := write(filepath.Join(dir, "Library Application Support", "Locklark Browser Host", "locklark-browser-chromium"), 0)
-	firefox := write(filepath.Join(dir, "opt", "locklark", "locklark-browser-firefox"), 0)
-	evilPrefix := write(filepath.Join(dir, "opt", "locklark", "locklark-browser-chromium-evil"), 0)
-	shortPrefix := write(filepath.Join(dir, "opt", "locklark", "locklark-browser"), 0)
-	arbitrary := write(filepath.Join(dir, "opt", "locklark", "evil"), 0)
-	groupWritable := write(filepath.Join(dir, "rw", "locklark-browser-chromium"), 0770)
-	otherWritable := write(filepath.Join(dir, "rw", "locklark-browser-firefox"), 0702)
-	notExecutable := write(filepath.Join(dir, "rx", "locklark-browser-chromium"), 0600)
-	directory := filepath.Join(dir, "a-directory", "locklark-browser-chromium")
+	self := write(filepath.Join(dir, "bin", "passme-desktop"), 0)
+	host := write(filepath.Join(dir, "bin", "passme-browser-chromium"), 0)
+	installed := write(filepath.Join(dir, "Library Application Support", "Passme Browser Host", "passme-browser-chromium"), 0)
+	firefox := write(filepath.Join(dir, "opt", "passme", "passme-browser-firefox"), 0)
+	evilPrefix := write(filepath.Join(dir, "opt", "passme", "passme-browser-chromium-evil"), 0)
+	shortPrefix := write(filepath.Join(dir, "opt", "passme", "passme-browser"), 0)
+	arbitrary := write(filepath.Join(dir, "opt", "passme", "evil"), 0)
+	groupWritable := write(filepath.Join(dir, "rw", "passme-browser-chromium"), 0770)
+	otherWritable := write(filepath.Join(dir, "rw", "passme-browser-firefox"), 0702)
+	notExecutable := write(filepath.Join(dir, "rx", "passme-browser-chromium"), 0600)
+	directory := filepath.Join(dir, "a-directory", "passme-browser-chromium")
 	if e := os.MkdirAll(directory, 0700); e != nil {
 		t.Fatal(e)
 	}
 	// Give the file an owner uid other than the broker's. Unprivileged
 	// processes cannot chown, so this check is skipped when refused.
-	unowned := write(filepath.Join(dir, "unowned", "locklark-browser-chromium"), 0)
+	unowned := write(filepath.Join(dir, "unowned", "passme-browser-chromium"), 0)
 	chowned := os.Chown(unowned, 12345, 12345) == nil
 	peerUser := "UID " + strconv.Itoa(os.Geteuid())
 	otherUser := "UID " + strconv.Itoa(os.Geteuid()+1)
@@ -946,7 +946,7 @@ func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
 		{"other writable", otherWritable, peerUser, "linux", false},
 		{"non executable", notExecutable, peerUser, "linux", false},
 		{"directory", directory, peerUser, "linux", false},
-		{"bare basename", "locklark-browser-chromium", peerUser, "linux", false},
+		{"bare basename", "passme-browser-chromium", peerUser, "linux", false},
 		{"unauthenticated PID", installed, peerUser, "linux", false},
 	}
 	if chowned {
@@ -954,7 +954,7 @@ func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
 	}
 	// Unless a case names the desktop itself, the broker runs from another
 	// absolute desktop path so install-directory equality cannot help.
-	broker := write(filepath.Join(dir, "unrelated", "locklark-desktop"), 0)
+	broker := write(filepath.Join(dir, "unrelated", "passme-desktop"), 0)
 	against := make(map[string]string, len(cases))
 	for _, c := range cases {
 		against[c.path] = broker
@@ -977,16 +977,16 @@ func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
 	// macOS Safari follows the same exact-basename policy at any directory; the
 	// sibling app-bundle requirement is gone.
 	apps := filepath.Join(dir, "Applications")
-	desktop := write(filepath.Join(apps, "Locklark.app", "Contents", "MacOS", "locklark-desktop"), 0)
-	safari := write(filepath.Join(apps, "Locklark Safari.app", "Contents", "MacOS", "locklark-browser-safari"), 0)
+	desktop := write(filepath.Join(apps, "Passme.app", "Contents", "MacOS", "passme-desktop"), 0)
+	safari := write(filepath.Join(apps, "Passme Safari.app", "Contents", "MacOS", "passme-browser-safari"), 0)
 	if !peerProcessAllowedFor(Peer{User: peerUser, PID: 3, Process: safari}, desktop, "darwin") {
 		t.Fatal("exact Safari helper rejected")
 	}
-	looseSafari := write(filepath.Join(dir, "safari elsewhere", "locklark-browser-safari"), 0)
+	looseSafari := write(filepath.Join(dir, "safari elsewhere", "passme-browser-safari"), 0)
 	if !peerProcessAllowedFor(Peer{User: peerUser, PID: 3, Process: looseSafari}, desktop, "darwin") {
 		t.Fatal("Safari helper outside an app bundle rejected")
 	}
-	writableSafari := write(filepath.Join(dir, "safari elsewhere", "locklark-browser-chromium"), 0o702)
+	writableSafari := write(filepath.Join(dir, "safari elsewhere", "passme-browser-chromium"), 0o702)
 	if e := os.Chmod(writableSafari, 0702); e != nil {
 		t.Fatal(e)
 	}

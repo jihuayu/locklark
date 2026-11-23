@@ -44,25 +44,25 @@ class PersonalTestPartitionWorkflowContract(unittest.TestCase):
         self.assertNotIn("go test -count=1 ./internal/personal", source)
         self.assertNotIn("go test ./internal/personal -count=1", source)
         for preserved in (
-            "LOCKLARK_TEST_OPENSSH: '1'",
-            "$env:LOCKLARK_TEST_PYKEEPASS",
-            "$env:LOCKLARK_TEST_BUN",
+            "PASSME_TEST_OPENSSH: '1'",
+            "$env:PASSME_TEST_PYKEEPASS",
+            "$env:PASSME_TEST_BUN",
         ):
             self.assertIn(preserved, step)
 
     def test_runner_has_the_exact_package_cap_and_exclusion(self):
-        self.assertEqual(split.PERSONAL_PACKAGE, "github.com/jihuayu/locklark/internal/personal")
+        self.assertEqual(split.PERSONAL_PACKAGE, "github.com/jihuayu/passme/internal/personal")
         self.assertEqual(split.GROUP_TIMEOUT, "10m")
         packages = [
             split.PERSONAL_PACKAGE,
             split.PERSONAL_PACKAGE + "/helper",
-            "github.com/jihuayu/locklark/internal/personalized",
+            "github.com/jihuayu/passme/internal/personalized",
         ]
         self.assertEqual(
             split.filter_other_packages(packages),
             [
                 split.PERSONAL_PACKAGE + "/helper",
-                "github.com/jihuayu/locklark/internal/personalized",
+                "github.com/jihuayu/passme/internal/personalized",
             ],
         )
 

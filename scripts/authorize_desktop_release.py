@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only authorization gate for a Locklark desktop release tag.
+"""Read-only authorization gate for a Passme desktop release tag.
 
 This is a preparatory source-only checkpoint. It is not wired into the
 release workflow and it does not create, change, or prove any external GitHub

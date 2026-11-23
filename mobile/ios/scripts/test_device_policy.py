@@ -10,14 +10,14 @@ from device_policy import validate_test_bundle_base, validate_runner_bundle, val
 
 class DevicePolicyTests(unittest.TestCase):
     def test_test_only_bundle_and_exact_runner(self):
-        base = "com.example.locklark.acceptance"
+        base = "com.example.passme.acceptance"
         self.assertEqual(validate_test_bundle_base(base), base)
         self.assertEqual(validate_runner_bundle(base + ".uitests.xctrunner"), base)
 
     def test_production_other_namespace_and_unsafe_input_are_refused(self):
-        for value in ["org.locklark.mobile.ios", "com.example.real", "example.locklark.acceptance", "com.1example.locklark.acceptance", "com.exa_mple.locklark.acceptance", "com.example.locklark.acceptance\n", "com.example.锁.locklark.acceptance", "a." * 101 + "locklark.acceptance"]:
+        for value in ["org.passme.mobile.ios", "com.example.real", "example.passme.acceptance", "com.1example.passme.acceptance", "com.exa_mple.passme.acceptance", "com.example.passme.acceptance\n", "com.example.锁.passme.acceptance", "a." * 101 + "passme.acceptance"]:
             with self.assertRaises(ValueError): validate_test_bundle_base(value)
-        with self.assertRaises(ValueError): validate_runner_bundle("com.example.locklark.acceptance.other.xctrunner")
+        with self.assertRaises(ValueError): validate_runner_bundle("com.example.passme.acceptance.other.xctrunner")
 
     def test_device_ids_are_identifiers_not_aliases_or_commands(self):
         for value in ["00008110-001234567890ABCD", "a" * 40, "12345678-1234-1234-1234-123456789abc"]:
@@ -30,7 +30,7 @@ class DevicePolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError): validate_team_id("personal signing certificate")
 
     def test_existing_test_container_is_refused_without_cleanup(self):
-        base = "com.example.locklark.acceptance"
+        base = "com.example.passme.acceptance"
         require_fresh_test_apps({"result": {"apps": [{"bundleIdentifier": "com.apple.example"}]}}, base)
         for identifier in [base, base + ".uitests.xctrunner"]:
             with self.assertRaises(ValueError): require_fresh_test_apps({"result": {"apps": [{"bundleIdentifier": identifier}]}}, base)
@@ -39,7 +39,7 @@ class DevicePolicyTests(unittest.TestCase):
 
     def test_entry_reports_config_and_real_inventory_as_distinct_steps(self):
         command = [sys.executable, str(Path(__file__).with_name("device-preflight.py"))]
-        environment = dict(os.environ, IOS_TEST_BUNDLE_BASE="com.example.locklark.acceptance", IOS_DEVICE_ID="00008110-001234567890ABCD", IOS_DEVELOPMENT_TEAM="AB12CD34EF")
+        environment = dict(os.environ, IOS_TEST_BUNDLE_BASE="com.example.passme.acceptance", IOS_DEVICE_ID="00008110-001234567890ABCD", IOS_DEVELOPMENT_TEAM="AB12CD34EF")
         config = subprocess.run(command, env=environment, capture_output=True, text=True)
         self.assertEqual(config.returncode, 0)
         self.assertEqual(config.stdout.strip(), "ios physical configuration PASS")

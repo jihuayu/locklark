@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // TestVaultfileKDBXPayloadItemsRoundTrip exercises the public

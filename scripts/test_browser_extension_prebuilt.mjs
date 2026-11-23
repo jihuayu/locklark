@@ -24,7 +24,7 @@ const HARNESS = join(ROOT, "tests/e2e/harness.py");
 const SUPPORT = join(ROOT, "tests/e2e/support.py");
 
 function privateBase() {
-  const base = mkdtempSync(join(tmpdir(), "locklark-extension-prebuilt-"));
+  const base = mkdtempSync(join(tmpdir(), "passme-extension-prebuilt-"));
   return base;
 }
 
@@ -82,10 +82,10 @@ function producer(root, prepared) {
 function strictEnv(root, prepared) {
   return {
     ...process.env,
-    LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
-    LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: prepared,
-    LOCKLARK_BROWSER_EXTENSION_CHROMIUM: join(root, "browser-extension/dist/chromium"),
-    LOCKLARK_BROWSER_EXTENSION_FIREFOX: join(root, "browser-extension/dist/firefox"),
+    PASSME_BROWSER_REQUIRE_PREBUILT: "1",
+    PASSME_BROWSER_EXTENSION_PREPARED_DIR: prepared,
+    PASSME_BROWSER_EXTENSION_CHROMIUM: join(root, "browser-extension/dist/chromium"),
+    PASSME_BROWSER_EXTENSION_FIREFOX: join(root, "browser-extension/dist/firefox"),
   };
 }
 
@@ -110,21 +110,21 @@ test("missing and partial env, and consumer mismatch, fail without build", async
 
   assert.equal(helper.requirePrebuiltExtension(root, "chromium", {}), null);
   const allPaths = {
-    LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: join(base, "prepared"),
-    LOCKLARK_BROWSER_EXTENSION_CHROMIUM: join(base, "chromium"),
-    LOCKLARK_BROWSER_EXTENSION_FIREFOX: join(base, "firefox"),
+    PASSME_BROWSER_EXTENSION_PREPARED_DIR: join(base, "prepared"),
+    PASSME_BROWSER_EXTENSION_CHROMIUM: join(base, "chromium"),
+    PASSME_BROWSER_EXTENSION_FIREFOX: join(base, "firefox"),
   };
   for (const env of [
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1" },
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "0", ...allPaths },
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "true", ...allPaths },
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "" },
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "1" },
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "0", ...allPaths },
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "true", ...allPaths },
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "" },
     allPaths,
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1", ...allPaths,
-      LOCKLARK_BROWSER_EXTENSION_SAFARI: "" },
-    { LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
-      LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR: allPaths.LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR,
-      LOCKLARK_BROWSER_EXTENSION_CHROMIUM: allPaths.LOCKLARK_BROWSER_EXTENSION_CHROMIUM,
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "1", ...allPaths,
+      PASSME_BROWSER_EXTENSION_SAFARI: "" },
+    { PASSME_BROWSER_REQUIRE_PREBUILT: "1",
+      PASSME_BROWSER_EXTENSION_PREPARED_DIR: allPaths.PASSME_BROWSER_EXTENSION_PREPARED_DIR,
+      PASSME_BROWSER_EXTENSION_CHROMIUM: allPaths.PASSME_BROWSER_EXTENSION_CHROMIUM,
     },
   ]) {
     assert.throws(
@@ -144,7 +144,7 @@ test("missing and partial env, and consumer mismatch, fail without build", async
   writeFileSync(wrongPython, `#!/bin/sh\nprintf wrong > ${JSON.stringify(wrong)}\nexit 0\n`);
   execFileSync("chmod", ["0755", wrongPython]);
   const all = {
-    LOCKLARK_BROWSER_REQUIRE_PREBUILT: "1",
+    PASSME_BROWSER_REQUIRE_PREBUILT: "1",
     ...allPaths,
     PATH: `${fakeBin}:${process.env.PATH}`,
     PYTHON: wrongPython,
@@ -166,25 +166,25 @@ test("native register validation is absolute, regular, nonempty and executable",
   writeFileSync(valid, "#!/bin/sh\nexit 0\n");
   chmodSync(valid, 0o755);
   assert.equal(
-    helper.validateNativeRegister({ LOCKLARK_BROWSER_REGISTER: valid }),
+    helper.validateNativeRegister({ PASSME_BROWSER_REGISTER: valid }),
     valid,
   );
   const invalid = [
     {},
-    { LOCKLARK_BROWSER_REGISTER: "relative/register" },
-    { LOCKLARK_BROWSER_REGISTER: join(base, "missing") },
+    { PASSME_BROWSER_REGISTER: "relative/register" },
+    { PASSME_BROWSER_REGISTER: join(base, "missing") },
   ];
   const empty = join(base, "empty");
   writeFileSync(empty, "");
   chmodSync(empty, 0o755);
-  invalid.push({ LOCKLARK_BROWSER_REGISTER: empty });
+  invalid.push({ PASSME_BROWSER_REGISTER: empty });
   const nonexec = join(base, "nonexec");
   writeFileSync(nonexec, "#!/bin/sh\nexit 0\n");
   chmodSync(nonexec, 0o644);
-  invalid.push({ LOCKLARK_BROWSER_REGISTER: nonexec });
+  invalid.push({ PASSME_BROWSER_REGISTER: nonexec });
   const link = join(base, "link");
   symlinkSync(valid, link);
-  invalid.push({ LOCKLARK_BROWSER_REGISTER: link });
+  invalid.push({ PASSME_BROWSER_REGISTER: link });
   for (const env of invalid) {
     assert.throws(
       () => helper.validateNativeRegister(env),
@@ -210,7 +210,7 @@ test("local default and native/Edge/T2 wiring remain explicit", () => {
   assert.ok(native.indexOf("try {") < native.indexOf("const prebuiltChromium"));
   assert.ok(native.indexOf("const prebuiltChromium") < native.lastIndexOf("browserFixtureExecutable"));
   assert.ok(firefox.indexOf("requirePrebuiltExtension(root, \"firefox\")") < firefox.indexOf("create private synthetic fixture"));
-  assert.match(harness, /LOCKLARK_BROWSER_REQUIRE_PREBUILT/);
+  assert.match(harness, /PASSME_BROWSER_REQUIRE_PREBUILT/);
   assert.match(harness, /env = dict\(os\.environ\)/);
   assert.match(
     support,

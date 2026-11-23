@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const importPlanAction = "migration.plan.1pux"
@@ -65,7 +65,7 @@ func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 	if err != nil {
 		return onepux.MappedLogins{}, err
 	}
-	derived, err := hkdf.Key(sha256.New, secret, nil, "locklark/personal/import-plan/key/v1", 32)
+	derived, err := hkdf.Key(sha256.New, secret, nil, "passme/personal/import-plan/key/v1", 32)
 	if err != nil {
 		return onepux.MappedLogins{}, invalid
 	}
@@ -78,7 +78,7 @@ func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 		return onepux.MappedLogins{}, invalid
 	}
 	mac := hmac.New(sha256.New, derived)
-	mac.Write([]byte("locklark/personal/import-plan/" + profile + "\x00"))
+	mac.Write([]byte("passme/personal/import-plan/" + profile + "\x00"))
 	mac.Write(raw)
 	stamp := mac.Sum(nil)
 	if r.expected != "" {

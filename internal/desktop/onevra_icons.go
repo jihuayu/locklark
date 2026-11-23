@@ -17,15 +17,15 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
 
 const (
-	customIconMetaSectionID    = "_locklark_meta"
+	customIconMetaSectionID    = "_passme_meta"
 	customIconMetaSectionTitle = "_meta"
-	customIconMetaFieldID      = "_locklark_icon"
+	customIconMetaFieldID      = "_passme_icon"
 	customIconMetaFieldLabel   = "icon"
 	customIconMaxBytes         = 32768
 	customIconIconPrefix       = "icon:"
@@ -91,7 +91,7 @@ var curatedIconLookup = func() map[string]func() *ui.SVG {
 	return m
 }()
 
-// IsInternalMetaSection reports whether sec is the reserved Locklark internal
+// IsInternalMetaSection reports whether sec is the reserved Passme internal
 // metadata section that must not be shown as user-editable custom fields.
 func IsInternalMetaSection(sec vault.ItemSection) bool {
 	return strings.EqualFold(sec.ID, customIconMetaSectionID)

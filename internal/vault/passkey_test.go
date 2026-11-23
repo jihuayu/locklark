@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/passkey"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -36,7 +36,7 @@ func TestPasskeyProtectedKDBXAndLegacyOmission(t *testing.T) {
 	found := false
 	for n := range group.Entries[1].Values {
 		v := &group.Entries[1].Values[n]
-		if v.Key == "Locklark.Passkey" {
+		if v.Key == "Passme.Passkey" {
 			found = true
 			if !v.Value.Protected.Bool {
 				t.Fatal("unprotected")
@@ -114,13 +114,13 @@ func TestMixedSSHKeyAndPasskeyVaultRoundTripAndKDBX(t *testing.T) {
 	for _, entry := range db.Content.Root.Groups[0].Entries {
 		for _, v := range entry.Values {
 			switch v.Key {
-			case "Locklark.SSHSeed":
+			case "Passme.SSHSeed":
 				decoded, err := base64.StdEncoding.Strict().DecodeString(v.Value.Content)
 				if err != nil || !v.Value.Protected.Bool || !bytes.Equal(decoded, seed) {
 					t.Fatal("export lost protected SSH seed")
 				}
 				foundSeed = true
-			case "Locklark.Passkey":
+			case "Passme.Passkey":
 				decoded, err := base64.StdEncoding.Strict().DecodeString(v.Value.Content)
 				if err != nil || !v.Value.Protected.Bool || !bytes.Equal(decoded, raw) {
 					t.Fatal("export lost protected passkey")

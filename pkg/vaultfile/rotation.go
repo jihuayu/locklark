@@ -9,7 +9,7 @@ import (
 
 	"filippo.io/age"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // deriveFileDigestBytes returns the raw 32 bytes of FileDigest(f): the SHA-256

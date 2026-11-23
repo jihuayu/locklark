@@ -13,8 +13,8 @@ import (
 
 // V1 is a single-device Ed25519 stream. A dedicated key per stream makes its
 // local trust anchor also its identity. Proofs live inside the encrypted vault.
-const eventDomain = "locklark/audit-event/v1\x00"
-const checkpointDomain = "locklark/audit-checkpoint/v1\x00"
+const eventDomain = "passme/audit-event/v1\x00"
+const checkpointDomain = "passme/audit-checkpoint/v1\x00"
 
 var errAudit = errors.New("audit signature, sequence or witnessed history mismatch")
 

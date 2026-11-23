@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const (
@@ -109,7 +109,7 @@ func (p *runCLIPolicy) binding(r RunRequest, secret []byte) (string, error) {
 	if p.profile == RunCLIProfileGH {
 		profile = "gh-token-inherited-stdio-v1"
 	}
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/run-cli/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/run-cli/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

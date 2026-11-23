@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func lastNativeResponse(t *testing.T, out *memoryPipe) Response {
@@ -44,7 +44,7 @@ func expectRefused(t *testing.T, out *memoryPipe, id string) Response {
 // the test; dedicated tests cover the non-quick path.
 func pairedQuick(t *testing.T) (*Connection, *personal.Session, *memoryPipe, Request) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "quick.ll")
+	path := filepath.Join(t.TempDir(), "quick.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

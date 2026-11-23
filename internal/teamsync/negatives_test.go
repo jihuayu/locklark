@@ -15,8 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func TestHTTPSFreshSignedForkAndIllegalTransitionRejected(t *testing.T) {
@@ -37,10 +37,10 @@ func TestHTTPSFreshSignedForkAndIllegalTransitionRejected(t *testing.T) {
 						receipt.Proposal.Members[1].Role = "writer"
 						p := receipt.Proposal
 						p.Signature = nil
-						receipt.Proposal.Signature = ed25519.Sign(f.keys[0], append([]byte("locklark/team-directory/proposal/v1\x00"), encode(p)...))
+						receipt.Proposal.Signature = ed25519.Sign(f.keys[0], append([]byte("passme/team-directory/proposal/v1\x00"), encode(p)...))
 						r := *receipt
 						r.Signature = nil
-						receipt.Signature = ed25519.Sign(f.seq, append([]byte("locklark/team-directory/receipt/v1\x00"), encode(r)...))
+						receipt.Signature = ed25519.Sign(f.seq, append([]byte("passme/team-directory/receipt/v1\x00"), encode(r)...))
 					}
 					out.Head = out.History.Receipts[len(out.History.Receipts)-1].Checkpoint()
 					out.HistoryDigest = digest("history", out.History)

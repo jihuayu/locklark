@@ -27,8 +27,8 @@ PRODUCT_EXTRA_FILES = {
 PRODUCTS = ("chromium", "firefox", "safari")
 
 CHROMIUM_ID = "geldnhjapnackobgknocomedmjgphnpe"
-FIREFOX_ID = "browser@locklark.local"
-SAFARI_ID = "org.locklark.browser.safari.Extension"
+FIREFOX_ID = "browser@passme.local"
+SAFARI_ID = "org.passme.browser.safari.Extension"
 
 IDENTITIES = {
     "chromium": f"chrome-extension://{CHROMIUM_ID}/",

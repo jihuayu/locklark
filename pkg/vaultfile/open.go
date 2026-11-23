@@ -3,7 +3,7 @@ package vaultfile
 import (
 	"filippo.io/age"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // OpenAuthenticatedFile is the package's caller-pinned authenticated full-file

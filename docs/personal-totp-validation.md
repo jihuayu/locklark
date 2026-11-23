@@ -14,7 +14,7 @@ stdout 只有 `status: written-to-terminal`、session、intent 与 `[valid_from,
 
 ## 失败先行和回归
 
-首先运行新增 `TestOTP*`，因 `RevealOTP` 等接口缺失而编译失败，临时日志 `/tmp/locklark-validation/personal-otp-red.log`。实现后的回归包括：
+首先运行新增 `TestOTP*`，因 `RevealOTP` 等接口缺失而编译失败，临时日志 `/tmp/passme-validation/personal-otp-red.log`。实现后的回归包括：
 
 - 真实加密库保存 RFC 示例配置；取码前另一事务能读到已提交意图；59 秒的 8 位码为 `94287082`，时间窗 `[30,60)`，条目修订不变。
 - 正常时间、精确截止、同窗亚秒回拨、提交期间回拨、负时间和长提交跨窗；失败零输出、零成功回执，意图仍可验证，临时配置失效。
@@ -28,7 +28,7 @@ stdout 只有 `status: written-to-terminal`、session、intent 与 `[valid_from,
 
 本轮运行全仓 Go（含 Bun 和 PyKeePass）、OTP/披露定向 race、vet/模块校验、ConPTY 驱动单测、个人恢复/披露/生成/OTP/MCP 进程验收与 macOS arm64 交叉编译。最终结果、Luna/max 独立复核和双平台 CI 针对最终 PR head 核对，记录在 PR 正文。
 
-上述本地检查均通过；全仓个人包 73.806s，定向 race 个人包 279.701s / TOTP 1.066s / CLI 1.113s。PR 为 [#4](https://github.com/jihuayu/locklark/pull/4)，实现 head `f80dab40a0bd04edea7bd0a1ec96d7f0bb792d58`；最终测试/文档修正 head 与双平台链接见 PR 正文。
+上述本地检查均通过；全仓个人包 73.806s，定向 race 个人包 279.701s / TOTP 1.066s / CLI 1.113s。PR 为 [#4](https://github.com/jihuayu/passme/pull/4)，实现 head `f80dab40a0bd04edea7bd0a1ec96d7f0bb792d58`；最终测试/文档修正 head 与双平台链接见 PR 正文。
 
 Luna/max 独立复核未发现阻塞问题，独立 personal/TOTP/CLI 全包测试（58.389s / 0.016s / 8.646s）、构建、OTP PTY、vet 与 diff 检查通过。两项低优先级意见均关闭：文档明确通用回执 `status`；并发测试换成真实不同种子（独立 Python HMAC 计算恢复后的 6 位码为 `326399`），避免只验证格式差异。
 

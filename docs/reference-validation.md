@@ -2,7 +2,7 @@
 
 ## 接手与本切片
 
-重新 fetch 核对：`origin/main` 为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`；[PR #1](https://github.com/jihuayu/locklark/pull/1) 开放、未合并，真实 head、远端 `codex/first-preview` 和 `refs/pull/1/head` 均为 `78ed9e584930ba2fcf6b3179d575c7e0b2827200`。接手工作树干净，未见其他开发测试进程。没有覆盖后续提交或改动 main。
+重新 fetch 核对：`origin/main` 为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`；[PR #1](https://github.com/jihuayu/passme/pull/1) 开放、未合并，真实 head、远端 `codex/first-preview` 和 `refs/pull/1/head` 均为 `78ed9e584930ba2fcf6b3179d575c7e0b2827200`。接手工作树干净，未见其他开发测试进程。没有覆盖后续提交或改动 main。
 
 本切片实现不依赖存储或未合并主分支的纯 Go 引用基础：`internal/reference`。代码提交为 `0dece6d432c787ca126c4575417d0424ec48fdd9`，已快进推送到 PR #1 原分支。它不依赖 `personal`、`preview`、KDBX、解锁因素或任何服务；不是人工 raw read、Gateway 授权或已经接通的 CLI 功能。原恢复修复与审核门槛继续保留。
 
@@ -26,23 +26,23 @@
 
 先写 API 类型、空实现与合成测试，执行 `go test -count=1 ./internal/reference`，实际失败：有效引用被报 invalid、有效目标被报 not found、同名歧义误报 not found、目录校验与输出投影正例失败。然后实现解析与查找，以上测试通过。这是新增核心能力的 TDD，不把空实现失败描述为既有产品漏洞。
 
-失败日志为本次临时环境 `/tmp/locklark-validation/reference/red.log`，临时环境不保证长期保留。合成测试未接触真实金库、真实账号或生产凭据。
+失败日志为本次临时环境 `/tmp/passme-validation/reference/red.log`，临时环境不保证长期保留。合成测试未接触真实金库、真实账号或生产凭据。
 
 ## 实际检查
 
-工具链为 Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0，执行环境为 Cloud Linux。`go` 为 `/tmp/locklark-tools/go/bin/go`。
+工具链为 Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0，执行环境为 Cloud Linux。`go` 为 `/tmp/passme-tools/go/bin/go`。
 
 | 检查 | 命令与结果 |
 | --- | --- |
 | 核心单测与竞态 | `go test -race -count=1 ./internal/reference` 通过；复查补充空白/控制字符修订号拒绝后重新通过（1.025 秒） |
 | 模糊测试 | `go test ./internal/reference -run '^$' -fuzz=FuzzParse -fuzztime=15s -parallel=2` 通过，789326 次执行；覆盖失败不返回部分目标、成功身份始终来自给定目录、解析重建语义一致 |
 | 模块/静态 | `go mod verify`、`go vet ./...`、补充修订号校验后的 `go vet ./internal/reference`、`git diff --check` 通过 |
-| Go 全量 | 设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun` 和 `LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python`，`go test -count=1 ./...` 通过，含独立 KDBX 实现和真实 Bun 子进程；随后只补充本包修订号校验并重跑本包竞态/静态检查 |
+| Go 全量 | 设置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun` 和 `PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python`，`go test -count=1 ./...` 通过，含独立 KDBX 实现和真实 Bun 子进程；随后只补充本包修订号校验并重跑本包竞态/静态检查 |
 | Bun | `bun test ./plugins/github-pull-reader`：2 pass、0 fail |
-| 个人终端 | 构建本轮 CLI 后 `python3 scripts/personal_acceptance.py /tmp/locklark-validation/reference/locklark` 通过，含原恢复所有负例及 FIFO 拒绝 |
-| MCP 子进程 | Bun 位于命令 PATH 时，`python3 scripts/mcp_acceptance.py /tmp/locklark-validation/reference/locklark` 通过 |
-| Windows 编译 | `GOOS=windows GOARCH=amd64 go test -c -o /tmp/locklark-validation/reference/reference-windows.test.exe ./internal/reference` 通过，仅编译未运行 |
-| macOS 编译 | `GOOS=darwin GOARCH=arm64 go test -c -o /tmp/locklark-validation/reference/reference-macos.test ./internal/reference` 通过，仅编译未运行 |
+| 个人终端 | 构建本轮 CLI 后 `python3 scripts/personal_acceptance.py /tmp/passme-validation/reference/passme` 通过，含原恢复所有负例及 FIFO 拒绝 |
+| MCP 子进程 | Bun 位于命令 PATH 时，`python3 scripts/mcp_acceptance.py /tmp/passme-validation/reference/passme` 通过 |
+| Windows 编译 | `GOOS=windows GOARCH=amd64 go test -c -o /tmp/passme-validation/reference/reference-windows.test.exe ./internal/reference` 通过，仅编译未运行 |
+| macOS 编译 | `GOOS=darwin GOARCH=arm64 go test -c -o /tmp/passme-validation/reference/reference-macos.test ./internal/reference` 通过，仅编译未运行 |
 
 ## op 行为对照状态
 
@@ -59,7 +59,7 @@
 
 ## 远端检查、复核与下一项
 
-代码提交 `0dece6d` 的 [run 41871642842](https://github.com/jihuayu/locklark/actions/runs/41871642842) 未启动测试。实际读取了 Ubuntu check `126720015974` 和 Windows check `126720015461` 的 annotation，仍为账户付款/额度限制；本地通过不等于远端通过。此为原阻塞，未单独重复通知。文档提交后的最新 head 检查以 [PR checks](https://github.com/jihuayu/locklark/pull/1/checks) 为准。
+代码提交 `0dece6d` 的 [run 41871642842](https://github.com/jihuayu/passme/actions/runs/41871642842) 未启动测试。实际读取了 Ubuntu check `126720015974` 和 Windows check `126720015461` 的 annotation，仍为账户付款/额度限制；本地通过不等于远端通过。此为原阻塞，未单独重复通知。文档提交后的最新 head 检查以 [PR checks](https://github.com/jihuayu/passme/pull/1/checks) 为准。
 
 本切片独立代码复核未完成；既有恢复切片及 `4932c8d..a0d8ab1` 的复核欠项保留。自己的复查和模糊测试不算独立复核。本轮未运行原生 Windows/macOS、移动真机、硬件实验、真实 op/1Password 对照或外部密码评审。预览包全量竞态检查原超时限制仍未关闭。
 

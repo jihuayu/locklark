@@ -25,7 +25,7 @@ from desktop_clipboard_owner import current_owner
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TITLE = "Locklark · 本地金库"
+TITLE = "Passme · 本地金库"
 MARKER = "Later independent synthetic clipboard owner"
 OTP_WINDOW_SECONDS = 20
 OTP_WINDOW_MIN_REMAINING = 18
@@ -69,14 +69,14 @@ def otp_diagnostic(copy_delta=None, failure_delta=None, clipboard_empty=None):
 class Acceptance:
     def __init__(self):
         self.stage = "setup"
-        self.state = pathlib.Path(tempfile.mkdtemp(prefix="locklark-desktop-acceptance-"))
+        self.state = pathlib.Path(tempfile.mkdtemp(prefix="passme-desktop-acceptance-"))
         self.diagnostics = self.state / "diagnostics"
         self.diagnostics.mkdir(mode=0o700)
-        self.host = pathlib.Path(os.environ["LOCKLARK_DESKTOP_HOST"]).resolve(strict=True)
+        self.host = pathlib.Path(os.environ["PASSME_DESKTOP_HOST"]).resolve(strict=True)
         require(bool(os.environ.get("DISPLAY")))
         self.env = {**os.environ, "GOTOOLCHAIN": "go1.27.3"}
-        self.go = os.environ.get("LOCKLARK_GO", "go")
-        fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
+        self.go = os.environ.get("PASSME_GO", "go")
+        fixture = os.environ.get("PASSME_DESKTOP_FIXTURE")
         self.fixture_prebuilt = bool(fixture)
         self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
         self.fixture_path = self.state / "vault" / "fixture.json"
@@ -784,16 +784,16 @@ class Acceptance:
         success = False
         try:
             self.setup()
-            if os.environ.get("LOCKLARK_TEST_FAILURE_STAGE") == "probe-input":
+            if os.environ.get("PASSME_TEST_FAILURE_STAGE") == "probe-input":
                 # Add a genuinely newly generated password to the fault's
                 # private payload and final scan, alongside unlock/OTP factors.
                 self.create(True)
                 self.phase("private-probe-failure")
                 result = self.probe_request({"op":"unsupported", "private":list(self.values)})
                 require(result.get("ok") is True)
-            elif os.environ.get("LOCKLARK_TEST_FAILURE_STAGE"):
+            elif os.environ.get("PASSME_TEST_FAILURE_STAGE"):
                 raise AcceptanceFailure()
-            scenario = os.environ.get("LOCKLARK_TEST_SCENARIO")
+            scenario = os.environ.get("PASSME_TEST_SCENARIO")
             if scenario:
                 require(scenario in ("foreign-owner","provider"))
                 if scenario == "provider":
@@ -869,7 +869,7 @@ class Acceptance:
         success_label = {
             "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
             "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
-        }.get(os.environ.get("LOCKLARK_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
+        }.get(os.environ.get("PASSME_TEST_SCENARIO"),"PASS: real desktop atomic create/generate, exact regeneration, native clipboard ownership and independent TOTP lifecycle")
         final_lines = ["Desktop native private state: " + str(self.state),
                        "Desktop native authorized display read attempts: max=" + str(self.probe_read_attempts_max),
                        "Desktop native private artifact and controller scan: passed",

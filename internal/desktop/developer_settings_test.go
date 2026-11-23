@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/clibinding"
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/clibinding"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func TestSettingsDeveloperTabExposesImplementedDesktopTools(t *testing.T) {
@@ -205,7 +205,7 @@ func TestCLIRequestActivityShowsApprovedAndRefusedRequestsAfterRestart(t *testin
 
 func TestCLIConfigurationCreatesPinnedGitHubBindingWithoutCredentialData(t *testing.T) {
 	privateRoot := newPrivateCLIConfigDir(t)
-	path := filepath.Join(privateRoot, "desktop.ll")
+	path := filepath.Join(privateRoot, "desktop.pm")
 	key := []byte("0123456789abcdef")
 	if err := personal.Create(path, "fixture", key); err != nil {
 		t.Fatal(err)
@@ -373,7 +373,7 @@ func TestCLIWorkbenchSupportsAll24ProfilesMultiSlotTokenAndPrecheck(t *testing.T
 
 	tokenBinding := clibinding.ToolBinding{
 		Profile:       "token",
-		VaultPath:     filepath.Join(t.TempDir(), "personal.ll"),
+		VaultPath:     filepath.Join(t.TempDir(), "personal.pm"),
 		Program:       myToolPath,
 		ProgramSHA256: a.cliSettings.precheckDigest,
 		TokenEnvName:  "MY_CUSTOM_TOKEN",
@@ -459,7 +459,7 @@ func TestStandaloneCLIApprovalPopupView(t *testing.T) {
 		id:   "pending-1",
 		peer: browserhost.Peer{PID: 99, User: "tester", Process: "gh.exe"},
 		request: browserhost.BrokerCLIRequest{
-			VaultPath: filepath.Join(t.TempDir(), "personal.ll"),
+			VaultPath: filepath.Join(t.TempDir(), "personal.pm"),
 			Targets: []personal.CLIBrokerTarget{{
 				Slot:     "GH_TOKEN",
 				ID:       "0123456789abcdef0123456789abcdef",
