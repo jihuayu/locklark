@@ -460,7 +460,7 @@ class ScrollProbeTest {
             ensureWindowFocus()
             waitFor("Initial create unavailable") { ready("generate-account-key") }
             stage("create"); click("generate-account-key")
-            waitFor("Account key unavailable") { text("backup-secret-key").startsWith("LL") }
+            waitFor("Account key unavailable") { text("backup-secret-key").startsWith("PM") }
             val key = record(text("backup-secret-key"))
             enter("new-master-password", master); enter("repeat-master-password", master)
             click("backup-ack"); click("create-vault")
