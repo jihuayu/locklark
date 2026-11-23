@@ -6,11 +6,11 @@
 
 Chromium 扩展由实际用户 action/快捷键开启，固定扩展 ID，通过 Native Messaging 启动独立 MyGo 窗口。窗口持有自己的个人金库会话，使用既有完整因素及系统解锁接口；原生批准连接后才能读取当前网站候选，每次用户名/密码填充仍须原生批准。Next.js 管理页不接收金库字段。连接、来源/标签页/文档/条目/修订、短期一次请求以及认证事务的审计意图共同限制交付。
 
-Chrome/Edge 使用 Chromium 宿主；Firefox 有独立启动身份、注册及扩展构建。真实 Firefox 157 临时扩展实验已验证 `executeScript` 返回标准 UUID `documentId`，按 `documentIds` 注入成功，同源导航后旧 ID 被浏览器拒绝（`Invalid documentId`），证据见 `/tmp/locklark-validation/firefox-document-binding/report.json`。该 API 自 Firefox 153 起提供，缺失身份的负测只是模拟不支持的 API，不代表新版 Firefox 不支持。主代理已独立实跑 Firefox 157 的完整 native 填充/UI 链路，见下方记录；仓库脚本亦已独立通过，精确 head CI 继续验收，不引入较弱的来源匹配回退。Chromium 和 Firefox 的测试结果不能替代 Edge、Safari 或手机验收。签名发布、自动更新和商店分发仍待完成。
+Chrome/Edge 使用 Chromium 宿主；Firefox 有独立启动身份、注册及扩展构建。真实 Firefox 157 临时扩展实验已验证 `executeScript` 返回标准 UUID `documentId`，按 `documentIds` 注入成功，同源导航后旧 ID 被浏览器拒绝（`Invalid documentId`），证据见 `/tmp/passme-validation/firefox-document-binding/report.json`。该 API 自 Firefox 153 起提供，缺失身份的负测只是模拟不支持的 API，不代表新版 Firefox 不支持。主代理已独立实跑 Firefox 157 的完整 native 填充/UI 链路，见下方记录；仓库脚本亦已独立通过，精确 head CI 继续验收，不引入较弱的来源匹配回退。Chromium 和 Firefox 的测试结果不能替代 Edge、Safari 或手机验收。签名发布、自动更新和商店分发仍待完成。
 
 ## 失败先行及回归
 
-日志保存在执行环境 `/tmp/locklark-validation/`：`browser-red-session.log`、`browser-red-host.log`、`browser-red-connection.log` 分别记录缺失会话 API、协议模块和连接到期行为的失败。`browser-red-worker-late.log` 复现锁库提示被迟到回调覆盖及旧请求清除新候选；实现加入代次/请求身份约束后，扩展测试通过。
+日志保存在执行环境 `/tmp/passme-validation/`：`browser-red-session.log`、`browser-red-host.log`、`browser-red-connection.log` 分别记录缺失会话 API、协议模块和连接到期行为的失败。`browser-red-worker-late.log` 复现锁库提示被迟到回调覆盖及旧请求清除新候选；实现加入代次/请求身份约束后，扩展测试通过。
 
 已完成个人金库精确来源、修订/状态、一次消费、提交回滚/关闭失败、到期/锁定、旧历史复验；宿主帧长度、重复 JSON 字段、固定启动身份、配对/确认前无值、请求重放、慢管道/断管和原生锁定竞态；扩展来源规范、精确 popup sender、导航后旧响应及缺失文档身份拒绝。`browser-race-final.log` 的 host/desktop/personal 定向竞态通过；`browser-go-all.log` 记录启用真实 Bun 和 PyKeePass 的全量 Go 测试通过。后续独立审阅修复仍需相应回归，不能把早期测试当作最终 head 的结论。
 
@@ -20,25 +20,25 @@ Chrome/Edge 使用 Chromium 宿主；Firefox 有独立启动身份、注册及�
 
 `scripts/browser_native_x11.py` 通过系统 AT-SPI 的控件标签、可见/可用状态及实际几何定位，再使用 XTest 操作窗口（不读取字段 Value/Text）：输入完整合成解锁因素、确认连接、批准或拒绝填充、锁库。实际 popup 以本机测试 CDP 连接并发送鼠标输入，不伪造扩展消息或宿主响应。产品中没有跳过解锁/配对/批准的测试入口。
 
-首次完整验收发现锁库提示被异步失败覆盖，保留失败日志并修复；随后 `browser-native-e2e.log` 已通过：批准前字段为空、批准后两字段与合成值一致、未自动提交、原生拒绝后无值、文档导航后旧请求不填新页面、锁库停止匹配/交付且提示锁定、浏览器控制台不含合成秘密。合成证据目录 `/tmp/locklark-browser-acceptance-vTSzqm`，原生确认截图 `native-confirm.png`；合成因素目录不上传、不提交。真实 DOM 测试还覆盖隐藏/disabled/readonly/歧义字段、跨来源表单 action/base 与 iframe 拒绝，见 `browser-dom.log`。
+首次完整验收发现锁库提示被异步失败覆盖，保留失败日志并修复；随后 `browser-native-e2e.log` 已通过：批准前字段为空、批准后两字段与合成值一致、未自动提交、原生拒绝后无值、文档导航后旧请求不填新页面、锁库停止匹配/交付且提示锁定、浏览器控制台不含合成秘密。合成证据目录 `/tmp/passme-browser-acceptance-vTSzqm`，原生确认截图 `native-confirm.png`；合成因素目录不上传、不提交。真实 DOM 测试还覆盖隐藏/disabled/readonly/歧义字段、跨来源表单 action/base 与 iframe 拒绝，见 `browser-dom.log`。
 
 复跑命令（路径按本机调整）：
 
 ```sh
 DISPLAY=:94 \
-LOCKLARK_TEST_PLAYWRIGHT=/workspace/locklark/web/node_modules/playwright \
-LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
-LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-chromium \
+PASSME_TEST_PLAYWRIGHT=/workspace/passme/web/node_modules/playwright \
+PASSME_GO=/tmp/passme-tools/go/bin/go \
+PASSME_BROWSER_HOST=/tmp/passme-tools/passme-browser-chromium \
 dbus-run-session -- node scripts/browser_native_acceptance.mjs
 ```
 
 ## 共享桌面金库的剪贴板租约外部验收
 
-`scripts/browser_native_acceptance.mjs` 新增显式外部验收模式（不是产品测试开关）：同时设置 `LOCKLARK_TEST_SHARED_CLIPBOARD=1` 与绝对路径 `LOCKLARK_DESKTOP_HOST` 时，脚本在生成私有合成 fixture、注册真实 native host manifest 并启动固定身份扩展之后、进入原有独立宿主配对流程之前，直接转入 `scripts/browser_shared_clipboard_acceptance.mjs`。未设置该变量时原独立宿主验收路径完全不变。
+`scripts/browser_native_acceptance.mjs` 新增显式外部验收模式（不是产品测试开关）：同时设置 `PASSME_TEST_SHARED_CLIPBOARD=1` 与绝对路径 `PASSME_DESKTOP_HOST` 时，脚本在生成私有合成 fixture、注册真实 native host manifest 并启动固定身份扩展之后、进入原有独立宿主配对流程之前，直接转入 `scripts/browser_shared_clipboard_acceptance.mjs`。未设置该变量时原独立宿主验收路径完全不变。
 
-该模式首先在私有验收目录下创建 0700 的 `shared-environment/home` 与 `shared-environment/tmp`，并把 `HOME`、`TMPDIR`、`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME` 与显式 `LOCKLARK_BROWSER_SOCKET=<state>/shared-environment/tmp/b.sock` 组成独立环境：它同时传给 Playwright 的浏览器进程和真实 `locklark-desktop` 普通进程（无参数启动），因此浏览器启动的 native host 子进程与桌面 App 使用同一个私有 broker 端点，不会连接或影响真实用户的桌面 App/设置。启动前断言私有 HOME/配置/临时目录为空且该端点尚不存在（因此产品使用默认 30 秒清理设置、只打开本脚本生成的受控 fixture 金库），启动后断言端点已是 socket。Go fixture/注册步骤仍使用原环境，因为其输出路径都是显式私有路径。
+该模式首先在私有验收目录下创建 0700 的 `shared-environment/home` 与 `shared-environment/tmp`，并把 `HOME`、`TMPDIR`、`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME` 与显式 `PASSME_BROWSER_SOCKET=<state>/shared-environment/tmp/b.sock` 组成独立环境：它同时传给 Playwright 的浏览器进程和真实 `passme-desktop` 普通进程（无参数启动），因此浏览器启动的 native host 子进程与桌面 App 使用同一个私有 broker 端点，不会连接或影响真实用户的桌面 App/设置。启动前断言私有 HOME/配置/临时目录为空且该端点尚不存在（因此产品使用默认 30 秒清理设置、只打开本脚本生成的受控 fixture 金库），启动后断言端点已是 socket。Go fixture/注册步骤仍使用原环境，因为其输出路径都是显式私有路径。
 
-宿主随后按其正常 native-messaging 通道转发到该桌面 broker，`native-clipboard-lease-v1` 能力由实际 App 的 `NewClipboard` 工厂发布；popup 的连接不依赖任何“快捷配对”勾选。桌面解锁只通过 `scripts/browser_native_x11.py` 的真实 AT-SPI 控件、就绪状态与 XTest 物理输入完成，桌面窗口使用标题 `Locklark · 本地金库` 与桌面可执行文件，独立宿主窗口标题 `Locklark · 浏览器原生确认` 与之区分为不同 UI 宿主。
+宿主随后按其正常 native-messaging 通道转发到该桌面 broker，`native-clipboard-lease-v1` 能力由实际 App 的 `NewClipboard` 工厂发布；popup 的连接不依赖任何“快捷配对”勾选。桌面解锁只通过 `scripts/browser_native_x11.py` 的真实 AT-SPI 控件、就绪状态与 XTest 物理输入完成，桌面窗口使用标题 `Passme · 本地金库` 与桌面可执行文件，独立宿主窗口标题 `Passme · 浏览器原生确认` 与之区分为不同 UI 宿主。
 
 配对仍先在真实弹窗上点击 `#connect`，并用 XTest 物理点击固定标签 `拒绝连接` 完成拒绝前置检查：随后重新打开的新 popup 必须仍可连接、不可刷新（`pair_refused_unpaired`），因此拒绝路径是真实的，不是仅检查提示。成功连接只在桌面配对提示上物理等待并点击唯一固定标签 `连接并启用快捷填充`（`pair_quick_consent_bound` / `quick_consent_accepted`），该原生提示文本明确授权本连接 15 分钟内的 V2 详情（`item-get`）与字段复制/显示等快捷操作，配对 UI 也说明快捷模式避免反复切换焦点窗口；不使用普通逐次同意（`确认连接（每次敏感操作需批准）`），不从状态文本推断或自动批准同意。标签均为源码固定的字面量，不从动态 UI 文本读取。
 
@@ -60,11 +60,11 @@ dbus-run-session -- node scripts/browser_native_acceptance.mjs
 
 ```sh
 DISPLAY=:94 \
-LOCKLARK_TEST_PLAYWRIGHT=/workspace/locklark/web/node_modules/playwright \
-LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
-LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-chromium \
-LOCKLARK_DESKTOP_HOST=/tmp/locklark-tools/locklark-desktop \
-LOCKLARK_TEST_SHARED_CLIPBOARD=1 \
+PASSME_TEST_PLAYWRIGHT=/workspace/passme/web/node_modules/playwright \
+PASSME_GO=/tmp/passme-tools/go/bin/go \
+PASSME_BROWSER_HOST=/tmp/passme-tools/passme-browser-chromium \
+PASSME_DESKTOP_HOST=/tmp/passme-tools/passme-desktop \
+PASSME_TEST_SHARED_CLIPBOARD=1 \
 dbus-run-session -- node scripts/browser_native_acceptance.mjs
 ```
 
@@ -76,7 +76,7 @@ DeepSeek 补齐独立/共享、管理器存在/缺失及锁定状态的六组回
 
 ## 独立 review 与待验收
 
-Luna 的架构预审及最终实现复审已完成，未发现剩余阻塞项。安装路径/权限与原子发布、无关标签导航、配对前锁定通知、取消授权顺序、候选 JSON 编码预算、外置提交按钮、值后浏览器 API 无界等待与迟到状态覆盖均已修复并有回归。独立运行宿主测试、14 项扩展测试及 Windows 测试交叉编译通过；最后新增一项过期参数测试并格式化后，Sol 的 15 项 Node 测试及真实 DOM 再次通过。主代理在最终二进制上重新运行完整真实 GUI，`browser-native-e2e-final.log` 通过，合成证据目录 `/tmp/locklark-browser-acceptance-bSULDZ`。精确 PR head 远端 CI 尚待完成。已开始写管道/注入的字段无法撤回，失败或回执丢失只表示交付未知；不自动重试或声称网站接收成功。
+Luna 的架构预审及最终实现复审已完成，未发现剩余阻塞项。安装路径/权限与原子发布、无关标签导航、配对前锁定通知、取消授权顺序、候选 JSON 编码预算、外置提交按钮、值后浏览器 API 无界等待与迟到状态覆盖均已修复并有回归。独立运行宿主测试、14 项扩展测试及 Windows 测试交叉编译通过；最后新增一项过期参数测试并格式化后，Sol 的 15 项 Node 测试及真实 DOM 再次通过。主代理在最终二进制上重新运行完整真实 GUI，`browser-native-e2e-final.log` 通过，合成证据目录 `/tmp/passme-browser-acceptance-bSULDZ`。精确 PR head 远端 CI 尚待完成。已开始写管道/注入的字段无法撤回，失败或回执丢失只表示交付未知；不自动重试或声称网站接收成功。
 
 Windows Hello/TPM、macOS Touch ID 与 Linux Secret Service 的真实系统验证仍保留桌面硬件验收项；本次完整因素 UI 流程不是生物识别硬件验证。保存/更新、TOTP/Passkey、完整类别迁移、团队邀请/远端同步、Safari及移动系统填充继续推进，不由本切片关闭。
 
@@ -86,11 +86,11 @@ PR #26 初始 head `63a5a2b` 的 run `42066506800`：Ubuntu Go/macOS 桌面通�
 
 Web 的管理页 Chromium/Firefox、扩展单测和真实 DOM 已通过；原生 GUI 在配对阶段失败。Sol 在与 CI 相同的 WenQuanYi 中文字体和 Xvfb 环境复现：字体改变控件高度，固定坐标没有正确输入/解锁。改用实际 AT-SPI 控件定位和就绪状态，保留一次真实用户输入，不反复重试授权。又实证两个 Linux 浏览器均向 native host 继承 `NO_AT_BRIDGE=1`，使实际 MyGo 窗口不可被系统辅助技术发现。合法宿主启动后、GTK 初始化前仅移除此标记，恢复系统默认桥接；不改其他系统设置和解锁/批准条件。Chromium 与 Firefox 均有环境回归，Firefox 扩展修复前失败记录为 `browser-ci-firefox-a11y-red.log`。
 
-主代理在原失败字体配置独立复跑 `browser-xvfb-wqy-parent.log` 全绿，覆盖成功、拒绝、导航、锁库、批准前无值和不自动提交；私有合成目录 `locklark-browser-acceptance-LRceOc`。复跑在上方命令增加 `FONTCONFIG_FILE=/tmp/locklark-ci-fonts/wqy.conf XDG_CONFIG_HOME=/tmp/locklark-ci-gtk-wqy`，使用已运行的隔离 Xvfb `:94`。本机 AT-SPI 需要 `at-spi2-core`、`libatspi2.0-0` 和私有 DBus 会话。
+主代理在原失败字体配置独立复跑 `browser-xvfb-wqy-parent.log` 全绿，覆盖成功、拒绝、导航、锁库、批准前无值和不自动提交；私有合成目录 `passme-browser-acceptance-LRceOc`。复跑在上方命令增加 `FONTCONFIG_FILE=/tmp/passme-ci-fonts/wqy.conf XDG_CONFIG_HOME=/tmp/passme-ci-gtk-wqy`，使用已运行的隔离 Xvfb `:94`。本机 AT-SPI 需要 `at-spi2-core`、`libatspi2.0-0` 和私有 DBus 会话。
 
 ## Firefox 独立完整链路
 
-Sol 的外部实验和主代理独立复跑均已通过真实 Firefox 157、临时扩展、native messaging 和 MyGo 的完整解锁/连接/批准填充，包括原生拒绝、同源新文档拒绝、锁库、批准前无值、不自动提交及控制台秘密扫描。主代理日志 `firefox-native-parent.log`，私有合成目录 `locklark-firefox-native-R0s0Am`。测试只向临时 NSS 库导入受控 HTTPS CA，`acceptInsecureCerts=false`；使用浏览器真实 document IDs，无身份回退。
+Sol 的外部实验和主代理独立复跑均已通过真实 Firefox 157、临时扩展、native messaging 和 MyGo 的完整解锁/连接/批准填充，包括原生拒绝、同源新文档拒绝、锁库、批准前无值、不自动提交及控制台秘密扫描。主代理日志 `firefox-native-parent.log`，私有合成目录 `passme-firefox-native-R0s0Am`。测试只向临时 NSS 库导入受控 HTTPS CA，`acceptInsecureCerts=false`；使用浏览器真实 document IDs，无身份回退。
 
 Firefox 通过实际工具栏 action 触发 `activeTab`。默认 Ctrl+Shift+Y 与 Firefox Library 冲突，其他候选快捷键未证明可靠，故 Firefox 构建不预设快捷键，用户可在浏览器扩展快捷键管理中配置；Chromium 的既有快捷键不变。新的仓库脚本 `scripts/browser_firefox_native_acceptance.mjs` 已由主代理独立复跑通过，CI 使用私有 DBus/Xvfb；本机成功不冒充远端 CI 已通过。
 
@@ -101,18 +101,18 @@ Luna/max 对 Linux 两宿主无障碍环境恢复、Windows 启动测试路径�
 
 复核提出的诊断问题已修复：X11 与 AT-SPI 同时绑定预期宿主可执行文件/PID和唯一窗口；只捕获该窗口或测试 popup，不截整个桌面。诊断目录由脚本在私有状态目录内创建，不接受外部复用目录。失败只输出固定阶段/错误类，避免把含合成因素的远端异常原文打印出来。Sol 的 Chrome 实际批准后强制故障、Firefox 实际配对后向异常放入合成因素的故障测试，均确认非零退出、stdout/stderr及诊断 JSON 无因素/字段回显；Firefox 同时确认自建 manifest 清理。分别见 `browser-ci-private-diagnostic-check.log`、`firefox-repo-privacy-after-pair.log`。这些工具故障不会改变产品授权条件。
 
-主代理对最终 Chromium 控件/进程定位与私密截图版再次独立验收通过：`browser-xvfb-final-parent.log`，私有诊断目录 `locklark-browser-acceptance-d36xtN/diagnostics-103CUb`。定向 Go desktop/browserhost 与 15 项 Node 回归亦由主代理独立通过（`browser-parent-incremental-go.log`、`browser-parent-incremental-node.log`）。Firefox 最终仓库脚本亦由主代理独立复跑通过：`firefox-repo-final-parent.log`，私有目录 `locklark-firefox-native-lVt62A`。精确新 head CI 结果随后记录。
+主代理对最终 Chromium 控件/进程定位与私密截图版再次独立验收通过：`browser-xvfb-final-parent.log`，私有诊断目录 `passme-browser-acceptance-d36xtN/diagnostics-103CUb`。定向 Go desktop/browserhost 与 15 项 Node 回归亦由主代理独立通过（`browser-parent-incremental-go.log`、`browser-parent-incremental-node.log`）。Firefox 最终仓库脚本亦由主代理独立复跑通过：`firefox-repo-final-parent.log`，私有目录 `passme-firefox-native-lVt62A`。精确新 head CI 结果随后记录。
 
 
 Firefox 最终复跑命令（使用已经运行的隔离显示，路径按本机调整）：
 
 ```sh
 DISPLAY=:95 \
-LOCKLARK_FIREFOX=/home/agent/.cache/ms-playwright/firefox-1555/firefox/firefox \
-LOCKLARK_GECKODRIVER=/tmp/locklark-validation/firefox-document-binding/geckodriver \
-LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
-LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-firefox \
-LOCKLARK_BROWSER_REGISTER=/tmp/locklark-tools/locklark-browser-register \
+PASSME_FIREFOX=/home/agent/.cache/ms-playwright/firefox-1555/firefox/firefox \
+PASSME_GECKODRIVER=/tmp/passme-validation/firefox-document-binding/geckodriver \
+PASSME_GO=/tmp/passme-tools/go/bin/go \
+PASSME_BROWSER_HOST=/tmp/passme-tools/passme-browser-firefox \
+PASSME_BROWSER_REGISTER=/tmp/passme-tools/passme-browser-register \
 dbus-run-session -- node scripts/browser_firefox_native_acceptance.mjs
 ```
 
@@ -121,4 +121,4 @@ dbus-run-session -- node scripts/browser_firefox_native_acceptance.mjs
 
 ## 合并结果
 
-[PR #26](https://github.com/jihuayu/locklark/pull/26) 最终 head `6c649d992f913c36a75a16f30e1320c4b008d085` 在 [run 42073803355](https://github.com/jihuayu/locklark/actions/runs/42073803355) 的 Ubuntu Go、Windows Go/终端验收、macOS 桌面、Web 四项全部通过。Web 日志分别确认真实 Chromium 和 Firefox 原生完整链路通过，保留原有 Next.js 两浏览器和 DOM 测试。经 Luna/max 复审与主代理验收后 squash 合入 main `0f38177eb1059121d04e94fb96d264126688573f`。下一切片是显式保存/更新，见 [架构约定](browser-save-design.md)。
+[PR #26](https://github.com/jihuayu/passme/pull/26) 最终 head `6c649d992f913c36a75a16f30e1320c4b008d085` 在 [run 42073803355](https://github.com/jihuayu/passme/actions/runs/42073803355) 的 Ubuntu Go、Windows Go/终端验收、macOS 桌面、Web 四项全部通过。Web 日志分别确认真实 Chromium 和 Firefox 原生完整链路通过，保留原有 Next.js 两浏览器和 DOM 测试。经 Luna/max 复审与主代理验收后 squash 合入 main `0f38177eb1059121d04e94fb96d264126688573f`。下一切片是显式保存/更新，见 [架构约定](browser-save-design.md)。

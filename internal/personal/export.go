@@ -2,7 +2,7 @@ package personal
 
 import (
 	"errors"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +20,7 @@ type ExportReceipt struct {
 type exportRequest struct{ password string }
 
 func publishExport(raw []byte, dest string) error {
-	f, err := os.CreateTemp(filepath.Dir(dest), ".locklark-export-*")
+	f, err := os.CreateTemp(filepath.Dir(dest), ".passme-export-*")
 	if err != nil {
 		return err
 	}

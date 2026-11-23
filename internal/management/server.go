@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 var ErrUnavailable = errors.New("verified management state unavailable")

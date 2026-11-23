@@ -1,22 +1,22 @@
 // Explicit cross-origin checkout acceptance: same-site top page plus an
-// embedded card form served from checkout.locklark.test. The caller supplies
+// embedded card form served from checkout.passme.test. The caller supplies
 // the real browser page, popup adapter, native X11 input helper and the
 // private synthetic fixture. This module never dispatches extension runtime
 // messages, never asks for a Session approval directly and never submits a
 // form. It only performs trusted pointer/click and native-label actions.
 import assert from "node:assert/strict";
 
-const CHECKOUT_DEFAULT_HOST = "checkout.locklark.test";
+const CHECKOUT_DEFAULT_HOST = "checkout.passme.test";
 const CHECKOUT_CROSS_SITE_HOST = "checkout.other.test";
 // The same-origin variant's child is the exact top HTTPS origin (same host
 // and the same ephemeral port), so every frame on that page shares one origin.
-const CHECKOUT_TOP_HOST = "login.locklark.test";
+const CHECKOUT_TOP_HOST = "login.passme.test";
 const CHECKOUT_HOSTS = new Set([
   CHECKOUT_DEFAULT_HOST,
   CHECKOUT_CROSS_SITE_HOST,
   CHECKOUT_TOP_HOST,
 ]);
-// The real Chromium journey window is titled "Locklark · 浏览器原生确认".
+// The real Chromium journey window is titled "Passme · 浏览器原生确认".
 // Focus-preserving probes match it by that exact title (and executable) only:
 // browser_native_x11.py rejects a `title_prefix` on its read-only inspection
 // path, and raising/focusing the window would close the open action popup.
@@ -99,7 +99,7 @@ export function checkoutTopHTML(port, options = {}) {
   const sandboxAttribute = sandbox ? ' sandbox="allow-scripts"' : "";
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
-    "<title>Locklark acceptance · checkout</title>" +
+    "<title>Passme acceptance · checkout</title>" +
     "<style>body{font-family:sans-serif;margin:1rem}" +
     "label{display:block;margin:.5rem 0}" +
     "input,select{display:block;width:20rem;padding:.3rem}" +
@@ -136,7 +136,7 @@ export function checkoutTopHTML(port, options = {}) {
 export function checkoutCardHTML() {
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
-    "<title>Locklark checkout card frame</title>" +
+    "<title>Passme checkout card frame</title>" +
     "<style>body{font-family:sans-serif;margin:1rem}" +
     "label{display:block;margin:.5rem 0}" +
     "input,select{display:block;width:18rem;padding:.3rem}</style></head><body>" +
@@ -608,9 +608,9 @@ export function sanitizeDetailFillDiagnostic(value) {
 }
 
 const DETAIL_FILL_DIAGNOSTIC_ENABLE =
-  "(() => { globalThis.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true; return true; })()";
+  "(() => { globalThis.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true; return true; })()";
 const DETAIL_FILL_DIAGNOSTIC_READ =
-  "(() => globalThis.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__ ?? null)()";
+  "(() => globalThis.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__ ?? null)()";
 
 // Requests the metadata frame picker with one explicit trusted pointer click
 // on the real "#detail-fill" control. The popup only enumerates frames from a

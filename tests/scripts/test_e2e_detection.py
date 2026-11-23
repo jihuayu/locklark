@@ -56,7 +56,7 @@ class FakeContext:
             rc, stdout, stderr = self.go_result
             return CLIResult(rc, stdout, stderr, list(key))
         rc, stdout, stderr = self.responses.get(
-            key, (1, "", "unknown command; see locklark help")
+            key, (1, "", "unknown command; see passme help")
         )
         return CLIResult(rc, stdout, stderr, list(key))
 
@@ -88,12 +88,12 @@ TOP_HELP = (
     "  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]\n"
 )
 RUN_HELP = (
-    "usage: locklark cli run <tool> [--binding PATH] [--cwd ABS_DIR] "
+    "usage: passme cli run <tool> [--binding PATH] [--cwd ABS_DIR] "
     "[--timeout SECONDS] -- [ARG...]\n"
 )
 SHELL_SCRIPT = (
-    "# Locklark CLI wrappers (bash/zsh)\n"
-    'gh() {\n  command "/opt/locklark" cli run gh -- "$@"\n}\n'
+    "# Passme CLI wrappers (bash/zsh)\n"
+    'gh() {\n  command "/opt/passme" cli run gh -- "$@"\n}\n'
 )
 
 
@@ -130,7 +130,7 @@ class F14DetectionTests(unittest.TestCase):
             support.f14_cli_profiles_ready(ctx)
 
     def test_missing_profiles_command_is_real_absence(self):
-        ctx = FakeContext({("help",): (0, "locklark help\n", "")})
+        ctx = FakeContext({("help",): (0, "passme help\n", "")})
         self.assertFalse(support.f14_cli_profiles_ready(ctx))
         self.assertNotIn(("cli", "profiles"), ctx.calls)
 
@@ -241,7 +241,7 @@ class F17DetectionTests(unittest.TestCase):
         ctx = self._ctx(
             {
                 "internal/desktop/ipc_broker.go": "startBrowserBroker handleCLIRun",
-                "cmd/locklark/cli.go": "RequestCLIRun",
+                "cmd/passme/cli.go": "RequestCLIRun",
             }
         )
         self.assertTrue(support.f17_broker_ready(ctx))
@@ -298,7 +298,7 @@ class AutoLoginDetectionTests(unittest.TestCase):
         for name, body in files.items():
             (extension / name).write_text(body, encoding="utf-8")
         return FakeContext(
-            {("help",): (0, "locklark help\n", "")},
+            {("help",): (0, "passme help\n", "")},
             repo_root=root,
             extension_dir=extension,
         )
@@ -349,7 +349,7 @@ class F11FillContractDetectionTests(unittest.TestCase):
         (extension / "core.js").write_text(core, encoding="utf-8")
         (extension / "content.js").write_text(core, encoding="utf-8")
         return FakeContext(
-            {("help",): (0, "locklark help\n", "")},
+            {("help",): (0, "passme help\n", "")},
             repo_root=root,
             extension_dir=extension,
             **kwargs,
@@ -415,7 +415,7 @@ class F11FillContractDetectionTests(unittest.TestCase):
 class F13HostWatchtowerDetectionTests(unittest.TestCase):
     """F13 must separate CLI health flags from the shipped Watchtower service."""
 
-    def _ctx(self, files: dict[str, str], *, help_text: str = "locklark help\n") -> FakeContext:
+    def _ctx(self, files: dict[str, str], *, help_text: str = "passme help\n") -> FakeContext:
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         for relative, body in files.items():
@@ -445,7 +445,7 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
         # personal help surface.
         ctx = self._ctx(
             {},
-            help_text="locklark help\n  health --file PATH [--hibp true]\n",
+            help_text="passme help\n  health --file PATH [--hibp true]\n",
         )
         self.assertTrue(support.f13_cli_health_flags(ctx))
         self.assertFalse(support.f13_hibp_client_ready(ctx))
@@ -454,7 +454,7 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
     def test_old_health_flags_are_not_evidence_of_the_landed_contract(self):
         ctx = self._ctx(
             {},
-            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+            help_text="passme help\n  --check-breached\n  --hibp-endpoint URL\n",
         )
         self.assertFalse(support.f13_cli_health_flags(ctx))
         self.assertFalse(support.f13_hibp_client_ready(ctx))
@@ -510,7 +510,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
     def test_personal_help_hibp_pair_detected(self):
         ctx = self._ctx(
             {
-                ("help",): (0, "locklark help\n", ""),
+                ("help",): (0, "passme help\n", ""),
                 ("personal", "help"): (0, "  health --file PATH [--hibp true]\n", ""),
             }
         )
@@ -519,11 +519,11 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
     def test_health_help_is_read_even_when_it_exits_non_zero(self):
         ctx = self._ctx(
             {
-                ("help",): (0, "locklark help\n", ""),
-                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+                ("help",): (0, "passme help\n", ""),
+                ("personal", "help"): (0, "usage: passme personal\n", ""),
                 ("personal", "health", "--help"): (
                     1,
-                    "usage: locklark personal health --file PATH [--hibp true]\n",
+                    "usage: passme personal health --file PATH [--hibp true]\n",
                     "",
                 ),
             }
@@ -534,7 +534,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
         ctx = self._ctx(
             {
                 ("help",): (0, "  --check-breached\n  --hibp-endpoint URL\n", ""),
-                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+                ("personal", "help"): (0, "usage: passme personal\n", ""),
             }
         )
         self.assertFalse(support.f13_cli_health_flags(ctx))
@@ -542,7 +542,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
     def test_bare_hibp_without_true_is_not_the_landed_contract(self):
         ctx = self._ctx(
             {
-                ("help",): (0, "locklark help\n", ""),
+                ("help",): (0, "passme help\n", ""),
                 ("personal", "help"): (0, "  health --file PATH [--hibp]\n", ""),
             }
         )
@@ -646,7 +646,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
             support, "local_hibp_range_proxy", lambda _ctx, _responses: DummyProxy()
         ):
             observed = support.f13_cli_hibp_range_lookups(
-                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}, {"ABCDE": ()}
+                ctx, {"path": "vault.pm", "password": "p", "secret": "s"}, {"ABCDE": ()}
             )
         self.assertEqual(observed["status"], "pending")
         self.assertEqual(observed["connections"], [])
@@ -654,7 +654,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
     def _declined_opt_in(self, before, after):
         ctx = mock.Mock()
         ctx.run_cli.return_value = CLIResult(
-            1, "", "usage: locklark personal health --file PATH [--hibp true]", []
+            1, "", "usage: passme personal health --file PATH [--hibp true]", []
         )
         declined = support.PTYResult(
             1,
@@ -669,7 +669,7 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
             mock.patch.object(support, "pty", return_value=declined),
         ):
             observed = support.f13_cli_hibp_opt_in(
-                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}
+                ctx, {"path": "vault.pm", "password": "p", "secret": "s"}
             )
         return ctx, observed
 
@@ -772,7 +772,7 @@ class F5RefreshDetectionTests(unittest.TestCase):
         desktop = root / "internal" / "desktop"
         desktop.mkdir(parents=True)
         (desktop / "app.go").write_text(app_source, encoding="utf-8")
-        return FakeContext({("help",): (0, "locklark help\n", "")}, repo_root=root)
+        return FakeContext({("help",): (0, "passme help\n", "")}, repo_root=root)
 
     MODERN = (
         "func (a *App) refresh() {\n"
@@ -1000,7 +1000,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         self.assertEqual(command[0], "sh")
         self.assertEqual(command[1], "-c")
         self.assertEqual(command[2], harness.OWNED_SESSION_WRAPPER)
-        self.assertEqual(command[3], "locklark-session")
+        self.assertEqual(command[3], "passme-session")
         rest = command[4:]
         if dbus:
             self.assertEqual(rest[0], "/usr/bin/dbus-run-session")
@@ -1013,12 +1013,12 @@ class GuiSessionWrappingTests(unittest.TestCase):
         self.assertEqual(rest[0], "sh")
         self.assertEqual(rest[1], "-c")
         self.assertEqual(rest[2], harness.OWNED_TARGET_WRAPPER)
-        self.assertEqual(rest[3], "locklark-native")
+        self.assertEqual(rest[3], "passme-native")
         self.assertEqual(rest[4:], target)
 
     def test_missing_bus_is_wrapped_with_owned_dbus_session(self):
         env = {"DISPLAY": "", "PATH": "/usr/bin"}
-        target = ["/opt/locklark-browser-chromium", "origin"]
+        target = ["/opt/passme-browser-chromium", "origin"]
         with self._which(
             {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
         ):
@@ -1046,7 +1046,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         self.assertFalse(harness.session_bus_usable({"DBUS_SESSION_BUS_ADDRESS": "  "}))
         self.assertFalse(
             harness.session_bus_usable(
-                {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/locklark-bus"}
+                {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/passme-bus"}
             )
         )
         with self._which(

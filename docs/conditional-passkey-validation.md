@@ -9,7 +9,7 @@
 - 只读复核发现能力握手期间 abort 可迟到复活；已将取消监听前移并清理 waiter/timer，补可用/不可用回复、pagehide、fallback 微任务及 listener 释放测试，旧顺序 mutation 下回归失败。
 - 主代理发现开放 Shadow DOM 的 input 被 document.activeElement 重定向到 host；改为只遍历开放 root 的 activeElement，覆盖已聚焦、新聚焦、查询期间换焦点和 closed-root 不可遍历。
 - 后续复核提示选择可能覆盖正在等待的普通批准；主代理确认另有 await current 后 intent 被替换/取消的问题。选择前后均重验 intent 对象、pageID/context/epoch/capability/support 以及三个空闲槽位；回包再查批准对象。四组受控延迟/并发回归在旧逻辑 mutation 下全部失败，修复后通过；未声称 OTP pending 分支已有专门动态子例。
-- RS256/EdDSA-only create、enterprise/未知 attestation、超过 native 32 个算法参数的请求，以及已有 PRF/largeBlob/其他扩展/cross-platform 请求继续交给浏览器。混合列表含 ES256 且符合限制时仍可使用 Locklark。未虚构 PRF、largeBlob、新算法或相关来源支持。
+- RS256/EdDSA-only create、enterprise/未知 attestation、超过 native 32 个算法参数的请求，以及已有 PRF/largeBlob/其他扩展/cross-platform 请求继续交给浏览器。混合列表含 ES256 且符合限制时仍可使用 Passme。未虚构 PRF、largeBlob、新算法或相关来源支持。
 
 两个只读外部复核均明确区分检查过的代码与未读部分；后一个补读 background/core 及 sender/原 options/选择成员关系。静态复核不算实际执行，也不等同完整独立密码审计。native writer 在 Session/generation 变化后拒绝帧；Handle 错误会关闭 standalone/共享连接并触发扩展断连清理，并非悄悄留下无期限响应。
 

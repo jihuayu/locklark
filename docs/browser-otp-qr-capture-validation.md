@@ -1,6 +1,6 @@
 # 浏览器两步验证二维码捕获与保存
 
-日期：2026-11-10。本文件记录在 Locklark 浏览器扩展中实现“检测页面上的两步验证二维码、经用户确认后保存到已有登录”的设计、信任边界和实际测试结果。它对应 1Password 的 `autosave-qr-code-detected` / `autosave-2fa-*` 行为；参考实现来源与字节锚点见[1Password beta 对照](browser-1password-beta-parity.md)。
+日期：2026-11-10。本文件记录在 Passme 浏览器扩展中实现“检测页面上的两步验证二维码、经用户确认后保存到已有登录”的设计、信任边界和实际测试结果。它对应 1Password 的 `autosave-qr-code-detected` / `autosave-2fa-*` 行为；参考实现来源与字节锚点见[1Password beta 对照](browser-1password-beta-parity.md)。
 
 ## 参考行为
 

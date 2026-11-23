@@ -1,7 +1,7 @@
 /* Isolated world. Closed shadow UI; password values never cross the page bridge. */
 (() => {
   "use strict";
-  const core = globalThis.LocklarkCore || null;
+  const core = globalThis.PassmeCore || null;
   // Private isolated-world DOM-policy fence. It is installed at document_start
   // in every frame the content script runs, including a cross-origin frame that
   // frameAllowed() refuses below. It only tracks whether this document's root
@@ -12,7 +12,7 @@
     try {
       const g = globalThis;
       if (!g || !g.document) return;
-      if (Object.prototype.hasOwnProperty.call(g, "LocklarkCheckoutFence"))
+      if (Object.prototype.hasOwnProperty.call(g, "PassmeCheckoutFence"))
         return;
       const doc = g.document;
       const state = {
@@ -90,7 +90,7 @@
       };
       Object.freeze(snapshot);
       try {
-        Object.defineProperty(g, "LocklarkCheckoutFence", {
+        Object.defineProperty(g, "PassmeCheckoutFence", {
           value: snapshot,
           writable: false,
           configurable: false,
@@ -312,7 +312,7 @@
     box.className = "panel";
     box.setAttribute("role", "dialog");
     box.setAttribute("aria-label", heading);
-    const title = element("strong", "Locklark · " + heading);
+    const title = element("strong", "Passme · " + heading);
     box.append(title);
     root.append(style, box);
     document.documentElement.append(host);
@@ -385,8 +385,8 @@
     try {
       return (
         el.hasAttribute?.("data-1p-ignore") ||
-        el.hasAttribute?.("data-locklark-ignore") ||
-        !!el.closest?.("[data-1p-ignore],[data-locklark-ignore]")
+        el.hasAttribute?.("data-passme-ignore") ||
+        !!el.closest?.("[data-1p-ignore],[data-passme-ignore]")
       );
     } catch {
       return false;
@@ -555,7 +555,7 @@
     const supported = (await conditionalCapabilitySupported()) === true;
     // Only a boolean ever leaves the isolated world for the page bridge.
     window.postMessage(
-      { source: "locklark-capability-v1", id, conditional: supported },
+      { source: "passme-capability-v1", id, conditional: supported },
       location.origin,
     );
   }
@@ -566,7 +566,7 @@
   function forwardSignalHint(data) {
     if (!data || typeof data !== "object") return;
     if (Object.keys(data).sort().join(",") !== "id,options,source") return;
-    if (data.source !== "locklark-signal-v1") return;
+    if (data.source !== "passme-signal-v1") return;
     if (typeof data.id !== "string" || !/^[a-f0-9-]{36}$/.test(data.id)) return;
     if (typeof data.options !== "string" || data.options.length > 32768) return;
     const options = core?.passkeySignalOptions
@@ -636,7 +636,7 @@
       pendingDismissedForPasskey = true;
     }
     const box = panel(anchor, "Passkey 账号");
-    box.setAttribute("data-locklark-conditional", "passkey");
+    box.setAttribute("data-passme-conditional", "passkey");
     note(box, location.hostname);
     const entries = listed.passkeys.slice(0, 50);
     const labelCounts = new Map();
@@ -657,14 +657,14 @@
       const choice = element("button", hint ? label + " · " + hint : label);
       choice.type = "button";
       choice.setAttribute(
-        "data-locklark-passkey-choice",
+        "data-passme-passkey-choice",
         entry.item_id || entry.credential_id,
       );
-      choice.setAttribute("data-locklark-passkey-credential", entry.credential_id);
-      choice.setAttribute("data-locklark-passkey-revision", entry.revision);
+      choice.setAttribute("data-passme-passkey-credential", entry.credential_id);
+      choice.setAttribute("data-passme-passkey-revision", entry.revision);
       if (childRevision)
         choice.setAttribute(
-          "data-locklark-passkey-credential-revision",
+          "data-passme-passkey-credential-revision",
           childRevision,
         );
       choice.addEventListener("click", (event) => {
@@ -690,7 +690,7 @@
     if (listed.truncated === true) {
       const native = element("button", "使用系统 Passkey 选择器");
       native.type = "button";
-      native.setAttribute("data-locklark-passkey-native", "true");
+      native.setAttribute("data-passme-passkey-native", "true");
       native.addEventListener("click", (event) => {
         if (!event.isTrusted) return;
         if (conditionalRequest !== call) return;
@@ -960,8 +960,8 @@
     focusMenuOnOpen = false;
     if (request || !loginInput(input)) return;
     if (
-      input.closest?.("[data-locklark-ignore]") ||
-      input.getAttribute?.("data-locklark-ignore") !== null
+      input.closest?.("[data-passme-ignore]") ||
+      input.getAttribute?.("data-passme-ignore") !== null
     )
       return;
     await settingsReady;
@@ -1005,7 +1005,7 @@
       }
       const box = panel(anchor, otp ? "填充验证码" : "选择账号");
       if (!state.connected) {
-        button(box, "解锁 Locklark", async () => {
+        button(box, "解锁 Passme", async () => {
           dismiss();
           await send({ type: "inline-connect" });
           if (target?.isConnected) {
@@ -1112,7 +1112,7 @@
         category === "identity" ? "填充身份信息" : "填充信用卡",
       );
       if (!state.connected) {
-        button(box, "解锁 Locklark", async () => {
+        button(box, "解锁 Passme", async () => {
           dismiss();
           await send({ type: "inline-connect" });
           if (target?.isConnected) {
@@ -1579,7 +1579,7 @@
     note(
       callout,
       isSecret
-        ? "这看起来是 Locklark 的 Secret Key。Secret Key 只应在 Locklark 应用中使用，切勿粘贴到任何网页。"
+        ? "这看起来是 Passme 的 Secret Key。Secret Key 只应在 Passme 应用中使用，切勿粘贴到任何网页。"
         : "此网站没有已保存的登录。确认信任此网站后再粘贴密码，以防钓鱼网站窃取凭据。",
       "warn-body",
     );
@@ -1978,13 +1978,13 @@
     const box = element("section");
     box.className = "banner";
     box.setAttribute("role", "alertdialog");
-    box.setAttribute("aria-label", "Locklark 保存登录");
+    box.setAttribute("aria-label", "Passme 保存登录");
     box.append(
       element(
         "strong",
         staged.mode === "update"
-          ? "Locklark · 是否更新此登录密码？"
-          : "Locklark · 是否保存此网站登录？",
+          ? "Passme · 是否更新此登录密码？"
+          : "Passme · 是否保存此网站登录？",
       ),
     );
     box.append(element("p", staged.origin || location.origin));
@@ -2045,7 +2045,7 @@
           dismissPending();
           // A confirmed save makes this origin linked for paste protection.
           siteLink = { origin: location.origin, linked: true, at: Date.now() };
-          showToast("已保存到 Locklark");
+          showToast("已保存到 Passme");
         } else status.textContent = result?.status || "保存失败，请稍后重试";
       } catch {
         status.textContent = "保存失败，请稍后重试";
@@ -2054,10 +2054,10 @@
       }
     }
     const label = !staged.connected
-      ? "解锁 Locklark 并保存"
+      ? "解锁 Passme 并保存"
       : staged.mode === "update"
         ? "更新密码 · " + (staged.title || location.hostname)
-        : "保存到 Locklark";
+        : "保存到 Passme";
     controls.push(
       button(box, label, () =>
         commit(staged.mode === "update" ? "update" : "new"),
@@ -2268,7 +2268,7 @@
       if (!sender || sender.id !== api.runtime.id) return false;
       // The worker invalidates a waiting conditional intent with a bare id; the
       // UI must not outlive a lock, disconnect, navigation or eviction.
-      if (message?.type === "locklark:conditional-passkey-cancel") {
+      if (message?.type === "passme:conditional-passkey-cancel") {
         const call = conditionalRequest;
         if (
           typeof message.id !== "string" ||
@@ -2289,10 +2289,10 @@
         respond({ cancelled: true });
         return true;
       }
-      if (message?.type === "locklark:open-inline-menu") {
+      if (message?.type === "passme:open-inline-menu") {
         const active = document.activeElement;
         const input =
-          loginInput(active) && !active.closest?.("[data-locklark-ignore]")
+          loginInput(active) && !active.closest?.("[data-passme-ignore]")
             ? active
             : document.querySelector(
                 'input[type="password"],input[autocomplete="username"],input[type="email"]',
@@ -2312,7 +2312,7 @@
   window.addEventListener("message", async (event) => {
     if (event.source !== window || event.origin !== location.origin) return;
     const m = event.data;
-    if (m?.source === "locklark-capability-v1") {
+    if (m?.source === "passme-capability-v1") {
       if (
         typeof m.id !== "string" ||
         !/^[a-f0-9-]{36}$/.test(m.id) ||
@@ -2323,7 +2323,7 @@
       return;
     }
     if (window !== window.top) return;
-    if (m?.source === "locklark-signal-v1") {
+    if (m?.source === "passme-signal-v1") {
       // Same top-frame, same-origin, visible-document policy as the credential
       // bridge; a hint is never forwarded from a hidden page.
       if (document.visibilityState !== "visible") return;
@@ -2333,14 +2333,14 @@
     if (
       event.source !== window ||
       event.origin !== location.origin ||
-      m?.source !== "locklark-request-v1" ||
+      m?.source !== "passme-request-v1" ||
       typeof m.id !== "string" ||
       !/^[a-f0-9-]{36}$/.test(m.id)
     )
       return;
     const finish = (value) => {
       window.postMessage(
-        { source: "locklark-result-v1", id: m.id, ...value },
+        { source: "passme-result-v1", id: m.id, ...value },
         location.origin,
       );
       if (pendingDismissedForPasskey) {
@@ -2461,10 +2461,10 @@
     button(
       box,
       !state.connected
-        ? "解锁 Locklark 并继续"
+        ? "解锁 Passme 并继续"
         : m.type === "create"
-          ? "保存到 Locklark"
-          : "使用 Locklark 登录",
+          ? "保存到 Passme"
+          : "使用 Passme 登录",
       async () => {
         dismiss();
         let submitted = false;

@@ -37,8 +37,8 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/pkg/remoteunlock"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/remoteunlock"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Deterministic synthetic naming, values and caller-supplied timestamps of the
@@ -671,7 +671,7 @@ func compositionContext(fx *compositionFixture, requestID string, requestDigest 
 }
 
 func compositionRequestDigest(label string) [remoteunlock.DigestSize]byte {
-	return sha256.Sum256([]byte("locklark.synthetic.remote-unlock.request\x00" + label))
+	return sha256.Sum256([]byte("passme.synthetic.remote-unlock.request\x00" + label))
 }
 
 // signCompositionAuthorization has the delegated admin device sign one fresh
@@ -715,7 +715,7 @@ func signCompositionAuthorization(t *testing.T, fx *compositionFixture, c remote
 }
 
 func syntheticCompositionVUK() []byte {
-	sum := sha256.Sum256([]byte("locklark.synthetic.remote-unlock.vuk.0001"))
+	sum := sha256.Sum256([]byte("passme.synthetic.remote-unlock.vuk.0001"))
 	return append([]byte(nil), sum[:]...)
 }
 

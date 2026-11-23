@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -42,7 +42,7 @@ import (
 // State record layout (version 1), all integers big-endian:
 //
 //	offset  size  field
-//	0       4     magic "LLVS"
+//	0       4     magic "PMVS"
 //	4       2     format version (1)
 //	6       8     generation
 //	14      4     base bytes length          0..MaxValueSize (0 = no base)
@@ -58,7 +58,7 @@ import (
 // base/revision pairing, then the checksum; only after all of that does it
 // allocate the copies it returns.
 const (
-	stateMagic    = "LLVS"
+	stateMagic    = "PMVS"
 	stateVersion  = uint16(1)
 	statePrefix   = 4 + 2 + 8 + 4 + 2 + 4
 	stateDigest   = sha256.Size
@@ -78,7 +78,7 @@ const (
 	// record; any longer stored value is rejected from its length alone.
 	MaxStateRecordBytes = stateOverhead + MaxBaseBytes + MaxStateRevisionBytes + MaxWorkingBytes
 
-	stateDigestDomain = "locklark vault-file journal state v1\x00"
+	stateDigestDomain = "passme vault-file journal state v1\x00"
 
 	stateKey = "state"
 )

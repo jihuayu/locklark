@@ -15,9 +15,9 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/localpath"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/localpath"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // desktopPassthroughSentinel is deliberately synthetic: it must never appear in
@@ -61,7 +61,7 @@ func desktopCLITargetsFixture() []personal.CLIBrokerTarget {
 }
 
 func desktopPeerFixture() browserhost.Peer {
-	return browserhost.Peer{User: "UID 501", PID: 4242, Process: "/fixture/bin/locklark"}
+	return browserhost.Peer{User: "UID 501", PID: 4242, Process: "/fixture/bin/passme"}
 }
 
 // summaryTexts joins every presented line, so absence checks cannot miss a
@@ -77,13 +77,13 @@ func summaryTexts(summary cliRunApprovalSummary) []string {
 
 func TestCLIRunApprovalSummaryPresentsFullScopeWithoutSecrets(t *testing.T) {
 	peer, scope, targets := desktopPeerFixture(), desktopCLIScopeFixture(), desktopCLITargetsFixture()
-	summary := cliRunApprovalSummaryFor(peer, "/fixture/vault.ll", scope, targets)
+	summary := cliRunApprovalSummaryFor(peer, "/fixture/vault.pm", scope, targets)
 	texts := strings.Join(summaryTexts(summary), "\n")
 	for _, want := range []string{
 		// Authenticated peer, each user-supplied value quoted.
-		`金库路径："/fixture/vault.ll"`,
+		`金库路径："/fixture/vault.pm"`,
 		`本机用户："UID 501"`,
-		`调用进程：PID 4242 · "/fixture/bin/locklark"`,
+		`调用进程：PID 4242 · "/fixture/bin/passme"`,
 		// Every scope field that authorizes the run.
 		`配置档："gh"`,
 		`终端标识："/dev/ttys-fixture"`,
@@ -138,16 +138,16 @@ func TestCLIRunApprovalSummaryQuotesControlCharacters(t *testing.T) {
 	targets := desktopCLITargetsFixture()
 	targets[0].Slot = "token" + control
 	targets[0].Field = "password" + control
-	peer := browserhost.Peer{User: "UID 501" + control, PID: 4242, Process: "/fixture/bin/locklark" + control}
+	peer := browserhost.Peer{User: "UID 501" + control, PID: 4242, Process: "/fixture/bin/passme" + control}
 
-	summary := cliRunApprovalSummaryFor(peer, "/fixture/vault.ll"+control, scope, targets)
+	summary := cliRunApprovalSummaryFor(peer, "/fixture/vault.pm"+control, scope, targets)
 	texts := summaryTexts(summary)
 	joined := strings.Join(texts, "\n")
 	// Escaped text is visible, in its quoted form only.
 	for _, want := range []string{
-		`金库路径："/fixture/vault.ll\r\n` + forged + `："`,
+		`金库路径："/fixture/vault.pm\r\n` + forged + `："`,
 		`本机用户："UID 501\r\n` + forged + `："`,
-		`调用进程：PID 4242 · "/fixture/bin/locklark\r\n` + forged + `："`,
+		`调用进程：PID 4242 · "/fixture/bin/passme\r\n` + forged + `："`,
 		`终端标识："/dev/ttys-a\r\n` + forged + `：b"`,
 		`执行程序："/fixture/bin/gh\r\n` + forged + `："`,
 		`工作目录："/fixture/work\r\n` + forged + `："`,
@@ -212,14 +212,14 @@ const desktopSpoofEscaped = `"/fixture/vault-\u0085\u2028\u202bedir\",\"\u202ex\
 func TestCLIRunApprovalSummaryQuotesInvalidUTF8(t *testing.T) {
 	scope := desktopCLIScopeFixture()
 	scope.TTY = "/dev/ttys-\xff\xfe"
-	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.ll", scope, nil)
+	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.pm", scope, nil)
 	if got, want := summary.Sections[0].Lines[1], `终端标识："/dev/ttys-\xff\xfe"`; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 
 	peer := desktopPeerFixture()
 	peer.User = desktopSpoofPath
-	texts := summaryTexts(cliRunApprovalSummaryFor(peer, "/fixture/vault.ll", scope, nil))
+	texts := summaryTexts(cliRunApprovalSummaryFor(peer, "/fixture/vault.pm", scope, nil))
 	joined := strings.Join(texts, "\n")
 	if !strings.Contains(joined, "本机用户："+desktopSpoofEscaped) {
 		t.Fatalf("spoof path was not rendered as %s:\n%s", desktopSpoofEscaped, joined)
@@ -240,7 +240,7 @@ func TestCLIRunApprovalSummaryQuotesInvalidUTF8(t *testing.T) {
 	a.cliPending = &cliRunPending{
 		id:      "fixture",
 		peer:    peer,
-		summary: cliRunApprovalSummaryFor(peer, "/fixture/vault.ll", desktopCLIScopeFixture(), desktopCLITargetsFixture()),
+		summary: cliRunApprovalSummaryFor(peer, "/fixture/vault.pm", desktopCLIScopeFixture(), desktopCLITargetsFixture()),
 	}
 	a.brokerMu.Unlock()
 	tester := ui.NewTester(a.View, 1200, 3600)
@@ -265,7 +265,7 @@ func TestCLIRunApprovalSummaryShowsUnpinnedProgramAndEmptyCollections(t *testing
 	scope.Helper = nil
 	scope.Passthru = nil
 	scope.TokenEnv = ""
-	texts := strings.Join(summaryTexts(cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.ll", scope, nil)), "\n")
+	texts := strings.Join(summaryTexts(cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.pm", scope, nil)), "\n")
 	for _, want := range []string{
 		"程序固定：未固定 · " + cliRunUnpinnedLabel,
 		"命令参数（共 0 项）", cliRunEmptyLabel,
@@ -289,7 +289,7 @@ func TestCLIRunApprovalSummaryShowsUnpinnedProgramAndEmptyCollections(t *testing
 // check that runs before native approval, and still renders without secrets.
 func TestCLIRunApprovalSummaryShowsCanonicalProfile(t *testing.T) {
 	scope, targets := desktopCLIScopeFixture(), desktopCLITargetsFixture()
-	request := browserhost.CLIRunBrokerRequest{V: 1, VaultPath: "/fixture/vault.ll", Scope: scope, Targets: targets}
+	request := browserhost.CLIRunBrokerRequest{V: 1, VaultPath: "/fixture/vault.pm", Scope: scope, Targets: targets}
 	wire, e := json.Marshal(request)
 	if e != nil {
 		t.Fatal(e)
@@ -297,7 +297,7 @@ func TestCLIRunApprovalSummaryShowsCanonicalProfile(t *testing.T) {
 	if !bytes.Contains(wire, []byte(`"tty_identity":"/dev/ttys-fixture"`)) || !bytes.Contains(wire, []byte(`"passthrough_env":{"GH_HOST":`)) {
 		t.Fatalf("scope wire names are not snake_case: %s", wire)
 	}
-	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.ll", scope, targets)
+	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.pm", scope, targets)
 	texts := strings.Join(summaryTexts(summary), "\n")
 	if !strings.Contains(texts, `配置档："gh"`) || !strings.Contains(texts, `"GH_HOST"`) {
 		t.Fatalf("canonical profile summary incomplete:\n%s", texts)
@@ -317,7 +317,7 @@ func TestCLIRunApprovalViewRendersScopeWithoutSecrets(t *testing.T) {
 	a.cliPending = &cliRunPending{
 		id:      "fixture",
 		peer:    desktopPeerFixture(),
-		summary: cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.ll", desktopCLIScopeFixture(), desktopCLITargetsFixture()),
+		summary: cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.pm", desktopCLIScopeFixture(), desktopCLITargetsFixture()),
 		decided: false,
 	}
 	a.brokerMu.Unlock()
@@ -325,7 +325,7 @@ func TestCLIRunApprovalViewRendersScopeWithoutSecrets(t *testing.T) {
 	tester := ui.NewTester(a.View, 1200, 3600)
 	for _, want := range []string{
 		cliRunApprovalTitle,
-		`调用进程：PID 4242 · "/fixture/bin/locklark"`,
+		`调用进程：PID 4242 · "/fixture/bin/passme"`,
 		`配置档："gh"`,
 		`终端标识："/dev/ttys-fixture"`,
 		`执行程序："/fixture/bin/gh"`,
@@ -426,7 +426,7 @@ func TestCLIRunApprovalStaleButtonsStayBoundToRenderedReview(t *testing.T) {
 	}
 	next := captureCLIRunHandlers(t)
 
-	reviewA := pending("review-a", "/Fixture/vault.ll")
+	reviewA := pending("review-a", "/Fixture/vault.pm")
 	a.brokerMu.Lock()
 	a.cliPending = reviewA
 	a.brokerMu.Unlock()
@@ -439,7 +439,7 @@ func TestCLIRunApprovalStaleButtonsStayBoundToRenderedReview(t *testing.T) {
 	// decision input pass already sees B as pending and may build no handlers.
 	// Retire A and install B under one lock acquisition, exactly as
 	// finishCLIRunApproval followed by B's installation does in production.
-	reviewB := pending("review-b", "/Fixture/vault.ll")
+	reviewB := pending("review-b", "/Fixture/vault.pm")
 	a.brokerMu.Lock()
 	if a.cliPending == reviewA {
 		a.cliPending = nil
@@ -506,7 +506,7 @@ func TestCLIRunApprovalStaleButtonsStayBoundToRenderedReview(t *testing.T) {
 // nothing.
 func TestCLIRunApprovalViewRacesFinish(t *testing.T) {
 	a := dailyAppFixture(t)
-	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.ll", desktopCLIScopeFixture(), desktopCLITargetsFixture())
+	summary := cliRunApprovalSummaryFor(desktopPeerFixture(), "/fixture/vault.pm", desktopCLIScopeFixture(), desktopCLITargetsFixture())
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -528,7 +528,7 @@ func TestCLIRunApprovalViewRacesFinish(t *testing.T) {
 	for time.Now().Before(deadline) {
 		tester := ui.NewTester(a.View, 1200, 3600)
 		for _, text := range tester.Texts() {
-			if strings.Contains(text, "调用进程") && !strings.Contains(text, `"PID 4242"`) && !strings.Contains(text, `PID 4242 · "/fixture/bin/locklark"`) {
+			if strings.Contains(text, "调用进程") && !strings.Contains(text, `"PID 4242"`) && !strings.Contains(text, `PID 4242 · "/fixture/bin/passme"`) {
 				t.Fatalf("partially rendered summary line: %q", text)
 			}
 		}
@@ -673,7 +673,7 @@ func desktopStartBrokerEndpoint(t *testing.T, a *App, callbacks browserhost.Brok
 		return "", false
 	}
 	sock := filepath.Join(dir, "b.sock")
-	t.Setenv("LOCKLARK_BROWSER_SOCKET", sock)
+	t.Setenv("PASSME_BROWSER_SOCKET", sock)
 	b := browserhost.NewBroker(callbacks)
 	if e := b.Start(sock); e != nil {
 		t.Fatalf("broker did not start: %v", e)
@@ -806,7 +806,7 @@ func TestCLIRunHandlerRefusesStaleOrChangedSession(t *testing.T) {
 func TestCLIRunHandlerVaultMismatchIsRefusal(t *testing.T) {
 	a, req := desktopCLIRunFixture(t)
 	a.cliApprover = func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error) { return true, nil }
-	req.VaultPath = "/fixture/other.ll"
+	req.VaultPath = "/fixture/other.pm"
 	resp, e := a.handleCLIRun(context.Background(), desktopPeerFixture(), req)
 	if e != errCLIRunRefused || desktopHasCLIPrepared(resp) {
 		t.Fatalf("vault mismatch: %v %#v", e, resp)

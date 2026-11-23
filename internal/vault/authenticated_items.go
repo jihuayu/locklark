@@ -4,8 +4,8 @@ import (
 	"crypto/ed25519"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // This file is the narrow adapter between the internal vault item model (the

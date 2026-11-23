@@ -17,8 +17,8 @@ import (
 	berrors "go.etcd.io/bbolt/errors"
 )
 
-var eventsBucket = []byte("locklark.plugin-events/v1")
-var packagesBucket = []byte("locklark.plugin-packages/v1")
+var eventsBucket = []byte("passme.plugin-events/v1")
+var packagesBucket = []byte("passme.plugin-packages/v1")
 
 const maxCatalogSize = 256 << 20
 
@@ -51,7 +51,7 @@ type Event struct {
 }
 
 func (e Event) hash() string {
-	h := sha256.Sum256(append([]byte("locklark/plugin-catalog/event/v1\x00"), encoded(e)...))
+	h := sha256.Sum256(append([]byte("passme/plugin-catalog/event/v1\x00"), encoded(e)...))
 	return hex.EncodeToString(h[:])
 }
 func canonical(raw []byte, v any) bool {
@@ -184,7 +184,7 @@ func withClose(run func() (Status, error), closeDB func() error) (out Status, er
 	return run()
 }
 func Create(path string) (Status, error) {
-	f, e := os.CreateTemp(filepath.Dir(path), ".locklark-plugins-*")
+	f, e := os.CreateTemp(filepath.Dir(path), ".passme-plugins-*")
 	if e != nil {
 		return Status{}, ErrStorage
 	}

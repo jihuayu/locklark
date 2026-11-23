@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 // These tests exercise the public low-level KDBX payload API only. Every
@@ -30,7 +30,7 @@ func payloadFixtureDB(t *testing.T) *kdbx.Database {
 	t.Helper()
 	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
 	group := kdbx.NewGroup()
-	group.Name = "Locklark"
+	group.Name = "Passme"
 	entry := kdbx.NewEntry()
 	entry.Values = []kdbx.ValueData{
 		{Key: "Title", Value: kdbx.V{Content: "fixture"}},
@@ -387,7 +387,7 @@ func payloadBudgetFixture(t *testing.T, cipherID []byte, ivLen int, title string
 
 // encodeUnboundedLegacy writes db the way SealKDBXPayload does, but with the
 // legacy gokeepasslib encoder, whose Encode has no plaintext budget: the
-// Locklark profile, a copied CEK installed as key credentials and protected
+// Passme profile, a copied CEK installed as key credentials and protected
 // entries locked the way Seal leaves them. The caller's cek is not modified,
 // db.Credentials is cleared again and the encoder's key copy is cleared. db
 // is left with protected entries locked.

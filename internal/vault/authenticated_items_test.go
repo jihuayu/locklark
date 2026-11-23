@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // authItemsFixture is one real caller-pinned vault for the authenticated item

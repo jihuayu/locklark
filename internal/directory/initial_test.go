@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 func initialFixture(t *testing.T, policy string) (fixture, Proposal, vault.Snapshot) {
@@ -178,7 +178,7 @@ func TestVerifyInitialRejectsSnapshotAndPinChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal("synthetic roster failed")
 	}
-	foreign, err := vault.SealItems([]byte("locklark/team/items/v1/"+f.cfg.scope), f.items, 1, recipients, signing(97))
+	foreign, err := vault.SealItems([]byte("passme/team/items/v1/"+f.cfg.scope), f.items, 1, recipients, signing(97))
 	if err != nil {
 		t.Fatal("synthetic foreign publisher failed")
 	}

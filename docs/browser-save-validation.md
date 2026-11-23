@@ -1,6 +1,6 @@
 # 浏览器保存与更新验收
 
-最终 [PR #27](https://github.com/jihuayu/locklark/pull/27) 已合入 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`。精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的 [CI 42089993817](https://github.com/jihuayu/locklark/actions/runs/42089993817) Ubuntu、Windows、macOS、Web四项全通过；Web包含两浏览器真实native保存链路。下文“待CI/待合并”为该批各阶段历史状态，已由本段关闭。
+最终 [PR #27](https://github.com/jihuayu/passme/pull/27) 已合入 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`。精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的 [CI 42089993817](https://github.com/jihuayu/passme/actions/runs/42089993817) Ubuntu、Windows、macOS、Web四项全通过；Web包含两浏览器真实native保存链路。下文“待CI/待合并”为该批各阶段历史状态，已由本段关闭。
 
 基线 main `0f38177eb1059121d04e94fb96d264126688573f`，分支 `codex/browser-save-update`。此前浏览器配对/填充 PR #26 精确 head `6c649d9` 的四项 CI 与独立验收已通过并合入。本批沿用用户指定分工：主代理架构/功能设计与独立验收，Sol xhigh 实现，Luna max 独立 review。
 
@@ -8,9 +8,9 @@
 
 ## 失败先行
 
-`/tmp/locklark-validation/browser-save-red-core.log` 记录新核心保存 API 缺失而导致契约测试编译失败；新增核心后第一轮对应测试通过（`browser-save-green-core.log`），后续协议、并发、错误与整体验收尚待完成。
+`/tmp/passme-validation/browser-save-red-core.log` 记录新核心保存 API 缺失而导致契约测试编译失败；新增核心后第一轮对应测试通过（`browser-save-green-core.log`），后续协议、并发、错误与整体验收尚待完成。
 
-`browser-save-red-firefox-control.log` 记录真实 Firefox 临时扩展打开 popup 后缺少保存入口而失败，阶段为 `save-new control`。该失败证明旧产品没有功能入口，不代表浏览器保存协议或安全负测已经验证。合成目录 `locklark-firefox-native-Et433l` 保持私有，因素不提交。
+`browser-save-red-firefox-control.log` 记录真实 Firefox 临时扩展打开 popup 后缺少保存入口而失败，阶段为 `save-new control`。该失败证明旧产品没有功能入口，不代表浏览器保存协议或安全负测已经验证。合成目录 `passme-firefox-native-Et433l` 保持私有，因素不提交。
 
 ## 验收门槛
 
@@ -28,7 +28,7 @@ Luna/max 在个人核心增量审阅中发现：已落盘拒绝审计遇到DB cl
 
 ## v1 完整真实链路
 
-Sol 使用版本化原生二进制 `/tmp/locklark-tools/browser-save-v1/` 和该轮冻结的扩展dist，分别通过真实Firefox与Chromium的完整流程（`browser-save-firefox-v1-gui.log`、`browser-save-chromium-v1-gui.log`）。私有合成目录分别为 `locklark-firefox-native-IeVgng`、`locklark-browser-acceptance-Tgs4x8`。保留原填充四场景，新增真实保存后按新ID回填、同ID更新后回填新值，中文/非BMP字段精确一致；待批准期间修改页面字段不改变已经捕获的值。新建与更新各自的原生拒绝、导航、锁库均保持snapshot、条目修订和保存事件数不变。原库观察通过只读bbolt一致快照进行，读取/审计仅在私有副本上执行。
+Sol 使用版本化原生二进制 `/tmp/passme-tools/browser-save-v1/` 和该轮冻结的扩展dist，分别通过真实Firefox与Chromium的完整流程（`browser-save-firefox-v1-gui.log`、`browser-save-chromium-v1-gui.log`）。私有合成目录分别为 `passme-firefox-native-IeVgng`、`passme-browser-acceptance-Tgs4x8`。保留原填充四场景，新增真实保存后按新ID回填、同ID更新后回填新值，中文/非BMP字段精确一致；待批准期间修改页面字段不改变已经捕获的值。新建与更新各自的原生拒绝、导航、锁库均保持snapshot、条目修订和保存事件数不变。原库观察通过只读bbolt一致快照进行，读取/审计仅在私有副本上执行。
 
 验收结束关闭驱动后，controller输出、浏览器console、持久化驱动日志与诊断JSON/摘要均扫描全部合成canary，无值回显。工具输入合成因素与受控页面值始终留在私有fixture中，不上传或提交。v1不是最终树验收：扩展unknown提示在超时/手动断开及链式失效后的保留仍需v2补丁、独立复跑及最终CI。
 
@@ -40,11 +40,11 @@ Sol 使用版本化原生二进制 `/tmp/locklark-tools/browser-save-v1/` 和该
 
 Luna 最后两项发现也有先行失败：有效空标题登录被错误当作没有候选（`browser-save-empty-title-red.log`）；并发原生批准可能重复发挑战（`browser-save-native-double-approve-red.log`）。分别以独立 found 状态和第二次状态核验修复；空标题保留原值，仅显示“（无标题）”，并发批准只有一次确定标题和挑战。Luna 对 v2 最终树复核未留下阻塞发现。
 
-冻结 `/tmp/locklark-tools/browser-save-v2/` 后，Sol 的真实 Firefox 完整链路通过（`browser-save-firefox-v2-gui.log`，私有目录 `locklark-firefox-native-0Cz6f6`）。主代理独立 Chromium/WenQuanYi/Xvfb 验收增加了真实 popup 候选按钮跨轮询焦点保持检查，该项通过，但全链路在 `save-update:reject` 失败（`browser-save-chromium-v2-parent.log`，私有目录 `locklark-browser-acceptance-NbFBd4`）。该失败没有忽略或计为通过。
+冻结 `/tmp/passme-tools/browser-save-v2/` 后，Sol 的真实 Firefox 完整链路通过（`browser-save-firefox-v2-gui.log`，私有目录 `passme-firefox-native-0Cz6f6`）。主代理独立 Chromium/WenQuanYi/Xvfb 验收增加了真实 popup 候选按钮跨轮询焦点保持检查，该项通过，但全链路在 `save-update:reject` 失败（`browser-save-chromium-v2-parent.log`，私有目录 `passme-browser-acceptance-NbFBd4`）。该失败没有忽略或计为通过。
 
 随后源代码核查确认 popup 在候选刷新 RPC 未返回时仍允许点击旧候选：`busy` 尚未同步反映到真实按钮，存在刷新与更新并发的实际产品操作窗口。正在补充确定性失败测试、同步禁用及响应顺序修复，再做增量独立审阅和两浏览器最终完整验收。此时尚未创建本批 PR，精确 head CI 和合并仍待完成。
 
-主代理以真实 Chromium DOM 加载原版 popup.js、仅延迟测试 runtime 响应，确定性复现了“刷新必须立即禁用”断言失败（`browser-save-popup-parent-red.log`）；这独立于完整 GUI 的时序，证明产品需要修复。v2 Firefox 的实际驱动故障注入在受控页面已收到 Unicode 合成登录参数之后触发，预期退出失败；controller、geckodriver 持久日志及 JSON 摘要扫描无合成值或因素（`browser-save-firefox-v2-driver-failure.log`，私有目录 `locklark-firefox-native-h6hYaX`）。因素从未作为网页参数传入。
+主代理以真实 Chromium DOM 加载原版 popup.js、仅延迟测试 runtime 响应，确定性复现了“刷新必须立即禁用”断言失败（`browser-save-popup-parent-red.log`）；这独立于完整 GUI 的时序，证明产品需要修复。v2 Firefox 的实际驱动故障注入在受控页面已收到 Unicode 合成登录参数之后触发，预期退出失败；controller、geckodriver 持久日志及 JSON 摘要扫描无合成值或因素（`browser-save-firefox-v2-driver-failure.log`，私有目录 `passme-firefox-native-h6hYaX`）。因素从未作为网页参数传入。
 
 ## v3 popup 修复
 
@@ -60,18 +60,18 @@ Sol 增加加载真实 popup.js 的确定性 deferred-runtime 测试，先得到
 
 ## v4 最终固定产物验收
 
-`browser-save-v4-artifacts.sha256` 固定 `/tmp/locklark-tools/browser-save-v4/` 三个原生 binary 及扩展源/两种 dist。验收脚本将 enabled 条件改为明确 `=== false`，缺失控件不能误判成可用；刷新后按认证库观察得到的最新 ID/修订寻找真实 row，三个不变断言（snapshot、条目/修订、保存事件）均保留，增加固定细阶段定位。
+`browser-save-v4-artifacts.sha256` 固定 `/tmp/passme-tools/browser-save-v4/` 三个原生 binary 及扩展源/两种 dist。验收脚本将 enabled 条件改为明确 `=== false`，缺失控件不能误判成可用；刷新后按认证库观察得到的最新 ID/修订寻找真实 row，三个不变断言（snapshot、条目/修订、保存事件）均保留，增加固定细阶段定位。
 
-主代理独立 Chromium/WenQuanYi/Xvfb 完整通过（`browser-save-chromium-v4-parent.log`，私有目录 `locklark-browser-acceptance-00sKvk`）：实际 popup 跨轮询焦点保持、原填充四场景、新建/更新后真实回填与点击时快照、两种保存的拒绝/导航/锁库均通过；日志/持久诊断无合成秘密。安全元数据原生截图已人工检查。Firefox 最终重跑及故障诊断继续记录，不以先前版本通过代替本版本。
+主代理独立 Chromium/WenQuanYi/Xvfb 完整通过（`browser-save-chromium-v4-parent.log`，私有目录 `passme-browser-acceptance-00sKvk`）：实际 popup 跨轮询焦点保持、原填充四场景、新建/更新后真实回填与点击时快照、两种保存的拒绝/导航/锁库均通过；日志/持久诊断无合成秘密。安全元数据原生截图已人工检查。Firefox 最终重跑及故障诊断继续记录，不以先前版本通过代替本版本。
 
-Firefox 的 v4 首轮在解锁/配对阶段出现驱动失败（`browser-save-firefox-v4-gui.log`，私有目录 `locklark-firefox-native-0aNRbq`）。补充只输出白名单原因和固定动作编号的诊断后，主代理在另一显示环境独立复现（`browser-save-firefox-v4-parent.log`，`locklark-firefox-native-bnj5qq`）：失败明确为 `native-pair` 的 `a11y-query`，随后的只读检查已找到唯一可用配对控件。原脚本的 ready 循环虽有10秒截止，却在瞬态 AT-SPI 查询错误时直接退出；修复限定为同一截止内重读该查询，不重试点击、不放宽唯一性/可用性和任何库状态断言。修复及最终复跑继续记录。`initialBridgeDisabled` 只反映进程初始环境，不能误称 native 未执行运行时清除；控件已通过 AT-SPI 可见。
+Firefox 的 v4 首轮在解锁/配对阶段出现驱动失败（`browser-save-firefox-v4-gui.log`，私有目录 `passme-firefox-native-0aNRbq`）。补充只输出白名单原因和固定动作编号的诊断后，主代理在另一显示环境独立复现（`browser-save-firefox-v4-parent.log`，`passme-firefox-native-bnj5qq`）：失败明确为 `native-pair` 的 `a11y-query`，随后的只读检查已找到唯一可用配对控件。原脚本的 ready 循环虽有10秒截止，却在瞬态 AT-SPI 查询错误时直接退出；修复限定为同一截止内重读该查询，不重试点击、不放宽唯一性/可用性和任何库状态断言。修复及最终复跑继续记录。`initialBridgeDisabled` 只反映进程初始环境，不能误称 native 未执行运行时清除；控件已通过 AT-SPI 可见。
 
 工具修复先得到一次瞬态与持续查询失败两项 red（`browser-save-a11y-query-red.log`），再通过4项回归（`browser-save-a11y-query-green.log`），主代理也独立复跑通过。专用异常仅在原 AT-SPI GError 查询路径产生；歧义、结构限额等错误不重试，XTest 输入动作不重放，CI已接入这些纯Python测试。Luna 最终工具增量 review 无阻塞；Firefox 完整复跑已经越过此前配对失败点，最终结果随后记录。
 
-Chromium v4 的实际 `page-arguments` 驱动故障验收通过：预期失败，38个持久化artifact扫描无合成值/因素（`browser-save-chromium-v4-driver-failure.log`，私有目录 `locklark-browser-acceptance-NJTNAI`）。测试wrapper最初误用v2文件名，已保留原字节并纠正本轮文件名；没有覆盖此前Firefox v2证据，后续wrapper显式版本且拒绝覆写。
+Chromium v4 的实际 `page-arguments` 驱动故障验收通过：预期失败，38个持久化artifact扫描无合成值/因素（`browser-save-chromium-v4-driver-failure.log`，私有目录 `passme-browser-acceptance-NJTNAI`）。测试wrapper最初误用v2文件名，已保留原字节并纠正本轮文件名；没有覆盖此前Firefox v2证据，后续wrapper显式版本且拒绝覆写。
 
-主代理最终 Firefox/WenQuanYi/Xvfb 完整通过（`browser-save-firefox-v4-parent-final.log`，私有目录 `locklark-firefox-native-B0irEy`，退出0）：原填充正负流程、新建/更新后真实回填、点击时字段快照、两种操作各自拒绝/导航/锁库后的三个不变断言均通过；controller、驱动持久日志、console和JSON诊断扫描无合成值。用户native manifest已按身份检查清理，产物哈希再次核对一致。本结果关闭上述原生配对阶段的工具失败，未通过无限重试或重复批准动作掩盖。
+主代理最终 Firefox/WenQuanYi/Xvfb 完整通过（`browser-save-firefox-v4-parent-final.log`，私有目录 `passme-firefox-native-B0irEy`，退出0）：原填充正负流程、新建/更新后真实回填、点击时字段快照、两种操作各自拒绝/导航/锁库后的三个不变断言均通过；controller、驱动持久日志、console和JSON诊断扫描无合成值。用户native manifest已按身份检查清理，产物哈希再次核对一致。本结果关闭上述原生配对阶段的工具失败，未通过无限重试或重复批准动作掩盖。
 
 最终源码还包含一个 Luna 非阻塞工具维护项：AT-SPI snapshot 首段若已经 ref 一个窗口后另一查询失败，异常路径可进一步清理该引用；每次外部输入进程有界且终止会释放资源，不影响批准/否决和库不变验收。已安排下一原生桌面工具切片处理，不称为产品安全阻塞。
 
-最后的 Firefox v4 实际驱动故障验收也通过（`browser-save-firefox-v4-driver-failure.log`，`locklark-firefox-native-X7eJYS`）：受控页面收到参数后固定阶段预期退出1，controller、geckodriver日志和JSON摘要3个artifact扫描无合成值/因素，主代理独立重跑扫描通过。manifest再次确认清理，未覆盖v2日志。最终本地门槛和Luna review已满足；精确head的四项远端CI仍须通过，才能正常squash合并。
+最后的 Firefox v4 实际驱动故障验收也通过（`browser-save-firefox-v4-driver-failure.log`，`passme-firefox-native-X7eJYS`）：受控页面收到参数后固定阶段预期退出1，controller、geckodriver日志和JSON摘要3个artifact扫描无合成值/因素，主代理独立重跑扫描通过。manifest再次确认清理，未覆盖v2日志。最终本地门槛和Luna review已满足；精确head的四项远端CI仍须通过，才能正常squash合并。

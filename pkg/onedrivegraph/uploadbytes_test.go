@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 // These tests use only synthetic sessions, IDs, tokens and payloads. The
@@ -99,7 +99,7 @@ func newUploadBytesTLSMaterial(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	}
 	rootTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "locklark synthetic upload test root"},
+		Subject:               pkix.Name{CommonName: "passme synthetic upload test root"},
 		NotBefore:             now.Add(-time.Hour),
 		NotAfter:              now.Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,

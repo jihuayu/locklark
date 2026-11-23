@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // itemEqualPresent reports whole-item equality of two present items. Field

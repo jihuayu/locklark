@@ -539,12 +539,12 @@ test("receipt is public-only and carries honest emulation limits", () => {
 });
 
 test("explicit axe source must be an absolute existing file", () => {
-  const directory = mkdtempSync(join(tmpdir(), "locklark-a11y-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "passme-a11y-test-"));
   try {
     const source = join(directory, "axe.min.js");
     writeFileSync(source, "globalThis.axe={version:'4.10.3'};");
     assert.equal(resolveAxeSource(source, {}), source);
-    assert.equal(resolveAxeSource("", { LOCKLARK_TEST_AXE_SOURCE: source }), source);
+    assert.equal(resolveAxeSource("", { PASSME_TEST_AXE_SOURCE: source }), source);
     assert.throws(() => resolveAxeSource("relative/axe.min.js", {}), /axe-source-not-absolute/);
     assert.throws(() => resolveAxeSource(join(directory, "missing.js"), {}), /axe-source-unavailable/);
     assert.equal(sha256File(source).length, 64);
@@ -554,7 +554,7 @@ test("explicit axe source must be an absolute existing file", () => {
 });
 
 test("output path refuses overwrite and missing output", () => {
-  const directory = mkdtempSync(join(tmpdir(), "locklark-a11y-out-"));
+  const directory = mkdtempSync(join(tmpdir(), "passme-a11y-out-"));
   try {
     assert.throws(() => ensureNewOutput(""), /output-required/);
     const output = join(directory, "receipt.json");

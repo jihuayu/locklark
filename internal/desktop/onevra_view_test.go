@@ -14,9 +14,9 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 	"github.com/oneo-me/onevra/source/theme"
 )
 
@@ -113,9 +113,9 @@ func TestOnevraVaultLockClearsSelectionButKeepsLayoutPreferences(t *testing.T) {
 }
 
 func TestOnevraVaultHeadlessSnapshot(t *testing.T) {
-	target := os.Getenv("LOCKLARK_UI_SNAPSHOT")
+	target := os.Getenv("PASSME_UI_SNAPSHOT")
 	if target == "" {
-		t.Skip("set LOCKLARK_UI_SNAPSHOT to write a headless PNG")
+		t.Skip("set PASSME_UI_SNAPSHOT to write a headless PNG")
 	}
 	tester := newOnevraTestTester(newOnevraTestApp())
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -1112,8 +1112,8 @@ func (s *enrollableTestSystemStore) Delete(id string) error {
 }
 
 func TestLockViewSystemUnlockNotEnrolledOffersEnrollOnMasterUnlock(t *testing.T) {
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "")
-	vaultPath := filepath.Join(t.TempDir(), "personal-hello.ll")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "")
+	vaultPath := filepath.Join(t.TempDir(), "personal-hello.pm")
 	key := bytes.Repeat([]byte{7}, 16)
 	if err := personal.Create(vaultPath, "fixture-pass", key); err != nil {
 		t.Fatal(err)

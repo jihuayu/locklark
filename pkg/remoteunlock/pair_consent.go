@@ -25,7 +25,7 @@ const (
 	// preimage from every other signed structure. The preimage is this domain
 	// followed by the canonical JSON of members 1..13 (format through
 	// deadline_unix_ms). Both endpoints sign exactly these bytes.
-	PairConsentSignatureDomain = "locklark.remote-unlock/v1/pair-consent\x00"
+	PairConsentSignatureDomain = "passme.remote-unlock/v1/pair-consent\x00"
 	// MaxPairConsentSize is the maximum encoded or accepted consent size in
 	// bytes.
 	MaxPairConsentSize = 2048

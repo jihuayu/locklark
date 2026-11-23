@@ -12,15 +12,15 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
 const (
 	passkeyTransferExportAction     = "vault.passkey.transfer.export"
-	passkeyTransferExportLinkDomain = "locklark/personal/passkey-transfer/export/v1\x00"
+	passkeyTransferExportLinkDomain = "passme/personal/passkey-transfer/export/v1\x00"
 	maxPasskeyTransferExportTargets = 16
 )
 

@@ -2,7 +2,7 @@
 
 Everything in this module talks to the product through the same user-facing
 surfaces the harness exposes: compiled binaries, native-messaging frames,
-built extension bundles, and repository files.  It never imports a Locklark Go
+built extension bundles, and repository files.  It never imports a Passme Go
 package or inspects private in-memory state.
 """
 
@@ -507,7 +507,7 @@ def reveal_login(
     return value, result.transcript
 
 
-PYKEEPASS_ENV = "LOCKLARK_TEST_PYKEEPASS"
+PYKEEPASS_ENV = "PASSME_TEST_PYKEEPASS"
 
 _PYKEEPASS_READER = r"""
 import json
@@ -533,7 +533,7 @@ def pykeepass_peer() -> str | None:
     """Return an interpreter that can import PyKeePass, if one is installed.
 
     CI installs ``pykeepass==4.2.0`` into a peer virtualenv and points
-    ``LOCKLARK_TEST_PYKEEPASS`` at it.  The current interpreter is probed as a
+    ``PASSME_TEST_PYKEEPASS`` at it.  The current interpreter is probed as a
     local fallback; when neither works the export content cannot be read
     independently and the caller must report a blocked assertion, never pass.
     """
@@ -947,12 +947,12 @@ def source_files(ctx: E2EContext, relative_glob: str) -> list[Path]:
 
 
 def cli_help(ctx: E2EContext, args: Sequence[Any] = ("help",)) -> str:
-    """Run the real CLI help surface (``locklark help`` by default)."""
+    """Run the real CLI help surface (``passme help`` by default)."""
 
     result = ctx.run_cli(list(args))
     if result.returncode != 0:
         raise AssertionError(
-            f"locklark {' '.join(str(arg) for arg in args)} failed "
+            f"passme {' '.join(str(arg) for arg in args)} failed "
             f"(rc={result.returncode}): {result.stderr}"
         )
     return result.stdout + "\n" + result.stderr
@@ -970,7 +970,7 @@ def command_known(ctx: E2EContext, args: Sequence[Any]) -> tuple[bool, CLIResult
     result = ctx.run_cli(args)
     known = not (
         result.returncode != 0
-        and "unknown command; see locklark help" in (result.stderr or "")
+        and "unknown command; see passme help" in (result.stderr or "")
     )
     return known, result
 
@@ -1067,7 +1067,7 @@ def go_tool() -> str | None:
 
     candidates = [
         shutil.which("go") or "",
-        os.environ.get("LOCKLARK_GO", ""),
+        os.environ.get("PASSME_GO", ""),
         "/workspace/toolchains/go/bin/go",
     ]
     for candidate in candidates:
@@ -1429,14 +1429,14 @@ def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any
         if event.get("action") != "audit.list"
     ]
     # The fixed refusal is what the cancellation error maps to on the CLI
-    # (cmd/locklark prints it as its error line); an accepted decline would
+    # (cmd/passme prints it as its error line); an accepted decline would
     # instead finish rc=0 with a JSON receipt.
     cancelled_error = "HIBP network check cancelled"
     observations = {
         "flags": flags,
         "bad_pair_refused": all(
             result.returncode != 0
-            and "usage: locklark personal" in result.stderr
+            and "usage: passme personal" in result.stderr
             for result in bad_pairs
         ),
         "declined_rc": declined.returncode,
@@ -1464,7 +1464,7 @@ def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any
 
 
 # The hidden consent prompt emitted by ``personal health --hibp true`` before
-# any unlock or network access (cmd/locklark/personal_health_hibp.go).
+# any unlock or network access (cmd/passme/personal_health_hibp.go).
 HIBP_NETWORK_PROMPT = "输入 NETWORK 确认联网查询泄露前缀"
 
 
@@ -2052,7 +2052,7 @@ def cli_profiles(ctx: E2EContext) -> list[dict[str, Any]]:
     help_result = ctx.run_cli(["help"])
     if help_result.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={help_result.returncode}): "
+            f"passme help probe failed (rc={help_result.returncode}): "
             f"{help_result.stderr[-800:]}"
         )
     if "cli profiles" not in (help_result.stdout + help_result.stderr):
@@ -2108,7 +2108,7 @@ def f15_run_bundle_ready(ctx: E2EContext) -> bool:
     top = ctx.run_cli(["help"])
     if top.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+            f"passme help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
         )
     if "cli run" not in (top.stdout + top.stderr):
         return False
@@ -2123,7 +2123,7 @@ def f15_run_bundle_ready(ctx: E2EContext) -> bool:
         )
     usage = run_help.stdout + run_help.stderr
     required = (
-        "locklark cli run <tool>",
+        "passme cli run <tool>",
         "--binding PATH",
         "--cwd ABS_DIR",
         "--timeout SECONDS",
@@ -2159,7 +2159,7 @@ def f16_cli_shell_ready(ctx: E2EContext) -> bool:
     top = ctx.run_cli(["help"])
     if top.returncode != 0:
         raise AssertionError(
-            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+            f"passme help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
         )
     if "cli shell-init" not in (top.stdout + top.stderr):
         return False
@@ -2174,8 +2174,8 @@ def f16_cli_shell_ready(ctx: E2EContext) -> bool:
         raise AssertionError("cli shell-init did not emit a gh function")
     if not re.search(r"\bcli\s+run\s+gh\b", body):
         raise AssertionError(f"gh wrapper does not call cli run: {body!r}")
-    if not re.search(r"(?:command|&)\s+\S*locklark\b", body):
-        raise AssertionError(f"gh wrapper does not invoke a locklark executable: {body!r}")
+    if not re.search(r"(?:command|&)\s+\S*passme\b", body):
+        raise AssertionError(f"gh wrapper does not invoke a passme executable: {body!r}")
     if '"$@"' not in body:
         raise AssertionError(f"gh wrapper does not forward arguments: {body!r}")
     return True
@@ -2187,8 +2187,8 @@ def desktop_broker_implemented(ctx: E2EContext) -> bool:
 
 
 def cli_broker_client_implemented(ctx: E2EContext) -> bool:
-    return sources_contain(ctx, "cmd/locklark/*.go", "RequestCLIRun") or sources_contain(
-        ctx, "cmd/locklark/*.go", "BrokerCLI"
+    return sources_contain(ctx, "cmd/passme/*.go", "RequestCLIRun") or sources_contain(
+        ctx, "cmd/passme/*.go", "BrokerCLI"
     )
 
 
@@ -2222,7 +2222,7 @@ def desktop_runtime_available(ctx: E2EContext) -> bool:
     return True
 
 
-DESKTOP_SETTINGS_USAGE = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
+DESKTOP_SETTINGS_USAGE = "usage: passme-desktop [--settings ABSOLUTE_PATH]"
 
 # One minimal, schema-valid desktop settings document. The key spellings are
 # the dotted preference keys from internal/desktop/settings.go; the values are
@@ -2245,7 +2245,7 @@ DESKTOP_SMOKE_SETTINGS: Mapping[str, Any] = {
 }
 
 # A vault path that must never appear in argv or settings.
-DESKTOP_VAULT_SENTINEL = "/nonexistent/locklark-desktop-smoke/vault.ll"
+DESKTOP_VAULT_SENTINEL = "/nonexistent/passme-desktop-smoke/vault.pm"
 
 
 def desktop_smoke_dir(ctx: E2EContext) -> Path:
@@ -2589,7 +2589,7 @@ def sha256_file(path: Path) -> str:
 # Native Chromium checkout journey (F11)
 # ---------------------------------------------------------------------------
 
-CHECKOUT_EVIDENCE_SCHEMA = "locklark.e2e.checkout-native"
+CHECKOUT_EVIDENCE_SCHEMA = "passme.e2e.checkout-native"
 CHECKOUT_EVIDENCE_VERSION = 1
 CHECKOUT_JOURNEY_ID = "chromium-native-checkout"
 # Report key attached only when a native journey run exits nonzero.
@@ -2941,7 +2941,7 @@ def _checkout_source_identity(repo_root: Path) -> dict[str, Any]:
 
 
 def _checkout_playwright_path(ctx: E2EContext) -> Path | None:
-    raw = (os.environ.get("LOCKLARK_TEST_PLAYWRIGHT") or "").strip()
+    raw = (os.environ.get("PASSME_TEST_PLAYWRIGHT") or "").strip()
     candidates: list[Path] = []
     if raw:
         candidates.append(Path(raw))
@@ -2960,7 +2960,7 @@ def _checkout_playwright_path(ctx: E2EContext) -> Path | None:
 
 def _checkout_chromium_executable(playwright: Path | None) -> Path | None:
     explicit = _executable_path(
-        os.environ.get("LOCKLARK_TEST_BROWSER_EXECUTABLE")
+        os.environ.get("PASSME_TEST_BROWSER_EXECUTABLE")
     )
     if explicit is not None:
         return explicit
@@ -2996,7 +2996,7 @@ def _resolve_checkout_artifacts(ctx: E2EContext) -> dict[str, Any]:
     host = _executable_path(getattr(ctx, "browser_chromium_bin", None))
     register = _executable_path(getattr(ctx, "browser_register_bin", None))
     fixture = _executable_path(
-        os.environ.get("LOCKLARK_BROWSER_FIXTURE")
+        os.environ.get("PASSME_BROWSER_FIXTURE")
     ) or _executable_path(Path(ctx.bin_dir) / "browser-acceptance-fixture")
     playwright = _checkout_playwright_path(ctx)
     chromium = _checkout_chromium_executable(playwright)
@@ -3681,9 +3681,9 @@ def _checkout_run(
             directory.mkdir(mode=0o700)
         env = dict(os.environ)
         for stale in (
-            "LOCKLARK_TEST_SHARED_CLIPBOARD",
-            "LOCKLARK_TEST_FAILURE_STAGE",
-            "LOCKLARK_TEST_BROWSER_PARITY",
+            "PASSME_TEST_SHARED_CLIPBOARD",
+            "PASSME_TEST_FAILURE_STAGE",
+            "PASSME_TEST_BROWSER_PARITY",
         ):
             env.pop(stale, None)
         env.update(
@@ -3694,23 +3694,23 @@ def _checkout_run(
                 "XDG_DATA_HOME": str(private / "data"),
                 "XDG_STATE_HOME": str(private / "state"),
                 "XDG_RUNTIME_DIR": str(private / "runtime"),
-                "LOCKLARK_TEST_CHECKOUT_FRAMES": "1",
-                "LOCKLARK_TEST_BROWSER": "chromium",
-                "LOCKLARK_BROWSER_HOST": str(artifacts["chromium_host"]),
-                "LOCKLARK_BROWSER_REGISTER": str(
+                "PASSME_TEST_CHECKOUT_FRAMES": "1",
+                "PASSME_TEST_BROWSER": "chromium",
+                "PASSME_BROWSER_HOST": str(artifacts["chromium_host"]),
+                "PASSME_BROWSER_REGISTER": str(
                     artifacts["browser_register"]
                 ),
-                "LOCKLARK_BROWSER_FIXTURE": str(artifacts["fixture"]),
-                "LOCKLARK_TEST_BROWSER_EXECUTABLE": str(
+                "PASSME_BROWSER_FIXTURE": str(artifacts["fixture"]),
+                "PASSME_TEST_BROWSER_EXECUTABLE": str(
                     artifacts["chromium"]
                 ),
             }
         )
         if artifacts.get("playwright") is not None:
-            env["LOCKLARK_TEST_PLAYWRIGHT"] = str(artifacts["playwright"])
-        go = shutil.which("go") or (os.environ.get("LOCKLARK_GO") or "").strip()
+            env["PASSME_TEST_PLAYWRIGHT"] = str(artifacts["playwright"])
+        go = shutil.which("go") or (os.environ.get("PASSME_GO") or "").strip()
         if go:
-            env["LOCKLARK_GO"] = go
+            env["PASSME_GO"] = go
         command = [
             "dbus-run-session",
             "--",
@@ -3836,18 +3836,18 @@ def checkout_native_acceptance(
     """Return validated sanitized evidence for the native Chromium checkout.
 
     Enablement is explicit: an existing evidence manifest is consumed when
-    ``LOCKLARK_E2E_CHECKOUT_EVIDENCE`` is set, otherwise the real journey runs
-    only with ``LOCKLARK_E2E_CHECKOUT_NATIVE=1``.  A missing opt-in or runtime
+    ``PASSME_E2E_CHECKOUT_EVIDENCE`` is set, otherwise the real journey runs
+    only with ``PASSME_E2E_CHECKOUT_NATIVE=1``.  A missing opt-in or runtime
     prerequisite is PENDING_FEATURE; any attempted journey or evidence failure
     is an AssertionError (FAIL).  Only fixed case/stage labels, hashes, the git
     revision and safe version metadata are returned or written.
     """
 
     evidence_raw = (
-        os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE") or ""
+        os.environ.get("PASSME_E2E_CHECKOUT_EVIDENCE") or ""
     ).strip()
     native_enabled = (
-        os.environ.get("LOCKLARK_E2E_CHECKOUT_NATIVE") or ""
+        os.environ.get("PASSME_E2E_CHECKOUT_NATIVE") or ""
     ).strip() == "1"
     if not evidence_raw and not native_enabled:
         raise _checkout_pending(
@@ -3863,7 +3863,7 @@ def checkout_native_acceptance(
         _revalidate_checkout_cache_hit(ctx, cached, evidence_raw, mode)
         if mode == "native":
             output = (
-                os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT") or ""
+                os.environ.get("PASSME_E2E_CHECKOUT_EVIDENCE_OUT") or ""
             ).strip()
             if output:
                 _write_checkout_evidence(Path(output), cached)
@@ -3880,7 +3880,7 @@ def checkout_native_acceptance(
         artifacts = _resolve_checkout_artifacts(ctx)
         result = _checkout_run(ctx, artifacts, timeout)
         output = (
-            os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT") or ""
+            os.environ.get("PASSME_E2E_CHECKOUT_EVIDENCE_OUT") or ""
         ).strip()
         if output:
             _write_checkout_evidence(Path(output), result)

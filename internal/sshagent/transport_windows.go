@@ -49,7 +49,7 @@ func DefaultEndpoint() (string, error) {
 		return "", e
 	}
 	hash := sha256.Sum256([]byte(sid))
-	return `\\.\pipe\Locklark-SSH-agent-` + hex.EncodeToString(hash[:8]), nil
+	return `\\.\pipe\Passme-SSH-agent-` + hex.EncodeToString(hash[:8]), nil
 }
 func listenLocal(path string) (net.Listener, error) {
 	want, e := DefaultEndpoint()

@@ -3,8 +3,8 @@
 /.tmp/
 /artifacts/
 /bin/
-/locklark.exe
-/locklark
+/passme.exe
+/passme
 /out/
 /demo-out/
 /.mygo-release/
@@ -30,8 +30,8 @@ fixture.secret
 .pending-*
 .env
 .env.*
-*.ll
-.locklark-personal-*
+*.pm
+.passme-personal-*
 __pycache__/
 
 /web/node_modules/

@@ -12,7 +12,7 @@ import { fail } from "./browser_accessibility_receipt.mjs";
 import { listTargets, readDevToolsPort } from "./browser_accessibility_cdp_adapter.mjs";
 import { popupReady } from "./browser_accessibility_probes.mjs";
 
-export const FIXTURE_TITLE = "Locklark accessibility acceptance";
+export const FIXTURE_TITLE = "Passme accessibility acceptance";
 export const ACTION_SHORTCUT = "Control_L+Shift_L+y";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

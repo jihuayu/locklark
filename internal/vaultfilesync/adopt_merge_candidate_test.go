@@ -13,12 +13,12 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/vaultmerge"
-	"github.com/jihuayu/locklark/pkg/vaultfile"
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/vaultmerge"
+	"github.com/jihuayu/passme/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -121,7 +121,7 @@ func adoptBuildFixture(t *testing.T) *adoptFixture {
 // adoptReplaceState rewrites the journal's stored state record directly. The
 // public API cannot produce the adoption precondition (a base whose recorded
 // revision is the candidate's) without a real remote publication, so fixtures
-// record it through the documented LLVS layout. The journal still validates
+// record it through the documented PMVS layout. The journal still validates
 // every field and checksum when it next reads the record.
 func adoptReplaceState(t *testing.T, fx *adoptFixture, state vaultfilejournal.State) {
 	t.Helper()
@@ -239,14 +239,14 @@ func adoptAssertNoPreparedOrAudit(t *testing.T, fx *adoptFixture) {
 	}
 }
 
-// adoptEncodeState produces the exact version-1 LLVS state record the journal
+// adoptEncodeState produces the exact version-1 PMVS state record the journal
 // stores, so a test can rewrite a state the public API cannot produce. It
 // mirrors the documented layout only; it never substitutes for the journal
 // decoder, which validates every rewrite on the next read.
 func adoptEncodeState(s vaultfilejournal.State) []byte {
 	const prefix = 4 + 2 + 8 + 4 + 2 + 4
 	buf := make([]byte, prefix+len(s.BaseBytes)+len(s.RemoteRevision)+len(s.WorkingBytes)+sha256.Size)
-	copy(buf[0:4], "LLVS")
+	copy(buf[0:4], "PMVS")
 	binary.BigEndian.PutUint16(buf[4:6], 1)
 	binary.BigEndian.PutUint64(buf[6:14], s.Generation)
 	binary.BigEndian.PutUint32(buf[14:18], uint32(len(s.BaseBytes)))
@@ -257,7 +257,7 @@ func adoptEncodeState(s vaultfilejournal.State) []byte {
 	off += copy(buf[off:], s.RemoteRevision)
 	off += copy(buf[off:], s.WorkingBytes)
 	h := sha256.New()
-	h.Write([]byte("locklark vault-file journal state v1\x00"))
+	h.Write([]byte("passme vault-file journal state v1\x00"))
 	h.Write(buf[:off])
 	h.Sum(buf[off:off])
 	return buf
@@ -666,7 +666,7 @@ func TestAdoptMergeCandidateRejectsCorruptPendingRecord(t *testing.T) {
 			path := journalPath(t, fx.journal)
 			closeNow(t, fx.journal)
 			if err := openRaw(t, path, func(tx *bolt.Tx) error {
-				return tx.Bucket([]byte("journal")).Put([]byte(key), []byte("LLVP-corrupt"))
+				return tx.Bucket([]byte("journal")).Put([]byte(key), []byte("PMVP-corrupt"))
 			}); err != nil {
 				t.Fatalf("corrupt %s record: %v", key, err)
 			}

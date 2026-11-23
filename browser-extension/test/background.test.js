@@ -373,7 +373,7 @@ function harness(options = {}) {
   };
   const context = {
     chrome: api,
-    LocklarkCore: core,
+    PassmeCore: core,
     crypto: webcrypto,
     Date:
       options.clock === undefined && options.fakeTimers !== true
@@ -4294,7 +4294,7 @@ test("a missing native host is reported with actionable guidance", async () => {
   const state = await h.send({ type: "state" });
   assert.equal(state.connected, false);
   assert.equal(state.hostState, "missing");
-  assert.match(state.status, /未找到 Locklark 原生宿主/);
+  assert.match(state.status, /未找到 Passme 原生宿主/);
 });
 
 test("an old native host is flagged when shared session exists without vault", async () => {
@@ -4335,7 +4335,7 @@ test("idle auto-lock needs the opt-in setting and a live capability", async () =
     "the native lock request is sent",
   );
   assert.equal(h.notifications.length, 1);
-  assert.equal(h.notifications[0].title, "Locklark 已锁定");
+  assert.equal(h.notifications[0].title, "Passme 已锁定");
   assert.equal((await h.send({ type: "state" })).connected, false);
 });
 
@@ -4866,7 +4866,7 @@ const conditionalUUID = (n) =>
   "aaaaaaaa-bbbb-cccc-dddd-" + String(n).padStart(12, "0");
 const conditionalCancels = (h) =>
   h.tabMessages.filter(
-    (sent) => sent.message.type === "locklark:conditional-passkey-cancel",
+    (sent) => sent.message.type === "passme:conditional-passkey-cancel",
   );
 const openConditional = (h, n, doc = "doc-1") => {
   h.setDoc(doc);

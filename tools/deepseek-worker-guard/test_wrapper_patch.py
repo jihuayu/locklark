@@ -239,7 +239,7 @@ class WrapperPatchArtifactTest(unittest.TestCase):
         self.assertEqual(set(ENV_NAME_RE.findall(self.patch)), {"DEEPSEEK_WORKER_GUARD_MODULE"})
 
     def test_patch_hardcodes_no_module_path(self):
-        self.assertNotIn("locklark-worker-guard", self.patch)
+        self.assertNotIn("passme-worker-guard", self.patch)
         self.assertNotIn("dsh-patch-scratch", self.patch)
         for line in self.added:
             if line.strip().startswith(('"', "'")):

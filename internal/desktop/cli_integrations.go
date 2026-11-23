@@ -11,9 +11,9 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/clibinding"
-	"github.com/jihuayu/locklark/internal/cliprofile"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/clibinding"
+	"github.com/jihuayu/passme/internal/cliprofile"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -621,7 +621,7 @@ func (a *App) cliIntegrationsView(c *ui.Context) {
 
 	// 2-column CLI Workbench: filterable list of all 24 profiles + unified inspector
 	renderProfileList := func(panel ui.Element, scrollable bool) {
-		panel.Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).
+		panel.Border(1, t.Border).Radius(t.Radius * 1.25).Background(t.Surface).
 			Padding(t.Space(2)).Gap(t.Space(1.25)).Children(func() {
 			oneui.Text(c, "全部 CLI 工具 ("+intString(len(profiles))+")").FontSize(t.Rem(.78)).Bold().TextColor(t.TextMuted)
 			oneui.TextBox(c, &a.cliSettings.query, oneui.TextBoxOptions{LeadingIcon: lucide.Search()}).
@@ -806,10 +806,10 @@ func (a *App) cliIntegrationsView(c *ui.Context) {
 			onevraGroup(c, "3. CLI 绑定文件与运行命令", func(row func(func())) {
 				row(func() {
 					ui.Column(c).FillWidth().Gap(t.Space(1.25)).Children(func() {
-						oneui.Text(c, "仅保存非机密的条目 ID、修订号与程序 SHA-256，供项目目录中的 locklark cli run 读取。").
+						oneui.Text(c, "仅保存非机密的条目 ID、修订号与程序 SHA-256，供项目目录中的 passme cli run 读取。").
 							FontSize(t.Rem(.74)).TextColor(t.TextMuted).Wrap()
 						oneui.TextBox(c, &a.cliSettings.bindingPath, oneui.TextBoxOptions{}).
-							Label("CLI 绑定文件").Placeholder(`绝对路径，例如 C:\project\.locklark-cli.json`).FillWidth()
+							Label("CLI 绑定文件").Placeholder(`绝对路径，例如 C:\project\.passme-cli.json`).FillWidth()
 						ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
 							oneui.Button(c, "选择文件…", oneui.ButtonOutline).Disabled(a.uiBusy(c)).OnClick(func() {
 								win := a.win
@@ -822,7 +822,7 @@ func (a *App) cliIntegrationsView(c *ui.Context) {
 										Parent:      win,
 										Title:       "选择 CLI 绑定文件保存位置",
 										DefaultPath: curPath,
-										Filters:     []mygo.FileFilter{{Name: "Locklark CLI Binding", Extensions: []string{"json"}}},
+										Filters:     []mygo.FileFilter{{Name: "Passme CLI Binding", Extensions: []string{"json"}}},
 									})
 									return outcome{err: err, apply: func() {
 										if strings.TrimSpace(picked) != "" {
@@ -853,7 +853,7 @@ func (a *App) cliIntegrationsView(c *ui.Context) {
 						}
 					})
 				})
-				command := `locklark cli run ` + a.cliSettings.profile + ` --binding "` + a.cliSettings.bindingPath + `" -- ...`
+				command := `passme cli run ` + a.cliSettings.profile + ` --binding "` + a.cliSettings.bindingPath + `" -- ...`
 				row(func() {
 					ui.Column(c).FillWidth().Gap(t.Space(1)).Children(func() {
 						ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
@@ -916,7 +916,7 @@ func (a *App) cliIntegrationsView(c *ui.Context) {
 	// 4-step Add Integration Wizard modal
 	ui.Column(c.Key("dialog-cli-wizard")).Children(func() {
 		oneui.Dialog(c, &a.cliSettings.wizardOpen, oneui.DialogOptions{Label: "添加 CLI 集成向导"}, func(panel ui.Element) {
-			panel.Width(520).Background(t.Surface).Border(1, t.Border).Radius(t.Radius*1.25).Padding(t.Space(4))
+			panel.Width(520).Background(t.Surface).Border(1, t.Border).Radius(t.Radius * 1.25).Padding(t.Space(4))
 			panel.Children(func() {
 				step := a.cliSettings.wizardStep
 				if step < 1 || step > 4 {

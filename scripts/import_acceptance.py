@@ -24,7 +24,7 @@ def phase(value):
 def check(binary,legacy=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path, source = str(root / "owner.ll"), root / "private.1pux"
+        path, source = str(root / "owner.pm"), root / "private.1pux"
         pw = "synthetic-master-password"
         _, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                          ("重新输入刚保存的 Secret Key", None)], issue=True)
@@ -47,7 +47,7 @@ def check(binary,legacy=None):
                 z.writestr("export.data", json.dumps(value))
         if legacy:
             phase("legacy-plan-and-source-identity")
-            compatibility=str(root/"legacy-owner.ll")
+            compatibility=str(root/"legacy-owner.pm")
             _,oldkey=invoke(legacy,"init",compatibility,[("主密码",pw),("再次输入主密码",pw),
                             ("重新输入刚保存的 Secret Key",None)],issue=True)
             oldfactors=[("主密码",pw),("Secret Key",oldkey)]
@@ -113,15 +113,15 @@ def check(binary,legacy=None):
         entries = PyKeePass(portable, password=export_pw).entries
         assert len(entries) == 2
         for entry, expected in zip(entries, (item, archived)):
-            provenance = json.loads(base64.b64decode(entry.get_custom_property("Locklark.ImportSource")))
-            assert entry.is_custom_property_protected("Locklark.ImportSource")
+            provenance = json.loads(base64.b64decode(entry.get_custom_property("Passme.ImportSource")))
+            assert entry.is_custom_property_protected("Passme.ImportSource")
             assert provenance["item"] == expected and provenance["account"] == {"uuid": "account"}
             assert provenance["vault"] == {"uuid": "vault"}
             assert entry.title == expected["overview"]["title"] and entry.url == expected["overview"]["url"]
             assert (entry.notes or "")==expected["details"]["notesPlain"]
             assert entry._is_property_protected("Notes")
             assert entry.username == "private-user" and (entry.password or "") == expected["details"]["loginFields"][1]["value"]
-            assert (entry.get_custom_property("Locklark.State") or "active") == expected["state"]
+            assert (entry.get_custom_property("Passme.State") or "active") == expected["state"]
         events, _ = invoke(binary, "audit", path, factors, forbidden=private)
         imports = [e for e in events if e["action"] == "migration.import.1pux"]
         assert [e["result"] for e in imports] == ["source-changed", "succeeded", "duplicate"]

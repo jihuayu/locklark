@@ -42,8 +42,8 @@ EXPECTED_FILES = {
 }
 
 FROZEN_MANIFEST_SHA256 = {
-    "chromium": "717db9a0140563ac7d40fb44a8ac8ec5657d3928dc56d0b89bc1707aaf0d8e20",
-    "firefox": "acad78db31d7d3572c993463b48e8913a6eba16ade3fea435ff1a73a17e1f424",
+    "chromium": "1154e4bbe1e17d4688a7b937956162dba9e6d6d811dd4bc921f8057ae41820e7",
+    "firefox": "913563db08d1bd2a8c525dc7e5d9ad0a118194ec39d25753bf8e64e01422ec60",
 }
 
 APPLE_SOURCE = (
@@ -198,7 +198,7 @@ class SafariPackagingTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         if not shutil.which("node"):
             raise unittest.SkipTest("node unavailable")
-        cls.temporary = tempfile.TemporaryDirectory(prefix="locklark-safari-test-")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="passme-safari-test-")
         cls.addClassCleanup(cls.temporary.cleanup)
         fixture_root = Path(cls.temporary.name)
         os.chmod(fixture_root, 0o700)
@@ -260,7 +260,7 @@ class SafariPackagingTests(unittest.TestCase):
     def test_swift_scratch_path_is_shared_and_ci_external(self) -> None:
         script = (SAFARI / "scripts/test_safari_swift.sh").read_text("utf-8")
         self.assertIn(
-            'SCRATCH="${LOCKLARK_SWIFT_SCRATCH:-$ROOT/safari/.build}"',
+            'SCRATCH="${PASSME_SWIFT_SCRATCH:-$ROOT/safari/.build}"',
             script,
         )
         commands = re.findall(r"swift (?:test|build)\b[^\n]*", script)
@@ -274,7 +274,7 @@ class SafariPackagingTests(unittest.TestCase):
         end = workflow.index("- run: go test", start)
         step = workflow[start:end]
         self.assertIn(
-            "LOCKLARK_SWIFT_SCRATCH: ${{ runner.temp }}/locklark-safari-swift",
+            "PASSME_SWIFT_SCRATCH: ${{ runner.temp }}/passme-safari-swift",
             step,
         )
         self.assertNotIn("${{ github.workspace }}", step.split("run: |", 1)[0])
@@ -293,11 +293,11 @@ class SafariPackagingTests(unittest.TestCase):
         self.assertIn("browserrelease.prebuilt", strict)
         self.assertNotIn('node "$ROOT/browser-extension/build.js"', strict)
         for token in (
-            "LOCKLARK_BROWSER_REQUIRE_PREBUILT",
-            "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR",
-            "LOCKLARK_BROWSER_EXTENSION_CHROMIUM",
-            "LOCKLARK_BROWSER_EXTENSION_FIREFOX",
-            "LOCKLARK_BROWSER_EXTENSION_SAFARI",
+            "PASSME_BROWSER_REQUIRE_PREBUILT",
+            "PASSME_BROWSER_EXTENSION_PREPARED_DIR",
+            "PASSME_BROWSER_EXTENSION_CHROMIUM",
+            "PASSME_BROWSER_EXTENSION_FIREFOX",
+            "PASSME_BROWSER_EXTENSION_SAFARI",
         ):
             self.assertIn(token, script)
         self.assertIn("REQUIRE_PREBUILT", strict)
@@ -330,17 +330,17 @@ class SafariPackagingTests(unittest.TestCase):
         project = (SAFARI / "project.yml").read_text("utf-8")
         identity = (SAFARI / "Shared/Sources/SignedIdentity.swift").read_text("utf-8")
         for value in (
-            "org.locklark.browser.safari",
-            "org.locklark.browser.safari.Extension",
-            "group.org.locklark.browser.safari",
+            "org.passme.browser.safari",
+            "org.passme.browser.safari.Extension",
+            "group.org.passme.browser.safari",
             'MACOSX_DEPLOYMENT_TARGET: "13.0"',
             "type: application",
             "type: app-extension",
             "com.apple.Safari.web-extension",
         ):
-            target = identity if value.startswith("org.locklark") or value.startswith("group.") else project
+            target = identity if value.startswith("org.passme") or value.startswith("group.") else project
             if value == "com.apple.Safari.web-extension":
-                target = (SAFARI / "LocklarkSafariExtension/Info.plist").read_text("utf-8")
+                target = (SAFARI / "PassmeSafariExtension/Info.plist").read_text("utf-8")
             self.assertIn(value, target)
         self.assertIn("fixedContainingAppBundleID", identity)
         self.assertIn("fixedExtensionBundleID", identity)
@@ -351,30 +351,30 @@ class SafariPackagingTests(unittest.TestCase):
 
     def test_entitlements_and_placeholders_fail_closed(self) -> None:
         for name, target in (
-            ("LocklarkSafari.entitlements", "LocklarkSafari"),
-            ("LocklarkSafariExtension.entitlements", "LocklarkSafariExtension"),
+            ("PassmeSafari.entitlements", "PassmeSafari"),
+            ("PassmeSafariExtension.entitlements", "PassmeSafariExtension"),
         ):
             text = (SAFARI / target / name).read_text("utf-8")
             self.assertIn("com.apple.security.app-sandbox", text)
             self.assertIn("com.apple.security.application-groups", text)
-            self.assertIn("$(LOCKLARK_APP_GROUP_ID)", text)
+            self.assertIn("$(PASSME_APP_GROUP_ID)", text)
             self.assertNotIn("group.REPLACE", text)
         identity = (SAFARI / "Shared/Sources/SignedIdentity.swift").read_text("utf-8")
         for marker in ("REPLACE", "CHANGEME", "PLACEHOLDER", "TEAMID", "UNSIGNED"):
             self.assertIn(marker, identity)
         for plist in (
-            SAFARI / "LocklarkSafari/Info.plist",
-            SAFARI / "LocklarkSafariExtension/Info.plist",
+            SAFARI / "PassmeSafari/Info.plist",
+            SAFARI / "PassmeSafariExtension/Info.plist",
         ):
             text = plist.read_text("utf-8")
-            self.assertIn("$(LOCKLARK_TEAM_ID)", text)
-            self.assertIn("$(LOCKLARK_APP_GROUP_ID)", text)
+            self.assertIn("$(PASSME_TEAM_ID)", text)
+            self.assertIn("$(PASSME_APP_GROUP_ID)", text)
             self.assertNotIn("<string>ABCDE12345</string>", text)
 
     def test_extension_never_launches_processes_or_logs_raw_requests(self) -> None:
         sources = "\n".join(
             path.read_text("utf-8")
-            for path in sorted((SAFARI / "LocklarkSafariExtension/Sources").glob("*.swift"))
+            for path in sorted((SAFARI / "PassmeSafariExtension/Sources").glob("*.swift"))
         )
         for forbidden in (
             "Process(",
@@ -389,7 +389,7 @@ class SafariPackagingTests(unittest.TestCase):
             "logger.",
         ):
             self.assertNotIn(forbidden, sources)
-        handler = (SAFARI / "LocklarkSafariExtension/Sources/SafariWebExtensionHandler.swift").read_text("utf-8")
+        handler = (SAFARI / "PassmeSafariExtension/Sources/SafariWebExtensionHandler.swift").read_text("utf-8")
         self.assertIn("SFExtensionMessageKey", handler)
         self.assertIn("SFExtensionProfileKey", handler)
         self.assertIn("NSExtensionRequestHandling", handler)
@@ -398,10 +398,10 @@ class SafariPackagingTests(unittest.TestCase):
     def test_app_launches_only_fixed_embedded_helper(self) -> None:
         sources = "\n".join(
             path.read_text("utf-8")
-            for path in sorted((SAFARI / "LocklarkSafari/Sources").glob("*.swift"))
+            for path in sorted((SAFARI / "PassmeSafari/Sources").glob("*.swift"))
         )
         limits = (SAFARI / "Shared/Sources/RelayLimits.swift").read_text("utf-8")
-        self.assertIn('helperName = "locklark-browser-safari"', limits)
+        self.assertIn('helperName = "passme-browser-safari"', limits)
         self.assertIn("RelayLimits.helperName", sources)
         self.assertIn('fixedArguments = ["--safari-browser"]', sources)
         self.assertIn("Process()", sources)
@@ -414,7 +414,7 @@ class SafariPackagingTests(unittest.TestCase):
 
     def test_peer_policy_requires_team_and_exact_extension_bundle(self) -> None:
         peer = (SAFARI / "Shared/Sources/PeerPolicy.swift").read_text("utf-8")
-        verifier = (SAFARI / "LocklarkSafari/Sources/PeerVerifier.swift").read_text("utf-8")
+        verifier = (SAFARI / "PassmeSafari/Sources/PeerVerifier.swift").read_text("utf-8")
         self.assertIn("peer.uid == expectedUID", peer)
         self.assertIn("teamID == expectedTeamID", peer)
         self.assertIn("bundleID == expectedExtensionBundleID", peer)
@@ -443,8 +443,8 @@ class SafariPackagingTests(unittest.TestCase):
         self.assertNotIn("error", failure)
 
     def test_no_fake_replies_when_helper_missing(self) -> None:
-        helper = (SAFARI / "LocklarkSafari/Sources/HelperSession.swift").read_text("utf-8")
-        relay = (SAFARI / "LocklarkSafariExtension/Sources/ExtensionRelay.swift").read_text("utf-8")
+        helper = (SAFARI / "PassmeSafari/Sources/HelperSession.swift").read_text("utf-8")
+        relay = (SAFARI / "PassmeSafariExtension/Sources/ExtensionRelay.swift").read_text("utf-8")
         self.assertIn("throw RelayError.unavailable", helper)
         self.assertIn("RelayReply.failure(token: request.token)", relay)
         self.assertNotIn("RelayReply.success(token: request.token, frames: [", relay)
@@ -452,8 +452,8 @@ class SafariPackagingTests(unittest.TestCase):
 
     def test_build_script_requires_signed_inputs_and_guards_unsigned_mode(self) -> None:
         script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
-        self.assertIn("LOCKLARK_TEAM_ID", script)
-        self.assertIn("LOCKLARK_APP_GROUP_ID", script)
+        self.assertIn("PASSME_TEAM_ID", script)
+        self.assertIn("PASSME_APP_GROUP_ID", script)
         self.assertIn("UNSIGNEDCI0", script)
         self.assertIn("unsigned CI compile only", script)
         self.assertIn("CODE_SIGNING_ALLOWED=NO", script)
@@ -473,10 +473,10 @@ class SafariPackagingTests(unittest.TestCase):
         self.assertIn("unsigned", docs.lower())
 
     def test_safari_container_app_status_ui_and_safe_copy(self) -> None:
-        app_src = (SAFARI / "LocklarkSafari/Sources/LocklarkSafariApp.swift").read_text("utf-8")
+        app_src = (SAFARI / "PassmeSafari/Sources/PassmeSafariApp.swift").read_text("utf-8")
         for required in (
             "enum RelayState",
-            "Locklark for Safari",
+            "Passme for Safari",
             "Native relay ready",
             "Native relay stopped",
             "Unavailable: signed app identity or app group is missing",

@@ -1,6 +1,6 @@
 # MyGo 日常密码生成与 TOTP：架构约定
 
-基线 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`，分支 `codex/desktop-daily-tools`。前一浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 经 Luna/max、主代理独立两浏览器验收及精确 head `8d63fd6` 的四项 CI（run `42089993817`）合入。本批仍由主代理设计/验收、Sol xhigh 实现、Luna max review；设计草案已经预审，本文不是实现完成声明。
+基线 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`，分支 `codex/desktop-daily-tools`。前一浏览器保存/更新 [PR #27](https://github.com/jihuayu/passme/pull/27) 经 Luna/max、主代理独立两浏览器验收及精确 head `8d63fd6` 的四项 CI（run `42089993817`）合入。本批仍由主代理设计/验收、Sol xhigh 实现、Luna max review；设计草案已经预审，本文不是实现完成声明。
 
 ## 用户流程
 

@@ -110,13 +110,13 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
         self.assertIn("--prepared-dir", producer)
         self.assertIn("--dist", producer)
         self.assertNotIn("browser-extension/build.js", producer)
-        self.assertIn("name: locklark-extension-producer", producer)
+        self.assertIn("name: passme-extension-producer", producer)
         self.assertIn("unpacked", producer)
         self.assertIn("prepared/v2pairs", producer)
         self.assertIn("legacy/v1pairs", producer)
         self.assertIn("retention-days: 14", producer)
-        self.assertEqual(producer.count("name: locklark-extension-producer"), 1)
-        self.assertNotIn("locklark-extension-unsigned", source)
+        self.assertEqual(producer.count("name: passme-extension-producer"), 1)
+        self.assertNotIn("passme-extension-unsigned", source)
         for job in ("web-core", "web-browsers", "desktop-macos"):
             self.assertIn(
                 "needs: [linux-build, contracts, extension-producer]"
@@ -125,7 +125,7 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
                 block(job),
             )
         desktop = block("desktop-macos")
-        self.assertIn("LOCKLARK_BROWSER_EXTENSION_SAFARI", desktop)
+        self.assertIn("PASSME_BROWSER_EXTENSION_SAFARI", desktop)
         self.assertIn("safari/scripts/build_safari.sh", desktop)
         self.assertNotIn("/unpacked/chromium\n", desktop.split("Test Safari")[1])
         web = block("web")
@@ -141,7 +141,7 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
                 root = pathlib.Path(temporary)
                 runner = root / "runner"
                 workspace = root / "workspace"
-                artifact = runner / "locklark-extension-producer"
+                artifact = runner / "passme-extension-producer"
                 workspace.mkdir()
                 env_file = root / "github-env"
                 fake_bin = root / "bin"
@@ -174,15 +174,15 @@ class ExtensionProducerWorkflowContract(unittest.TestCase):
                 for line in env_file.read_text(encoding="utf-8").splitlines():
                     key, _, value = line.partition("=")
                     values[key] = value
-                self.assertEqual(values["LOCKLARK_BROWSER_REQUIRE_PREBUILT"], "1")
+                self.assertEqual(values["PASSME_BROWSER_REQUIRE_PREBUILT"], "1")
                 self.assertEqual(
-                    values["LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR"],
+                    values["PASSME_BROWSER_EXTENSION_PREPARED_DIR"],
                     str(artifact / "prepared" / "v2pairs"),
                 )
                 for product in ("chromium", "firefox", "safari"):
                     target = workspace / "browser-extension" / "dist" / product
                     self.assertEqual(
-                        values["LOCKLARK_BROWSER_EXTENSION_" + product.upper()],
+                        values["PASSME_BROWSER_EXTENSION_" + product.upper()],
                         str(target),
                     )
                     self.assertEqual(

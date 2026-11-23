@@ -11,12 +11,12 @@ import { acceptPasskeyManagement, passkeyChoiceLabel } from "./browser_passkey_m
 import { acceptConditionalPasskey, acceptConditionalSibling } from "./browser_conditional_passkey_acceptance.mjs";
 
 export const PASSKEY_CONTRACT = Object.freeze({
-  gate: "LOCKLARK_TEST_FIREFOX_PASSKEY=1",
-  rpID: "login.locklark.test",
+  gate: "PASSME_TEST_FIREFOX_PASSKEY=1",
+  rpID: "login.passme.test",
   userName: "passkey-test",
   inlineButtons: Object.freeze([
-    "保存到 Locklark",
-    "使用 Locklark 登录",
+    "保存到 Passme",
+    "使用 Passme 登录",
     "使用其他验证器",
   ]),
   nativeControls: Object.freeze({
@@ -141,7 +141,7 @@ function coseToPublicKey(cose) {
 }
 // Independent relying-party verification. Mirrors the Chromium helper's checks
 // (client data, RP ID hash, flags, credential ID, ES256 signature) without any
-// browser automation channel. LOCKLARK_TEST_WEBAUTHN_SERVER may name an
+// browser automation channel. PASSME_TEST_WEBAUTHN_SERVER may name an
 // independent WebAuthn server module exactly as in the Chromium acceptance.
 function verifiedClientData(response, { type, challenge, origin }) {
   const raw = fromBase64URL(
@@ -248,7 +248,7 @@ export function verifyAuthenticationResponse({
 }
 
 function externalServer() {
-  const module = process.env.LOCKLARK_TEST_WEBAUTHN_SERVER;
+  const module = process.env.PASSME_TEST_WEBAUTHN_SERVER;
   if (!module) return null;
   const require = createRequire(import.meta.url);
   return require(module);
@@ -528,7 +528,7 @@ export async function acceptFirefoxPasskey(driver) {
   ).toString("base64url");
   await pageEval(startCreateInPage, { rp, challenge });
   phase("firefox-passkey-create:inline");
-  await clickInline("保存到 Locklark");
+  await clickInline("保存到 Passme");
   phase("firefox-passkey-create:native-factors");
   input([...verifyFactors, { click_label: nativeLabel("create") }]);
   phase("firefox-passkey-create:result");
@@ -599,7 +599,7 @@ export async function acceptFirefoxPasskey(driver) {
     challenge: getChallenge,
   });
   phase("firefox-passkey-get:inline");
-  await clickInline("使用 Locklark 登录");
+  await clickInline("使用 Passme 登录");
   const loginLabel = nativeLabel("get", created.result.json.id);
   assert.equal(
     loginLabel,
@@ -666,7 +666,7 @@ export async function acceptFirefoxPasskey(driver) {
     "Aborted passkey request must reject with AbortError",
   );
   await eventually(
-    () => inlineAbsent("使用 Locklark 登录"),
+    () => inlineAbsent("使用 Passme 登录"),
     "Closed-shadow passkey panel survived the aborted request",
     15000,
   );
@@ -699,13 +699,13 @@ export async function acceptFirefoxPasskey(driver) {
   assert.notEqual(
     fallback.state,
     "resolved",
-    "Browser fallback resolved with a Locklark credential",
+    "Browser fallback resolved with a Passme credential",
   );
-  assert.equal(fallback.result, null, "Browser fallback leaked a Locklark credential");
+  assert.equal(fallback.result, null, "Browser fallback leaked a Passme credential");
   assert.equal(
-    await inlineAbsent("使用 Locklark 登录"),
+    await inlineAbsent("使用 Passme 登录"),
     true,
-    "Locklark panel survived the browser fallback",
+    "Passme panel survived the browser fallback",
   );
   if (fallback.state === "pending") {
     await pageEval(abortFallbackInPage);
@@ -721,7 +721,7 @@ export async function acceptFirefoxPasskey(driver) {
     fallback.state.startsWith("rejected:"),
     "Unexpected browser fallback outcome: " + fallback.state,
   );
-  if (process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_CONDITIONAL === "1") {
     await acceptConditionalPasskey({
       origin, fixture, first: created.result.json, pageEval, inlineClick: clickInline,
       inlinePresent: async label => !(await inlineAbsent(label)),
@@ -739,7 +739,7 @@ export async function acceptFirefoxPasskey(driver) {
       eventually, input, observe: driver.observe, phase, openPopup: driver.openPopup, reconnect,
     });
   }
-  if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_MANAGEMENT === "1") {
     // Quick pairing is for Passkey metadata access; each destructive Passkey
     // removal still gets its own native owner approval.
     assert.equal(typeof reconnectQuickFill, "function",
@@ -883,7 +883,7 @@ if (
       verifyRegistrationResponse({
         response: registration,
         expectedChallenge: challenge,
-        expectedOrigin: "https://evil.locklark.test",
+        expectedOrigin: "https://evil.passme.test",
         expectedRPID: rp,
       }),
     "a mismatched registration origin",

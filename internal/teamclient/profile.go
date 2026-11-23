@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 	bolt "go.etcd.io/bbolt"
 )
 
 const maxProfileBytes = 32 << 20
 
-var profileBucket = []byte("locklark/teamclient/bootstrap-profile/v1")
+var profileBucket = []byte("passme/teamclient/bootstrap-profile/v1")
 var profileKey = []byte("record")
 
 // Only public bindings, signed proofs and encrypted artifact bytes are durable.
@@ -241,7 +241,7 @@ func createProfile(path string, r profileRecord) error {
 	if _, e := rand.Read(token[:]); e != nil {
 		return ErrProfile
 	}
-	tmp := filepath.Join(filepath.Dir(path), ".locklark-team-profile-"+hex.EncodeToString(token[:]))
+	tmp := filepath.Join(filepath.Dir(path), ".passme-team-profile-"+hex.EncodeToString(token[:]))
 	f, e := createProfileFile(tmp)
 	if e != nil {
 		return ErrProfile

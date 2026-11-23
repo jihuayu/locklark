@@ -10,20 +10,20 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
 
-const emergencyKitFileName = "Locklark-Emergency-Kit.txt"
+const emergencyKitFileName = "Passme-Emergency-Kit.txt"
 
 // DefaultVaultPath returns the default local vault path under the user's Documents folder.
 func DefaultVaultPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
-		return filepath.Join("Locklark", "personal.ll")
+		return filepath.Join("Passme", "personal.pm")
 	}
-	return filepath.Join(home, "Documents", "Locklark", "personal.ll")
+	return filepath.Join(home, "Documents", "Passme", "personal.pm")
 }
 
 func vaultDisplayBaseName(path string) string {
@@ -58,7 +58,7 @@ func emergencyKitCandidate(dir string, index int) string {
 	if index <= 1 {
 		return filepath.Join(dir, emergencyKitFileName)
 	}
-	return filepath.Join(dir, fmt.Sprintf("Locklark-Emergency-Kit-%d.txt", index))
+	return filepath.Join(dir, fmt.Sprintf("Passme-Emergency-Kit-%d.txt", index))
 }
 
 // nextEmergencyKitPath picks the first non-existing Emergency Kit filename in vaultPath's directory.
@@ -109,7 +109,7 @@ func (a *App) saveNewVaultKit(vaultPath, key string) (string, error) {
 }
 
 // syncInitialVaultState binds the persisted vault path or enters the 4-step first-launch guide
-// without creating an empty .ll file on disk.
+// without creating an empty .pm file on disk.
 func (a *App) syncInitialVaultState() {
 	if classicLayoutRequested() {
 		if strings.TrimSpace(a.path) == "" {
@@ -172,7 +172,7 @@ func (a *App) chooseCreateVaultLocation() {
 	}
 	defaultName := vaultDisplayBaseName(a.path)
 	if defaultName == "" {
-		defaultName = "personal.ll"
+		defaultName = "personal.pm"
 	}
 	win := a.win
 	a.runInteractive(func() outcome {
@@ -180,7 +180,7 @@ func (a *App) chooseCreateVaultLocation() {
 			Parent:      win,
 			Title:       "选择新建金库保存位置",
 			DefaultPath: defaultName,
-			Filters:     []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}},
+			Filters:     []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}},
 		})
 		return outcome{err: err, apply: func() {
 			if strings.TrimSpace(path) != "" {
@@ -205,8 +205,8 @@ func (a *App) openExistingVault() {
 	a.runInteractive(func() outcome {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
 			Parent:  win,
-			Title:   "打开已有 Locklark 金库",
-			Filters: []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}},
+			Title:   "打开已有 Passme 金库",
+			Filters: []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}},
 		})
 		return outcome{err: err, apply: func() {
 			if len(paths) == 0 || strings.TrimSpace(paths[0]) == "" {
@@ -262,7 +262,7 @@ func (a *App) reexportEmergencyKit() {
 		if win != nil {
 			chosen, dlgErr := mygo.Dialog.Save(mygo.SaveDialogOptions{
 				Parent:      win,
-				Title:       "重新导出 Locklark 应急文件",
+				Title:       "重新导出 Passme 应急文件",
 				DefaultPath: emergencyKitFileName,
 				Filters:     []mygo.FileFilter{{Name: "文本文件", Extensions: []string{"txt"}}},
 			})
@@ -302,7 +302,7 @@ func saveEmergencyKit(path, key string) error {
 	if err != nil {
 		return err
 	}
-	content := "Locklark 应急文件\r\n\r\nSecret Key: " + key + "\r\n\r\n解锁金库还需要主密码和金库文件。此文件不包含主密码，也不是金库备份。\r\n请离线保存或打印此文件，并与金库文件分开保管。任何取得此文件的人都能看到 Secret Key。\r\n"
+	content := "Passme 应急文件\r\n\r\nSecret Key: " + key + "\r\n\r\n解锁金库还需要主密码和金库文件。此文件不包含主密码，也不是金库备份。\r\n请离线保存或打印此文件，并与金库文件分开保管。任何取得此文件的人都能看到 Secret Key。\r\n"
 	_, err = fmt.Fprint(f, content)
 	if err == nil {
 		err = f.Sync()
@@ -364,7 +364,7 @@ func (a *App) chooseEmergencyKit() {
 
 func (a *App) onboardingView(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c.Key("onboarding-guide")).Role(ui.RoleGroup).Label("欢迎使用 Locklark").
+	ui.Column(c.Key("onboarding-guide")).Role(ui.RoleGroup).Label("欢迎使用 Passme").
 		FillWidth().MaxWidth(580).Border(1, t.Border).Radius(t.Radius*1.75).Background(t.Surface).
 		Padding(t.Space(6)).Gap(t.Space(4)).Shadow(0, t.Space(1.5), t.Space(6), 0, ui.RGBA(0, 0, 0, .07)).Children(func() {
 		// Hero section
@@ -375,7 +375,7 @@ func (a *App) onboardingView(c *ui.Context) {
 				oneui.Icon(c, lucide.ShieldCheck()).Size(t.Space(6), t.Space(6)).TextColor(t.AccentText)
 			})
 			onevraPill(c, "离线零知识 · 本机派生加密", t.Accent)
-			oneui.Text(c, "欢迎使用 Locklark 本地金库").FontSize(t.Rem(1.5)).Bold().TextColor(t.Text)
+			oneui.Text(c, "欢迎使用 Passme 本地金库").FontSize(t.Rem(1.5)).Bold().TextColor(t.Text)
 			oneui.Text(c, "没有云账号、没有服务器同步。所有密码与敏感字段都在你的设备上用「主密码 + Secret Key」双因素加密保存。").
 				FontSize(t.Rem(.82)).TextColor(t.TextMuted).Wrap()
 		})
@@ -445,7 +445,7 @@ func (a *App) createVaultView(c *ui.Context) {
 				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
 					base := vaultDisplayBaseName(a.path)
 					if base == "" {
-						base = "personal.ll"
+						base = "personal.pm"
 					}
 					oneui.Text(c, base+" · "+displayVaultLocation(a.path)).FontSize(t.Rem(.88)).Bold().TextColor(t.Text).Wrap()
 					oneui.Text(c, a.path).FontSize(t.Rem(.72)).TextColor(t.TextMuted).Wrap()

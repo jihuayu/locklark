@@ -228,7 +228,7 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
             draft["env"]["RELEASE_TAG"], "${{ needs.authorize.outputs.tag }}"
         )
         self.assertEqual(
-            draft["env"]["LOCKLARK_VERSION"],
+            draft["env"]["PASSME_VERSION"],
             "${{ needs.authorize.outputs.version }}",
         )
         self.assertEqual(
@@ -284,7 +284,7 @@ class DesktopReleaseWorkflowTests(unittest.TestCase):
 
         run = run_text(verifier)
         self.assertIn("python3 scripts/verify_desktop_release.py", run)
-        self.assertIn('--version "$LOCKLARK_VERSION"', run)
+        self.assertIn('--version "$PASSME_VERSION"', run)
         self.assertIn('--public-key "$public_key"', run)
         self.assertIn(
             'gh release download "$RELEASE_TAG"', run

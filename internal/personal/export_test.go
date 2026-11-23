@@ -3,7 +3,7 @@ package personal
 import (
 	"bytes"
 	"errors"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"os"
 	"path/filepath"
@@ -99,7 +99,7 @@ func TestKDBXExportRollbackAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := PrepareBackup(path, filepath.Join(t.TempDir(), "backup.llb"), "fixture", key)
+	b, err := PrepareBackup(path, filepath.Join(t.TempDir(), "backup.pmb"), "fixture", key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestKDBXExportRollbackAndRecovery(t *testing.T) {
 	if err = b.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(t.TempDir(), "restored.ll")
+	dest := filepath.Join(t.TempDir(), "restored.pm")
 	rec, err := PrepareRestore(b.dest, dest, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)
@@ -157,7 +157,7 @@ func TestKDBXExportConcurrentPublication(t *testing.T) {
 	if successes != 1 || err != nil || (string(raw) != "first" && string(raw) != "second") {
 		t.Fatal("non-atomic publication", successes, err)
 	}
-	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), ".locklark-export-*"))
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), ".passme-export-*"))
 	if len(leftovers) != 0 {
 		t.Fatal("temporary output retained")
 	}

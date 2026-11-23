@@ -42,7 +42,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var (

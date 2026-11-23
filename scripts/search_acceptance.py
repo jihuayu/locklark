@@ -7,7 +7,7 @@ from personal_acceptance import invoke
 
 def check(binary):
     with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "owner.ll")
+        path = str(pathlib.Path(tmp) / "owner.pm")
         pw, secret = "synthetic-master-password", "password-only-needle"
         _, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw), ("重新输入刚保存的 Secret Key", None)], issue=True)
         factors = [("主密码", pw), ("Secret Key", key)]

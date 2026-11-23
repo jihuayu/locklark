@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 )
 
 var errVerifyRejected = errors.New("verifier rejected")

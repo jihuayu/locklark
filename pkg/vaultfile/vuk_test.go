@@ -358,15 +358,15 @@ func TestVUKMaxIdentifierBoundary(t *testing.T) {
 	fx.vaultID = strings.Repeat("v", MaxIDLength)
 	fx.deviceID = strings.Repeat("d", MaxDeviceIDLength)
 	fx.epoch = ^uint64(0)
-	// At these limits the plaintext is the 42-byte purpose label, the 1-byte
+	// At these limits the plaintext is the 40-byte purpose label, the 1-byte
 	// NUL, 2 + 64 + 8 + 2 + 128 bytes of context and the 32-byte VUK:
-	// 42 + 1 + (2 + 64 + 8 + 2 + 128) + 32 = 279 bytes, one unchunked age chunk.
-	if len(DomainVUKDeviceWrapping) != 42 {
-		t.Fatalf("DomainVUKDeviceWrapping is %d bytes, want 42", len(DomainVUKDeviceWrapping))
+	// 40 + 1 + (2 + 64 + 8 + 2 + 128) + 32 = 277 bytes, one unchunked age chunk.
+	if len(DomainVUKDeviceWrapping) != 40 {
+		t.Fatalf("DomainVUKDeviceWrapping is %d bytes, want 40", len(DomainVUKDeviceWrapping))
 	}
 	wantLen := len(DomainVUKDeviceWrapping) + 1 + (2 + MaxIDLength + 8 + 2 + MaxDeviceIDLength) + CEKSize
-	if wantLen != 279 {
-		t.Fatalf("max plaintext length %d, want 279", wantLen)
+	if wantLen != 277 {
+		t.Fatalf("max plaintext length %d, want 277", wantLen)
 	}
 	slot := sealVUK(t, fx)
 	if len(slot.WrappedVUK) > MaxWrappedKeyLength {

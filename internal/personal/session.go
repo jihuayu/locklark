@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 )
 
 var ErrSessionLocked = errors.New("desktop vault is locked; unlock again")

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/ssh"
 	"os"
@@ -64,7 +64,7 @@ func TestPasskeyBackupRestoreAndNoPlaintext(t *testing.T) {
 	}
 	key := bytes.Repeat([]byte{4}, 16)
 	defer clear(key)
-	archive, restored := filepath.Join(t.TempDir(), "backup.llb"), filepath.Join(t.TempDir(), "restored.ll")
+	archive, restored := filepath.Join(t.TempDir(), "backup.pmb"), filepath.Join(t.TempDir(), "restored.pm")
 	kit, e := Backup(s.path, archive, "fixture", key)
 	if e != nil {
 		t.Fatal(e)
@@ -191,7 +191,7 @@ func TestMixedSSHAndPasskeyVaultReplayAndBackupRestore(t *testing.T) {
 	}
 	key := bytes.Repeat([]byte{4}, 16)
 	defer clear(key)
-	archive, restored := filepath.Join(t.TempDir(), "backup.llb"), filepath.Join(t.TempDir(), "restored.ll")
+	archive, restored := filepath.Join(t.TempDir(), "backup.pmb"), filepath.Join(t.TempDir(), "restored.pm")
 	kit, e := Backup(s.path, archive, "fixture", key)
 	if e != nil {
 		t.Fatal("mixed backup", e)

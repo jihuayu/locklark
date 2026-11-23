@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 )
 
 // Only the fixture writer, which already owns this plaintext and the authority
@@ -18,7 +18,7 @@ type pullTarget struct {
 	Sig                          []byte
 }
 
-func (c pullTarget) proof() []byte { c.Sig = nil; return message("locklark/fixture-slot/v1\x00", c) }
+func (c pullTarget) proof() []byte { c.Sig = nil; return message("passme/fixture-slot/v1\x00", c) }
 func issuePullTarget(device, bundle string, archive []byte, key ed25519.PrivateKey) error {
 	id, err := mailIdentity(device)
 	if err != nil {

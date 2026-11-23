@@ -129,7 +129,7 @@ func TestDarwinTTYDevEncoding(t *testing.T) {
 // (both nodes exist on this host), and unavailability when that node does not
 // exist here, so the two replies are never confused.
 func TestDarwinVerifyCLIRunTTYOtherKernelTerminal(t *testing.T) {
-	peer := Peer{User: "UID 501", PID: 994, Process: "/fixture/bin/locklark"}
+	peer := Peer{User: "UID 501", PID: 994, Process: "/fixture/bin/passme"}
 	node, dev := trustableTTYNode(t)
 	platform := CLIRunTTYPlatform()
 

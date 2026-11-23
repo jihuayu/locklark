@@ -180,7 +180,7 @@ function harness() {
   };
   document.querySelector("#tab-passkeys").dataset.filter = "passkeys";
   const context = {
-    LocklarkCore: core,
+    PassmeCore: core,
     document,
     navigator: { clipboard: { writeText: async (value) => clipboardWrites.push(value) } },
     chrome: {
@@ -569,7 +569,7 @@ test("a card only offers frame choice when the host reports support", async () =
 
 
 function detailFillDiagnosticLog(h) {
-  return h.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__;
+  return h.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC_LOG__;
 }
 
 function assertDiagnosticShape(records, expectedPhases) {
@@ -605,7 +605,7 @@ test("detail-fill diagnostics are disabled by default and do not branch", async 
 
 test("detail-fill diagnostics record entry, early guard and refused gesture", async () => {
   const early = harness();
-  early.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  early.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   early.click("#detail-fill");
   assertDiagnosticShape(detailFillDiagnosticLog(early), [
     "handler-entry",
@@ -614,7 +614,7 @@ test("detail-fill diagnostics record entry, early guard and refused gesture", as
 
   const refused = harness();
   await openCard(refused);
-  refused.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  refused.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   refused.click("#detail-fill", { isTrusted: false });
   const records = detailFillDiagnosticLog(refused);
   assertDiagnosticShape(records, ["handler-entry", "gesture-refused"]);
@@ -626,7 +626,7 @@ test("detail-fill diagnostics record entry, early guard and refused gesture", as
 test("detail-fill diagnostics record reply and adopt phases", async () => {
   const nullReply = harness();
   await openCard(nullReply);
-  nullReply.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  nullReply.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   nullReply.click("#detail-fill");
   assertDiagnosticShape(detailFillDiagnosticLog(nullReply), [
     "handler-entry",
@@ -643,7 +643,7 @@ test("detail-fill diagnostics record reply and adopt phases", async () => {
 
   const refusedAdopt = harness();
   await openCard(refusedAdopt);
-  refusedAdopt.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  refusedAdopt.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   refusedAdopt.click("#detail-fill");
   refusedAdopt
     .take("checkout-frames")
@@ -658,7 +658,7 @@ test("detail-fill diagnostics record reply and adopt phases", async () => {
 
   const adopted = harness();
   await openCard(adopted);
-  adopted.context.__LOCKLARK_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
+  adopted.context.__PASSME_TEST_DETAIL_FILL_DIAGNOSTIC__ = true;
   adopted.click("#detail-fill");
   adopted
     .take("checkout-frames")

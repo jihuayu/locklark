@@ -11,16 +11,16 @@ establish where an arbitrary executable came from. For example, from the
 reviewed checkout (with logs kept private):
 
     umask 077
-    sha256sum -c /tmp/locklark-validation/team-identity-acceptance-reviewed.sha256
-    GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go build \\
-      -o /tmp/locklark-tools/team-identity-fixture-reviewed ./scripts/team_identity_fixture
-    fixture_digest=$(sha256sum /tmp/locklark-tools/team-identity-fixture-reviewed)
+    sha256sum -c /tmp/passme-validation/team-identity-acceptance-reviewed.sha256
+    GOTOOLCHAIN=go1.27.3 /tmp/passme-tools/go/bin/go build \\
+      -o /tmp/passme-tools/team-identity-fixture-reviewed ./scripts/team_identity_fixture
+    fixture_digest=$(sha256sum /tmp/passme-tools/team-identity-fixture-reviewed)
     fixture_digest=${fixture_digest%% *}
     python3 scripts/team_identity_acceptance.py \\
-      --fixture-bin /tmp/locklark-tools/team-identity-fixture-reviewed \\
+      --fixture-bin /tmp/passme-tools/team-identity-fixture-reviewed \\
       --fixture-sha256 "$fixture_digest" \\
-      --dependency-root /tmp/locklark-tools/secret-service-debian \\
-      --artifacts /tmp/locklark-validation/team-identity-native-reviewed
+      --dependency-root /tmp/passme-tools/secret-service-debian \\
+      --artifacts /tmp/passme-validation/team-identity-native-reviewed
 
 Do not replace the frozen executable or reviewed inputs during a run. Fixture
 and dependency arguments must be canonical absolute paths under trusted
@@ -313,11 +313,11 @@ class Session:
         self.api("store", common)
         self.api("load", common)
         self.passed(GROUPS[4])
-        lookup = self.command([str(self.prefix / "usr/bin/secret-tool"), "lookup", "service", "app.locklark.unlock.v1", "account", self.account], stage="storage", record_stdout=False)
+        lookup = self.command([str(self.prefix / "usr/bin/secret-tool"), "lookup", "service", "app.passme.unlock.v1", "account", self.account], stage="storage", record_stdout=False)
         if lookup.returncode or lookup.stdout != self.value:
             raise Failure("storage")
         self.api("delete", common)
-        missing = self.command([str(self.prefix / "usr/bin/secret-tool"), "lookup", "service", "app.locklark.unlock.v1", "account", self.account], stage="storage", record_stdout=False)
+        missing = self.command([str(self.prefix / "usr/bin/secret-tool"), "lookup", "service", "app.passme.unlock.v1", "account", self.account], stage="storage", record_stdout=False)
         if missing.returncode == 0 or missing.stdout:
             raise Failure("storage")
         self.passed(GROUPS[5])

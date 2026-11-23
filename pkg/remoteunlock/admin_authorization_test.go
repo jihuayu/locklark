@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Every key, identity, policy, vault-file content byte and timestamp in this
@@ -37,7 +37,7 @@ const (
 	// adminDelegationVectorPolicySeq and adminDelegationVectorPolicyDigest
 	// are the fixture's current policy anchor.
 	adminDelegationVectorPolicySeq    = uint64(2)
-	adminDelegationVectorPolicyDigest = "j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY"
+	adminDelegationVectorPolicyDigest = "MXsboXm9G6taRIRHlZVDcJ_8eSF19uJtm2N94Jz1moo"
 
 	// adminDelegationVectorKey is the synthetic Ed25519 policy signing key of
 	// the delegated device (seed span 0x80), a key role separate from that
@@ -46,19 +46,19 @@ const (
 
 	// adminDelegationSignedJSON is the canonical JSON of members 1..19, the
 	// owner-root signed preimage without its domain.
-	adminDelegationSignedJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000}`
+	adminDelegationSignedJSON = `{"format":"passme.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"yjnBQ-AsJsx94BGoiK_11QDS9ltZuDwuHrR6X8FGw9k","target_binding_sha256":"uw5uhdEb3vVsEsSgsE38ZwVog5TBeYkTX-4fbEX4hL8","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"MXsboXm9G6taRIRHlZVDcJ_8eSF19uJtm2N94Jz1moo","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000}`
 
 	// adminDelegationVectorSignature is the fixed synthetic owner-root
 	// signature over the domain and adminDelegationSignedJSON, by the synthetic
 	// root of seed span 0x20.
-	adminDelegationVectorSignature = "7zsUu-9zDLf7LNOMKpGFBk1tqhqZgctUzNBQFFd6S4A8GO2-WAUpRKwXSx_ejkkxI7Snk3fmSa9Qymz1n90UDg"
+	adminDelegationVectorSignature = "7asqYew_CKssV33n2rhRONyaebqxcP6rkt1TZTcPix7XUEgJMajoRIhdI3xHLyaDQlUvU6m8i892TYCns0WpCw"
 
 	// adminDelegationVectorDigest is AdminDelegationDigest of the complete
 	// vector.
-	adminDelegationVectorDigest = "BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU"
+	adminDelegationVectorDigest = "0LuCL2IZm4opMSvBq6NnzHCBBGzcEOZMlWt1VSFwtLE"
 )
 
-// adminDelegationVectorJSON is the complete canonical 810-byte delegation.
+// adminDelegationVectorJSON is the complete canonical 808-byte delegation.
 var adminDelegationVectorJSON = adminDelegationSignedJSON[:len(adminDelegationSignedJSON)-1] +
 	`,"signature":"` + adminDelegationVectorSignature + `"}`
 
@@ -201,8 +201,8 @@ func TestAdminDelegationFixedSyntheticVectors(t *testing.T) {
 	}
 
 	encoded := mustEncodeDelegation(t, d)
-	if string(encoded) != adminDelegationVectorJSON || len(encoded) != 810 {
-		t.Fatalf("canonical encoding is %d bytes, want the pinned 810-byte vector\n got: %s", len(encoded), encoded)
+	if string(encoded) != adminDelegationVectorJSON || len(encoded) != 808 {
+		t.Fatalf("canonical encoding is %d bytes, want the pinned 808-byte vector\n got: %s", len(encoded), encoded)
 	}
 	parsed, err := ParseOwnerRootAdminRemoteUnlockDelegation(encoded)
 	if err != nil || parsed != d {
@@ -242,7 +242,7 @@ func TestAdminDelegationMaximumLegalBudget(t *testing.T) {
 	// Seven identifiers at 128 bytes, three uint64 maxima (20 digits), two
 	// timestamps (1 and 19 digits), the constants and the fixed-width key,
 	// digests and signature.
-	const fixed = 810 - len("owner-root-0001") - len("carol") - len("device-outsider") - len("vault-0001") -
+	const fixed = 808 - len("owner-root-0001") - len("carol") - len("device-outsider") - len("vault-0001") -
 		len("member-0001") - len("device-source") - len("device-target") - len("0") - len("7") - len("2") -
 		len("1799999900000") - len("1800000001000")
 	want := fixed + 7*MaxIdentifierLen + 3*20 + 1 + 19
@@ -372,7 +372,7 @@ func TestAdminDelegationParseRejectsNonCanonicalInput(t *testing.T) {
 			return replaceOnce(t, b, `"format"`, `"\u0066ormat"`)
 		}, field: "format"},
 		tc{name: "wrong format", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark.remote-unlock.v2"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme.remote-unlock.v2"`)
 		}, field: "format"},
 		tc{name: "owner authorization kind", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"owner-admin-delegation"`, `"owner-authorization"`)

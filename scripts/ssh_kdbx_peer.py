@@ -16,11 +16,11 @@ def main():
     assert len(entries) == 2
     generated = None
     for entry in entries:
-        assert entry.get_custom_property("Locklark.Kind") == "ssh-key"
-        protected = entry._element.find("String[Key='Locklark.SSHSeed']/Value")
+        assert entry.get_custom_property("Passme.Kind") == "ssh-key"
+        protected = entry._element.find("String[Key='Passme.SSHSeed']/Value")
         assert protected is not None and protected.get("Protected") == "True"
-        seed_text = entry.get_custom_property("Locklark.SSHSeed")
-        public_text = entry.get_custom_property("Locklark.SSHPublicKey")
+        seed_text = entry.get_custom_property("Passme.SSHSeed")
+        public_text = entry.get_custom_property("Passme.SSHPublicKey")
         seed, public = base64.b64decode(seed_text, validate=True), base64.b64decode(public_text, validate=True)
         assert len(seed) == 32
         derived = ECC.construct(curve="Ed25519", seed=seed).public_key().export_key(format="OpenSSH").split()[1]

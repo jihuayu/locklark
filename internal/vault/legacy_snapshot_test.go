@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // legacyControlText is valid UTF-8 but not KDBX/XML plain text.
@@ -284,7 +284,7 @@ func legacyV2Slot(t *testing.T, db *kdbx.Database, id string) string {
 		t.Fatal(err)
 	}
 	for _, e := range db.Content.Root.Groups[0].Entries {
-		if e.GetContent("Locklark.ID") == id {
+		if e.GetContent("Passme.ID") == id {
 			return e.GetContent(itemV2Slot)
 		}
 	}

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func childRevisions(t *testing.T, s *personal.Session, itemID string) map[string]string {

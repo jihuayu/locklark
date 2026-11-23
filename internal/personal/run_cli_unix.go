@@ -5,7 +5,7 @@ package personal
 import (
 	"os"
 
-	"github.com/jihuayu/locklark/internal/localpath"
+	"github.com/jihuayu/passme/internal/localpath"
 )
 
 func createRunCLITemp() (string, error) {
@@ -13,5 +13,5 @@ func createRunCLITemp() (string, error) {
 	if e != nil {
 		return "", ErrRunTemporary
 	}
-	return os.MkdirTemp(parent, "locklark-run-cli-")
+	return os.MkdirTemp(parent, "passme-run-cli-")
 }

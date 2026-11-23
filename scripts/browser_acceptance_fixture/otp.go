@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // This fixture helper uses the ordinary authenticated edit API. It does not
@@ -51,7 +51,7 @@ func configureOTP(input string, digits int) error {
 	}
 	defer clear(raw)
 	var f fixture
-	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(input), "synthetic.ll") {
+	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(input), "synthetic.pm") {
 		return errors.New("invalid synthetic fixture path")
 	}
 	return setOTP(f, digits)

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// External, read-only accessibility audit of the real Locklark extension.
+// External, read-only accessibility audit of the real Passme extension.
 // The action popup is opened by a physical Ctrl+Shift+Y on a normal Edge
 // process; no regular-tab popup.html is accepted as popup evidence. CDP target
 // metadata only selects a unique candidate; the attached document must prove
@@ -28,12 +28,12 @@ import { assertActionPopupContext, lockedPopup } from "./browser_accessibility_p
 import { WINDOW_MANAGER_UNAVAILABLE, assertNativeWindowManager } from "./browser_accessibility_window_manager.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PLAYWRIGHT = process.env.LOCKLARK_TEST_PLAYWRIGHT || "/workspace/locklark/web/node_modules/playwright";
-const EDGE = process.env.LOCKLARK_TEST_EDGE || "/workspace/toolchains/edge/opt/microsoft/msedge/msedge";
+const PLAYWRIGHT = process.env.PASSME_TEST_PLAYWRIGHT || "/workspace/passme/web/node_modules/playwright";
+const EDGE = process.env.PASSME_TEST_EDGE || "/workspace/toolchains/edge/opt/microsoft/msedge/msedge";
 const EXTENSION = join(ROOT, "browser-extension/dist/chromium");
 const USAGE = `Usage: node scripts/browser_accessibility_acceptance.mjs --out <new-public.json> [--axe-source <absolute path>]
 
-LOCKLARK_TEST_AXE_SOURCE may supply the pinned axe-core ${AXE_VERSION} axe.min.js path.
+PASSME_TEST_AXE_SOURCE may supply the pinned axe-core ${AXE_VERSION} axe.min.js path.
 Requires a visible GUI session with a real EWMH window manager on DISPLAY: a
 read-only _NET_SUPPORTING_WM_CHECK preflight runs before Edge/action. The parent
 then opens the real action popup with a physical Ctrl+Shift+Y through
@@ -132,7 +132,7 @@ async function main() {
   }
   const axeSourceSha256 = sha256File(axePath);
   const axeSource = readFileSync(axePath, "utf8");
-  const profile = mkdtempSync(join(tmpdir(), "locklark-a11y-"));
+  const profile = mkdtempSync(join(tmpdir(), "passme-a11y-"));
   let audited = { clean: before.clean, sha256: "" };
   let fixture = null;
   let audits = [];

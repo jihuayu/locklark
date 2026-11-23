@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 func TestCLIRunApprovalCannotPublishAfterLock(t *testing.T) {
@@ -13,7 +13,7 @@ func TestCLIRunApprovalCannotPublishAfterLock(t *testing.T) {
 	a.notifyBrowserBrokerUnlocked()
 	s, epoch := a.brokerSession, a.brokerEpoch
 	a.Lock()
-	approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
+	approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.pm", browserhost.CLIRunScope{}, nil, s, epoch)
 	if approved || err == nil || a.cliPending != nil {
 		t.Fatal("an old session published an approval after lock")
 	}
@@ -25,7 +25,7 @@ func TestCLIRunLockCancelsPendingApproval(t *testing.T) {
 	s, epoch := a.brokerSession, a.brokerEpoch
 	result := make(chan bool, 1)
 	go func() {
-		approved, _ := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
+		approved, _ := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.pm", browserhost.CLIRunScope{}, nil, s, epoch)
 		result <- approved
 	}()
 	deadline := time.Now().Add(2 * time.Second)

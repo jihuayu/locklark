@@ -87,7 +87,7 @@ def failure_reason(error):
 
 class DisplayReader(NativeControls):
     def __init__(self, pid):
-        super().__init__("Locklark · 本地金库", pid)
+        super().__init__("Passme · 本地金库", pid)
         pointer, error = C.c_void_p, C.POINTER(C.c_void_p)
         self.at.atspi_accessible_get_text_iface.argtypes = [pointer]
         self.at.atspi_accessible_get_text_iface.restype = pointer

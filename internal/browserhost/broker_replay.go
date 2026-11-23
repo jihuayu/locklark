@@ -114,7 +114,7 @@ func (c *cliRunNonceCache) read() (time.Time, error) {
 // cliRunNonceDigest hashes the caller-composed cache key, so neither the raw
 // nonce nor the peer label is stored.
 func cliRunNonceDigest(key string) [sha256.Size]byte {
-	return sha256.Sum256([]byte("locklark/cli-run/nonce/v1\x00" + key))
+	return sha256.Sum256([]byte("passme/cli-run/nonce/v1\x00" + key))
 }
 
 // cliRunNonceKey binds a case-folded nonce to one authenticated peer. Only the

@@ -13,8 +13,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -64,7 +64,7 @@ func idOK(s string) bool {
 func (e Event) proof() []byte {
 	e.Signature = nil
 	b, _ := json.Marshal(e)
-	return append([]byte("locklark/personal/audit/v1\x00"), b...)
+	return append([]byte("passme/personal/audit/v1\x00"), b...)
 }
 func (e Event) hash() string {
 	b, _ := json.Marshal(e)
@@ -352,7 +352,7 @@ func readSealed(a cipher.AEAD, label, raw []byte, v any) error {
 	}
 	return nil
 }
-func eventLabel(seq []byte) []byte { return append([]byte("locklark/personal/event/v1\x00"), seq...) }
+func eventLabel(seq []byte) []byte { return append([]byte("passme/personal/event/v1\x00"), seq...) }
 
 // applyAuditRevision is the single revision-replay switch shared by cold
 // history verification, warm tail verification and cache extension.

@@ -2,7 +2,7 @@
 """Minimal real CLI smoke gate.
 
 This is deliberately smaller than the ``*_acceptance.py`` suites. It proves
-that a prebuilt ``locklark`` executable starts, prints its help, creates the
+that a prebuilt ``passme`` executable starts, prints its help, creates the
 synthetic gateway fixture, and reads two pinned epochs. It uses synthetic data
 only and never prints child stdout/stderr, so command output cannot leak into
 CI logs during this first gate.
@@ -65,9 +65,9 @@ def smoke(cli: pathlib.Path, timeout: float) -> None:
         help_text = invoke(cli, ["--help"], timeout).decode("utf-8")
     except UnicodeDecodeError:
         raise SmokeFailure("CLI help output is not UTF-8") from None
-    require("Locklark" in help_text, "CLI help output is missing the product name")
+    require("Passme" in help_text, "CLI help output is missing the product name")
 
-    state = pathlib.Path(tempfile.mkdtemp(prefix="locklark-cli-smoke-"))
+    state = pathlib.Path(tempfile.mkdtemp(prefix="passme-cli-smoke-"))
     try:
         state.chmod(0o700)
         demo = json_output(
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cli",
         required=True,
-        help="path to a prebuilt locklark executable (never rebuilt here)",
+        help="path to a prebuilt passme executable (never rebuilt here)",
     )
     parser.add_argument(
         "--timeout",
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         print("FAIL: CLI path is not an executable file", file=sys.stderr)
         return 1
 
-    print("PASS: locklark CLI smoke (help, synthetic demo, pinned inspect)")
+    print("PASS: passme CLI smoke (help, synthetic demo, pinned inspect)")
     return 0
 
 

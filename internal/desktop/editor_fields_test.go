@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 )
 
@@ -118,9 +118,9 @@ func TestEditorPageUsesGroupedFields(t *testing.T) {
 }
 
 func TestEditorPageSnapshot(t *testing.T) {
-	target := os.Getenv("LOCKLARK_EDITOR_SNAPSHOT")
+	target := os.Getenv("PASSME_EDITOR_SNAPSHOT")
 	if target == "" {
-		t.Skip("set LOCKLARK_EDITOR_SNAPSHOT to render the grouped editor")
+		t.Skip("set PASSME_EDITOR_SNAPSHOT to render the grouped editor")
 	}
 	a := New()
 	a.v2.draft = newItemDraft(vault.CategoryLogin)

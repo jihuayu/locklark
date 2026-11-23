@@ -7,16 +7,16 @@ import { join } from "node:path";
 import { browserFixtureExecutable } from "./browser_save_acceptance.mjs";
 
 export const otpHTML =
-  '<!doctype html><html><title>Locklark OTP acceptance</title><body><form id="otp-form" action="/verify"><input id="otp-code" autocomplete="one-time-code"><button>Verify</button></form><script>window.submits=0;document.addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
+  '<!doctype html><html><title>Passme OTP acceptance</title><body><form id="otp-form" action="/verify"><input id="otp-code" autocomplete="one-time-code"><button>Verify</button></form><script>window.submits=0;document.addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
 
 // Resolve the fixture once per configure call through the same helper as the
-// vault observer: LOCKLARK_BROWSER_FIXTURE is reused, otherwise the historical
+// vault observer: PASSME_BROWSER_FIXTURE is reused, otherwise the historical
 // state/fixture-observer build path is kept.
 export function configureOTPFixture(driver, digits) {
   const { root, state, env, go } = driver;
   return execFileSync(
     browserFixtureExecutable({
-      go: go || process.env.LOCKLARK_GO || "go",
+      go: go || process.env.PASSME_GO || "go",
       root,
       env,
       state,
@@ -217,7 +217,7 @@ export async function acceptBrowserOTP(driver) {
         received.submits === 0,
       "OTP did not match independent HMAC or submitted a form",
     );
-    if (env.LOCKLARK_TEST_FAILURE_STAGE === "otp-page-arguments") {
+    if (env.PASSME_TEST_FAILURE_STAGE === "otp-page-arguments") {
       step("driver-arguments-failure");
       await pageEval((code) => {
         document.querySelector("#otp-code").value = code;

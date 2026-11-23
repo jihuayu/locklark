@@ -2,11 +2,11 @@
 
 ## 目标
 
-Locklark 继续保持本地金库与安全授权边界，桌面界面采用 Onevra 原生组件提供简洁完整的桌面密码管理与开发者工作流：
+Passme 继续保持本地金库与安全授权边界，桌面界面采用 Onevra 原生组件提供简洁完整的桌面密码管理与开发者工作流：
 
-1. 首次未初始化启动进入 4 步零知识安全引导页（`onboardingView`），不在磁盘预建空 `.ll` 文件。
-2. 精简创建本地金库（`createVaultView`）：只需设置/确认主密码并选择保存位置，系统自动生成 Secret Key、在同目录以不可覆盖方式写入 `Locklark-Emergency-Kit.txt`、将 Secret Key 加密写入本机系统凭据库并持久化 `Settings.VaultPath`；日常解锁（`lockView`）收敛为单卡片仅输主密码（保留 `LOCKLARK_DESKTOP_LAYOUT=classic` 以兼容自动化测试）。
-3. 退出当前设备（`退出当前设备…`）强制再次验证主密码（缺少本机密钥时需补充应急 Secret Key），清除设备密钥与路径绑定并回到引导页，完整保留磁盘上的 `.ll` 文件。
+1. 首次未初始化启动进入 4 步零知识安全引导页（`onboardingView`），不在磁盘预建空 `.pm` 文件。
+2. 精简创建本地金库（`createVaultView`）：只需设置/确认主密码并选择保存位置，系统自动生成 Secret Key、在同目录以不可覆盖方式写入 `Passme-Emergency-Kit.txt`、将 Secret Key 加密写入本机系统凭据库并持久化 `Settings.VaultPath`；日常解锁（`lockView`）收敛为单卡片仅输主密码（保留 `PASSME_DESKTOP_LAYOUT=classic` 以兼容自动化测试）。
+3. 退出当前设备（`退出当前设备…`）强制再次验证主密码（缺少本机密钥时需补充应急 Secret Key），清除设备密钥与路径绑定并回到引导页，完整保留磁盘上的 `.pm` 文件。
 4. 解锁后在三栏主工作区浏览、搜索、筛选、创建/移动子保险库，在条目前查看/切换 `明文` 与 `加密` 自定义字段，或打开全宽 12 分区设置中心与受控 CLI 集成工作台。
 
 ## 技术与边界
@@ -21,10 +21,10 @@ Locklark 继续保持本地金库与安全授权边界，桌面界面采用 Onev
 
 ## 启动引导、建库与解锁流
 
-- **首次引导（`onboarding.go`）**：当 `Settings.VaultPath` 为空且默认 `<Documents>/Locklark/personal.ll` 不存在时进入 4 步引导（主密码零落盘 → 本机系统凭据保管 Secret Key → 双因素派生加密 → Emergency Kit 离线恢复）及 5 节点生命周期闭环，提供“创建金库”与“打开已有金库…”入口。
-- **精简建库（`createVaultView`）**：移除冗余的 Secret Key 二次确认输入框；默认位置显示文件名与摘要目录并提供“更改…”，点击“创建并进入金库”即原子建库并自动写入不覆盖的 `Locklark-Emergency-Kit.txt`（重名时自动递增 `-2.txt`）。
+- **首次引导（`onboarding.go`）**：当 `Settings.VaultPath` 为空且默认 `<Documents>/Passme/personal.pm` 不存在时进入 4 步引导（主密码零落盘 → 本机系统凭据保管 Secret Key → 双因素派生加密 → Emergency Kit 离线恢复）及 5 节点生命周期闭环，提供“创建金库”与“打开已有金库…”入口。
+- **精简建库（`createVaultView`）**：移除冗余的 Secret Key 二次确认输入框；默认位置显示文件名与摘要目录并提供“更改…”，点击“创建并进入金库”即原子建库并自动写入不覆盖的 `Passme-Emergency-Kit.txt`（重名时自动递增 `-2.txt`）。
 - **单卡片解锁（`lockView`）**：居中 `MaxWidth(460)` 卡片，仅展示当前绑定金库摘要、密钥状态徽章、主密码输入框、解锁与系统快捷解锁按钮，以及“使用应急资料…”、“打开其他金库…”和“退出当前设备…”。
-- **经典布局兼容**：设置 `LOCKLARK_DESKTOP_LAYOUT=classic` 时保留宽屏多卡片解锁界面及 Secret Key 确认流程，确保已有辅助功能与集成测试稳定。
+- **经典布局兼容**：设置 `PASSME_DESKTOP_LAYOUT=classic` 时保留宽屏多卡片解锁界面及 Secret Key 确认流程，确保已有辅助功能与集成测试稳定。
 
 ## 主界面结构
 
@@ -57,7 +57,7 @@ Locklark 继续保持本地金库与安全授权边界，桌面界面采用 Onev
 ## 状态与代码布局
 
 ```text
-cmd/locklark-desktop
+cmd/passme-desktop
   └─ internal/desktop.Run
       ├─ Onevra plain Shell（窗口、标题栏、主题）
       ├─ App.View（锁定、审批、浏览器、主工作区分流）
@@ -86,7 +86,7 @@ Onevra 视图是全同步 UI 线程执行器：可启动既有异步方法，但
 
 ## 验证要求
 
-- `go test ./...`、`go vet ./...` 和 `go build ./cmd/locklark-desktop` 在 Windows 通过。
+- `go test ./...`、`go vet ./...` 和 `go build ./cmd/passme-desktop` 在 Windows 通过。
 - Headless UI 测试覆盖三栏可见、导航文本、搜索、空状态和详情动作存在性；普通测试不得弹出窗口。
 - Windows 原生 smoke test 使用隐藏窗口和私有合成金库抓取界面；演示截图不包含真实用户数据。
 - 键盘必须覆盖 Tab、Enter/Space、分隔线方向键与搜索输入；指针必须覆盖导航、行选择、显示/复制与锁定。

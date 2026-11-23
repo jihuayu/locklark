@@ -148,7 +148,7 @@ func TestNodeCapAdmitsV1ArrayBounds(t *testing.T) {
 	device := `{"device_id":"dev","principal_id":"p","label":"L",` +
 		`"content_signing_key":{"alg":"ed25519","public_key":"AA"},` +
 		`"policy_signing_key":{"alg":"ed25519","public_key":"AA"},"age_encryption_key":"age1x"}`
-	policy := `{"format":"locklark.vault-file","version":1,"vault_id":"v","policy_seq":1,` +
+	policy := `{"format":"passme.vault-file","version":1,"vault_id":"v","policy_seq":1,` +
 		`"prev_policy_digest":null,"owner_root":{"key_id":"k","alg":"ed25519","public_key":"AA","owners":` +
 		arrOf(member, MaxPolicyArrayItems) + `},` +
 		`"readers":` + arrOf(member, MaxPolicyArrayItems) +

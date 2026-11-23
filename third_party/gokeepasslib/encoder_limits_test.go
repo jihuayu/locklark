@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
+	"github.com/jihuayu/passme/third_party/gokeepasslib/wrappers"
 )
 
 // encoderLimitTestNoteBytes is the size of the highly compressible Notes
@@ -35,7 +35,7 @@ func encoderLimitTestDatabase(t *testing.T) *Database {
 	db := NewDatabase(WithDatabaseKDBXVersion41())
 	db.Header.FileHeaders.KdfParameters = limitTestKDF()
 	group := NewGroup()
-	group.Name = "Locklark encoder limits"
+	group.Name = "Passme encoder limits"
 	entry := NewEntry()
 	entry.Values = []ValueData{
 		{Key: "Title", Value: V{Content: "bounded encode"}},

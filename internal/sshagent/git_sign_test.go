@@ -15,7 +15,7 @@ import (
 )
 
 func TestNativeOpenSSHGitCommitSigning(t *testing.T) {
-	if os.Getenv("LOCKLARK_TEST_OPENSSH") != "1" {
+	if os.Getenv("PASSME_TEST_OPENSSH") != "1" {
 		t.Skip("explicit native OpenSSH runtime gate disabled")
 	}
 	git, err := exec.LookPath("git")
@@ -62,8 +62,8 @@ func TestNativeOpenSSHGitCommitSigning(t *testing.T) {
 	}
 
 	run("init", "-q")
-	run("config", "user.name", "Locklark fixture")
-	run("config", "user.email", "locklark@example.invalid")
+	run("config", "user.name", "Passme fixture")
+	run("config", "user.email", "passme@example.invalid")
 	run("config", "gpg.format", "ssh")
 	run("config", "user.signingkey", publicFile)
 	run("config", "gpg.ssh.program", keygen)

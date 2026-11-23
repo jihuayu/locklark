@@ -7,9 +7,9 @@ class RuntimeWrapperTests(unittest.TestCase):
     def test_device_auth_failure_phases_remain_fixed_and_specific(self):
         for phase in ("device_ready", "device_wait", "device_crypto"):
             with self.subTest(phase=phase):
-                raw = (b"INSTRUMENTATION_STATUS: locklark_stage=platform-auth-refusal\n"
-                       b"INSTRUMENTATION_STATUS: locklark_core_phase=" + phase.encode() + b"\n"
-                       b"INSTRUMENTATION_STATUS: locklark_core_error=unavailable\n"
+                raw = (b"INSTRUMENTATION_STATUS: passme_stage=platform-auth-refusal\n"
+                       b"INSTRUMENTATION_STATUS: passme_core_phase=" + phase.encode() + b"\n"
+                       b"INSTRUMENTATION_STATUS: passme_core_error=unavailable\n"
                        b"INSTRUMENTATION_STATUS_CODE: -2\n")
                 result = safe_diagnostic(raw)
                 self.assertEqual(result["core_phase"], phase)
@@ -19,11 +19,11 @@ class RuntimeWrapperTests(unittest.TestCase):
                 self.assertNotIn("private-native-error-text", str(invalid))
 
     def test_unavailable_ime_observation_remains_unknown(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=edit-notes\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=save-field\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_phase=ime-observe\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime=unknown\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=false\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_stage=edit-notes\n"
+               b"INSTRUMENTATION_STATUS: passme_control=save-field\n"
+               b"INSTRUMENTATION_STATUS: passme_control_phase=ime-observe\n"
+               b"INSTRUMENTATION_STATUS: passme_ime=unknown\n"
+               b"INSTRUMENTATION_STATUS: passme_ime_hide_requested=false\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n")
         failure = safe_diagnostic(raw)["failed_contexts"][0]
         self.assertEqual(failure["control_phase"], "ime-observe")
@@ -31,14 +31,14 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual(failure["ime_hide_requested"], "false")
 
     def test_late_ime_hide_request_is_fixed_and_preserves_failure(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=edit-notes\n"
-               b"INSTRUMENTATION_STATUS: locklark_wait=native-visible\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=save-field\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_phase=ime-wait-hidden\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=true\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_stage=edit-notes\n"
+               b"INSTRUMENTATION_STATUS: passme_wait=native-visible\n"
+               b"INSTRUMENTATION_STATUS: passme_control=save-field\n"
+               b"INSTRUMENTATION_STATUS: passme_control_phase=ime-wait-hidden\n"
+               b"INSTRUMENTATION_STATUS: passme_ime=true\n"
+               b"INSTRUMENTATION_STATUS: passme_ime_hide_requested=true\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=false\n")
+               b"INSTRUMENTATION_STATUS: passme_ime_hide_requested=false\n")
         result = safe_diagnostic(raw)
         failure = result["failed_contexts"][0]
         self.assertEqual(failure["control_phase"], "ime-wait-hidden")
@@ -49,15 +49,15 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertNotIn("private-field-contents", str(invalid))
 
     def test_input_focus_context_is_fixed_and_survives_later_status(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=regenerate\n"
-               b"INSTRUMENTATION_STATUS: locklark_wait=native-input-focus\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=regenerate-length\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_phase=input-focus\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_focused=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_input_active=false\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_stage=regenerate\n"
+               b"INSTRUMENTATION_STATUS: passme_wait=native-input-focus\n"
+               b"INSTRUMENTATION_STATUS: passme_control=regenerate-length\n"
+               b"INSTRUMENTATION_STATUS: passme_control_phase=input-focus\n"
+               b"INSTRUMENTATION_STATUS: passme_control_focused=true\n"
+               b"INSTRUMENTATION_STATUS: passme_input_active=false\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=private-input-text\n"
-               b"INSTRUMENTATION_STATUS: locklark_input_active=private-input-text\n")
+               b"INSTRUMENTATION_STATUS: passme_control=private-input-text\n"
+               b"INSTRUMENTATION_STATUS: passme_input_active=private-input-text\n")
         result = safe_diagnostic(raw)
         failure = result["failed_contexts"][0]
         self.assertEqual((failure["step"], failure["wait"], failure["control"], failure["control_phase"]),
@@ -87,31 +87,31 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertTrue(complete_pass(0, b"OK (6 tests)\nINSTRUMENTATION_CODE: -1\n", 6))
 
     def test_diagnostic_returns_only_fixed_classes_steps_and_source_integers(self):
-        raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\njava.lang.AssertionError: private-field-contents\nat org.locklark.android.OfflineVaultTest.run(OfflineVaultTest.kt:123)\nTests run: 1"
+        raw = b"INSTRUMENTATION_STATUS: passme_stage=create\njava.lang.AssertionError: private-field-contents\nat org.passme.android.OfflineVaultTest.run(OfflineVaultTest.kt:123)\nTests run: 1"
         result = safe_diagnostic(raw)
         self.assertEqual(result["step"], "create")
         self.assertEqual(result["own_source_line"], 123)
         self.assertEqual(result["tests_run"], 1)
         self.assertNotIn("private-field-contents", str(result))
-        self.assertEqual(safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_stage=private-field-contents")["step"], "unknown")
+        self.assertEqual(safe_diagnostic(b"INSTRUMENTATION_STATUS: passme_stage=private-field-contents")["step"], "unknown")
 
     def test_later_success_does_not_replace_failed_test_context(self):
-        raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\nINSTRUMENTATION_STATUS: locklark_wait=account-key\nINSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_STATUS: locklark_stage=bound-operation\nINSTRUMENTATION_STATUS_CODE: 0\n"
+        raw = b"INSTRUMENTATION_STATUS: passme_stage=create\nINSTRUMENTATION_STATUS: passme_wait=account-key\nINSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_STATUS: passme_stage=bound-operation\nINSTRUMENTATION_STATUS_CODE: 0\n"
         self.assertEqual(safe_diagnostic(raw)["step"], "create")
         self.assertEqual(safe_diagnostic(raw)["wait"], "account-key")
 
     def test_control_geometry_diagnostic_is_fixed_and_preserves_failed_context(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=add-login\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=generate-password\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_phase=visibility\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_window_focus=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_visible=false\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_enabled=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_present=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_activity=RESUMED\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_stage=add-login\n"
+               b"INSTRUMENTATION_STATUS: passme_control=generate-password\n"
+               b"INSTRUMENTATION_STATUS: passme_control_phase=visibility\n"
+               b"INSTRUMENTATION_STATUS: passme_ime=true\n"
+               b"INSTRUMENTATION_STATUS: passme_window_focus=true\n"
+               b"INSTRUMENTATION_STATUS: passme_control_visible=false\n"
+               b"INSTRUMENTATION_STATUS: passme_control_enabled=true\n"
+               b"INSTRUMENTATION_STATUS: passme_control_present=true\n"
+               b"INSTRUMENTATION_STATUS: passme_activity=RESUMED\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=private-field-contents\n")
+               b"INSTRUMENTATION_STATUS: passme_control=private-field-contents\n")
         result = safe_diagnostic(raw)
         self.assertEqual(result["failed_contexts"][0]["control"], "generate-password")
         self.assertEqual(result["failed_contexts"][0]["control_phase"], "visibility")
@@ -121,14 +121,14 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertNotIn("private-field-contents", str(result))
 
     def test_offscreen_control_context_stays_distinct_from_visibility(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=search\n"
-               b"INSTRUMENTATION_STATUS: locklark_wait=native-visible\n"
-               b"INSTRUMENTATION_STATUS: locklark_control=back-to-list\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_phase=offscreen\n"
-               b"INSTRUMENTATION_STATUS: locklark_ime=false\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_visible=false\n"
-               b"INSTRUMENTATION_STATUS: locklark_control_enabled=true\n"
-               b"INSTRUMENTATION_STATUS: locklark_activity=RESUMED\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_stage=search\n"
+               b"INSTRUMENTATION_STATUS: passme_wait=native-visible\n"
+               b"INSTRUMENTATION_STATUS: passme_control=back-to-list\n"
+               b"INSTRUMENTATION_STATUS: passme_control_phase=offscreen\n"
+               b"INSTRUMENTATION_STATUS: passme_ime=false\n"
+               b"INSTRUMENTATION_STATUS: passme_control_visible=false\n"
+               b"INSTRUMENTATION_STATUS: passme_control_enabled=true\n"
+               b"INSTRUMENTATION_STATUS: passme_activity=RESUMED\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n")
         failure = safe_diagnostic(raw)["failed_contexts"][0]
         self.assertEqual((failure["step"], failure["wait"], failure["control"], failure["control_phase"]),
@@ -136,14 +136,14 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual((failure["control_enabled"], failure["control_visible"]), ("true", "false"))
 
     def test_autofill_fill_stages_are_fixed_and_unknown_ones_redacted(self):
-        raw = (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=dataset-visible\n"
+        raw = (b"INSTRUMENTATION_STATUS: passme_autofill_stage=dataset-visible\n"
                b"INSTRUMENTATION_STATUS_CODE: -2\n")
         self.assertEqual(safe_diagnostic(raw)["autofill_stage"], "dataset-visible")
         for accepted in ("fixture-create", "unlocked", "row-selected", "approved",
                          "dataset-clicked", "fields-filled", "no-ui-disclosure"):
-            stage = safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_autofill_stage=" + accepted.encode() + b"\n")
+            stage = safe_diagnostic(b"INSTRUMENTATION_STATUS: passme_autofill_stage=" + accepted.encode() + b"\n")
             self.assertEqual(stage["autofill_stage"], accepted)
-        invalid = safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_autofill_stage=synthetic-fixture-value\n")
+        invalid = safe_diagnostic(b"INSTRUMENTATION_STATUS: passme_autofill_stage=synthetic-fixture-value\n")
         self.assertEqual(invalid["autofill_stage"], "unknown")
         self.assertNotIn("synthetic-fixture-value", str(invalid))
 

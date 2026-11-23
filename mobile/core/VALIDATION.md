@@ -37,7 +37,7 @@ private diagnostic artifacts are retained.
 
 The v4 AAR warm bind passed with 89 exact transitive inputs (84 platform files
 per Android ABI), before/after input equality and zero current mismatches.
-The immutable local artifact under `/tmp/locklark-tools/mobile/core-final-v4`
+The immutable local artifact under `/tmp/passme-tools/mobile/core-final-v4`
 has SHA-256 `f306122940008c1e81bc45f91112fff32771d036d5120328fd08cf7196a3cd8f`;
 its source manifest has SHA-256
 `45556f2cfce45630a6e956c115a49e048424187c6e28af1d5ba01c4eb93b99a7`.
@@ -64,7 +64,7 @@ after v3, and module verification again reported `all modules verified`.
 The final v3 warm bind passed with matching before/after hashes for 88 exact
 transitive source/build inputs and the pinned binding-tool binaries. Current
 source re-verification found zero mismatches. Immutable local artifacts are
-under `/tmp/locklark-tools/mobile/core-final-v3`:
+under `/tmp/passme-tools/mobile/core-final-v3`:
 
 - AAR SHA-256: `edc91ce26a07a83d381be8e2428a404bec1ce6224e8dca177324bae6ef859593`
 - Manifest SHA-256: `0c2eaffab9a9e12d1570613feec3acbe53f50fabd3a1322fc6c2aaa59976ca76`
@@ -175,7 +175,7 @@ later v2 review fixes; its core binary did not include the deliberately failing
 new regressions. It is baseline repo-wide evidence, not a final v2 tree run.
 After the v2 fixes, repo-wide `go vet -p 1 ./...` passed and `go mod verify`
 reported `all modules verified`. Full logs, genuine red logs, and the explicit
-baseline-versus-v2 coverage note are under `/tmp/locklark-validation` in the
+baseline-versus-v2 coverage note are under `/tmp/passme-validation` in the
 validation workspace; those private runtime artifacts are not repository files.
 Native system authentication, non-migrating Keychain/Keystore keys,
 backup exclusion and real-device install remain platform acceptance work.

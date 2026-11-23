@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	pwgen "github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	pwgen "github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 )
@@ -172,7 +172,7 @@ func (a *App) onevraEditorDialog(c *ui.Context) {
 				modalH = min(max(460, winH-56), 860)
 			}
 			panel.Width(modalW).Height(modalH).Padding(0).
-				Background(t.Surface).Border(1, t.Border).Radius(t.Radius * 1.75).
+				Background(t.Surface).Border(1, t.Border).Radius(t.Radius*1.75).
 				Shadow(0, 24, 56, -12, ui.RGBA(0, 0, 0, .32))
 			panel.Children(func() {
 				a.v2EditorView(c)
@@ -329,21 +329,31 @@ func (a *App) onevraEditorBody(c *ui.Context, draft *ItemDraft) {
 	switch draft.Category {
 	case vault.CategoryLogin:
 		onevraGroup(c, "登录信息", func(row func(func())) {
-			row(func() { a.onevraEditorField(c, "用户名", &draft.Username, "用户名、邮箱或账号标识", false, "", nil) })
-			row(func() { a.onevraEditorField(c, "密码", &draft.Password, "输入密码，或点击右侧生成", true, "password", nil) })
+			row(func() {
+				a.onevraEditorField(c, "用户名", &draft.Username, "用户名、邮箱或账号标识", false, "", nil)
+			})
+			row(func() {
+				a.onevraEditorField(c, "密码", &draft.Password, "输入密码，或点击右侧生成", true, "password", nil)
+			})
 			if a.v2.generator.open && (a.v2.generator.target == "" || a.v2.generator.target == "password") {
 				row(func() { a.onevraInlineGenerator(c) })
 			}
-			row(func() { a.onevraEditorField(c, "一次性验证码", &draft.OTP, "otpauth://totp/… 或 Base32 密钥", true, "", nil) })
+			row(func() {
+				a.onevraEditorField(c, "一次性验证码", &draft.OTP, "otpauth://totp/… 或 Base32 密钥", true, "", nil)
+			})
 			row(func() { a.onevraEditorField(c, "网站", &draft.URL, "https://example.com", false, "", nil) })
 			addMoreRow(row)
 		})
 	case vault.CategoryPassword:
 		onevraGroup(c, "密码信息", func(row func(func())) {
 			if draft.Username != "" {
-				row(func() { a.onevraEditorField(c, "用户名", &draft.Username, "用户名、邮箱或账号标识", false, "", nil) })
+				row(func() {
+					a.onevraEditorField(c, "用户名", &draft.Username, "用户名、邮箱或账号标识", false, "", nil)
+				})
 			}
-			row(func() { a.onevraEditorField(c, "密码", &draft.Password, "输入密码，或点击右侧生成", true, "password", nil) })
+			row(func() {
+				a.onevraEditorField(c, "密码", &draft.Password, "输入密码，或点击右侧生成", true, "password", nil)
+			})
 			if a.v2.generator.open && (a.v2.generator.target == "" || a.v2.generator.target == "password") {
 				row(func() { a.onevraInlineGenerator(c) })
 			}
@@ -486,7 +496,7 @@ func (a *App) onevraEditorBody(c *ui.Context, draft *ItemDraft) {
 			continue
 		}
 		visibleCustomSections++
-		ui.Column(c.Key("section:"+sec.ID)).FillWidth().Gap(t.Space(1.5)).Children(func() {
+		ui.Column(c.Key("section:" + sec.ID)).FillWidth().Gap(t.Space(1.5)).Children(func() {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1)).Children(func() {
 				oneui.TextBox(c, &draft.Sections[i].Title, oneui.TextBoxOptions{}).
 					Label("分区标题").Placeholder("分区名称").Grow(1).Disabled(a.uiBusy(c))
@@ -529,7 +539,7 @@ func (a *App) onevraEditorBody(c *ui.Context, draft *ItemDraft) {
 			commitFrom, commitTo := -1, -1
 			shouldCommit := false
 			ui.Column(c.Key("section-card:"+sec.ID)).FillWidth().MinWidth(0).
-				Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).Children(func() {
+				Border(1, t.Border).Radius(t.Radius * 1.25).Background(t.Surface).Children(func() {
 				for p, j := range visIndices {
 					j := j
 					f := sec.Fields[j]
@@ -1149,7 +1159,7 @@ func (a *App) editorAddCustomFieldDialog(c *ui.Context, draft *ItemDraft) {
 	t := c.Theme()
 	ui.Column(c.Key("dialog-add-custom-field")).Children(func() {
 		oneui.Dialog(c, &draft.FieldDialogOpen, oneui.DialogOptions{Label: "添加自定义字段"}, func(panel ui.Element) {
-			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius*1.5).Padding(t.Space(5))
+			panel.Width(440).Background(t.Surface).Border(1, t.Border).Radius(t.Radius * 1.5).Padding(t.Space(5))
 			panel.Children(func() {
 				ui.Column(c).FillWidth().Gap(t.Space(2.5)).Children(func() {
 					oneui.Text(c, "添加自定义字段").FontSize(t.Rem(1.15)).Bold()

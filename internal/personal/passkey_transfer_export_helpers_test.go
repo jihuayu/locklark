@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
 )
 
 func exportTestReceiver(t *testing.T) (*Session, publicTransferIdentity) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "receiver.ll")
+	path := filepath.Join(t.TempDir(), "receiver.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if err := Create(path, "fixture", key); err != nil {
 		t.Fatal(err)

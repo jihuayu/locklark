@@ -168,7 +168,7 @@ func privateRegistrationTemp(dir string) (*os.File, error) {
 		if _, e = rand.Read(b[:]); e != nil {
 			return nil, e
 		}
-		path := filepath.Join(dir, ".locklark-native-"+hex.EncodeToString(b[:])+".tmp")
+		path := filepath.Join(dir, ".passme-native-"+hex.EncodeToString(b[:])+".tmp")
 		wide, e := windows.UTF16PtrFromString(path)
 		if e != nil {
 			return nil, e

@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 // The fake checks ownership/error boundaries only; it is not OS protection.

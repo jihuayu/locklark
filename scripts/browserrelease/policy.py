@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-EXPECTED_NAME = "Locklark"
+EXPECTED_NAME = "Passme"
 EXPECTED_DESCRIPTION = (
-    "Passwords, automatic sign-in and passkeys with your native Locklark vault"
+    "Passwords, automatic sign-in and passkeys with your native Passme vault"
 )
 EXPECTED_HOST_PERMISSIONS = ["https://*/*"]
 EXPECTED_CONTENT_SCRIPTS = [
@@ -27,7 +27,7 @@ EXPECTED_ACTION = {"default_popup": "popup.html"}
 EXPECTED_OPTIONS = {"page": "options.html", "open_in_tab": True}
 EXPECTED_ACTION_COMMAND = {
     "suggested_key": {"default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y"},
-    "description": "打开 Locklark 弹窗",
+    "description": "打开 Passme 弹窗",
 }
 EXPECTED_COMMON_COMMANDS = {
     "autofill": {
@@ -36,7 +36,7 @@ EXPECTED_COMMON_COMMANDS = {
     },
     "lock": {
         "suggested_key": {"default": "Ctrl+Shift+U", "mac": "Command+Shift+U"},
-        "description": "立即锁定 Locklark",
+        "description": "立即锁定 Passme",
     },
 }
 _NATIVE_PERMISSIONS = frozenset(

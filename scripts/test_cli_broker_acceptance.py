@@ -46,22 +46,22 @@ def fixture_tree(test):
 
 def synthetic_summary():
     """One exact product-shaped broker preamble, independent of the module."""
-    vault = "/tmp/llcb-AbCdEfGh/vault/synthetic.ll"
+    vault = "/tmp/llcb-AbCdEfGh/vault/synthetic.pm"
     helper = "/tmp/llcb-AbCdEfGh/bin/child-helper"
     cwd = "/tmp/llcb-AbCdEfGh/run"
     helper_dir = "/tmp/llcb-AbCdEfGh/bin"
     receipt = "/tmp/llcb-AbCdEfGh/receipt/receipt.txt"
     lines = [
-        "桌面代理 CLI 执行请求（locklark cli run）",
+        "桌面代理 CLI 执行请求（passme cli run）",
         '  密码库  ："%s"' % vault,
         '  Profile ："token"',
         '  终端    ："/dev/ttys007"（平台 "darwin"）',
         '  执行程序："%s"' % helper,
         "  SHA-256 ：" + "a" * 64,
         '  工作目录："%s"' % cwd,
-        '  临时目录："/var/folders/owned/T/locklark-run-cli-AbCdEf"',
+        '  临时目录："/var/folders/owned/T/passme-run-cli-AbCdEf"',
         "  超时上限：30 秒",
-        '  Tokens  ："LOCKLARK_SYNTHETIC_TOKEN"',
+        '  Tokens  ："PASSME_SYNTHETIC_TOKEN"',
         "槽位目标（读取不可变修订）：",
         '  "token" = %s @ %s（字段 "password"）' % ("b" * 32, "c" * 64),
         "透传环境变量名（不显示值）：",
@@ -75,12 +75,12 @@ def synthetic_summary():
 
 def summary_pattern():
     return acceptance.broker_summary_pattern(
-        "/tmp/llcb-AbCdEfGh/vault/synthetic.ll",
+        "/tmp/llcb-AbCdEfGh/vault/synthetic.pm",
         "/tmp/llcb-AbCdEfGh/bin/child-helper",
         "a" * 64,
         "/tmp/llcb-AbCdEfGh/run",
         30,
-        "LOCKLARK_SYNTHETIC_TOKEN",
+        "PASSME_SYNTHETIC_TOKEN",
         "b" * 32,
         "c" * 64,
         "/tmp/llcb-AbCdEfGh/bin",
@@ -111,24 +111,24 @@ class ScanTests(unittest.TestCase):
 class BinaryTests(unittest.TestCase):
     def test_binary_must_be_an_absolute_executable_regular_file(self):
         base = temporary_base(self)
-        executable = base / "locklark"
+        executable = base / "passme"
         executable.write_bytes(b"#!/bin/sh\n")
         executable.chmod(0o700)
         regular = base / "not-executable"
         regular.write_bytes(b"data")
         regular.chmod(0o600)
         self.assertEqual(acceptance.validate_binary(str(executable), "cli"), executable.resolve())
-        for value in ("locklark", "", str(regular), str(base / "missing")):
+        for value in ("passme", "", str(regular), str(base / "missing")):
             with self.subTest(value=value), self.assertRaises(acceptance.AcceptanceFailure):
                 acceptance.validate_binary(value, "cli")
 
     def test_symlink_resolves_to_the_actual_binary(self):
         base = temporary_base(self)
-        target = base / "build" / "locklark"
+        target = base / "build" / "passme"
         target.parent.mkdir(mode=0o700)
         target.write_bytes(b"binary")
         target.chmod(0o700)
-        link = base / "locklark"
+        link = base / "passme"
         link.symlink_to(target)
         self.assertEqual(acceptance.validate_binary(str(link), "cli"), target.resolve())
 
@@ -358,7 +358,7 @@ class CommandShapeTests(unittest.TestCase):
             "XDG_CONFIG_HOME": "/Users/owner/.config",
             "PATH": "/usr/bin:/bin",
             "TERM": "xterm-256color",
-            "LOCKLARK_CLI_ACTIVE": "1",
+            "PASSME_CLI_ACTIVE": "1",
         }
         original = dict(base)
         socket = "/tmp/llcb-AbCdEfGh/s/b.sock"
@@ -368,25 +368,25 @@ class CommandShapeTests(unittest.TestCase):
         self.assertEqual(environment["XDG_CONFIG_HOME"], base["XDG_CONFIG_HOME"])
         self.assertEqual(environment["PATH"], base["PATH"])
         self.assertEqual(environment["TERM"], base["TERM"])
-        self.assertEqual(environment["LOCKLARK_DESKTOP_LAYOUT"], "classic")
-        self.assertEqual(environment["LOCKLARK_BROWSER_SOCKET"], socket)
-        self.assertEqual(set(environment) - set(base), {"LOCKLARK_DESKTOP_LAYOUT", "LOCKLARK_BROWSER_SOCKET"})
+        self.assertEqual(environment["PASSME_DESKTOP_LAYOUT"], "classic")
+        self.assertEqual(environment["PASSME_BROWSER_SOCKET"], socket)
+        self.assertEqual(set(environment) - set(base), {"PASSME_DESKTOP_LAYOUT", "PASSME_BROWSER_SOCKET"})
         cli = acceptance.cli_environment(base, socket)
-        self.assertNotIn("LOCKLARK_CLI_ACTIVE", cli)
+        self.assertNotIn("PASSME_CLI_ACTIVE", cli)
         self.assertEqual(cli["HOME"], base["HOME"])
         self.assertEqual(cli["XDG_CONFIG_HOME"], base["XDG_CONFIG_HOME"])
-        self.assertEqual(cli["LOCKLARK_BROWSER_SOCKET"], socket)
+        self.assertEqual(cli["PASSME_BROWSER_SOCKET"], socket)
         self.assertEqual(base, original)
 
     def test_arguments_are_explicit_and_never_carry_factors(self):
         fixture = fixture_tree(self)
         master = "SyntheticMaster-" + "1" * 48
-        secret = "LL1-" + "A" * 26
+        secret = "PM1-" + "A" * 26
         token = "synthetic-token-" + "2" * 64
-        desktop = acceptance.desktop_arguments("/build/locklark-desktop", fixture.settings)
-        self.assertEqual(desktop, ["/build/locklark-desktop", "--settings", str(fixture.settings)])
+        desktop = acceptance.desktop_arguments("/build/passme-desktop", fixture.settings)
+        self.assertEqual(desktop, ["/build/passme-desktop", "--settings", str(fixture.settings)])
         run = acceptance.cli_run_arguments(
-            "/build/locklark", fixture.binding, fixture.run, fixture.helper, fixture.receipt)
+            "/build/passme", fixture.binding, fixture.run, fixture.helper, fixture.receipt)
         self.assertIn("--binding", run)
         self.assertIn(str(fixture.binding), run)
         self.assertIn("--", run)
@@ -395,7 +395,7 @@ class CommandShapeTests(unittest.TestCase):
         self.assertNotIn(secret, run)
         self.assertNotIn(token, run)
         init = acceptance.cli_init_arguments(
-            "/build/locklark", fixture.vault, fixture.binding, fixture.helper,
+            "/build/passme", fixture.vault, fixture.binding, fixture.helper,
             "a" * 32, "b" * 64)
         self.assertIn("--profile", init)
         self.assertIn("token", init)
@@ -446,7 +446,7 @@ class ActivationOrderTests(unittest.TestCase):
         return calls
 
     def test_activation_names_the_launched_pid_and_exact_executable_first(self):
-        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         instance = self.acceptance(desktop)
         calls = self.launch(instance)
         self.assertEqual([call[0] for call in calls],
@@ -465,7 +465,7 @@ class ActivationOrderTests(unittest.TestCase):
     def test_activation_request_is_validated_by_the_real_contract(self):
         sys.path.insert(0, str(ROOT / "scripts"))
         import native_acceptance_contract as contract
-        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         instance = self.acceptance(desktop)
         instance.desktop_process = _FakePopen(None)
         instance.desktop_generation = {
@@ -479,13 +479,13 @@ class ActivationOrderTests(unittest.TestCase):
                                               "generation": instance.desktop_generation})
 
     def test_activation_refusal_stops_before_any_window_wait(self):
-        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         instance = self.acceptance(desktop)
         with self.assertRaises(acceptance.AcceptanceFailure):
             self.launch(instance, returncode=1)
 
     def test_anything_other_than_the_fixed_result_is_refused(self):
-        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         for stdout in (b'{"activated": false}\n', b'{"activated": true, "window": "0x1"}\n',
                        b"{}\n"):
             with self.subTest(stdout=stdout):
@@ -494,7 +494,7 @@ class ActivationOrderTests(unittest.TestCase):
                     self.launch(instance, stdout=stdout)
 
     def test_exited_desktop_is_never_asked_to_activate(self):
-        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         instance = self.acceptance(desktop)
         instance.desktop_process = _FakePopen(exit_code=0)
         with self.assertRaises(acceptance.AcceptanceFailure):
@@ -636,7 +636,7 @@ class InspectSummaryTests(unittest.TestCase):
 
     def test_bad_record_shapes_and_private_fields_collapse_without_echo(self):
         empty = acceptance.empty_inspect_summary()
-        secret = "LL1-" + "B" * 26
+        secret = "PM1-" + "B" * 26
         records = (
             {"present": True, "enabled": False, "showing": True, "value": secret},
             {"present": True, "enabled": False, "showing": True, "text": secret},
@@ -658,7 +658,7 @@ class InspectSummaryTests(unittest.TestCase):
                     self.assertNotIn(secret, acceptance.inspect_summary_line(summary))
 
     def test_result_stdout_and_unknown_top_level_fields_are_never_read(self):
-        secret = "LL1-" + "C" * 26
+        secret = "PM1-" + "C" * 26
         result = inspect_result()
         result["stdout"] = secret
         result["stderr"] = "private exception detail"
@@ -697,16 +697,16 @@ class UnlockPlanTests(unittest.TestCase):
     """The fixed nine unlock actions are split across fresh bounded requests."""
 
     MASTER = "SyntheticMaster-" + "1" * 48
-    SECRET = "LL1-" + "A" * 26
+    SECRET = "PM1-" + "A" * 26
 
     def acceptance(self):
         base = temporary_base(self)
         args = __import__("argparse").Namespace(
-            cli="/build/locklark", desktop="/build/bin/locklark-desktop", timeout=240)
+            cli="/build/passme", desktop="/build/bin/passme-desktop", timeout=240)
         instance = acceptance.Acceptance(args)
         instance.fixture = acceptance.Fixture(base)
         self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
-        instance.desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance.desktop = pathlib.Path("/build/bin/passme-desktop").resolve()
         instance.master = self.MASTER
         instance.secret = self.SECRET
         instance.desktop_process = _LiveDesktop()
@@ -846,7 +846,7 @@ class UnlockPlanTests(unittest.TestCase):
                 self.assertEqual(request["owned_generation"],
                                  instance.desktop_generation)
                 self.assertEqual(request["title"], acceptance.TITLE)
-                self.assertEqual(request["title"], "Locklark · 本地金库")
+                self.assertEqual(request["title"], "Passme · 本地金库")
                 self.assertEqual(request["executable"], str(instance.desktop))
                 self.assertIs(request["inspect"], False)
                 self.assertEqual(request["actions"], plan)
@@ -988,18 +988,18 @@ def driver_failure_line(code, action="click", index=0, platform="macos"):
 class DriverErrorCategoryTests(unittest.TestCase):
     """One fixed allowlisted driver code in memory; a fake subprocess only."""
 
-    PRIVATE = "LL1-" + "Z" * 26
-    STDERR_TAIL = ('private exception detail title="Locklark · 本地金库" '
+    PRIVATE = "PM1-" + "Z" * 26
+    STDERR_TAIL = ('private exception detail title="Passme · 本地金库" '
                    'label=仅批准本次 CLI 请求 path=/private/tmp/llcb-DoSX5a\n').encode()
 
     def acceptance(self):
         base = temporary_base(self)
         args = __import__("argparse").Namespace(
-            cli="/build/locklark", desktop="/build/bin/locklark-desktop", timeout=240)
+            cli="/build/passme", desktop="/build/bin/passme-desktop", timeout=240)
         instance = acceptance.Acceptance(args)
         instance.fixture = acceptance.Fixture(base)
         self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
-        instance.desktop = pathlib.Path("/build/bin/locklark-desktop")
+        instance.desktop = pathlib.Path("/build/bin/passme-desktop")
         instance.desktop_process = _FakePopen(None)
         instance.desktop_generation = {
             "pid": _FakePopen.pid, "executable": str(instance.desktop),
@@ -1295,7 +1295,7 @@ class ProcessGenerationProtocolTests(unittest.TestCase):
 
     def acceptance(self):
         instance = acceptance.Acceptance(__import__("argparse").Namespace(
-            cli="/build/locklark", desktop="/bin/cat", timeout=240))
+            cli="/build/passme", desktop="/bin/cat", timeout=240))
         instance.desktop = pathlib.Path("/bin/cat")
         instance.desktop_process = _GenerationPopen()
         instance.desktop_generation = {
@@ -1524,7 +1524,7 @@ class UnavailableTests(unittest.TestCase):
 
     def test_untrusted_accessibility_is_a_fixed_unavailable_result(self):
         base = temporary_base(self)
-        cli, desktop = base / "locklark", base / "locklark-desktop"
+        cli, desktop = base / "passme", base / "passme-desktop"
         for binary in (cli, desktop):
             binary.write_bytes(b"binary")
             binary.chmod(0o700)

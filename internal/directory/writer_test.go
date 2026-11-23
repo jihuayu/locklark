@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -133,7 +133,7 @@ func sealWriterCandidate(t *testing.T, f fixture, p Proposal, key ed25519.Privat
 	if e != nil {
 		t.Fatal(e)
 	}
-	s, e := vault.SealItems([]byte("locklark/team/items/v1/"+f.cfg.scope), f.items, p.Epoch, recipients, key)
+	s, e := vault.SealItems([]byte("passme/team/items/v1/"+f.cfg.scope), f.items, p.Epoch, recipients, key)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -201,7 +201,7 @@ func TestWriterReaderAndRollback(t *testing.T) {
 		t.Fatal(e)
 	}
 	cmd := exec.Command(executable, "-test.run=^TestWriterReopenSubprocess$")
-	cmd.Env = append(os.Environ(), "LOCKLARK_WRITER_READ_REQUEST="+requestPath)
+	cmd.Env = append(os.Environ(), "PASSME_WRITER_READ_REQUEST="+requestPath)
 	if out, e := cmd.CombinedOutput(); e != nil {
 		t.Fatalf("fresh verifier: %v %s", e, out)
 	}
@@ -227,7 +227,7 @@ func TestWriterReaderAndRollback(t *testing.T) {
 }
 
 func TestWriterReopenSubprocess(t *testing.T) {
-	path := os.Getenv("LOCKLARK_WRITER_READ_REQUEST")
+	path := os.Getenv("PASSME_WRITER_READ_REQUEST")
 	if path == "" {
 		return
 	}

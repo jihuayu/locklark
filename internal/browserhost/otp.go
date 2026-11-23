@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type OTPView struct {

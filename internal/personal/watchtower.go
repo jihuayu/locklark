@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 )
 
 const (

@@ -1,4 +1,4 @@
-// Package vaultfile defines the locklark.vault-file/v1 wire schema, its
+// Package vaultfile defines the passme.vault-file/v1 wire schema, its
 // strict canonical-JSON codec and fixed synthetic encoding vectors.
 //
 // A vault file is a single complete object that carries everything a peer
@@ -127,10 +127,10 @@ const (
 
 // Wire identifiers that must appear literally in an encoded file.
 const (
-	Format    = "locklark.vault-file"
+	Format    = "passme.vault-file"
 	Version   = 1
-	MIME      = "application/vnd.locklark.vault-file+json"
-	SchemaURI = "https://locklark.dev/schema/locklark.vault-file/v1"
+	MIME      = "application/vnd.passme.vault-file+json"
+	SchemaURI = "https://passme.dev/schema/passme.vault-file/v1"
 
 	ContentEncoding = "kdbx"
 

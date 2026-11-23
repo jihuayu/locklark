@@ -24,11 +24,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import browser_native_macos as macos
 import native_acceptance_contract as contract
 
-TITLE = "Locklark · 本地金库"
-OTHER_TITLE = "Locklark · 另一个窗口"
+TITLE = "Passme · 本地金库"
+OTHER_TITLE = "Passme · 另一个窗口"
 OWNED_PID = 4242
 OTHER_PID = 4243
-EXE = "/opt/locklark/locklark-desktop"
+EXE = "/opt/passme/passme-desktop"
 NO_VALUE = -25212
 WINDOW_FRAME = {"x": 313, "y": 75, "width": 1102, "height": 822}
 CONTROL_FRAME = {"x": 400, "y": 500, "width": 80, "height": 30}
@@ -518,7 +518,7 @@ class PostDiscoveryChangeTests(unittest.TestCase):
 
     def test_title_change_after_discovery_refuses_everywhere(self):
         api, frameworks, window = self.discovered()
-        window.attributes["AXTitle"] = "Locklark · 改了标题"
+        window.attributes["AXTitle"] = "Passme · 改了标题"
         for name, call in self.paths(api, window).items():
             with self.subTest(path=name):
                 self.assert_not_authorised(self, call)
@@ -918,7 +918,7 @@ class RealEntryPointTests(unittest.TestCase):
             {"title": TITLE, "executable": EXE, "owned_pid": None},
             {"executable": EXE, "owned_pid": OWNED_PID},
             {"title": TITLE, "owned_pid": OWNED_PID},
-            {"title_prefix": "Locklark", "executable": EXE, "owned_pid": OWNED_PID},
+            {"title_prefix": "Passme", "executable": EXE, "owned_pid": OWNED_PID},
             {"title": TITLE, "executable": "relative/path", "owned_pid": OWNED_PID},
         )
         for document in cases:
@@ -1102,7 +1102,7 @@ class AbsenceRegressionTests(unittest.TestCase):
         # non-normalised but equivalent request path must still match.
         window, _ = owned_window()
         api, frameworks = scoped([window])
-        variant = "/opt/locklark/./locklark-desktop"
+        variant = "/opt/passme/./passme-desktop"
         request = json.dumps({"title": TITLE, "executable": variant,
                               "owned_pid": OWNED_PID, "wait_absent": True}).encode()
         code, out, err, clock = self.entry(api, request, _Clock())

@@ -156,10 +156,10 @@ function writeOutput(out, name, data) {
 for (const mode of modes) {
   const manifest = {
     manifest_version: 3,
-    name: "Locklark",
+    name: "Passme",
     version: releaseVersion,
     description:
-      "Passwords, automatic sign-in and passkeys with your native Locklark vault",
+      "Passwords, automatic sign-in and passkeys with your native Passme vault",
     permissions: ["activeTab", "scripting", "nativeMessaging", "storage"],
     host_permissions: ["https://*/*"],
     content_scripts: [
@@ -182,7 +182,7 @@ for (const mode of modes) {
     commands: {
       _execute_action: {
         suggested_key: { default: "Ctrl+Shift+Y", mac: "Command+Shift+Y" },
-        description: "打开 Locklark 弹窗",
+        description: "打开 Passme 弹窗",
       },
       autofill: {
         suggested_key: { default: "Ctrl+Shift+L", mac: "Command+Shift+L" },
@@ -190,7 +190,7 @@ for (const mode of modes) {
       },
       lock: {
         suggested_key: { default: "Ctrl+Shift+U", mac: "Command+Shift+U" },
-        description: "立即锁定 Locklark",
+        description: "立即锁定 Passme",
       },
     },
     content_security_policy: {
@@ -214,7 +214,7 @@ for (const mode of modes) {
     manifest.background = { scripts: ["core.js", "background.js"] };
     manifest.browser_specific_settings = {
       gecko: {
-        id: "browser@locklark.local",
+        id: "browser@passme.local",
         strict_min_version: "153.0",
         data_collection_permissions: { required: ["none"] },
       },

@@ -3,7 +3,7 @@ import re
 
 
 def validate_test_bundle_base(value):
-    if not isinstance(value, str) or len(value) > 200 or not re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9-]*\.){2,}locklark\.acceptance", value, flags=re.ASCII):
+    if not isinstance(value, str) or len(value) > 200 or not re.fullmatch(r"(?:[A-Za-z][A-Za-z0-9-]*\.){2,}passme\.acceptance", value, flags=re.ASCII):
         raise ValueError("physical acceptance requires an explicit test-only bundle base")
     return value
 

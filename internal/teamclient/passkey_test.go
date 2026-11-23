@@ -12,10 +12,10 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/teamsync"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/teamsync"
+	"github.com/jihuayu/passme/internal/vault"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -170,7 +170,7 @@ func TestBootstrapPasskeyAndSSHUpdateRoundTrip(t *testing.T) {
 	if e != nil {
 		t.Fatal("team update snapshot did not open", e)
 	}
-	if string(data) != "locklark/team/items/v1/"+view.Receipt.Proposal.Scope {
+	if string(data) != "passme/team/items/v1/"+view.Receipt.Proposal.Scope {
 		t.Fatal("team update metadata changed")
 	}
 	if !reflect.DeepEqual(got, items) {

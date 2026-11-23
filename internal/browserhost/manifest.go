@@ -39,7 +39,7 @@ func DefaultManifestPath(browser string) (string, error) {
 			return "", e
 		}
 		if browser == "chrome" || browser == "edge" || browser == "firefox" {
-			dir = filepath.Join(config, "Locklark", "NativeMessagingHosts", browser)
+			dir = filepath.Join(config, "Passme", "NativeMessagingHosts", browser)
 		}
 	}
 	if dir == "" {
@@ -57,7 +57,7 @@ func Manifest(browser, host string) ([]byte, error) {
 	if trustedRegistrationFile(host, true) != nil {
 		return nil, ErrProtocol
 	}
-	m := map[string]any{"name": HostName, "description": "Locklark native browser pairing and login fill", "path": host, "type": "stdio"}
+	m := map[string]any{"name": HostName, "description": "Passme native browser pairing and login fill", "path": host, "type": "stdio"}
 	switch browser {
 	case "chrome", "edge":
 		m["allowed_origins"] = []string{"chrome-extension://" + ChromiumID + "/"}

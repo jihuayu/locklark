@@ -24,8 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import native_acceptance_contract as contract
 
 LABEL = "仅批准本次 CLI 请求"
-TITLE = "Locklark · 浏览器原生确认"
-EXE = "/opt/locklark/test-browser"
+TITLE = "Passme · 浏览器原生确认"
+EXE = "/opt/passme/test-browser"
 PID = 4242
 BOUNDS = {"x": 100, "y": 100, "width": 800, "height": 600}
 CLIENT = {"x": 110, "y": 140, "width": 780, "height": 560}

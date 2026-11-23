@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "LocklarkSecurityLogic",
+    name: "PassmeSecurityLogic",
     platforms: [.iOS(.v17), .macOS(.v14)],
-    products: [.library(name: "LocklarkSecurityLogic", targets: ["LocklarkSecurityLogic"])],
+    products: [.library(name: "PassmeSecurityLogic", targets: ["PassmeSecurityLogic"])],
     targets: [
-        .target(name: "LocklarkSecurityLogic"),
-        .testTarget(name: "LocklarkSecurityLogicTests", dependencies: ["LocklarkSecurityLogic"])
+        .target(name: "PassmeSecurityLogic"),
+        .testTarget(name: "PassmeSecurityLogicTests", dependencies: ["PassmeSecurityLogic"])
     ],
     swiftLanguageModes: [.v5]
 )

@@ -27,43 +27,43 @@ import (
 // full-file open.
 const (
 	// Content signatures over ContentSigningBytes.
-	DomainContentSignature = "locklark.vault-file/v1/content-signature"
+	DomainContentSignature = "passme.vault-file/v1/content-signature"
 
 	// Revision identities over the canonical file with header.revision_id and
 	// content_signature removed (RevisionID).
-	DomainRevision = "locklark.vault-file/v1/revision"
+	DomainRevision = "passme.vault-file/v1/revision"
 
 	// File digests over the complete canonical signed file (FileDigest).
-	DomainFileDigest = "locklark.vault-file/v1/file-digest"
+	DomainFileDigest = "passme.vault-file/v1/file-digest"
 
 	// Policy document signatures over SignedPolicy.Document.
-	DomainPolicyDocumentSignature = "locklark.vault-file/v1/policy-document-signature"
+	DomainPolicyDocumentSignature = "passme.vault-file/v1/policy-document-signature"
 
 	// Restricted admin delegations issued by the owner root.
-	DomainAdminDelegation = "locklark.vault-file/v1/admin-delegation"
+	DomainAdminDelegation = "passme.vault-file/v1/admin-delegation"
 
 	// age wrapping of the VUK to a device encryption key (vuk_device_slots):
 	// the first plaintext bytes, followed by one NUL and the fixed context
 	// (SealVUKForDevice/OpenVUKForDevice).
-	DomainVUKDeviceWrapping = "locklark.vault-file/v1/vuk-device-wrapping"
+	DomainVUKDeviceWrapping = "passme.vault-file/v1/vuk-device-wrapping"
 
 	// Wrapping of the per-snapshot CEK by the epoch VUK (cek_slot).
-	DomainCEKWrapping = "locklark.vault-file/v1/cek-wrapping"
+	DomainCEKWrapping = "passme.vault-file/v1/cek-wrapping"
 
 	// Key fingerprints, one per key role.
-	UsageVaultID                 = "locklark.vault-file/v1/vault-id"
-	UsageContentRevisionID       = "locklark.vault-file/v1/content-revision-id"
-	UsageOpID                    = "locklark.vault-file/v1/op-id"
-	UsageDeviceID                = "locklark.vault-file/v1/device-id"
-	UsageDeviceContentSigningKey = "locklark.vault-file/v1/key/device-content-signing"
-	UsageDevicePolicySigningKey  = "locklark.vault-file/v1/key/device-policy-signing"
-	UsageAgeEncryptionKey        = "locklark.vault-file/v1/key/age-x25519"
+	UsageVaultID                 = "passme.vault-file/v1/vault-id"
+	UsageContentRevisionID       = "passme.vault-file/v1/content-revision-id"
+	UsageOpID                    = "passme.vault-file/v1/op-id"
+	UsageDeviceID                = "passme.vault-file/v1/device-id"
+	UsageDeviceContentSigningKey = "passme.vault-file/v1/key/device-content-signing"
+	UsageDevicePolicySigningKey  = "passme.vault-file/v1/key/device-policy-signing"
+	UsageAgeEncryptionKey        = "passme.vault-file/v1/key/age-x25519"
 
 	// UsagePolicyDocument is the policy digest domain: the SHA-256 digest of
 	// a canonical policy document (PolicyDigest). It is computed outside the
 	// policy and referenced by Header.PolicyDigest and the next policy's
 	// PrevPolicyDigest.
-	UsagePolicyDocument = "locklark.vault-file/v1/policy-document"
+	UsagePolicyDocument = "passme.vault-file/v1/policy-document"
 
 	// Digest algorithms named on the wire.
 	DigestSHA256 = DigestAlgSHA256

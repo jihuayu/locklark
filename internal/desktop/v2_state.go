@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Sidebar primary views. Category and tag filters are represented by the
@@ -116,11 +116,11 @@ func (a *App) resetV2() {
 }
 
 // classicLayoutRequested reports whether the classic single-list layout was
-// requested via LOCKLARK_DESKTOP_LAYOUT=classic. The three-pane layout is the
+// requested via PASSME_DESKTOP_LAYOUT=classic. The three-pane layout is the
 // default; the classic layout remains available for users and for the native
 // accessibility acceptance suites that drive its labels.
 func classicLayoutRequested() bool {
-	return os.Getenv("LOCKLARK_DESKTOP_LAYOUT") == "classic"
+	return os.Getenv("PASSME_DESKTOP_LAYOUT") == "classic"
 }
 
 // EnableV2 enters the three-pane UI. It exists so tests and embedders that
@@ -611,7 +611,7 @@ func (a *App) SelectVault(id string) {
 }
 
 // createVault creates a logical sub-vault inside the encrypted personal
-// database (not a separate .ll file; see createVaultFile for that).
+// database (not a separate .pm file; see createVaultFile for that).
 func (a *App) createVault(name, description, icon string) (vault.VaultMeta, error) {
 	if a.session == nil {
 		return vault.VaultMeta{}, personal.ErrSessionLocked

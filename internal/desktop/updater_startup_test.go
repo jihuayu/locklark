@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	updaterStartupHelperEnv = "LOCKLARK_DESKTOP_UPDATER_STARTUP_HELPER"
+	updaterStartupHelperEnv = "PASSME_DESKTOP_UPDATER_STARTUP_HELPER"
 	updaterRegisteredMarker = "updater-startup-registered"
 	updaterHelperTimeout    = 5 * time.Second
 )
@@ -47,7 +47,7 @@ func runUpdaterStartupHelperMain() (code int, handled bool) {
 		return 1, true
 	}
 
-	dir, e := os.MkdirTemp("", "locklark-updater-startup-")
+	dir, e := os.MkdirTemp("", "passme-updater-startup-")
 	if e != nil {
 		fmt.Fprintln(os.Stderr, "updater startup helper: cannot create owned data directory")
 		return 1, true
@@ -125,7 +125,7 @@ func runUpdaterStartupHelper(t *testing.T, mode string) (string, int) {
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case updaterStartupHelperEnv, "LOCKLARK_NATIVE_SMOKE", "LOCKLARK_NATIVE_FOREGROUND", "LOCKLARK_SCREENSHOTS":
+		case updaterStartupHelperEnv, "PASSME_NATIVE_SMOKE", "PASSME_NATIVE_FOREGROUND", "PASSME_SCREENSHOTS":
 			continue
 		}
 		env = append(env, entry)

@@ -54,17 +54,17 @@ import {
 
 const FIXED_ID = "geldnhjapnackobgknocomedmjgphnpe";
 const PRIVATE = {
-  profile: "/tmp/locklark-private-profile",
+  profile: "/tmp/passme-private-profile",
   executable: "/opt/microsoft/msedge/msedge",
   chromium: "/opt/playwright/chromium",
-  extensionDir: "/tmp/locklark-private-extension/chromium",
+  extensionDir: "/tmp/passme-private-extension/chromium",
   title: "Extensions",
 };
 // The existing synthetic login origin the official harness already serves.
-const SYNTHETIC_ORIGIN = "https://login.locklark.test:8443";
+const SYNTHETIC_ORIGIN = "https://login.passme.test:8443";
 
 function packageWith(manifest) {
-  const directory = mkdtempSync(join(tmpdir(), "locklark-edge-contract-"));
+  const directory = mkdtempSync(join(tmpdir(), "passme-edge-contract-"));
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, "manifest.json"), JSON.stringify(manifest));
   return directory;
@@ -81,7 +81,7 @@ test("fixed manifest-derived identity and service worker", () => {
 test("the id is derived from the manifest key, not hard-coded", () => {
   const directory = packageWith({
     manifest_version: 3,
-    key: Buffer.from("synthetic-not-the-locklark-key").toString("base64"),
+    key: Buffer.from("synthetic-not-the-passme-key").toString("base64"),
     background: { service_worker: "background.js" },
   });
   try {
@@ -154,7 +154,7 @@ test("the page title is an ASCII manager prefix, never the chrome title", () => 
   for (const title of [
     "edge://extensions",
     "Extensions - Microsoft\u200b Edge",
-    "Locklark Edge install 0123456789ab",
+    "Passme Edge install 0123456789ab",
     "  ",
     "",
     "Extensions\n",
@@ -469,7 +469,7 @@ const answer = (step) => ({
 test("install navigates, then opens, then waits for the real target", async () => {
   const directory = packageWith({
     manifest_version: 3,
-    key: Buffer.from("synthetic-not-the-locklark-key").toString("base64"),
+    key: Buffer.from("synthetic-not-the-passme-key").toString("base64"),
     background: { service_worker: "background.js" },
   });
   const calls = [];
@@ -679,7 +679,7 @@ function workerHarness(order) {
 // The real package is fixed-identity; the synthetic key would be refused by the
 // manifest-derived ID check, so this copies the fixed real manifest only.
 function fixedPackage() {
-  const directory = mkdtempSync(join(tmpdir(), "locklark-edge-contract-"));
+  const directory = mkdtempSync(join(tmpdir(), "passme-edge-contract-"));
   mkdirSync(directory, { recursive: true });
   writeFileSync(
     join(directory, "manifest.json"),
@@ -822,7 +822,7 @@ test("a failed or missing popup activation fails closed without a target proof",
     for (const overrides of [
       { openPopup: undefined },
       { origin: undefined },
-      { origin: "login.locklark.test" },
+      { origin: "login.passme.test" },
       { origin: "" },
     ]) {
       const order = [];
@@ -1158,7 +1158,7 @@ const SAFE_REASONS = nativeSource.slice(
 test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive", () => {
   assert.match(
     nativeSource,
-    /const edgePairDisconnect = process\.env\.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT === "1";/,
+    /const edgePairDisconnect = process\.env\.PASSME_TEST_EDGE_PAIR_DISCONNECT === "1";/,
   );
   // The route checkpoint refuses this mode exactly like every other journey
   // that would change what pairing, fill or checkout mean.
@@ -1171,10 +1171,10 @@ test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive
     })();
   assert.equal(compatible({}), true);
   assert.equal(
-    compatible({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }),
+    compatible({ PASSME_TEST_EDGE_PAIR_DISCONNECT: "1" }),
     false,
   );
-  assert.equal(compatible({ LOCKLARK_TEST_EDGE_INSTALL_ONLY: "1" }), false);
+  assert.equal(compatible({ PASSME_TEST_EDGE_INSTALL_ONLY: "1" }), false);
   // Execute the actual guard block with a synthetic Edge launch context and
   // the same assert implementation it uses in production.
   const guard = (env, browser, executable) =>
@@ -1187,28 +1187,28 @@ test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive
       PAIR_GUARD,
     )(assert, { env }, browser, executable, true);
   const absolute = "/opt/microsoft/msedge/msedge";
-  guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
+  guard({ PASSME_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
   assert.throws(
-    () => guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "chromium", absolute),
-    /requires LOCKLARK_TEST_BROWSER=edge/,
+    () => guard({ PASSME_TEST_EDGE_PAIR_DISCONNECT: "1" }, "chromium", absolute),
+    /requires PASSME_TEST_BROWSER=edge/,
   );
   assert.throws(
-    () => guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", "msedge"),
+    () => guard({ PASSME_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", "msedge"),
     /requires an explicit absolute executable path/,
   );
   const forbidden = [
-    "LOCKLARK_TEST_EDGE_INSTALL_ONLY",
-    "LOCKLARK_TEST_CHECKOUT_FRAMES",
-    "LOCKLARK_TEST_SHARED_CLIPBOARD",
-    "LOCKLARK_TEST_POPUP_VAULT",
-    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
-    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
-    "LOCKLARK_TEST_FAILURE_STAGE",
-    "LOCKLARK_TEST_BROWSER_PARITY",
-    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
-    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
-    "LOCKLARK_TEST_OTHER_PROVIDER",
-    "LOCKLARK_TEST_PASSKEY_SIGNALS",
+    "PASSME_TEST_EDGE_INSTALL_ONLY",
+    "PASSME_TEST_CHECKOUT_FRAMES",
+    "PASSME_TEST_SHARED_CLIPBOARD",
+    "PASSME_TEST_POPUP_VAULT",
+    "PASSME_TEST_ROUTE_DETAIL_READ",
+    "PASSME_TEST_ROUTE_IDLE_TTL",
+    "PASSME_TEST_FAILURE_STAGE",
+    "PASSME_TEST_BROWSER_PARITY",
+    "PASSME_TEST_PASSKEY_MANAGEMENT",
+    "PASSME_TEST_PASSKEY_CONDITIONAL",
+    "PASSME_TEST_OTHER_PROVIDER",
+    "PASSME_TEST_PASSKEY_SIGNALS",
   ];
   for (const name of forbidden)
     assert.throws(
@@ -1223,15 +1223,15 @@ test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive
     );
   // Empty workflow-materialized values and explicit 0 never select a mode.
   const inert = Object.fromEntries(forbidden.map((name) => [name, "0"]));
-  inert.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT = "1";
+  inert.PASSME_TEST_EDGE_PAIR_DISCONNECT = "1";
   guard(inert, "edge", absolute);
   const empty = Object.fromEntries(forbidden.map((name) => [name, ""]));
-  empty.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT = "1";
+  empty.PASSME_TEST_EDGE_PAIR_DISCONNECT = "1";
   guard(empty, "edge", absolute);
   // Install-only's own list gained exactly this mutual-exclusion name.
   const installGuard = sourceBlock(nativeSource, "if (edgeInstallOnly) {");
-  assert.match(installGuard, /"LOCKLARK_TEST_EDGE_PAIR_DISCONNECT"/);
-  guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
+  assert.match(installGuard, /"PASSME_TEST_EDGE_PAIR_DISCONNECT"/);
+  guard({ PASSME_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
   // Both guards run before launch: no browser can start for a refused pair.
   assert.ok(
     nativeSource.indexOf("if (edgePairDisconnect) {") <
@@ -1509,7 +1509,7 @@ test("browser keys use the explicit launched executable, else Playwright's", () 
   // The script's own assignment and helper run over a real temporary file
   // system: an explicit Chromium executable whose Playwright registry is
   // empty must still resolve to the launched file, exactly as under CI.
-  const directory = realpathSync(mkdtempSync(join(tmpdir(), "locklark-key-")));
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "passme-key-")));
   try {
     const selected = join(directory, "chromium");
     const edge = join(directory, "msedge");
@@ -1636,8 +1636,8 @@ function edgeInstallKeySeam(browserName, { keyAfterBranch = false } = {}) {
   let opened = false;
   const scope = {
     browserName,
-    SOURCE_TITLE_PREFIX: "Locklark acceptance",
-    ROUTE_TITLE_PREFIX: "Locklark",
+    SOURCE_TITLE_PREFIX: "Passme acceptance",
+    ROUTE_TITLE_PREFIX: "Passme",
     // The script's fixed closed-popup predicate, with its three messages.
     popupClosed: (error) =>
       ["Popup closed", "Popup CDP closed", "Popup CDP timed out"].includes(error?.message),
@@ -1666,7 +1666,7 @@ function edgeInstallKeySeam(browserName, { keyAfterBranch = false } = {}) {
       return function browserKey(actions, titlePrefix) {
         if (actions[0].key === "Control_L+Shift_L+y") opened = true;
         assert.ok(
-          titlePrefix === "Locklark acceptance" || titlePrefix === "Locklark",
+          titlePrefix === "Passme acceptance" || titlePrefix === "Passme",
           "title prefix",
         );
         events.push("key:" + actions[0].key);
@@ -1777,7 +1777,7 @@ test("the Edge install branch opens its popup through the script's own browserKe
   assert.deepEqual(new Set(result.requests.map((request) => request.executable)),
     new Set(["/synthetic/edge"]));
   assert.deepEqual(new Set(result.requests.map((request) => request.titlePrefix)),
-    new Set(["Locklark acceptance"]));
+    new Set(["Passme acceptance"]));
   // The popup the real openPopup() found was then the one the helper kept open.
   assert.ok(at("eventually:Action popup did not open") > at("key:Control_L+Shift_L+y"));
   assert.ok(at("phase:edge-installed") > at("eventually:Action popup did not open"));

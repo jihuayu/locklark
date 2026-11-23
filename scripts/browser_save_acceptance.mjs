@@ -246,10 +246,10 @@ export function assertPrivateArtifacts(state, fixture) {
   return scanned;
 }
 
-// A caller-supplied LOCKLARK_BROWSER_FIXTURE is reused as-is and must already
+// A caller-supplied PASSME_BROWSER_FIXTURE is reused as-is and must already
 // be executable; without it the historical per-call go build is kept.
 export function browserFixtureExecutable({ go, root, env, state }) {
-  const prebuilt = process.env.LOCKLARK_BROWSER_FIXTURE;
+  const prebuilt = process.env.PASSME_BROWSER_FIXTURE;
   if (prebuilt) {
     let usable = false;
     try {
@@ -260,7 +260,7 @@ export function browserFixtureExecutable({ go, root, env, state }) {
     }
     if (!usable) {
       throw new Error(
-        "LOCKLARK_BROWSER_FIXTURE must name an executable built fixture",
+        "PASSME_BROWSER_FIXTURE must name an executable built fixture",
       );
     }
     return prebuilt;

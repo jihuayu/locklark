@@ -22,7 +22,7 @@ public enum RelayLimits {
     public static let tokenBytes = 16
     public static let tokenLength = 32
     public static let maxProfileBytes = 256
-    public static let helperName = "locklark-browser-safari"
+    public static let helperName = "passme-browser-safari"
     public static let relayDirectoryName = "native"
     public static let relaySocketName = "relay.sock"
 }

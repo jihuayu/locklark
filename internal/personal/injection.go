@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 var ErrInjectionOutput = errors.New("sensitive JSON publication failed; intent recorded, output may exist")
@@ -49,7 +49,7 @@ func (r *injectionRequest) valid() bool {
 	return r != nil && ValidInjectionName(r.name) && filepath.IsAbs(r.path) && len(r.path) <= 4096 && utf8.ValidString(r.path) && !strings.ContainsRune(r.path, 0) && strings.EqualFold(filepath.Ext(r.path), ".json")
 }
 func (r *injectionRequest) binding(secret []byte) (string, error) {
-	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/injection/key/v1", 32)
+	key, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/injection/key/v1", 32)
 	if e != nil {
 		return "", invalid
 	}

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -95,7 +95,7 @@ func assertUnchanged(t *testing.T, j *Journal, before snapshot) {
 // operations with different generations. It runs on a real temporary database
 // through restarts:
 //
-//  1. a legacy LLVJ v1 proposal is saved under recordKey and state is
+//  1. a legacy PMVJ v1 proposal is saved under recordKey and state is
 //     initialized;
 //  2. the other proposal is prepared under preparedKey;
 //  3. all three raw records are captured, the journal is closed and the same
@@ -138,7 +138,7 @@ func TestAckLegacyOperationIDRejectedKeepsPrepared(t *testing.T) {
 	// A v1 record starts with its own magic and is never the prepared wrapper.
 	if !bytes.HasPrefix(preparedNone.rawProposal, []byte(recordMagic)) ||
 		bytes.HasPrefix(preparedNone.rawProposal, []byte(preparedMagic)) {
-		t.Fatalf("legacy record is not a plain LLVJ v1 record: %x", preparedNone.rawProposal[:min(4, len(preparedNone.rawProposal))])
+		t.Fatalf("legacy record is not a plain PMVJ v1 record: %x", preparedNone.rawProposal[:min(4, len(preparedNone.rawProposal))])
 	}
 
 	mustPrepare(t, j, 0, p)
@@ -223,7 +223,7 @@ func mustClose(t *testing.T, j *Journal) {
 }
 
 // TestPreparedLifecycleLateAckKeepsNewerWorking is the main real-file story:
-// a legacy LLVJ v1 proposal is saved, state is initialized, a proposal is
+// a legacy PMVJ v1 proposal is saved, state is initialized, a proposal is
 // prepared, the process restarts, the prepared proposal matches exactly, a
 // newer working edit is written, the late ack arrives, and after another
 // restart the base/revision advanced while the newer working edit and its
@@ -615,7 +615,7 @@ func TestAckRejectsMismatch(t *testing.T) {
 	if err := j.Ack(p.OperationID, other.Bytes, rev); !errors.Is(err, ErrPreparedMismatch) {
 		t.Fatalf("Ack(other proposal bytes) = %v, want ErrPreparedMismatch", err)
 	}
-	// The journal's own LLVJ v1 encoding of the right proposal is not the
+	// The journal's own PMVJ v1 encoding of the right proposal is not the
 	// sealed file bytes the caller read, so it is refused too.
 	if err := j.Ack(p.OperationID, encodeRecord(p), rev); !errors.Is(err, ErrPreparedMismatch) {
 		t.Fatalf("Ack(record envelope instead of file bytes) = %v, want ErrPreparedMismatch", err)
@@ -798,14 +798,14 @@ func TestAckFaultAfterDeleteRollsBack(t *testing.T) {
 	assertProposal(t, mustLoad(t, j2), legacy)
 }
 
-// TestPreparedRecordRoundTrip checks the wrapper encodes the inner LLVJ v1
+// TestPreparedRecordRoundTrip checks the wrapper encodes the inner PMVJ v1
 // record verbatim and decodes it again exactly.
 func TestPreparedRecordRoundTrip(t *testing.T) {
 	_, p := preparedState()
 	pp := PreparedProposal{WorkingGeneration: 42, Proposal: p}
 	raw := encodePrepared(pp)
 	if got := raw[preparedPrefix : len(raw)-preparedDigest]; !bytes.Equal(got, encodeRecord(p)) {
-		t.Fatal("wrapper does not embed the exact LLVJ v1 record")
+		t.Fatal("wrapper does not embed the exact PMVJ v1 record")
 	}
 	if got := binary.BigEndian.Uint64(raw[6:14]); got != 42 {
 		t.Fatalf("embedded working generation = %d", got)
@@ -821,7 +821,7 @@ func TestPreparedRecordRoundTrip(t *testing.T) {
 	}
 }
 
-// encodePreparedRaw wraps an already encoded LLVJ v1 record verbatim and seals
+// encodePreparedRaw wraps an already encoded PMVJ v1 record verbatim and seals
 // the outer digest, so tests can embed a deliberately malformed inner record.
 func encodePreparedRaw(workingGeneration uint64, inner []byte) []byte {
 	buf := make([]byte, preparedOverhead+len(inner))
@@ -861,7 +861,7 @@ func TestPreparedRejectsCorruptRecords(t *testing.T) {
 		}
 	}
 
-	// A valid wrapper whose inner record is not LLVJ v1 is corrupt too.
+	// A valid wrapper whose inner record is not PMVJ v1 is corrupt too.
 	badInner := encodePrepared(PreparedProposal{WorkingGeneration: 3, Proposal: p})
 	badInner[preparedPrefix+4] ^= 0xff
 	// Re-seal the outer digest so only the inner record is wrong.

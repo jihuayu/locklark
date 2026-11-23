@@ -11,8 +11,8 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // runtimeSettingsFixture keeps every settings mutation inside the temporary
@@ -78,7 +78,7 @@ func TestAutoLockTimeoutSurvivesSystemUnlock(t *testing.T) {
 	// The unlock entry points must read AutoLockMinutes instead of the old
 	// five-minute literal. A 10-minute preference is below Session's documented
 	// maximum and must be visible in the created session.
-	path := filepath.Join(t.TempDir(), "unlock.ll")
+	path := filepath.Join(t.TempDir(), "unlock.pm")
 	key := make([]byte, 16)
 	for i := range key {
 		key[i] = 6
@@ -582,7 +582,7 @@ func TestSystemUnlockExpiryPresetsAndAutoRenewOnMasterPasswordUnlock(t *testing.
 		t.Fatalf("round-trip ClipboardClearSeconds = %d (%v), want 0", reloadedZero.ClipboardClearSeconds, reloadedZero.ClipboardClearTimeout)
 	}
 
-	vaultPath := filepath.Join(t.TempDir(), "quick.ll")
+	vaultPath := filepath.Join(t.TempDir(), "quick.pm")
 	key := make([]byte, 16)
 	for i := range key {
 		key[i] = 9

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/passme/internal/browserhost"
 )
 
 // The native pairing prompt must show the OS-authenticated peer and let the
@@ -15,7 +15,7 @@ import (
 func TestBrowserPairingReviewRendersPeerAndChoosesQuickFill(t *testing.T) {
 	a := New()
 	// A real OS-reported executable path: absolute, canonical, with spaces.
-	hostPath := "/Users/fixture/Library/Application Support/Locklark Browser Host/locklark-browser-chromium"
+	hostPath := "/Users/fixture/Library/Application Support/Passme Browser Host/passme-browser-chromium"
 	decisions := make(chan browserhost.BrowserPairDecision, 1)
 	go func() {
 		decision, _ := a.approveBrowserPair(context.Background(), browserhost.BrowserPairRequest{

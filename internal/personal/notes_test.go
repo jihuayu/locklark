@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -226,12 +226,12 @@ func TestNativeNotesBackupRestoreRetainsValuesSourceAndHistory(t *testing.T) {
 		t.Fatal(e)
 	}
 	f.want.Notes = "edited\r\n备注🙂  "
-	archive := filepath.Join(t.TempDir(), "notes-backup.llb")
+	archive := filepath.Join(t.TempDir(), "notes-backup.pmb")
 	kit, e := Backup(f.path, archive, "boundary-fixture", f.key)
 	if e != nil {
 		t.Fatal(e)
 	}
-	dest := filepath.Join(t.TempDir(), "notes-restored.ll")
+	dest := filepath.Join(t.TempDir(), "notes-restored.pm")
 	key := bytes.Repeat([]byte{11}, 16)
 	if e = Restore(archive, dest, "boundary-fixture", f.key, kit, key); e != nil {
 		t.Fatal(e)
@@ -342,13 +342,13 @@ func TestNativeNotesMutationFaults(t *testing.T) {
 func TestLoginNotesImportPlanDomainRejectsOldPlan(t *testing.T) {
 	raw := importArchive(t)
 	secret := bytes.Repeat([]byte{3}, 32)
-	derived, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/import-plan/key/v1", 32)
+	derived, e := hkdf.Key(sha256.New, secret, nil, "passme/personal/import-plan/key/v1", 32)
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer clear(derived)
 	mac := hmac.New(sha256.New, derived)
-	mac.Write([]byte("locklark/personal/import-plan/login-v1\x00"))
+	mac.Write([]byte("passme/personal/import-plan/login-v1\x00"))
 	mac.Write(raw)
 	old := hex.EncodeToString(mac.Sum(nil))
 	request := &importRequest{read: func() ([]byte, error) { return bytes.Clone(raw), nil }, expected: old}

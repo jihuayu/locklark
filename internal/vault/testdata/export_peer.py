@@ -11,12 +11,12 @@ assert params["M"].value == 64 << 20 and params["I"].value == 3 and params["P"].
 from pykeepass.kdbx_parsing.kdbx4 import kdf_uuids
 assert params["$UUID"].value == kdf_uuids["argon2id"]
 assert len(db.entries) == len(expected)
-by_id = {e.get_custom_property("Locklark.ID"): e for e in db.entries}
+by_id = {e.get_custom_property("Passme.ID"): e for e in db.entries}
 for item in expected:
     e = by_id[item["ID"]]
-    assert e.title == item["Title"] and e.get_custom_property("Locklark.Kind") == item["Kind"]
-    assert (e.get_custom_property("Locklark.State") or "") == item.get("State", "")
-    assert (e.get_custom_property("Locklark.PreviousState") or "") == item.get("PreviousState", "")
+    assert e.title == item["Title"] and e.get_custom_property("Passme.Kind") == item["Kind"]
+    assert (e.get_custom_property("Passme.State") or "") == item.get("State", "")
+    assert (e.get_custom_property("Passme.PreviousState") or "") == item.get("PreviousState", "")
     assert (e.url or "") == item.get("URL", "")
     if item["Kind"] == "login":
         assert (e.username or "") == item["Username"] and (e.password or "") == item["Password"]

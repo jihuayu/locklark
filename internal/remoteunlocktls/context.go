@@ -1,6 +1,6 @@
 package remoteunlocktls
 
-import "github.com/jihuayu/locklark/pkg/remoteunlock"
+import "github.com/jihuayu/passme/pkg/remoteunlock"
 
 // The typed convenience methods below are thin adapters from the public
 // canonical binding-context codec (pkg/remoteunlock) to the opaque ExportBinding

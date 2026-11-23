@@ -3,8 +3,8 @@ package teamclient
 import (
 	"context"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 type OwnerPlan struct{ inner *bootstrapPlan }

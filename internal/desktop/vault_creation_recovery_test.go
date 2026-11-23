@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type creationInvariantStore struct {
@@ -47,7 +47,7 @@ func (s *creationInvariantStore) Delete(key string) error {
 
 func newCreationInvariantApp(t *testing.T) *App {
 	t.Helper()
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "")
 	a := New()
 	a.launch = func(fn func()) { fn() }
 	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
@@ -107,7 +107,7 @@ func TestGeneratedKeyCreationRequiresDurableKitBeforeVault(t *testing.T) {
 
 	store := newCreationInvariantStore()
 	a.deviceSecrets = store
-	a.path = filepath.Join(vaultDir, "personal.ll")
+	a.path = filepath.Join(vaultDir, "personal.pm")
 	a.startCreateVault()
 	issued := a.issued
 	if issued == "" {
@@ -119,7 +119,7 @@ func TestGeneratedKeyCreationRequiresDurableKitBeforeVault(t *testing.T) {
 	a.createVaultFile()
 
 	if _, err := os.Stat(a.path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("created a .ll without a durable kit: %v", err)
+		t.Fatalf("created a .pm without a durable kit: %v", err)
 	}
 	if store.setCalls != 0 {
 		t.Fatalf("device store was touched before a durable kit: %d calls", store.setCalls)
@@ -138,7 +138,7 @@ func TestGeneratedKeyCreationRequiresDurableKitBeforeVault(t *testing.T) {
 func TestSavedKitRecoversCreatedVaultAfterLockWhenDeviceStoreFails(t *testing.T) {
 	a := newCreationInvariantApp(t)
 	vaultDir := t.TempDir()
-	a.path = filepath.Join(vaultDir, "personal.ll")
+	a.path = filepath.Join(vaultDir, "personal.pm")
 	store := newCreationInvariantStore()
 	store.setErr = errors.New("injected device store failure")
 	a.deviceSecrets = store
@@ -169,7 +169,7 @@ func TestSavedKitRecoversCreatedVaultAfterLockWhenDeviceStoreFails(t *testing.T)
 		t.Fatal("settings persisted the generated Secret Key")
 	}
 	if _, err := os.Stat(a.path); err != nil {
-		t.Fatalf("created .ll is missing: %v", err)
+		t.Fatalf("created .pm is missing: %v", err)
 	}
 	if store.setCalls != 1 {
 		t.Fatalf("device store attempts = %d, want one optional attempt", store.setCalls)
@@ -184,7 +184,7 @@ func TestSavedKitRecoversCreatedVaultAfterLockWhenDeviceStoreFails(t *testing.T)
 		t.Fatal("lock retained a creation key in the app")
 	}
 	if after := vaultDigest(t, a.path); after != before {
-		t.Fatal("lock modified the created .ll")
+		t.Fatal("lock modified the created .pm")
 	}
 
 	a.password = password
@@ -195,7 +195,7 @@ func TestSavedKitRecoversCreatedVaultAfterLockWhenDeviceStoreFails(t *testing.T)
 		t.Fatalf("kit key could not unlock the created vault after lock: %q", a.status)
 	}
 	if _, err := os.Stat(a.path); err != nil {
-		t.Fatalf("created .ll disappeared after recovery unlock: %v", err)
+		t.Fatalf("created .pm disappeared after recovery unlock: %v", err)
 	}
 	a.Lock()
 }
@@ -203,7 +203,7 @@ func TestSavedKitRecoversCreatedVaultAfterLockWhenDeviceStoreFails(t *testing.T)
 func TestCreateRefusalPreservesExistingVaultAndDeviceBinding(t *testing.T) {
 	a := newCreationInvariantApp(t)
 	vaultDir := t.TempDir()
-	a.path = filepath.Join(vaultDir, "existing.ll")
+	a.path = filepath.Join(vaultDir, "existing.pm")
 	password := "fixture-password"
 
 	oldKey, err := personal.NewSecret()
@@ -231,7 +231,7 @@ func TestCreateRefusalPreservesExistingVaultAndDeviceBinding(t *testing.T) {
 		t.Fatal("create overwrote or unlocked an existing vault")
 	}
 	if after := vaultDigest(t, a.path); after != before {
-		t.Fatal("create refusal modified the existing .ll")
+		t.Fatal("create refusal modified the existing .pm")
 	}
 	if store.setCalls != 0 {
 		t.Fatalf("device binding touched before exclusive create: %d calls", store.setCalls)

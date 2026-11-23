@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -544,7 +544,7 @@ func TestDailyNewManualURLAndNativeAuditRestore(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	key := bytes.Repeat([]byte{5}, 16)
 	if e = Restore(archived, restored, "fixture", bytes.Repeat([]byte{4}, 16), kit, key); e != nil {
 		t.Fatal(e)

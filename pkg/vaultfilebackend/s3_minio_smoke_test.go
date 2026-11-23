@@ -195,7 +195,7 @@ func provisionMinioSmokeBucket(t *testing.T, e minioSmokeEnv) string {
 	if _, err := rand.Read(suffix[:]); err != nil {
 		t.Fatalf("random bucket suffix: %v", err)
 	}
-	bucket := "locklark-s3-smoke-" + fmt.Sprintf("%x", suffix)
+	bucket := "passme-s3-smoke-" + fmt.Sprintf("%x", suffix)
 	client := e.sdkClient()
 	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("provision bucket: %v", err)

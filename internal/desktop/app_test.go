@@ -6,14 +6,14 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 func TestNativeUnlockFieldsAreMasked(t *testing.T) {
 	a := New()
 	a.password = "private-master"
 	a.secret = "private-secret"
-	a.path = "owner.ll"
+	a.path = "owner.pm"
 	tt := ui.NewTester(a.View, 1100, 760)
 	for _, s := range tt.Texts() {
 		if s == a.password || s == a.secret {
@@ -69,7 +69,7 @@ func TestLockDropsLateNativeResults(t *testing.T) {
 func TestNativeVaultWorkflowAndChangedSelection(t *testing.T) {
 	a := New()
 	a.launch = func(f func()) { f() }
-	a.path = filepath.Join(t.TempDir(), "desktop.ll")
+	a.path = filepath.Join(t.TempDir(), "desktop.pm")
 	key, e := personal.NewSecret()
 	if e != nil {
 		t.Fatal(e)

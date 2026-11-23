@@ -8,8 +8,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
-	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilejournal"
 )
 
 // These tests cover the one unknown-commit path of AdoptMergeCandidate: an

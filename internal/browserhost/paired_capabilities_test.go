@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // attachmentWireCapability is the literal capability the extension checks
@@ -18,7 +18,7 @@ const attachmentWireCapability = "attachments-v1"
 
 func pairedCapabilitiesSession(t *testing.T) *personal.Session {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "paired-capabilities.ll")
+	path := filepath.Join(t.TempDir(), "paired-capabilities.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
 		t.Fatal(e)

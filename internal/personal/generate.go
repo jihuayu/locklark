@@ -3,8 +3,8 @@ package personal
 import (
 	"errors"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 type GenerationReceipt struct {

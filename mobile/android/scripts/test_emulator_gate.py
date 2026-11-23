@@ -13,7 +13,7 @@ from unittest import mock
 import test_emulator as gate
 
 
-CANARIES = ["MasterFixture", "AccountFixture", "UserFixture", "FirstPassword", "LL1-SECRETCANARY"]
+CANARIES = ["MasterFixture", "AccountFixture", "UserFixture", "FirstPassword", "PM1-SECRETCANARY"]
 RAWTEXT = "raw-stderr-adb-clean-5572-factor-fixture"
 ERROR = "FAIL: Android native runtime validation at "
 RESTORE = "Android autofill setting restore failed: "
@@ -22,10 +22,10 @@ DIAGNOSIS = "Fixed Android runtime diagnosis: "
 # Captured at import, before gate.subprocess is patched for any test.
 CLIENT_TIMEOUT = subprocess.TimeoutExpired
 ENVIRONMENT = {"ANDROID_HOME": "/nonexistent-sdk", "ANDROID_SERIAL": "emulator-5572",
-               "LOCKLARK_ANDROID_TEST_RESET": "1", "LOCKLARK_ANDROID_AUTOFILL_ONLY": "0"}
+               "PASSME_ANDROID_TEST_RESET": "1", "PASSME_ANDROID_AUTOFILL_ONLY": "0"}
 # The Autofill-only mode is read at import and bound to its own owned AVD.
-AUTOFILL_ENVIRONMENT = {**ENVIRONMENT, "LOCKLARK_ANDROID_AUTOFILL_ONLY": "1",
-                        "LOCKLARK_ANDROID_TEST_RESET": "1"}
+AUTOFILL_ENVIRONMENT = {**ENVIRONMENT, "PASSME_ANDROID_AUTOFILL_ONLY": "1",
+                        "PASSME_ANDROID_TEST_RESET": "1"}
 
 
 class FakeDevice:
@@ -45,7 +45,7 @@ class FakeDevice:
         # A prior service exists, so the restore is a put that can fail.
         self.setting = self.PRIOR
         self.previous_tempdir = tempfile.tempdir
-        self.root = Path(tempfile.mkdtemp(prefix="locklark-gate-test-"))
+        self.root = Path(tempfile.mkdtemp(prefix="passme-gate-test-"))
         tempfile.tempdir = str(self.root)
 
     def close(self):
@@ -63,7 +63,7 @@ class FakeDevice:
         if arguments[:3] == ["shell", "settings", "put"]:
             # A rejected restore leaves the setting unchanged, so its
             # readback differs, as on a device where the write was refused.
-            if self.restore_fails and not arguments[-1].startswith("org.locklark"):
+            if self.restore_fails and not arguments[-1].startswith("org.passme"):
                 return self.reply(failed=True)
             self.setting = arguments[-1]
             return self.reply()
@@ -149,7 +149,7 @@ class GateOutcomeTests(unittest.TestCase):
         device = FakeDevice(runtime_fails=runtime_fails, restore_fails=restore_fails)
         self.addCleanup(device.close)
         result, page = self.attempt(device)
-        runs = list(device.root.glob("locklark-android-runtime-*"))
+        runs = list(device.root.glob("passme-android-runtime-*"))
         self.assertEqual(len(runs), 1)
         return result, page, runs[0]
 
@@ -239,7 +239,7 @@ class GateOutcomeTests(unittest.TestCase):
                 autofill.main()
         self.assertNotIsInstance(raised.exception, NameError)
         cleared = [command[3] for command in device.commands if command[:3] == ["shell", "pm", "clear"]]
-        self.assertEqual(cleared[-2:], ["org.locklark.android", "org.locklark.android.test"])
+        self.assertEqual(cleared[-2:], ["org.passme.android", "org.passme.android.test"])
         self.assertEqual((autofill.STAGE, autofill.cleanup_failed), ("complete-test-count", False))
 
     def test_second_run_does_not_inherit_previous_state(self):
@@ -278,11 +278,11 @@ class GateOutcomeTests(unittest.TestCase):
         run = device.run
         def answer(arguments, **kwargs):
             command = list(arguments)[3:]
-            # The run's own write starts with org.locklark; the restore's put
+            # The run's own write starts with org.passme; the restore's put
             # brings the prior service back, and so does not.
             hit = "instrument" if command[:3] == ["shell", "am", "instrument"] else \
                 "restore" if command[:3] == ["shell", "settings", "put"] and \
-                not command[-1].startswith("org.locklark") else None
+                not command[-1].startswith("org.passme") else None
             reply = run(arguments, **kwargs)
             if hit in errors:
                 raise errors[hit]
@@ -331,7 +331,7 @@ class GateOutcomeTests(unittest.TestCase):
             command = list(arguments)[3:]
             if command[:3] == ["shell", "am", "instrument"]:
                 raise primary
-            if command[:3] == ["shell", "settings", "put"] and not command[-1].startswith("org.locklark"):
+            if command[:3] == ["shell", "settings", "put"] and not command[-1].startswith("org.passme"):
                 raise cleanup
             return device.run(arguments, **kwargs)
         with self.run_in(gate, device, ENVIRONMENT, run), mock.patch("builtins.print"):

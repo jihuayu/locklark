@@ -3,7 +3,7 @@ package browserhost
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 	"runtime"
 	"strings"
 	"testing"

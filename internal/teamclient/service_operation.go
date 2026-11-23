@@ -5,8 +5,8 @@ import (
 	"crypto/ed25519"
 	"net/http"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 type ServiceOperation struct{ inner *serviceOperation }

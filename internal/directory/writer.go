@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // NewConfigWithWriterACL permits data-only publications by admitted writer
@@ -18,7 +18,7 @@ func NewConfigWithWriterACL(pins Pins) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := sha256.Sum256(append([]byte("locklark/team-directory/writer-acl/v1\x00"), []byte(c.scope)...))
+	h := sha256.Sum256(append([]byte("passme/team-directory/writer-acl/v1\x00"), []byte(c.scope)...))
 	c.scope = hex.EncodeToString(h[:])
 	c.writerACL = true
 	return c, nil
@@ -53,7 +53,7 @@ func BuildUpdate(c *Config, signer ed25519.PrivateKey, parent Receipt, items []v
 	if err != nil {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
 	}
-	s, err := vault.SealItems([]byte("locklark/team/items/v1/"+c.scope), items, parent.Proposal.Epoch+1, recipients, signer)
+	s, err := vault.SealItems([]byte("passme/team/items/v1/"+c.scope), items, parent.Proposal.Epoch+1, recipients, signer)
 	if err != nil {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
 	}

@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/preview"
-	proposer "github.com/jihuayu/locklark/plugins/github-pull-reader"
+	"github.com/jihuayu/passme/internal/preview"
+	proposer "github.com/jihuayu/passme/plugins/github-pull-reader"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -110,7 +110,7 @@ func Serve(ctx context.Context, c Config) error {
 		}
 		return nil
 	}
-	s := mcp.NewServer(&mcp.Implementation{Name: "locklark", Version: "0.1-preview"}, nil)
+	s := mcp.NewServer(&mcp.Implementation{Name: "passme", Version: "0.1-preview"}, nil)
 	stringType := map[string]any{"type": "string"}
 	repo := map[string]any{"type": "string", "enum": []string{p.Scope.Repo.ID}}
 	if p.Scope.Current() {
@@ -127,7 +127,7 @@ func Serve(ctx context.Context, c Config) error {
 			return result(preview.SubmitBridgeAction(c.Poll, c.Inbox, p, str(m, "request_key"), str(m, "reason"), n, plan))
 		})
 	}
-	s.AddTool(&mcp.Tool{Name: "locklark_resume", Description: "Start a read-only status challenge or read its dated, signed snapshot. A new challenge requests a fresh observation.", InputSchema: schema(map[string]any{"request_id": stringType, "review": stringType, "poll_id": stringType}, "request_id", "review")}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(&mcp.Tool{Name: "passme_resume", Description: "Start a read-only status challenge or read its dated, signed snapshot. A new challenge requests a fresh observation.", InputSchema: schema(map[string]any{"request_id": stringType, "review": stringType, "poll_id": stringType}, "request_id", "review")}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		m, ok := args(req.Params.Arguments, "request_id", "review", "poll_id")
 		if !ok || check() != nil {
 			return result(nil, rejected)
@@ -150,7 +150,7 @@ func Serve(ctx context.Context, c Config) error {
 		}
 		return result(map[string]string{"state": "awaiting-holder", "request_id": id, "poll_id": poll}, nil)
 	})
-	s.AddTool(&mcp.Tool{Name: "locklark_collect", Description: "Read the signed result already delivered to this session. Never executes an action.", InputSchema: schema(map[string]any{"request_id": stringType, "review": stringType}, "request_id", "review")}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	s.AddTool(&mcp.Tool{Name: "passme_collect", Description: "Read the signed result already delivered to this session. Never executes an action.", InputSchema: schema(map[string]any{"request_id": stringType, "review": stringType}, "request_id", "review")}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		m, ok := args(req.Params.Arguments, "request_id", "review")
 		if !ok || len(m) != 2 || check() != nil {
 			return result(nil, rejected)

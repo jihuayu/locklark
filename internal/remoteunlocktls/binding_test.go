@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/remoteunlock"
+	"github.com/jihuayu/passme/pkg/remoteunlock"
 )
 
 // All keys, certificates and recipients in this file are SYNTHETIC test data

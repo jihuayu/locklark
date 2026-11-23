@@ -23,7 +23,7 @@ class DiagnosticPrivacyTests(unittest.TestCase):
 
     def test_runtime_reports_only_owned_case_line_and_fixed_source_reason(self):
         secret = "private-fixture-canary"
-        text = "/tmp/" + secret + "/OfflineVaultFlowTests.swift:17: error: -[LocklarkUITests.OfflineVaultFlowTests testActualOfflineCreateUnlockEditRevealAndBackgroundLock] : XCTAssertTrue failed: (\"" + secret + "\") - native input must exist\n"
+        text = "/tmp/" + secret + "/OfflineVaultFlowTests.swift:17: error: -[PassmeUITests.OfflineVaultFlowTests testActualOfflineCreateUnlockEditRevealAndBackgroundLock] : XCTAssertTrue failed: (\"" + secret + "\") - native input must exist\n"
         output = diagnostics.summary(text)
         self.assertNotIn(secret, json.dumps(output))
         self.assertEqual(output["compile_diagnostics"], [])
@@ -34,14 +34,14 @@ class DiagnosticPrivacyTests(unittest.TestCase):
         self.assertEqual(diagnostics.summary(text)["runtime_diagnostics"], [])
 
     def test_unexpected_thrown_error_uses_static_method_location_only(self):
-        text = "<unknown>:0: error: -[LocklarkTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : threw private-fixture-canary"
+        text = "<unknown>:0: error: -[PassmeTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : threw private-fixture-canary"
         output = diagnostics.summary(text)
         self.assertNotIn("private-fixture-canary", json.dumps(output))
         self.assertEqual(output["runtime_diagnostics"][0]["location"], "method-declaration")
         self.assertEqual(output["runtime_diagnostics"][0]["reason"], "unexpected-error")
 
     def test_fixed_phase_does_not_publish_original_error(self):
-        text = "/tmp/CoreIntegrationTests.swift:45: error: -[LocklarkTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : failed - core-phase-default-protection private-fixture-canary"
+        text = "/tmp/CoreIntegrationTests.swift:45: error: -[PassmeTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : failed - core-phase-default-protection private-fixture-canary"
         output = diagnostics.summary(text)
         self.assertNotIn("private-fixture-canary", json.dumps(output))
         self.assertEqual(output["runtime_diagnostics"][0]["reason"], "core-phase-default-protection")
@@ -60,7 +60,7 @@ waitActionable(element, message: "prefix \(privateValue)")'''
         self.assertNotIn(r"prefix \(privateValue)", reasons)
 
     def test_capability_denial_failures_keep_only_fixed_reasons(self):
-        text = "/private/fixture/ProtectionCapabilityDenialTests.swift:19: error: -[LocklarkCapabilityTests.ProtectionCapabilityDenialTests testUnavailableCompleteProtectionIsRefusedBeforeVaultCreation] : XCTAssertThrowsError failed - product must refuse unverifiable or weaker complete protection private-fixture-canary"
+        text = "/private/fixture/ProtectionCapabilityDenialTests.swift:19: error: -[PassmeCapabilityTests.ProtectionCapabilityDenialTests testUnavailableCompleteProtectionIsRefusedBeforeVaultCreation] : XCTAssertThrowsError failed - product must refuse unverifiable or weaker complete protection private-fixture-canary"
         output = diagnostics.summary(text)
         self.assertNotIn("private-fixture-canary", json.dumps(output))
         self.assertEqual(output["runtime_diagnostics"][0]["reason"], "product must refuse unverifiable or weaker complete protection")

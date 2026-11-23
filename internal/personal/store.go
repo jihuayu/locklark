@@ -17,18 +17,18 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/onepux"
-	"github.com/jihuayu/locklark/internal/origin"
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/totp"
-	"github.com/jihuayu/locklark/internal/vault"
-	"github.com/jihuayu/locklark/internal/watchtower"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/onepux"
+	"github.com/jihuayu/passme/internal/origin"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/totp"
+	"github.com/jihuayu/passme/internal/vault"
+	"github.com/jihuayu/passme/internal/watchtower"
 	bolt "go.etcd.io/bbolt"
 )
 
-var bucket = []byte("locklark.personal/v1")
+var bucket = []byte("passme.personal/v1")
 var slotKey = []byte("device-slot")
 var snapshotKey = []byte("snapshot")
 
@@ -70,11 +70,11 @@ func FormatSecret(k []byte) string {
 	if len(k) != 16 {
 		return ""
 	}
-	return "LL1-" + b32.EncodeToString(k)
+	return "PM1-" + b32.EncodeToString(k)
 }
 func ParseSecret(s string) ([]byte, error) {
 	s = strings.ToUpper(strings.TrimSpace(s))
-	if !strings.HasPrefix(s, "LL1-") {
+	if !strings.HasPrefix(s, "PM1-") {
 		return nil, invalid
 	}
 	k, e := b32.DecodeString(s[4:])
@@ -84,7 +84,7 @@ func ParseSecret(s string) ([]byte, error) {
 	return k, nil
 }
 
-const schema = "locklark/personal/items/v1"
+const schema = "passme/personal/items/v1"
 
 func seal(b *bolt.Bucket, i identity, epoch uint64, items []vault.Item) (vault.Snapshot, error) {
 	id, e := age.ParseX25519Identity(i.Device)
@@ -123,7 +123,7 @@ func create(path, pw string, key []byte, recovered *payload) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	file, e := os.CreateTemp(filepath.Dir(path), ".locklark-personal-*")
+	file, e := os.CreateTemp(filepath.Dir(path), ".passme-personal-*")
 	if e != nil {
 		return e
 	}

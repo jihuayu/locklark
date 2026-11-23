@@ -22,7 +22,7 @@ import scripts.run_release_contracts as runner
 
 class TempModule:
     def __init__(self) -> None:
-        self.directory = tempfile.TemporaryDirectory(prefix="locklark-runner-")
+        self.directory = tempfile.TemporaryDirectory(prefix="passme-runner-")
         self.root = Path(self.directory.name)
         sys.path.insert(0, str(self.root))
         self.names: list[str] = []

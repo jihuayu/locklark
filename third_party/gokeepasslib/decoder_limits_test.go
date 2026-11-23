@@ -41,7 +41,7 @@ func limitTestDatabase(t *testing.T) *Database {
 	db := NewDatabase(WithDatabaseKDBXVersion41())
 	db.Header.FileHeaders.KdfParameters = limitTestKDF()
 	group := NewGroup()
-	group.Name = "Locklark test"
+	group.Name = "Passme test"
 	entry := NewEntry()
 	entry.Values = []ValueData{{Key: "Title", Value: V{Content: "roundtrip"}}}
 	group.Entries = []Entry{entry}

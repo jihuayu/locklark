@@ -2,7 +2,7 @@ package teamclient
 
 import (
 	"context"
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 // BootstrapStatus is unverified recorded local state, not a network freshness

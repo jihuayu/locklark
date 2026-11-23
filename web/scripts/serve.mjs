@@ -1,11 +1,11 @@
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-const path = process.env.LOCKLARK_MANAGEMENT_CONNECTION;
+const path = process.env.PASSME_MANAGEMENT_CONNECTION;
 const port = Number(process.env.PORT ?? 3417);
 if (!path || !Number.isInteger(port) || port < 1024 || port > 65535) {
   console.error(
-    "Set LOCKLARK_MANAGEMENT_CONNECTION to the private connection file.",
+    "Set PASSME_MANAGEMENT_CONNECTION to the private connection file.",
   );
   process.exit(1);
 }
@@ -13,12 +13,12 @@ try {
   // Reuse the native reader on every platform: mode bits alone cannot validate
   // Windows ACLs or the integrity of the connection file's parent directories.
   const connectionPath = resolve(path);
-  const executable = process.env.LOCKLARK_MANAGEMENT_EXECUTABLE;
+  const executable = process.env.PASSME_MANAGEMENT_EXECUTABLE;
   const raw = execFileSync(
-    executable || process.env.LOCKLARK_GO || "go",
+    executable || process.env.PASSME_GO || "go",
     executable
       ? ["--read-connection", connectionPath]
-      : ["run", "./cmd/locklark-management", "--read-connection", connectionPath],
+      : ["run", "./cmd/passme-management", "--read-connection", connectionPath],
     {
       cwd: resolve(".."),
       encoding: "utf8",
@@ -55,10 +55,10 @@ try {
         ...process.env,
         NODE_ENV: "production",
         NEXT_TELEMETRY_DISABLED: "1",
-        LOCKLARK_CONNECTION_JSON: raw,
-        LOCKLARK_WEB_CODE: code,
-        LOCKLARK_WEB_ORIGIN: origin,
-        LOCKLARK_WEB_STARTED_AT: String(Date.now()),
+        PASSME_CONNECTION_JSON: raw,
+        PASSME_WEB_CODE: code,
+        PASSME_WEB_ORIGIN: origin,
+        PASSME_WEB_STARTED_AT: String(Date.now()),
       },
     },
   );

@@ -2,8 +2,8 @@ package desktop
 
 import (
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -14,7 +14,7 @@ import (
 func TestCreationSecretCanBeCopiedAndSaved(t *testing.T) {
 	a := New()
 	a.create = true
-	a.issued = "LL1-SYNTHETIC-KEY"
+	a.issued = "PM1-SYNTHETIC-KEY"
 	clip := attachFakeClipboard(a)
 	tester := ui.NewTester(a.View, 1100, 760)
 	for _, label := range []string{"复制 Secret Key", "保存应急文件…"} {
@@ -57,9 +57,9 @@ func TestCreationSecretCanBeCopiedAndSaved(t *testing.T) {
 
 func TestUnlockOnboardingUsesTheWideDesktopWorkspace(t *testing.T) {
 	t.Run("default-centered-card", func(t *testing.T) {
-		t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "")
+		t.Setenv("PASSME_DESKTOP_LAYOUT", "")
 		a := New()
-		a.path = filepath.Join(t.TempDir(), "personal.ll")
+		a.path = filepath.Join(t.TempDir(), "personal.pm")
 		tester := ui.NewTester(a.lockView, 1600, 900)
 		card, ok := tester.Find("解锁当前设备金库")
 		if !ok {
@@ -81,7 +81,7 @@ func TestUnlockOnboardingUsesTheWideDesktopWorkspace(t *testing.T) {
 	})
 
 	t.Run("classic", func(t *testing.T) {
-		t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "classic")
+		t.Setenv("PASSME_DESKTOP_LAYOUT", "classic")
 		a := New()
 		tester := ui.NewTester(a.lockView, 1600, 900)
 		workspace, ok := tester.Find("解锁与本地安全")
@@ -100,9 +100,9 @@ func TestUnlockOnboardingUsesTheWideDesktopWorkspace(t *testing.T) {
 }
 
 func TestOnboardingSnapshot(t *testing.T) {
-	dir := os.Getenv("LOCKLARK_ONBOARDING_SNAPSHOT")
+	dir := os.Getenv("PASSME_ONBOARDING_SNAPSHOT")
 	if dir == "" {
-		t.Skip("set LOCKLARK_ONBOARDING_SNAPSHOT to render onboarding")
+		t.Skip("set PASSME_ONBOARDING_SNAPSHOT to render onboarding")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -118,11 +118,11 @@ func TestOnboardingSnapshot(t *testing.T) {
 		{"unlock", 1240, 820, false, false},
 	} {
 		a := New()
-		a.path = filepath.Join(dir, "personal.ll")
+		a.path = filepath.Join(dir, "personal.pm")
 		a.onboarding = tc.onboarding
 		a.create = tc.create
 		if tc.create {
-			a.issued = "LL1-EXAMPLEEXAMPLEEXAMPLEEXAMPL"
+			a.issued = "PM1-EXAMPLEEXAMPLEEXAMPLEEXAMPL"
 		}
 		tester := ui.NewTester(a.View, tc.width, tc.height)
 		if tc.create && !tester.HasText("保存应急文件…") {
@@ -144,7 +144,7 @@ func TestOnboardingSnapshot(t *testing.T) {
 }
 
 func TestStreamlinedCreationAutoSavesEmergencyKitWithoutSecretReentry(t *testing.T) {
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "")
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOME", home)
@@ -155,7 +155,7 @@ func TestStreamlinedCreationAutoSavesEmergencyKitWithoutSecretReentry(t *testing
 	a.deviceSecrets = newFakeDeviceSecretStore()
 
 	vaultDir := t.TempDir()
-	a.path = filepath.Join(vaultDir, "personal.ll")
+	a.path = filepath.Join(vaultDir, "personal.pm")
 	existingKit := filepath.Join(vaultDir, emergencyKitFileName)
 	if err := os.WriteFile(existingKit, []byte("existing-kit"), 0o600); err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestStreamlinedCreationAutoSavesEmergencyKitWithoutSecretReentry(t *testing
 	if a.settingsSnapshot().VaultPath != a.path {
 		t.Fatalf("Settings.VaultPath = %q, want %q", a.settingsSnapshot().VaultPath, a.path)
 	}
-	wantKit := filepath.Join(vaultDir, "Locklark-Emergency-Kit-2.txt")
+	wantKit := filepath.Join(vaultDir, "Passme-Emergency-Kit-2.txt")
 	if a.kitSavedPath != wantKit {
 		t.Fatalf("kitSavedPath = %q, want %q", a.kitSavedPath, wantKit)
 	}
@@ -195,11 +195,11 @@ func TestStreamlinedCreationAutoSavesEmergencyKitWithoutSecretReentry(t *testing
 }
 
 func TestClassicCreationStillRequiresMatchingSavedSecret(t *testing.T) {
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "classic")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "classic")
 	a := New()
 	a.launch = func(f func()) { f() }
 	a.create = true
-	a.path = filepath.Join(t.TempDir(), "vault.ll")
+	a.path = filepath.Join(t.TempDir(), "vault.pm")
 	key, err := personal.NewSecret()
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestSettingsCustomValuesRemainSelectable(t *testing.T) {
 }
 
 func TestFirstLaunchShowsOnboardingGuideWithoutCreatingVault(t *testing.T) {
-	t.Setenv("LOCKLARK_DESKTOP_LAYOUT", "")
+	t.Setenv("PASSME_DESKTOP_LAYOUT", "")
 	home := t.TempDir()
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOME", home)
@@ -294,7 +294,7 @@ func TestFirstLaunchShowsOnboardingGuideWithoutCreatingVault(t *testing.T) {
 
 	tester := ui.NewTester(a.View, 1240, 860)
 	for _, want := range []string{
-		"欢迎使用 Locklark 本地金库",
+		"欢迎使用 Passme 本地金库",
 		"1. 主密码（仅你记忆）",
 		"2. Secret Key（本机系统凭据保护）",
 		"3. 双因素派生与零知识加密",
@@ -369,7 +369,7 @@ func TestForgetDeviceUsesTwoStepConfirmationAndKeepsVaultFile(t *testing.T) {
 		t.Fatal("device secret remained after forget device")
 	}
 	if _, err := os.Stat(vaultPath); err != nil {
-		t.Fatalf("forget device deleted .ll vault file: %v", err)
+		t.Fatalf("forget device deleted .pm vault file: %v", err)
 	}
 }
 
@@ -399,9 +399,9 @@ func TestSettingsReexportEmergencyKitRequiresMasterPassword(t *testing.T) {
 }
 
 func TestSettingsSnapshot(t *testing.T) {
-	dir := os.Getenv("LOCKLARK_ONBOARDING_SNAPSHOT")
+	dir := os.Getenv("PASSME_ONBOARDING_SNAPSHOT")
 	if dir == "" {
-		t.Skip("set LOCKLARK_ONBOARDING_SNAPSHOT to render settings")
+		t.Skip("set PASSME_ONBOARDING_SNAPSHOT to render settings")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

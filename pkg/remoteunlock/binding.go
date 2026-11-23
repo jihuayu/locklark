@@ -27,7 +27,7 @@ const (
 	// BindingSignatureDomain separates the binding signature preimage from
 	// every other signed structure. The preimage is this domain followed by
 	// the canonical JSON of the binding fields without "signature".
-	BindingSignatureDomain = "locklark.remote-unlock/v1/device-transport-binding\x00"
+	BindingSignatureDomain = "passme.remote-unlock/v1/device-transport-binding\x00"
 	// MaxBindingSize is the maximum encoded or accepted size in bytes.
 	MaxBindingSize = 2048
 	// BindingSPKIDigestSize is the exact length of spki_sha256 in bytes.

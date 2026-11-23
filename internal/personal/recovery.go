@@ -11,8 +11,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"io"
 	"os"
@@ -20,7 +20,7 @@ import (
 	"strings"
 )
 
-const backupDomain = "locklark/personal/backup/v2"
+const backupDomain = "passme/personal/backup/v2"
 const maxArchive = 32 << 20
 const maxChains = 32
 
@@ -208,18 +208,18 @@ func newRecovery() (string, error) {
 		return "", err
 	}
 	defer clear(raw[:])
-	return "LLR2-" + b32.EncodeToString(raw[:]), nil
+	return "PMR2-" + b32.EncodeToString(raw[:]), nil
 }
 func kitBytes(kit string) ([]byte, error) {
 	// A seed is only used while preparing a backup. Only the complete
 	// 110-character seed + checkpoint material is accepted for restoration.
-	if strings.HasPrefix(kit, "LLR1-") {
+	if strings.HasPrefix(kit, "PMR1-") {
 		return nil, ErrLegacyRecovery
 	}
 	if len(kit) == 110 && kit[57] == '-' {
 		kit = kit[:57]
 	}
-	if len(kit) != 57 || !strings.HasPrefix(kit, "LLR2-") {
+	if len(kit) != 57 || !strings.HasPrefix(kit, "PMR2-") {
 		return nil, invalid
 	}
 	raw, err := b32.DecodeString(kit[5:])
@@ -231,7 +231,7 @@ func kitBytes(kit string) ([]byte, error) {
 }
 
 func recoveryCheckpoint(kit string) ([]byte, error) {
-	if strings.HasPrefix(kit, "LLR1-") {
+	if strings.HasPrefix(kit, "PMR1-") {
 		return nil, ErrLegacyRecovery
 	}
 	if len(kit) != 110 || kit[57] != '-' {
@@ -554,7 +554,7 @@ func PrepareBackup(src, dest, pw string, key []byte) (*BackupPreparation, error)
 	} else if !os.IsNotExist(e) {
 		return nil, e
 	}
-	f, e := os.CreateTemp(filepath.Dir(dest), ".locklark-backup-*")
+	f, e := os.CreateTemp(filepath.Dir(dest), ".passme-backup-*")
 	if e != nil {
 		return nil, e
 	}
@@ -628,7 +628,7 @@ func PrepareRestore(src, dest, pw string, oldKey []byte, kit string) (*Restorati
 	} else if !os.IsNotExist(e) {
 		return nil, e
 	}
-	f, e := os.CreateTemp(filepath.Dir(dest), ".locklark-preflight-*")
+	f, e := os.CreateTemp(filepath.Dir(dest), ".passme-preflight-*")
 	if e != nil {
 		return nil, e
 	}

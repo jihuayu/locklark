@@ -13,7 +13,7 @@ from personal_acceptance import invoke
 def check(binary, legacy=None):
     with tempfile.TemporaryDirectory() as tmp:
         root = pathlib.Path(tmp)
-        path, source = str(root / "owner.ll"), root / "private-source.1pux"
+        path, source = str(root / "owner.pm"), root / "private-source.1pux"
         pw = "synthetic-master-" + os.urandom(8).hex()
         _, key = invoke(legacy or binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                         ("重新输入刚保存的 Secret Key", None)], issue=True)

@@ -232,7 +232,7 @@ class OracleConnection(socketserver.BaseRequestHandler):
                                 "selected_token_matches": authorized, "tls13": secure.version() == "TLSv1.3"})
             require(authorized and version == "HTTP/1.1", "oracle-request-auth-or-version-mismatch")
             if path == "/user" and method == "GET":
-                status, response = "200 OK", {"login": "locklark-owned-fixture", "id": 8675309}
+                status, response = "200 OK", {"login": "passme-owned-fixture", "id": 8675309}
             elif path == "/owned-denied" and method == "GET":
                 status, response = "403 Forbidden", {"message": "owned fixture refusal"}
             elif path == "/owned-stdin" and method == "POST":
@@ -258,7 +258,7 @@ class Acceptance:
         self.cli = str(pathlib.Path(args.cli).absolute())
         self.gh = str(pathlib.Path(args.gh).absolute())
         self.wrapper = pathlib.Path(args.fixture_bin).absolute() if args.fixture_bin else self.root / "trusted-gh-fixture"
-        self.vault = self.root / "personal.ll"
+        self.vault = self.root / "personal.pm"
         self.master = self.secret("Master")
         self.token = self.secret("ghp_")
         self.poison = self.secret("ParentOnly")
@@ -355,7 +355,7 @@ class Acceptance:
                 self.failure_metadata["prompts_observed"] = self.failure_metadata.get("prompts_observed", 0) + 1
                 require(not termios.tcgetattr(slave)[3] & termios.ECHO, "invoke-hidden-input-echo-enabled")
                 if value is None:
-                    match = re.search(rb"LL1-[A-Z2-7]{26}", terminal)
+                    match = re.search(rb"PM1-[A-Z2-7]{26}", terminal)
                     require(issue and match is not None, "invoke-issued-key-malformed")
                     value = issued = match.group().decode()
                     self.values.append(value)
@@ -449,7 +449,7 @@ class Acceptance:
         self.item = next(row for row in json.loads(rows) if row["id"] == added["id"])
         self.stage = "gh-success"
         out, _, record, count = self.request("success", ["api", "/user", "--jq", ".login"])
-        require(out == b"locklark-owned-fixture\n" and record.exists() and count == 1, "gh-success-output-or-receipt-mismatch")
+        require(out == b"passme-owned-fixture\n" and record.exists() and count == 1, "gh-success-output-or-receipt-mismatch")
         self.mark("actual_gh_selected_token_tls13_stdout_and_child_only_environment")
         self.stage = "gh-error"
         out, error, _, count = self.request("http-error", ["api", "/owned-denied"], expected=1)
@@ -521,7 +521,7 @@ def main(argv=None):
     parser.add_argument("--gh", default="/usr/bin/gh")
     parser.add_argument("--go", default="go")
     parser.add_argument("--fixture-bin", help="independently fixed trusted fixture executable")
-    parser.add_argument("--artifacts", default="/tmp/locklark-validation")
+    parser.add_argument("--artifacts", default="/tmp/passme-validation")
     args = parser.parse_args(argv)
     os.umask(0o077)
     acceptance, success, failure_code = None, False, None

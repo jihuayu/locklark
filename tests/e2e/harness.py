@@ -1,11 +1,11 @@
-"""Opaque-box E2E harness for the Locklark M5 test track.
+"""Opaque-box E2E harness for the Passme M5 test track.
 
-The harness deliberately speaks to Locklark only through user-facing
+The harness deliberately speaks to Passme only through user-facing
 interfaces: the CLI (through a POSIX PTY when private prompts are involved),
 the browser native-messaging hosts (4-byte native-endian length-prefixed JSON),
 the browser-extension build script, and Node.js child processes.
 
-No test helper imports Locklark's Go packages or reaches into private state.
+No test helper imports Passme's Go packages or reaches into private state.
 """
 
 from __future__ import annotations
@@ -42,13 +42,13 @@ VALID_TIERS = (1, 2, 3, 4)
 COVERAGE_KINDS = ("functional", "capability_probe", "component_contract")
 VALID_FEATURES = tuple(f"F{i}" for i in range(1, 18))
 CHROMIUM_EXT_ORIGIN = "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/"
-FIREFOX_EXT_ID = "browser@locklark.local"
-SECRET_KEY_RE = re.compile(rb"LL1-[A-Z2-7]{26}")
+FIREFOX_EXT_ID = "browser@passme.local"
+SECRET_KEY_RE = re.compile(rb"PM1-[A-Z2-7]{26}")
 RECOVERY_KIT_RE = re.compile(
-    rb"(?:LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})"
+    rb"(?:PMR2-[A-Z2-7]{52}-[A-Z2-7]{52}|PMR1-[A-Z2-7]{52})"
 )
 ISSUED_TOKEN_RE = re.compile(
-    rb"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})"
+    rb"(?:PM1-[A-Z2-7]{26}|PMR2-[A-Z2-7]{52}-[A-Z2-7]{52}|PMR1-[A-Z2-7]{52})"
 )
 
 # The native messaging limit in internal/browserhost/protocol.go.
@@ -56,11 +56,11 @@ _MAX_NATIVE_FRAME = 256 << 10
 _E2E_BIN_NAME = "e2e-bin"
 PREBUILT_EXTENSION_ERROR = "prebuilt browser extension input rejected"
 PREBUILT_ENV_KEYS = (
-    "LOCKLARK_BROWSER_REQUIRE_PREBUILT",
-    "LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR",
-    "LOCKLARK_BROWSER_EXTENSION_CHROMIUM",
-    "LOCKLARK_BROWSER_EXTENSION_FIREFOX",
-    "LOCKLARK_BROWSER_EXTENSION_SAFARI",
+    "PASSME_BROWSER_REQUIRE_PREBUILT",
+    "PASSME_BROWSER_EXTENSION_PREPARED_DIR",
+    "PASSME_BROWSER_EXTENSION_CHROMIUM",
+    "PASSME_BROWSER_EXTENSION_FIREFOX",
+    "PASSME_BROWSER_EXTENSION_SAFARI",
 )
 
 
@@ -269,14 +269,14 @@ _EXTENSION_BUILD_CACHE: dict[str, tuple[Path, Path]] = {}
 
 def _go_build_targets(repo_root: Path) -> list[tuple[str, str]]:
     targets = [
-        ("locklark", "./cmd/locklark"),
-        ("locklark-browser-chromium", "./cmd/locklark-browser-chromium"),
-        ("locklark-browser-firefox", "./cmd/locklark-browser-firefox"),
-        ("locklark-browser-register", "./cmd/locklark-browser-register"),
-        ("locklark-desktop", "./cmd/locklark-desktop"),
+        ("passme", "./cmd/passme"),
+        ("passme-browser-chromium", "./cmd/passme-browser-chromium"),
+        ("passme-browser-firefox", "./cmd/passme-browser-firefox"),
+        ("passme-browser-register", "./cmd/passme-browser-register"),
+        ("passme-desktop", "./cmd/passme-desktop"),
     ]
-    if (repo_root / "cmd" / "locklark-team-sync").is_dir():
-        targets.append(("locklark-team-sync", "./cmd/locklark-team-sync"))
+    if (repo_root / "cmd" / "passme-team-sync").is_dir():
+        targets.append(("passme-team-sync", "./cmd/passme-team-sync"))
     return targets
 
 
@@ -402,9 +402,9 @@ def owned_gui_command(
     launch is wrapped in a fixed fd topology (no shell interpolation, every
     argument supplied through argv):
 
-    ``sh -c OWNED_SESSION_WRAPPER locklark-session`` moves stdout to fd 9 and
+    ``sh -c OWNED_SESSION_WRAPPER passme-session`` moves stdout to fd 9 and
     redirects fd 1 to stderr, then runs ``dbus-run-session -- xvfb-run ...
-    sh -c OWNED_TARGET_WRAPPER locklark-native <target>`` so only the actual
+    sh -c OWNED_TARGET_WRAPPER passme-native <target>`` so only the actual
     host gets the original stdout pipe back.  A supplied usable
     DBUS_SESSION_BUS_ADDRESS is preserved untouched (its services are already
     externally owned), and an empty address is treated as absent.
@@ -431,12 +431,12 @@ def owned_gui_command(
             )
     if xvfb is None and dbus is None:
         return target
-    chain = ["sh", "-c", OWNED_TARGET_WRAPPER, "locklark-native", *target]
+    chain = ["sh", "-c", OWNED_TARGET_WRAPPER, "passme-native", *target]
     if xvfb is not None:
         chain = [xvfb, *XVFB_ARGS, *chain]
     if dbus is not None:
         chain = [dbus, "--", *chain]
-    return ["sh", "-c", OWNED_SESSION_WRAPPER, "locklark-session", *chain]
+    return ["sh", "-c", OWNED_SESSION_WRAPPER, "passme-session", *chain]
 
 
 def first_native_frame_end(data: bytes) -> int | None:
@@ -645,12 +645,12 @@ class E2EContext:
         self.temp_dir.mkdir(mode=0o700, exist_ok=False)
         os.chmod(self.temp_dir, 0o700)
 
-        self.locklark_bin = self.bin_dir / "locklark"
-        self.browser_chromium_bin = self.bin_dir / "locklark-browser-chromium"
-        self.browser_firefox_bin = self.bin_dir / "locklark-browser-firefox"
-        self.browser_register_bin = self.bin_dir / "locklark-browser-register"
-        self.desktop_bin = self.bin_dir / "locklark-desktop"
-        team_sync = self.bin_dir / "locklark-team-sync"
+        self.passme_bin = self.bin_dir / "passme"
+        self.browser_chromium_bin = self.bin_dir / "passme-browser-chromium"
+        self.browser_firefox_bin = self.bin_dir / "passme-browser-firefox"
+        self.browser_register_bin = self.bin_dir / "passme-browser-register"
+        self.desktop_bin = self.bin_dir / "passme-desktop"
+        team_sync = self.bin_dir / "passme-team-sync"
         self.team_sync_bin: Path | None = team_sync if _executable(team_sync) else None
         # Sanitized, small evidence a test may add to the JSON report.
         self.evidence: dict[str, Any] | None = None
@@ -695,7 +695,7 @@ class E2EContext:
         timeout: float = 15.0,
         binary: Path | str | None = None,
     ) -> CLIResult:
-        executable = Path(binary) if binary is not None else self.locklark_bin
+        executable = Path(binary) if binary is not None else self.passme_bin
         string_args = [str(arg) for arg in args]
         command = [str(executable), *string_args]
         proc = subprocess.run(
@@ -732,7 +732,7 @@ class E2EContext:
     ) -> PTYResult:
         """Run the CLI with a real POSIX PTY and answer hidden prompts.
 
-        Prompts are emitted by Locklark on stderr.  The PTY slave is therefore
+        Prompts are emitted by Passme on stderr.  The PTY slave is therefore
         attached to stderr (and to stdin unless pipe input is requested), while
         stdout remains a normal pipe for the JSON receipt.  ``answer=None``
         means "re-use the most recently issued Secret Key / Recovery Kit",
@@ -740,7 +740,7 @@ class E2EContext:
         """
 
         ensure_vm_temp_root()
-        executable = Path(binary) if binary is not None else self.locklark_bin
+        executable = Path(binary) if binary is not None else self.passme_bin
         command = [str(executable), *[str(arg) for arg in args]]
         proc_env = self._child_env(env)
 
@@ -966,7 +966,7 @@ class E2EContext:
         master_password: str = "correct-horse-battery-staple-2026",
     ) -> tuple[Path, str, str]:
         if vault_path is None:
-            path = self.temp_dir / f"vault-{uuid.uuid4().hex[:8]}.ll"
+            path = self.temp_dir / f"vault-{uuid.uuid4().hex[:8]}.pm"
         else:
             path = Path(vault_path)
         result = self.run_pty_cli(
@@ -1075,7 +1075,7 @@ class E2EContext:
                 # ValidateLaunch only inspects the canonical absolute path and
                 # extension ID; the host itself does not need to read the file.
                 launch_args = [
-                    str(self.temp_dir / "org.locklark.browser.json"),
+                    str(self.temp_dir / "org.passme.browser.json"),
                     FIREFOX_EXT_ID,
                 ]
 
@@ -1205,18 +1205,18 @@ class E2EContext:
     def _prebuilt_extension_paths(self) -> tuple[Path, Path] | None:
         if not prebuilt_env_configured():
             return None
-        if os.environ.get("LOCKLARK_BROWSER_REQUIRE_PREBUILT") != "1":
+        if os.environ.get("PASSME_BROWSER_REQUIRE_PREBUILT") != "1":
             raise AssertionError(PREBUILT_EXTENSION_ERROR)
-        prepared = os.environ.get("LOCKLARK_BROWSER_EXTENSION_PREPARED_DIR", "")
-        chromium = os.environ.get("LOCKLARK_BROWSER_EXTENSION_CHROMIUM", "")
-        firefox = os.environ.get("LOCKLARK_BROWSER_EXTENSION_FIREFOX", "")
+        prepared = os.environ.get("PASSME_BROWSER_EXTENSION_PREPARED_DIR", "")
+        chromium = os.environ.get("PASSME_BROWSER_EXTENSION_CHROMIUM", "")
+        firefox = os.environ.get("PASSME_BROWSER_EXTENSION_FIREFOX", "")
         if not prepared or not chromium or not firefox:
             raise AssertionError(PREBUILT_EXTENSION_ERROR)
         if not all(Path(value).is_absolute() for value in (prepared, chromium, firefox)):
             raise AssertionError(PREBUILT_EXTENSION_ERROR)
         checks = [("chromium", chromium), ("firefox", firefox)]
-        if "LOCKLARK_BROWSER_EXTENSION_SAFARI" in os.environ:
-            safari = os.environ.get("LOCKLARK_BROWSER_EXTENSION_SAFARI", "")
+        if "PASSME_BROWSER_EXTENSION_SAFARI" in os.environ:
+            safari = os.environ.get("PASSME_BROWSER_EXTENSION_SAFARI", "")
             if not safari or not Path(safari).is_absolute():
                 raise AssertionError(PREBUILT_EXTENSION_ERROR)
             checks.append(("safari", safari))

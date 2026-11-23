@@ -10,11 +10,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
-var bucket = []byte("locklark.team-directory/v1")
+var bucket = []byte("passme.team-directory/v1")
 var recordsKey = []byte("records")
 var snapshotKey = []byte("snapshot")
 
@@ -239,7 +239,7 @@ func Create(path string, c *Config, sequencer ed25519.PrivateKey, p Proposal, s 
 	if authorized(c, sequencer, p, s) != nil || p.Parent != c.Genesis() || p.Mode != "active" {
 		return Receipt{}, ErrInvalid
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".locklark-directory-*")
+	f, err := os.CreateTemp(filepath.Dir(path), ".passme-directory-*")
 	if err != nil {
 		return Receipt{}, ErrStorage
 	}

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 type fixture struct {
@@ -69,7 +69,7 @@ func setup() {
 	check(err == nil)
 	defer clear(key)
 	f.Key = personal.FormatSecret(key)
-	path := filepath.Join(root, "vault.ll")
+	path := filepath.Join(root, "vault.pm")
 	fixturePhase = "vault-create"
 	check(personal.Create(path, f.Master, key) == nil)
 	fixturePhase = "vault-login"
@@ -83,8 +83,8 @@ func setup() {
 	fmt.Println(root) // Only the owned evidence path, never a factor.
 }
 func cliArgs(root, executable, label string, f fixture) []string {
-	return []string{"personal", "run-cli", "--file", filepath.Join(root, "vault.ll"), "--id", f.ID,
-		"--revision", f.Revision, "--profile", "token", "--name", "LOCKLARK_TEST_TOKEN", "--cwd", root,
+	return []string{"personal", "run-cli", "--file", filepath.Join(root, "vault.pm"), "--id", f.ID,
+		"--revision", f.Revision, "--profile", "token", "--name", "PASSME_TEST_TOKEN", "--cwd", root,
 		"--timeout", "15", "--", executable, "child", root, filepath.Dir(root), label}
 }
 func launch(root, cli, label string) {
@@ -193,7 +193,7 @@ func child(root, parent, label string) {
 	// public parent argument is part of the exact approved command. RunCLI's
 	// isolated USERPROFILE/LOCALAPPDATA must not reinterpret that location.
 	if err := privateRootAt(root, parent); err != nil {
-		fmt.Fprintln(os.Stderr, "LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code="+privateRootFailure(err))
+		fmt.Fprintln(os.Stderr, "PASSME_WINDOWS_CHILD_ROOT=REFUSED code="+privateRootFailure(err))
 		panic("owned child artifact policy refused")
 	}
 	f := readValidatedFixture(root)
@@ -203,7 +203,7 @@ func child(root, parent, label string) {
 	data, err := io.ReadAll(io.LimitReader(os.Stdin, 1024))
 	check(err == nil)
 	allowed := map[string]bool{}
-	for _, name := range []string{"LOCKLARK_TEST_TOKEN", "SYSTEMROOT", "PATH", "HOME", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR", "TMP", "TEMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"} {
+	for _, name := range []string{"PASSME_TEST_TOKEN", "SYSTEMROOT", "PATH", "HOME", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR", "TMP", "TEMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"} {
 		allowed[name] = true
 	}
 	environment := len(os.Environ()) == len(allowed)
@@ -214,7 +214,7 @@ func child(root, parent, label string) {
 		}
 	}
 	writeJSON(filepath.Join(root, label+"-child.json"), map[string]any{
-		"token_matches": os.Getenv("LOCKLARK_TEST_TOKEN") == f.Token,
+		"token_matches": os.Getenv("PASSME_TEST_TOKEN") == f.Token,
 		"stdin_matches": string(data) == "owned Windows stdin marker\n",
 		"stdin_pipe":    isPipe(os.Stdin), "stdout_pipe": isPipe(os.Stdout), "stderr_pipe": isPipe(os.Stderr),
 		"stdio_are_pipes":          isPipe(os.Stdin) && isPipe(os.Stdout) && isPipe(os.Stderr),
@@ -233,7 +233,7 @@ func audit(root string) {
 	key, err := personal.ParseSecret(f.Key)
 	check(err == nil)
 	defer clear(key)
-	events, err := personal.Audit(filepath.Join(root, "vault.ll"), f.Master, key)
+	events, err := personal.Audit(filepath.Join(root, "vault.pm"), f.Master, key)
 	check(err == nil)
 	count := 0
 	for _, event := range events {

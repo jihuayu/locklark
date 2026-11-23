@@ -56,8 +56,8 @@ const pairConsentMinDifferingBits = 96
 
 const (
 	// pairConsentSignedJSON is the exact signed tuple both endpoints sign.
-	pairConsentSignedJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}`
-	pairConsentJSON       = `{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}`
+	pairConsentSignedJSON = `{"format":"passme.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"wzGWWPWzT78cfjw3sljUnBI0CPt97xQF_4EggiNt2f4","device_b_id":"device-b","device_b_binding_sha256":"fc3DIVp-ABjofhxXsH0_VIQMrATpzTLpdXee5OFFbnk","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}`
+	pairConsentJSON       = `{"format":"passme.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"wzGWWPWzT78cfjw3sljUnBI0CPt97xQF_4EggiNt2f4","device_b_id":"device-b","device_b_binding_sha256":"fc3DIVp-ABjofhxXsH0_VIQMrATpzTLpdXee5OFFbnk","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"kZz_KF07acBU51YA_gR22fTVrD0mSfBsRQGr9b4gt65r6kH36TQGhxPrcAE1_xAZn2EJS2EyNivke9JIHInGBQ","device_b_signature":"qr8DqL5O3m7oxauAA4DMBRouk9Jc-EF0VNGmmQk8DMgzc-KQuqIHssXRpeqyyjQgUlJXuEeHQlq0-gW-864SAQ"}`
 
 	pairConsentKeyA = "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0"
 	pairConsentKeyB = "P3cI1fXMK8YztZ0rOi7ZLnR5IgxvCK3iCL682FgKuTs"
@@ -239,8 +239,8 @@ func TestPairConsentFixedSyntheticVector(t *testing.T) {
 	if string(encoded) != pairConsentJSON {
 		t.Fatalf("canonical encoding mismatch\n got: %s\nwant: %s", encoded, pairConsentJSON)
 	}
-	if len(encoded) != 638 || len(encoded) > MaxPairConsentSize {
-		t.Fatalf("vector uses %d bytes, want 638 within budget %d", len(encoded), MaxPairConsentSize)
+	if len(encoded) != 636 || len(encoded) > MaxPairConsentSize {
+		t.Fatalf("vector uses %d bytes, want 636 within budget %d", len(encoded), MaxPairConsentSize)
 	}
 
 	parsed, err := ParsePairConsent([]byte(pairConsentJSON))
@@ -262,8 +262,8 @@ func TestPairConsentFixedSyntheticVector(t *testing.T) {
 	if string(preimage) != wantPreimage {
 		t.Fatalf("signature preimage mismatch\n got: %q\nwant: %q", preimage, wantPreimage)
 	}
-	if len(preimage) != 457 {
-		t.Fatalf("preimage length = %d, want 457", len(preimage))
+	if len(preimage) != 453 {
+		t.Fatalf("preimage length = %d, want 453", len(preimage))
 	}
 	// Both endpoints signed the one preimage; the signatures must be real
 	// Ed25519 outputs distinct from each other.
@@ -497,9 +497,9 @@ func TestPairConsentMaximumLegalEncoding(t *testing.T) {
 		t.Fatalf("EncodePairConsent(maximum): %v", err)
 	}
 	// 6 identifiers x 128 + uint64 maximum (20) + int64 maximum (19) +
-	// 2 digests x 43 + 2 signatures x 86 + 307 bytes of constant schema text.
-	const maxLegal = 6*128 + 20 + 19 + 2*43 + 2*86 + 307
-	if maxLegal != 1372 || len(encoded) != maxLegal || maxLegal > MaxPairConsentSize {
+	// 2 digests x 43 + 2 signatures x 86 + 305 bytes of constant schema text.
+	const maxLegal = 6*128 + 20 + 19 + 2*43 + 2*86 + 305
+	if maxLegal != 1370 || len(encoded) != maxLegal || maxLegal > MaxPairConsentSize {
 		t.Fatalf("maximum encoding is %d bytes, want %d within %d", len(encoded), maxLegal, MaxPairConsentSize)
 	}
 	parsed, err := ParsePairConsent(encoded)
@@ -511,8 +511,8 @@ func TestPairConsentMaximumLegalEncoding(t *testing.T) {
 	}
 	// The signed tuple alone stays well inside the same bound.
 	preimage, err := PairConsentSigningBytes(c)
-	if err != nil || len(preimage) != 1191 {
-		t.Fatalf("PairConsentSigningBytes = %d bytes, %v; want 1191", len(preimage), err)
+	if err != nil || len(preimage) != 1187 {
+		t.Fatalf("PairConsentSigningBytes = %d bytes, %v; want 1187", len(preimage), err)
 	}
 }
 
@@ -539,20 +539,33 @@ func consentDropMember(json, member string) string {
 }
 
 func TestPairConsentParseRejectsNonCanonicalInput(t *testing.T) {
-	// The last base64url character of the device b signature ("Q") carries
-	// only two significant bits. "R" shares those bits but not the rest, so
-	// the lenient decoder yields the same 64 bytes while strict decoding and
-	// the canonical re-encode reject it.
-	mutatedSigB := strings.Replace(pairConsentJSON, `CeBQ"`, `CeBR"`, 1)
+	vector := pairConsentVector(t)
+	bindingA := base64.RawURLEncoding.EncodeToString(vector.DeviceABindingSHA256[:])
+	bindingB := base64.RawURLEncoding.EncodeToString(vector.DeviceBBindingSHA256[:])
+	sigA := base64.RawURLEncoding.EncodeToString(vector.DeviceASignature[:])
+	// The last base64url character of the device b signature carries only
+	// four significant bits; its low two padding bits must be zero. Replace
+	// it with a character sharing the high four bits but setting padding
+	// bits, so the lenient decoder yields the same 64 bytes while strict
+	// decoding and the canonical re-encode reject it.
+	const sigBKey = `"device_b_signature":"`
+	start := strings.Index(pairConsentJSON, sigBKey) + len(sigBKey)
+	end := start + 86
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := pairConsentJSON[end-1]
+	idx := strings.IndexByte(alphabet, last)
+	if idx < 0 {
+		t.Fatalf("unexpected device b signature character %q", last)
+	}
+	mutated := byte(alphabet[(idx&^3)|1])
+	mutatedSigB := pairConsentJSON[:end-1] + string(mutated) + pairConsentJSON[end:]
 	if mutatedSigB == pairConsentJSON {
 		t.Fatal("trailing-bits mutation did not apply")
 	}
 	// The rewritten spelling still decodes to exactly the pinned signature
 	// bytes with the lenient decoder, while the strict decoder rejects it:
 	// only the canonical-spelling re-encode can catch it.
-	const sigBKey = `"device_b_signature":"`
 	spelled := strings.TrimSpace(strings.TrimRight(mutatedSigB[strings.Index(mutatedSigB, sigBKey)+len(sigBKey):], "}`\""))
-	vector := pairConsentVector(t)
 	mutatedRaw, err := base64.RawURLEncoding.DecodeString(spelled)
 	if err != nil || !bytes.Equal(mutatedRaw, vector.DeviceBSignature[:]) {
 		t.Fatalf("mutated device b spelling does not decode to the vector signature: %v", err)
@@ -589,7 +602,7 @@ func TestPairConsentParseRejectsNonCanonicalInput(t *testing.T) {
 		{"missing generation", consentDropMember(pairConsentJSON, "pair_generation"), "pair_generation"},
 		{"missing device a digest", consentDropMember(pairConsentJSON, "device_a_binding_sha256"), "device_a_binding_sha256"},
 		{"wrong kind", strings.Replace(pairConsentJSON, `"kind":"pair-consent"`, `"kind":"channel-binding-context"`, 1), "kind"},
-		{"wrong format", strings.Replace(pairConsentJSON, `"format":"locklark.remote-unlock"`, `"format":"locklark.remote-unlock2"`, 1), "format"},
+		{"wrong format", strings.Replace(pairConsentJSON, `"format":"passme.remote-unlock"`, `"format":"passme.remote-unlock2"`, 1), "format"},
 		{"version 2", strings.Replace(pairConsentJSON, `"version":1`, `"version":2`, 1), "version"},
 		{"version string", strings.Replace(pairConsentJSON, `"version":1`, `"version":"1"`, 1), "version"},
 		{"generation leading zero", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":00`, 1), "pair_generation"},
@@ -606,12 +619,12 @@ func TestPairConsentParseRejectsNonCanonicalInput(t *testing.T) {
 		{"deadline quoted", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":"1800000000000"`, 1), "deadline_unix_ms"},
 		{"identical endpoints", strings.Replace(pairConsentJSON, `"device_b_id":"device-b"`, `"device_b_id":"device-a"`, 1), "device_b_id"},
 		{"reversed endpoints", strings.Replace(strings.Replace(pairConsentJSON, `"device_a_id":"device-a"`, `"device_a_id":"device-z"`, 1), `"device_b_id":"device-b"`, `"device_b_id":"device-y"`, 1), "device_b_id"},
-		{"device a digest short", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ"`, `"device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbT"`, 1), "device_a_binding_sha256"},
-		{"device b digest long", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU"`, `"device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZUAA"`, 1), "device_b_binding_sha256"},
-		{"device a digest padded", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ"`, `"device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ="`, 1), "device_a_binding_sha256"},
-		{"device b digest standard alphabet", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU"`, `"device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZ+/"`, 1), "device_b_binding_sha256"},
-		{"device a signature short", strings.Replace(pairConsentJSON, `"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA"`, `"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pA"`, 1), "device_a_signature"},
-		{"device a signature long", strings.Replace(pairConsentJSON, `"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA"`, `"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAAA"`, 1), "device_a_signature"},
+		{"device a digest short", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"`+bindingA+`"`, `"device_a_binding_sha256":"`+bindingA[:len(bindingA)-1]+`"`, 1), "device_a_binding_sha256"},
+		{"device b digest long", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"`+bindingB+`"`, `"device_b_binding_sha256":"`+bindingB+`AA"`, 1), "device_b_binding_sha256"},
+		{"device a digest padded", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"`+bindingA+`"`, `"device_a_binding_sha256":"`+bindingA+`="`, 1), "device_a_binding_sha256"},
+		{"device b digest standard alphabet", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"`+bindingB+`"`, `"device_b_binding_sha256":"`+bindingB[:len(bindingB)-2]+`+/"`, 1), "device_b_binding_sha256"},
+		{"device a signature short", strings.Replace(pairConsentJSON, `"device_a_signature":"`+sigA+`"`, `"device_a_signature":"`+sigA[:len(sigA)-1]+`"`, 1), "device_a_signature"},
+		{"device a signature long", strings.Replace(pairConsentJSON, `"device_a_signature":"`+sigA+`"`, `"device_a_signature":"`+sigA+`A"`, 1), "device_a_signature"},
 		{"non-zero trailing bits", mutatedSigB, "device_b_signature"},
 		{"trailing comma", strings.Replace(pairConsentJSON, `"device_b_signature":`, `"device_b_signature":"",`, 1), "device_b_signature"},
 		{"escaped device id", strings.Replace(pairConsentJSON, `"device_a_id":"device-a"`, `"device_a_id":"device\u002da"`, 1), "device_a_id"},
@@ -633,13 +646,15 @@ func TestPairConsentParseRejectsNonCanonicalInput(t *testing.T) {
 
 func TestPairConsentParseRejectsStructuralDamage(t *testing.T) {
 	valid := []byte(pairConsentJSON)
+	vector := pairConsentVector(t)
+	bindingA := base64.RawURLEncoding.EncodeToString(vector.DeviceABindingSHA256[:])
 	inputs := map[string][]byte{
 		"invalid utf8":        []byte("{\"format\":\"\xff\xfe\"}"),
 		"single quote keys":   []byte(strings.Replace(pairConsentJSON, `"format":`, `'format':`, 1)),
 		"nul after value":     append([]byte(pairConsentJSON), 0x00),
 		"tab between members": bytes.Replace(valid, []byte(`,"kind"`), []byte(",\t\"kind\""), 1),
 		"null member value":   []byte(strings.Replace(pairConsentJSON, `"challenge_id":"challenge-0001"`, `"challenge_id":null`, 1)),
-		"array digest":        []byte(strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ"`, `"device_a_binding_sha256":[]`, 1)),
+		"array digest":        []byte(strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"`+bindingA+`"`, `"device_a_binding_sha256":[]`, 1)),
 		"uppercase id":        []byte(strings.Replace(pairConsentJSON, `"pair_id":"pair-0001"`, `"pair_id":"PAIR-0001"`, 1)),
 	}
 	for name, in := range inputs {
@@ -703,7 +718,8 @@ func TestPairConsentErrorsNeverContainValues(t *testing.T) {
 		}
 	}
 
-	_, err := ParsePairConsent([]byte(strings.Replace(pairConsentJSON, `"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA"`, `"device_a_signature":"0DvVrOuuYtJfLYFbfmseG2NA_OI1aTfAuRYLEHBPkirdneF6dC2wHzPfNmJuyMae6lbLehncTFcb_W1gvySxBy"`, 1)))
+	sigA := base64.RawURLEncoding.EncodeToString(c.DeviceASignature[:])
+	_, err := ParsePairConsent([]byte(strings.Replace(pairConsentJSON, `"device_a_signature":"`+sigA+`"`, `"device_a_signature":"`+sigA[:len(sigA)-1]+`"`, 1)))
 	check(t, err)
 	_, err = ParsePairConsent([]byte(strings.Replace(pairConsentJSON, `"kind":"pair-consent"`, `"kind":"pair-consent-x"`, 1)))
 	check(t, err)

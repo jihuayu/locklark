@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -257,7 +257,7 @@ func TestRebaseAndPrepareLifecycle(t *testing.T) {
 		t.Fatal("audit record was not written")
 	}
 	if !bytes.Equal(raw, encodeRebaseAudit(wantAudit)) {
-		t.Fatal("audit value is not the LLVA v1 encoding of the expected record")
+		t.Fatal("audit value is not the PMVA v1 encoding of the expected record")
 	}
 	if _, err := j.LoadRebaseAudit(old.Generation); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("LoadRebaseAudit(old generation) = %v, want ErrEmpty", err)
@@ -342,8 +342,8 @@ func TestRebaseAndPrepareFullStateCAS(t *testing.T) {
 	}
 }
 
-// TestRebaseAndPrepareRejectsPendingRecords proves a legacy LLVJ proposal, a
-// prepared LLVP proposal, and either key stored as a nested bucket are refused
+// TestRebaseAndPrepareRejectsPendingRecords proves a legacy PMVJ proposal, a
+// prepared PMVP proposal, and either key stored as a nested bucket are refused
 // as pending work, with every existing raw byte unchanged.
 func TestRebaseAndPrepareRejectsPendingRecords(t *testing.T) {
 	t.Run("legacy proposal value", func(t *testing.T) {
@@ -809,7 +809,7 @@ func TestRebaseAuditDecoderRejectsMalformed(t *testing.T) {
 			binary.BigEndian.PutUint64(r[6:14], math.MaxUint64)
 			return resealAudit(r)
 		}(),
-		// The LLVJ, LLVS and LLVP digests are not accepted for an audit.
+		// The PMVJ, PMVS and PMVP digests are not accepted for an audit.
 		"proposal-domain": func() []byte {
 			r := clone()
 			sum := recordDigestOf(r[:len(r)-auditDigest])

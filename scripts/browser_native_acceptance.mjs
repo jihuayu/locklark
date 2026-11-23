@@ -48,7 +48,7 @@ import {
   manifestExtensionId,
 } from "./browser_edge_install.mjs";
 
-const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+const checkoutFrames = process.env.PASSME_TEST_CHECKOUT_FRAMES === "1";
 // Opt-in normal-checkout startup markers on the existing stdout: a fixed
 // prefix and one fixed phase, printed only at its real launch boundary.
 const CHECKOUT_STARTUP_PREFIX = "Native checkout startup: ";
@@ -69,14 +69,14 @@ function startupMarkup(index) {
 }
 // Explicit opt-in: a QuickFill=false action row opens one persistent route tab
 // and its native per-operation approval, instead of the long default journeys.
-const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
+const routeDetailRead = process.env.PASSME_TEST_ROUTE_DETAIL_READ === "1";
 // Opt-in on top of the route detail mode only: after every existing physical
 // route switch/reload/no-prompt assertion has passed, one ordinary route
 // journey is left idle through its full two-minute route TTL and must then be
 // fully wiped. It never changes what the default route mode runs, and any
 // value other than the exactly paired flags fails closed at import, before
 // anything is launched.
-const routeIdleValue = process.env.LOCKLARK_TEST_ROUTE_IDLE_TTL;
+const routeIdleValue = process.env.PASSME_TEST_ROUTE_IDLE_TTL;
 const routeIdleTtl = routeIdleValue === "1";
 assert(
   routeIdleValue === undefined ||
@@ -87,25 +87,25 @@ assert(
 // token fragment. Action popups are that same document with no fragment.
 const ROUTE_PAGE = /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/;
 const ACTION_POPUP = /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/;
-// The source tab is titled "Locklark acceptance · …"; the route page is titled
-// "Locklark". Each key goes to its own exact expected title prefix.
-const SOURCE_TITLE_PREFIX = "Locklark acceptance";
-const ROUTE_TITLE_PREFIX = "Locklark";
+// The source tab is titled "Passme acceptance · …"; the route page is titled
+// "Passme". Each key goes to its own exact expected title prefix.
+const SOURCE_TITLE_PREFIX = "Passme acceptance";
+const ROUTE_TITLE_PREFIX = "Passme";
 // The route checkpoint is the only requested journey in this mode, so every
 // mode that would change what pairing, fill or checkout mean is refused before
 // anything is launched.
 function routeModeCompatible() {
   const off = (name) => !process.env[name];
   return (
-    off("LOCKLARK_TEST_SHARED_CLIPBOARD") &&
-    off("LOCKLARK_TEST_POPUP_VAULT") &&
-    off("LOCKLARK_TEST_CHECKOUT_FRAMES") &&
-    off("LOCKLARK_TEST_BROWSER_PARITY") &&
-    off("LOCKLARK_TEST_FAILURE_STAGE") &&
-    off("LOCKLARK_TEST_EDGE_INSTALL_ONLY") &&
-    off("LOCKLARK_TEST_EDGE_PAIR_DISCONNECT") &&
-    (process.env.LOCKLARK_TEST_BROWSER === undefined ||
-      process.env.LOCKLARK_TEST_BROWSER === "chromium")
+    off("PASSME_TEST_SHARED_CLIPBOARD") &&
+    off("PASSME_TEST_POPUP_VAULT") &&
+    off("PASSME_TEST_CHECKOUT_FRAMES") &&
+    off("PASSME_TEST_BROWSER_PARITY") &&
+    off("PASSME_TEST_FAILURE_STAGE") &&
+    off("PASSME_TEST_EDGE_INSTALL_ONLY") &&
+    off("PASSME_TEST_EDGE_PAIR_DISCONNECT") &&
+    (process.env.PASSME_TEST_BROWSER === undefined ||
+      process.env.PASSME_TEST_BROWSER === "chromium")
   );
 }
 const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"];
@@ -130,21 +130,21 @@ function expectedRouteClickClose(error, event, expected) {
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
-const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
-  ? require(process.env.LOCKLARK_TEST_PLAYWRIGHT)
+const { chromium } = process.env.PASSME_TEST_PLAYWRIGHT
+  ? require(process.env.PASSME_TEST_PLAYWRIGHT)
   : require("playwright");
-const go = process.env.LOCKLARK_GO || "go";
-const host = process.env.LOCKLARK_BROWSER_HOST;
-const register = process.env.LOCKLARK_BROWSER_REGISTER
-  ? resolve(process.env.LOCKLARK_BROWSER_REGISTER)
+const go = process.env.PASSME_GO || "go";
+const host = process.env.PASSME_BROWSER_HOST;
+const register = process.env.PASSME_BROWSER_REGISTER
+  ? resolve(process.env.PASSME_BROWSER_REGISTER)
   : null;
-const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chromium";
-const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
+const browserName = process.env.PASSME_TEST_BROWSER === "edge" ? "edge" : "chromium";
+const browserExecutable = process.env.PASSME_TEST_BROWSER_EXECUTABLE;
 // Explicit external install-only mode, not a product test switch: real Edge
 // installs the built package through the visible edge://extensions manager,
 // proves the fixed extension ID and its background.js worker, and stops
 // before any pairing. Every other mode is unchanged.
-const edgeInstallOnly = process.env.LOCKLARK_TEST_EDGE_INSTALL_ONLY === "1";
+const edgeInstallOnly = process.env.PASSME_TEST_EDGE_INSTALL_ONLY === "1";
 // Fixed install-only success signal: it carries no page text, title, path,
 // PID or driver output and is recognised only by identity.
 const EDGE_INSTALL_COMPLETE = Object.freeze({ edgeInstallComplete: true });
@@ -152,7 +152,7 @@ const EDGE_INSTALL_COMPLETE = Object.freeze({ edgeInstallComplete: true });
 // and background.js worker proofs pass, the real popup the install helper left
 // open is physically paired and then physically disconnected. It never chooses
 // quick pairing, never fills a page and never changes install-only.
-const edgePairDisconnect = process.env.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT === "1";
+const edgePairDisconnect = process.env.PASSME_TEST_EDGE_PAIR_DISCONNECT === "1";
 // Both managed-install modes share exactly the visible manager install launch:
 // no extension load switches, the default --disable-extensions dropped and the
 // real window size. Nothing pair-specific is added to that launch.
@@ -175,22 +175,22 @@ if (routeDetailRead) {
   assert(browserName === "chromium", "Route detail mode requires Chromium");
 }
 if (edgeInstallOnly) {
-  assert(browserName === "edge", "Edge install-only requires LOCKLARK_TEST_BROWSER=edge");
+  assert(browserName === "edge", "Edge install-only requires PASSME_TEST_BROWSER=edge");
   // A real value would select another (full) journey; workflows may
   // materialize optional variables as "" or "0".
   for (const name of [
-    "LOCKLARK_TEST_CHECKOUT_FRAMES",
-    "LOCKLARK_TEST_SHARED_CLIPBOARD",
-    "LOCKLARK_TEST_POPUP_VAULT",
-    "LOCKLARK_TEST_FAILURE_STAGE",
-    "LOCKLARK_TEST_BROWSER_PARITY",
-    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
-    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
-    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
-    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
-    "LOCKLARK_TEST_OTHER_PROVIDER",
-    "LOCKLARK_TEST_PASSKEY_SIGNALS",
-    "LOCKLARK_TEST_EDGE_PAIR_DISCONNECT",
+    "PASSME_TEST_CHECKOUT_FRAMES",
+    "PASSME_TEST_SHARED_CLIPBOARD",
+    "PASSME_TEST_POPUP_VAULT",
+    "PASSME_TEST_FAILURE_STAGE",
+    "PASSME_TEST_BROWSER_PARITY",
+    "PASSME_TEST_ROUTE_DETAIL_READ",
+    "PASSME_TEST_ROUTE_IDLE_TTL",
+    "PASSME_TEST_PASSKEY_MANAGEMENT",
+    "PASSME_TEST_PASSKEY_CONDITIONAL",
+    "PASSME_TEST_OTHER_PROVIDER",
+    "PASSME_TEST_PASSKEY_SIGNALS",
+    "PASSME_TEST_EDGE_PAIR_DISCONNECT",
   ])
     assert(
       [undefined, "", "0"].includes(process.env[name]),
@@ -204,25 +204,25 @@ if (edgeInstallOnly) {
 if (edgePairDisconnect) {
   assert(
     browserName === "edge",
-    "Edge pair/disconnect requires LOCKLARK_TEST_BROWSER=edge",
+    "Edge pair/disconnect requires PASSME_TEST_BROWSER=edge",
   );
   assert(
     browserExecutable && browserExecutable.startsWith("/"),
     "Edge pair/disconnect requires an explicit absolute executable path",
   );
   for (const name of [
-    "LOCKLARK_TEST_EDGE_INSTALL_ONLY",
-    "LOCKLARK_TEST_CHECKOUT_FRAMES",
-    "LOCKLARK_TEST_SHARED_CLIPBOARD",
-    "LOCKLARK_TEST_POPUP_VAULT",
-    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
-    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
-    "LOCKLARK_TEST_FAILURE_STAGE",
-    "LOCKLARK_TEST_BROWSER_PARITY",
-    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
-    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
-    "LOCKLARK_TEST_OTHER_PROVIDER",
-    "LOCKLARK_TEST_PASSKEY_SIGNALS",
+    "PASSME_TEST_EDGE_INSTALL_ONLY",
+    "PASSME_TEST_CHECKOUT_FRAMES",
+    "PASSME_TEST_SHARED_CLIPBOARD",
+    "PASSME_TEST_POPUP_VAULT",
+    "PASSME_TEST_ROUTE_DETAIL_READ",
+    "PASSME_TEST_ROUTE_IDLE_TTL",
+    "PASSME_TEST_FAILURE_STAGE",
+    "PASSME_TEST_BROWSER_PARITY",
+    "PASSME_TEST_PASSKEY_MANAGEMENT",
+    "PASSME_TEST_PASSKEY_CONDITIONAL",
+    "PASSME_TEST_OTHER_PROVIDER",
+    "PASSME_TEST_PASSKEY_SIGNALS",
   ])
     assert(
       [undefined, "", "0"].includes(process.env[name]),
@@ -236,20 +236,20 @@ if (edgePairDisconnect) {
 normalCheckoutMode = !routeDetailRead && !edgeManagerInstall;
 startupMarkup(0);
 if (register && (!prebuiltEnvConfigured() || edgeManagerInstall))
-  assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
+  assert(existsSync(register), "PASSME_BROWSER_REGISTER must name a built executable");
 assert(
   host && process.env.DISPLAY,
   "A built native host and real X display are required",
 );
 assert(
-  !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
+  !process.env.PASSME_TEST_FAILURE_STAGE ||
     ["after-pair", "page-arguments", "otp-page-arguments"].includes(
-      process.env.LOCKLARK_TEST_FAILURE_STAGE,
+      process.env.PASSME_TEST_FAILURE_STAGE,
     ),
   "Unsupported acceptance failure stage",
 );
 function privateStateParent() {
-  const value = process.env.LOCKLARK_TEST_PRIVATE_STATE_PARENT;
+  const value = process.env.PASSME_TEST_PRIVATE_STATE_PARENT;
   if (value === undefined) return null;
   try {
     if (
@@ -278,10 +278,10 @@ function privateStateParent() {
 function createPrivateState() {
   const parent = privateStateParent();
   if (parent === null) {
-    return mkdtempSync("/tmp/locklark-browser-acceptance-");
+    return mkdtempSync("/tmp/passme-browser-acceptance-");
   }
   try {
-    const created = mkdtempSync(join(parent, "locklark-browser-acceptance-"));
+    const created = mkdtempSync(join(parent, "passme-browser-acceptance-"));
     const info = lstatSync(created);
     if (
       !info.isDirectory() ||
@@ -302,7 +302,7 @@ const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 // Explicit external test mode only: the actual desktop app and the browser it
 // hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
 const sharedEnvironment =
-  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
+  process.env.PASSME_TEST_SHARED_CLIPBOARD === "1"
     ? prepareSharedEnvironment(state, env)
     : null;
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
@@ -497,7 +497,7 @@ function observeRouteLifecycle(target) {
   } catch {}
 }
 // The controlled source page's title; source-tab keys use exactly this prefix.
-const browserWindowTitle = "Locklark acceptance";
+const browserWindowTitle = "Passme acceptance";
 let privacyValues = [];
 let observedFixture = null;
 function popupStatusKind(value) {
@@ -584,7 +584,7 @@ const ROUTE_CLOSED_STATUS = "已关闭此条目";
 // by the stop function.
 function routeStatusTraceProbe(title) {
   return `(()=>{
-    if(globalThis.__locklarkRouteStatusTraceRead)return true;
+    if(globalThis.__passmeRouteStatusTraceRead)return true;
     const LIMIT=${ROUTE_STATUS_TRACE_LIMIT};
     const VIEWS=${JSON.stringify(ROUTE_VIEWS)};
     const FIXTURE_TITLE=${JSON.stringify(title)};
@@ -660,12 +660,12 @@ function routeStatusTraceProbe(title) {
     start();
     detectStatus();
     for(const type of['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,start,{once:true});
-    globalThis.__locklarkRouteStatusTraceRead=()=>JSON.stringify(entries);
-    globalThis.__locklarkRouteStatusTraceStop=()=>{
+    globalThis.__passmeRouteStatusTraceRead=()=>JSON.stringify(entries);
+    globalThis.__passmeRouteStatusTraceStop=()=>{
       observer.disconnect();
       for(const type of['DOMContentLoaded','pageshow'])globalThis.removeEventListener?.(type,start);
-      delete globalThis.__locklarkRouteStatusTraceRead;
-      delete globalThis.__locklarkRouteStatusTraceStop;
+      delete globalThis.__passmeRouteStatusTraceRead;
+      delete globalThis.__passmeRouteStatusTraceStop;
       return true;
     };
     return true;
@@ -702,7 +702,7 @@ async function readRouteStatusTrace(connection) {
     routeStatusTrace = sanitizeRouteStatusTrace(
       JSON.parse(
         await connection.evaluate(
-          "globalThis.__locklarkRouteStatusTraceRead?.() ?? '[]'",
+          "globalThis.__passmeRouteStatusTraceRead?.() ?? '[]'",
         ),
       ),
     );
@@ -717,7 +717,7 @@ async function refreshRouteStatusTrace(attach, target, uninstall = false) {
     if (!uninstall) return;
     // Stop observing in the page: disconnect and remove both diagnostic hooks.
     await connection.evaluate(
-      "globalThis.__locklarkRouteStatusTraceStop?.() ?? false",
+      "globalThis.__passmeRouteStatusTraceStop?.() ?? false",
     );
   } catch {} finally {
     try {
@@ -751,7 +751,7 @@ function routeForbiddenCanaries(fixture) {
 // The route's own tab switch, return and reload; each is one real XTest key
 // batch sent with the exact-title-prefix form (never the native-window form)
 // and addressed to the title of the tab that is ACTIVE when the key is sent:
-// the route tab ("Locklark") for the switch away and the reload, the source tab
+// the route tab ("Passme") for the switch away and the reload, the source tab
 // for the return.
 const ROUTE_SWITCH_SOURCE = Object.freeze([{ key: "Control_L+Shift_L+Tab" }]);
 const ROUTE_RETURN = Object.freeze([{ key: "Control_L+Tab" }]);
@@ -759,7 +759,7 @@ const ROUTE_RELOAD = Object.freeze([{ key: "Control_L+r" }]);
 // The exact native approval title and the longest bounded no-prompt
 // observation after the stale reload. Every poll must observe the real native
 // window; a missing or unobservable one fails instead of passing the bound.
-const ROUTE_NATIVE_TITLE = "Locklark · 浏览器原生确认";
+const ROUTE_NATIVE_TITLE = "Passme · 浏览器原生确认";
 const ROUTE_NATIVE_ABSENT_LIMIT = 3000;
 let routeMouseRejected = null;
 // Fixed fragments shared by the route page probes. Each handler resolves the
@@ -971,7 +971,7 @@ function sanitizeRouteIdleCloseStale(value) {
     sourceIntact: value?.sourceIntact === true,
   };
 }
-// Optional idle-expiry journey (LOCKLARK_TEST_ROUTE_IDLE_TTL=1 in route detail
+// Optional idle-expiry journey (PASSME_TEST_ROUTE_IDLE_TTL=1 in route detail
 // mode). It starts only after all of the default route switch/reload/
 // no-prompt/mouse-rejected assertions have passed, then runs one ordinary route
 // journey and leaves it idle: exactly one physical Ctrl+W addressed to the
@@ -1078,11 +1078,11 @@ execFileSync(
     "-out",
     cert,
     "-subj",
-    "/CN=login.locklark.test",
+    "/CN=login.passme.test",
     "-addext",
     checkoutFrames
-      ? "subjectAltName=DNS:login.locklark.test,DNS:checkout.locklark.test,DNS:checkout.other.test"
-      : "subjectAltName=DNS:login.locklark.test",
+      ? "subjectAltName=DNS:login.passme.test,DNS:checkout.passme.test,DNS:checkout.other.test"
+      : "subjectAltName=DNS:login.passme.test",
   ],
   { stdio: "ignore" },
 );
@@ -1122,8 +1122,8 @@ const server = createServer(
     res.end(
       req.url.startsWith("/otp")
         ? otpHTML.replace(
-            "Locklark OTP acceptance",
-            "Locklark acceptance · OTP",
+            "Passme OTP acceptance",
+            "Passme acceptance · OTP",
           )
         : html,
     );
@@ -1131,7 +1131,7 @@ const server = createServer(
 );
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 startupMarkup(3);
-const origin = "https://login.locklark.test:" + server.address().port;
+const origin = "https://login.passme.test:" + server.address().port;
 let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1567,7 +1567,7 @@ async function eventually(check, message, limit = 10000) {
   throw Error(message);
 }
 // Strict pair/disconnect checkpoint, opt-in only through
-// LOCKLARK_TEST_EDGE_PAIR_DISCONNECT=1. It starts only after the visible
+// PASSME_TEST_EDGE_PAIR_DISCONNECT=1. It starts only after the visible
 // manager install helper returned the manifest-derived fixed ID and exactly
 // the real background.js worker, and it reuses the popup that helper left open
 // through the existing physical Ctrl+Shift+Y flow. Every action is real: the
@@ -1663,7 +1663,7 @@ try {
   const nativeRegister = prebuiltChromium
     ? validateNativeRegister(process.env)
     : register;
-  // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
+  // PASSME_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
   const fixtureExecutable = browserFixtureExecutable({ go, root, env, state });
   execFileSync(
@@ -1688,11 +1688,11 @@ try {
     "--host",
     resolve(host),
     "--output",
-    join(profile, "NativeMessagingHosts/org.locklark.browser.json"),
+    join(profile, "NativeMessagingHosts/org.passme.browser.json"),
   ];
   execFileSync(
     nativeRegister || go,
-    nativeRegister ? registerArgs : ["run", "./cmd/locklark-browser-register", ...registerArgs],
+    nativeRegister ? registerArgs : ["run", "./cmd/passme-browser-register", ...registerArgs],
     { cwd: root, env, stdio: "inherit" },
   );
   let extension;
@@ -1708,15 +1708,15 @@ try {
   // never pass them and load the package only through the visible manager UI.
   if (edgeManagerInstall)
     assert.equal(manifestExtensionId(extension), EDGE_EXTENSION_ID,
-      "The built package must carry the fixed Locklark identity");
+      "The built package must carry the fixed Passme identity");
   const launchArguments = [
     "--no-sandbox",
     ...(edgeManagerInstall
       ? []
       : ["--disable-extensions-except=" + extension, "--load-extension=" + extension]),
     checkoutFrames
-      ? "--host-resolver-rules=MAP login.locklark.test 127.0.0.1,MAP checkout.locklark.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
-      : "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
+      ? "--host-resolver-rules=MAP login.passme.test 127.0.0.1,MAP checkout.passme.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
+      : "--host-resolver-rules=MAP login.passme.test 127.0.0.1",
     "--no-proxy-server",
     "--ignore-certificate-errors-spki-list=" + spki,
     "--window-size=1200,850",
@@ -1749,7 +1749,7 @@ try {
     assert(native !== false, "Native window input only");
     const options = typeof inspect === "object" ? inspect : { inspect };
     const request = {
-      title: "Locklark · 浏览器原生确认",
+      title: "Passme · 浏览器原生确认",
       executable: resolve(host),
       actions,
       ...options,
@@ -1765,7 +1765,7 @@ try {
   // managed-install branch: the install helper's openPopup() sends the real
   // Escape and Ctrl+Shift+Y during edge-activate, so any later declaration
   // would be read inside its temporal dead zone. Both browsers name the exact
-  // executable the launch above used: the explicit LOCKLARK_TEST_BROWSER_EXECUTABLE
+  // executable the launch above used: the explicit PASSME_TEST_BROWSER_EXECUTABLE
   // when given (Edge always requires it), otherwise Playwright's own default.
   const browserKey = browserKeyFor(
     browserExecutable
@@ -2616,7 +2616,7 @@ try {
         "Route page did not load",
       );
       // The route page is still the active tab, so the active window is titled
-      // exactly "Locklark". Exactly one XTest key batch, addressed to the
+      // exactly "Passme". Exactly one XTest key batch, addressed to the
       // Chromium window by the ACTIVE route tab's exact title prefix and
       // executable, switches to the original source tab. Nothing is messaged
       // to the worker, navigated via CDP or injected.
@@ -2845,7 +2845,7 @@ try {
     phase(scenario + ":native-confirmation");
     return popup;
   }
-  if (process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1") {
+  if (process.env.PASSME_TEST_SHARED_CLIPBOARD === "1") {
     // Explicit external test mode: the actual desktop app is the shared
     // broker and sole clipboard owner; the extension uses its normal port.
     await acceptSharedClipboard({
@@ -2873,7 +2873,7 @@ try {
   input([
     {
       click_label:
-        process.env.LOCKLARK_TEST_POPUP_VAULT === "1" || checkoutFrames
+        process.env.PASSME_TEST_POPUP_VAULT === "1" || checkoutFrames
           ? "连接并启用快捷填充"
           : "确认连接此扩展",
     },
@@ -2930,7 +2930,7 @@ try {
       await popup.click("#disconnect");
     }
   } else {
-  if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
+  if (process.env.PASSME_TEST_POPUP_VAULT) {
     const downloadDirectory = join(state, "attachment-downloads");
     mkdirSync(downloadDirectory, { recursive: true });
     const fileName = "popup-attachment.bin";
@@ -3195,14 +3195,14 @@ try {
   await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.
 
   if (
-    !process.env.LOCKLARK_TEST_BROWSER_PARITY &&
-    process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments"
+    !process.env.PASSME_TEST_BROWSER_PARITY &&
+    process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments"
   ) {
     await select("approved-fill");
     await blank(); // No field is released before native approval.
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
+    if (process.env.PASSME_TEST_FAILURE_STAGE === "after-pair")
       throw Error(fixtureCanaries(fixture).join("\n"));
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+    if (process.env.PASSME_TEST_FAILURE_STAGE === "page-arguments") {
       phase("driver-arguments-failure");
       await page.evaluate(
         ([username, password]) => {
@@ -3340,8 +3340,8 @@ try {
     env,
     pageEval: (fn, arg) => page.evaluate(fn, arg),
   };
-  if (!process.env.LOCKLARK_TEST_BROWSER_PARITY) {
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+  if (!process.env.PASSME_TEST_BROWSER_PARITY) {
+    if (process.env.PASSME_TEST_FAILURE_STAGE !== "otp-page-arguments")
       await acceptBrowserSave(acceptanceDriver);
     await acceptBrowserOTP(acceptanceDriver);
   }
@@ -3694,15 +3694,15 @@ if (edgeInstallOnly) {
   console.log(EDGE_PAIR_DISCONNECT_PASS);
 } else {
   console.log(
-    process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
-      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
+    process.env.PASSME_TEST_SHARED_CLIPBOARD === "1"
+      ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Passme desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
       : checkoutFrames
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
       : routeIdleTtl
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} route UI closed by an idle two-minute TTL`
       : routeDetailRead
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
-      : process.env.LOCKLARK_TEST_BROWSER_PARITY
+      : process.env.PASSME_TEST_BROWSER_PARITY
       ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
       : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
   );

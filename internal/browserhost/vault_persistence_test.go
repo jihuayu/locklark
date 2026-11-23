@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // These tests pin the durable browser data model: every item-create /
@@ -17,7 +17,7 @@ import (
 
 func browserPersistenceFixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, string, []byte, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "v2-persist.ll")
+	path := filepath.Join(t.TempDir(), "v2-persist.pm")
 	key := bytes.Repeat([]byte{9}, 16)
 	if e := personal.Create(path, "persistence", key); e != nil {
 		t.Fatal(e)

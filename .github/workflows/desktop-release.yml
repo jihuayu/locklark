@@ -74,7 +74,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
-      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PASSME_VERSION: ${{ needs.authorize.outputs.version }}
       PRERELEASE: ${{ needs.authorize.outputs.prerelease }}
     steps:
       - name: Check out the authorized commit
@@ -111,7 +111,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - "$RELEASE_TAG" "$LOCKLARK_VERSION" <<'PY'
+          python3 - "$RELEASE_TAG" "$PASSME_VERSION" <<'PY'
           from pathlib import Path
           import os
           import re
@@ -146,7 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
-          create_args=(--draft --verify-tag --title "Locklark $RELEASE_TAG" --notes-file "$notes")
+          create_args=(--draft --verify-tag --title "Passme $RELEASE_TAG" --notes-file "$notes")
           if [[ "$PRERELEASE" == "true" ]]; then
             create_args+=(--prerelease)
           fi
@@ -173,7 +173,7 @@ jobs:
     environment: production
     env:
       GH_TOKEN: ${{ github.token }}
-      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PASSME_VERSION: ${{ needs.authorize.outputs.version }}
       MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
       MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
@@ -206,13 +206,13 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:MYGO_WINDOWS_CERTIFICATE_PASSWORD)) {
             throw "WINDOWS_CERTIFICATE_PASSWORD must be set when WINDOWS_CERTIFICATE is provided."
           }
-          $path = Join-Path $env:RUNNER_TEMP 'locklark-code-signing.pfx'
+          $path = Join-Path $env:RUNNER_TEMP 'passme-code-signing.pfx'
           try {
             [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           } catch {
             throw "WINDOWS_CERTIFICATE is not valid base64: $($_.Exception.Message)"
           }
-          "LOCKLARK_WINDOWS_CERTIFICATE_FILE=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PASSME_WINDOWS_CERTIFICATE_FILE=$path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build and upload Windows packages
         shell: pwsh
         run: |
@@ -222,11 +222,11 @@ jobs:
       - name: Verify Windows packages
         shell: pwsh
         run: |
-          $version = $env:LOCKLARK_VERSION
+          $version = $env:PASSME_VERSION
           $required = @(
-            "out\windows-amd64\Locklark.exe",
-            "out\windows-amd64\locklark-$version-windows-amd64.tar.gz",
-            "out\windows-amd64\locklark-setup-$version-amd64.exe",
+            "out\windows-amd64\Passme.exe",
+            "out\windows-amd64\passme-$version-windows-amd64.tar.gz",
+            "out\windows-amd64\passme-setup-$version-amd64.exe",
             "out\windows-amd64\update-windows-amd64.json",
             "out\install.ps1",
             "out\SHA256SUMS"
@@ -236,7 +236,7 @@ jobs:
               throw "Missing Windows release artifact: $path"
             }
           }
-          if (-not [string]::IsNullOrWhiteSpace($env:LOCKLARK_WINDOWS_CERTIFICATE_FILE)) {
+          if (-not [string]::IsNullOrWhiteSpace($env:PASSME_WINDOWS_CERTIFICATE_FILE)) {
             foreach ($file in Get-ChildItem -Path out\windows-* -Filter *.exe -File -Recurse) {
               $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
               if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
@@ -255,7 +255,7 @@ jobs:
     environment: production
     env:
       GH_TOKEN: ${{ github.token }}
-      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PASSME_VERSION: ${{ needs.authorize.outputs.version }}
       MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
     steps:
       - name: Check out the authorized commit
@@ -307,29 +307,29 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           set -euo pipefail
-          keychain="$RUNNER_TEMP/locklark-signing.keychain-db"
+          keychain="$RUNNER_TEMP/passme-signing.keychain-db"
           password="$(openssl rand -base64 24)"
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
-            <<<"$MACOS_CERTIFICATE" > "$RUNNER_TEMP/locklark-certificate.p12"
-          security import "$RUNNER_TEMP/locklark-certificate.p12" -k "$keychain" \
+            <<<"$MACOS_CERTIFICATE" > "$RUNNER_TEMP/passme-certificate.p12"
+          security import "$RUNNER_TEMP/passme-certificate.p12" -k "$keychain" \
             -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/locklark-certificate.p12"
+          rm -f "$RUNNER_TEMP/passme-certificate.p12"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           security list-keychains -d user -s "$keychain" login.keychain
 
-          profile="$RUNNER_TEMP/locklark.provisionprofile"
+          profile="$RUNNER_TEMP/passme.provisionprofile"
           python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
             <<<"$MACOS_PROVISIONING_PROFILE" > "$profile"
           xcrun notarytool store-credentials notary --keychain "$keychain" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
           {
-            echo "LOCKLARK_MACOS_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY"
-            echo "LOCKLARK_MACOS_PROVISIONING_PROFILE=$profile"
-            echo "LOCKLARK_TEAM_ID=$APPLE_TEAM_ID"
-            echo "LOCKLARK_NOTARY_PROFILE=notary"
+            echo "PASSME_MACOS_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY"
+            echo "PASSME_MACOS_PROVISIONING_PROFILE=$profile"
+            echo "PASSME_TEAM_ID=$APPLE_TEAM_ID"
+            echo "PASSME_NOTARY_PROFILE=notary"
             echo "NOTARY_KEYCHAIN=$keychain"
           } >> "$GITHUB_ENV"
       - name: Build and upload macOS package
@@ -341,24 +341,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="$(find out -type d -name 'Locklark.app' -print -quit)"
+          app="$(find out -type d -name 'Passme.app' -print -quit)"
           dmg="$(find out -type f -name '*.dmg' -print -quit)"
-          [[ -n "$app" && -d "$app" ]] || { echo "Locklark.app was not built" >&2; exit 1; }
-          [[ -n "$dmg" && -f "$dmg" ]] || { echo "Locklark DMG was not built" >&2; exit 1; }
+          [[ -n "$app" && -d "$app" ]] || { echo "Passme.app was not built" >&2; exit 1; }
+          [[ -n "$dmg" && -f "$dmg" ]] || { echo "Passme DMG was not built" >&2; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$app"
           team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-          [[ "$team" == "$LOCKLARK_TEAM_ID" ]] || {
-            echo "Signed TeamIdentifier is '$team', want '$LOCKLARK_TEAM_ID'" >&2
+          [[ "$team" == "$PASSME_TEAM_ID" ]] || {
+            echo "Signed TeamIdentifier is '$team', want '$PASSME_TEAM_ID'" >&2
             exit 1
           }
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
-          [[ "$bundle_id" == "app.locklark.desktop" ]] || {
+          [[ "$bundle_id" == "app.passme.desktop" ]] || {
             echo "Bundle identifier is '$bundle_id'" >&2
             exit 1
           }
-          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/locklark-entitlements.plist" 2>&1
-          grep -q '<key>keychain-access-groups</key>' "$RUNNER_TEMP/locklark-entitlements.plist"
-          grep -q "$LOCKLARK_TEAM_ID.app.locklark.desktop" "$RUNNER_TEMP/locklark-entitlements.plist"
+          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/passme-entitlements.plist" 2>&1
+          grep -q '<key>keychain-access-groups</key>' "$RUNNER_TEMP/passme-entitlements.plist"
+          grep -q "$PASSME_TEAM_ID.app.passme.desktop" "$RUNNER_TEMP/passme-entitlements.plist"
           xcrun stapler validate "$app"
           xcrun stapler validate "$dmg"
           find out -maxdepth 3 -type f -print
@@ -372,7 +372,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.authorize.outputs.tag }}
-      LOCKLARK_VERSION: ${{ needs.authorize.outputs.version }}
+      PASSME_VERSION: ${{ needs.authorize.outputs.version }}
     steps:
       - name: Check out the trusted default-branch verifier
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -399,7 +399,7 @@ jobs:
           public_key="$(bun -e 'import config from "./mygo.config.ts"; process.stdout.write(config.updates.publicKey)')"
           python3 scripts/verify_desktop_release.py \
             --assets "$RUNNER_TEMP/release-assets" \
-            --version "$LOCKLARK_VERSION" \
+            --version "$PASSME_VERSION" \
             --public-key "$public_key"
       - name: Publish the complete SHA256SUMS
         shell: bash

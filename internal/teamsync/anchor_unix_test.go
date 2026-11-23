@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/passme/internal/directory"
 )
 
 func TestFileAnchorPublishDirectorySyncFailureKeepsCompleteFinal(t *testing.T) {

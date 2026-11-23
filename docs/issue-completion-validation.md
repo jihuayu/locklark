@@ -2,20 +2,20 @@
 
 2026-11-07 本轮补充：原八项关闭七项后，已将 #39 遗留范围及外部 worker/剪贴板问题拆成 #50–#59，每项附复现或验收标准。旧段落的“仅剩 #39”是拆分前状态；当前实现与安全边界见[专项验收](ui-performance-security-validation.md)。
 
-日期：2026-11-07。起点 `main` `41e31f77b18ad842db3be7c6c30f293329bcaf63`（[PR #45](https://github.com/jihuayu/locklark/pull/45)），最终开发 head `5e990dd` 六项 CI 均成功。起始有 8 个未关闭 issues，无未合并 PR。以实际实现和验收完成状态关闭 issue，史料中的旧提交复现不自动代表当前 main 仍有同一缺陷。
+日期：2026-11-07。起点 `main` `41e31f77b18ad842db3be7c6c30f293329bcaf63`（[PR #45](https://github.com/jihuayu/passme/pull/45)），最终开发 head `5e990dd` 六项 CI 均成功。起始有 8 个未关闭 issues，无未合并 PR。以实际实现和验收完成状态关闭 issue，史料中的旧提交复现不自动代表当前 main 仍有同一缺陷。
 
 ## 本批对账
 
 | Issue | 当前实现与证据 | 本批处理 |
 | --- | --- | --- |
-| [#24](https://github.com/jihuayu/locklark/issues/24) | Awesome MyGo 的收录通知，作者明确可关闭。 | README 增加项目目录回链。可选许可证选择、评分和版本发布建议不作为通知的关闭条件。 |
-| [#32](https://github.com/jihuayu/locklark/issues/32) | PR #43 已增加独立 clipboard/display/idle timers，经原生 dispatch 和 lease/session generation 校验；不依赖 `View`。 | 主代理重跑无渲染到期、外部剪贴板所有者、连续复制及重解锁竞态。 |
-| [#33](https://github.com/jihuayu/locklark/issues/33) | PR #43 的普通 edit/state 已使用原生 mutation gate；数据库等待期间锁库先赢则不写，提交先赢则保留未知结果。 | 实际 bbolt 锁阻塞的 edit/archive/trash、提交后锁库及输入清理回归已重跑。 |
-| [#34](https://github.com/jihuayu/locklark/issues/34) | PR #43 已统一 query/state refresh，过滤条件与界面代次绑定，变更提交与刷新失败分开。 | 现有筛选保持、query ABA、scope 变化和迟到 mutation refresh 回归已重跑。 |
-| [#36](https://github.com/jihuayu/locklark/issues/36) | PR #43 的普通 fill 已在取得 writer slot 后才消费秘密，并检查 cancel epoch、会话与期限。 | 原队列锁库回归保留；新增认证取消、请求/配对到期、错误能力与重复取消不影响新操作。主代理独立定向 race 通过。 |
-| [#38](https://github.com/jihuayu/locklark/issues/38) | PR #43 已记录 `injectionStarted`，对派发后的未确认结果保留 `fillUnknown`。 | 新增丢失注入回执、成功注入后 probe 挂起、导航/锁库/断开、派发前明确拒绝及迟到操作不覆盖新操作；扩展全量测试通过。 |
-| [#35](https://github.com/jihuayu/locklark/issues/35) | PR #47 已合并并关闭；前缀复用、密文逐字节检查与完整回退均通过篡改回归。 | 10k 事件基准及最终精确六项 CI 见历史性能验收。 |
-| [#39](https://github.com/jihuayu/locklark/issues/39) | PR #43–45 已覆盖多步、保存/更新、生成器、附加类型、编辑、附件、Passkey 独立管理和三浏览器受控真实验收；整项仍有缺口。 | 条件式输入框账号列表、Signal APIs、系统 UV、平台与发布验收逐项推进；不以一个 Passkey 删除入口关闭整个 epic。 |
+| [#24](https://github.com/jihuayu/passme/issues/24) | Awesome MyGo 的收录通知，作者明确可关闭。 | README 增加项目目录回链。可选许可证选择、评分和版本发布建议不作为通知的关闭条件。 |
+| [#32](https://github.com/jihuayu/passme/issues/32) | PR #43 已增加独立 clipboard/display/idle timers，经原生 dispatch 和 lease/session generation 校验；不依赖 `View`。 | 主代理重跑无渲染到期、外部剪贴板所有者、连续复制及重解锁竞态。 |
+| [#33](https://github.com/jihuayu/passme/issues/33) | PR #43 的普通 edit/state 已使用原生 mutation gate；数据库等待期间锁库先赢则不写，提交先赢则保留未知结果。 | 实际 bbolt 锁阻塞的 edit/archive/trash、提交后锁库及输入清理回归已重跑。 |
+| [#34](https://github.com/jihuayu/passme/issues/34) | PR #43 已统一 query/state refresh，过滤条件与界面代次绑定，变更提交与刷新失败分开。 | 现有筛选保持、query ABA、scope 变化和迟到 mutation refresh 回归已重跑。 |
+| [#36](https://github.com/jihuayu/passme/issues/36) | PR #43 的普通 fill 已在取得 writer slot 后才消费秘密，并检查 cancel epoch、会话与期限。 | 原队列锁库回归保留；新增认证取消、请求/配对到期、错误能力与重复取消不影响新操作。主代理独立定向 race 通过。 |
+| [#38](https://github.com/jihuayu/passme/issues/38) | PR #43 已记录 `injectionStarted`，对派发后的未确认结果保留 `fillUnknown`。 | 新增丢失注入回执、成功注入后 probe 挂起、导航/锁库/断开、派发前明确拒绝及迟到操作不覆盖新操作；扩展全量测试通过。 |
+| [#35](https://github.com/jihuayu/passme/issues/35) | PR #47 已合并并关闭；前缀复用、密文逐字节检查与完整回退均通过篡改回归。 | 10k 事件基准及最终精确六项 CI 见历史性能验收。 |
+| [#39](https://github.com/jihuayu/passme/issues/39) | PR #43–45 已覆盖多步、保存/更新、生成器、附加类型、编辑、附件、Passkey 独立管理和三浏览器受控真实验收；整项仍有缺口。 | 条件式输入框账号列表、Signal APIs、系统 UV、平台与发布验收逐项推进；不以一个 Passkey 删除入口关闭整个 epic。 |
 
 主代理独立运行（起始代码）：
 

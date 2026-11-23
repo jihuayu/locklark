@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 func suggestionsRevision(t *testing.T, s *Session, id string) string {

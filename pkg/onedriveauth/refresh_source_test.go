@@ -59,7 +59,7 @@ func (c *logCapture) Write(p []byte) (int, error) {
 // peer, and that the source and the package logger write nothing.
 func TestRefreshSourceRequestsStaySynthetic(t *testing.T) {
 	logged := captureLog(t)
-	for _, name := range []string{"ONEDRIVE_CLIENT_ID", "ONEDRIVE_TENANT", "ONEDRIVE_SCOPES", "ONEDRIVE_PROFILE", "LOCKLARK_ONEDRIVE_CLIENT_ID"} {
+	for _, name := range []string{"ONEDRIVE_CLIENT_ID", "ONEDRIVE_TENANT", "ONEDRIVE_SCOPES", "ONEDRIVE_PROFILE", "PASSME_ONEDRIVE_CLIENT_ID"} {
 		if _, ok := os.LookupEnv(name); ok {
 			t.Fatalf("a source test ran with %s set; tests must not read ambient configuration", name)
 		}

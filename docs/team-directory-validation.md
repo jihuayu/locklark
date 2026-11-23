@@ -24,7 +24,7 @@ age 信封没有可公开核验的收件人清单：排序端只能验证 publis
 
 ## 验收与未完成项
 
-失败先行 `/tmp/locklark-validation/directory-red.log`：缺少目录 API。Go 测试使用真实 bbolt、Ed25519、age 和 KDBX：重开、两位 owner 同父并发单赢家、重放、错 Scope、篡改、角色分离、设备移出/整成员移出、旧收钥/签名钥匙/ID 复用、设备改挂、快照替换、提交回滚、关闭失败后重读、独立检查点拒绝磁盘回滚、整库冻结和由独立数据重建。被移除成员的两台设备均打不开新代，剩余设备能读；冻结后旧父提案失败，旧设备不能读新身份的新代，但仍能读先前持有的历史版本。
+失败先行 `/tmp/passme-validation/directory-red.log`：缺少目录 API。Go 测试使用真实 bbolt、Ed25519、age 和 KDBX：重开、两位 owner 同父并发单赢家、重放、错 Scope、篡改、角色分离、设备移出/整成员移出、旧收钥/签名钥匙/ID 复用、设备改挂、快照替换、提交回滚、关闭失败后重读、独立检查点拒绝磁盘回滚、整库冻结和由独立数据重建。被移除成员的两台设备均打不开新代，剩余设备能读；冻结后旧父提案失败，旧设备不能读新身份的新代，但仍能读先前持有的历史版本。
 
 实跑命令：`go test ./internal/directory -count=1`、`go test -race ./internal/directory -count=1`、完整 `go test -count=1 ./...`、`go vet ./...`、`go mod verify`。最终 Luna/max 复核与 Ubuntu/Windows CI 结果见 PR。
 
@@ -32,4 +32,4 @@ age 信封没有可公开核验的收件人清单：排序端只能验证 publis
 
 Luna/max 预审反馈已处理：owner/device 签名公钥在 map lookup 前先限制长度，补超长输入负测；Go doc 和本文明确角色并非 ACL、无设备持有证明或双钥绑定。最终复核结论和双平台 CI 见 PR。
 
-最终 Luna/max 对代码 head `934a5a1` 复核无阻塞发现，独立实跑 directory 普通/race 测试、包 vet 和 diff 检查通过；该 head 的 Ubuntu/Windows CI 均通过（run 41975171039）。后续文档增量只补固定根钥匙丢失说明与交接记录，最终检查/合并证据见 [PR #12](https://github.com/jihuayu/locklark/pull/12)。
+最终 Luna/max 对代码 head `934a5a1` 复核无阻塞发现，独立实跑 directory 普通/race 测试、包 vet 和 diff 检查通过；该 head 的 Ubuntu/Windows CI 均通过（run 41975171039）。后续文档增量只补固定根钥匙丢失说明与交接记录，最终检查/合并证据见 [PR #12](https://github.com/jihuayu/passme/pull/12)。

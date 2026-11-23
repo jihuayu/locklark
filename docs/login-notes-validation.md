@@ -6,7 +6,7 @@
 
 `login-notes-behavior-red.log` 中两个实际运行的测试分别因多行备注迁入被拒、原生 notes/edit 准备被拒而失败，非编译失败。首次基础实现后两组通过（onepux 0.006s、personal 1.236s），不代表完整产品验收。
 
-主代理从实际 main 构建旧 CLI `/tmp/locklark-tools/login-notes-baseline/locklark`，SHA256 `7dab0b3ce66786f048d48f4e9cfa23ead3ba192d1a004c80badf718b41b3789b`。通过真实终端准备一个保留旧计划的空库和一个已完成 v1 导入的库，正文及因素仅保存在受限私有材料中，日志 `login-notes-parent-upgrade-prepare.log` 只有固定结果。早期固定 core-v1 CLI（SHA256 `9e4241fd1e2c22f6c6ac47e83a97bb7adfba7d4152ade8b48c12eb04f7e20456`）已在新建旧版夹具上独立通过这些边界，以及真实 CLI 多行/Unicode/TAB/CRLF/尾空格迁入、PyKeePass Notes 字节与保护位核对、单行编辑后原始来源字节语义不变，日志 `login-notes-parent-upgrade-core-v1-round2.log`。首轮父工具错误地预期重复来源能先生成计划再在导入时拒绝，产品实际在计划时已拒绝；仅修正 oracle 后重建夹具通过，首轮 `login-notes-parent-upgrade-core-v1.log` 保留，不记为产品缺陷。固定完整 v1 后又重新从旧 CLI 创建新夹具并完整重跑，通过 `login-notes-parent-upgrade-v1.log`；主代理另对完整重定向 stdout/stderr 扫描因素、正文/随机标记及 JSON/URL/Base64 变体，零命中。
+主代理从实际 main 构建旧 CLI `/tmp/passme-tools/login-notes-baseline/passme`，SHA256 `7dab0b3ce66786f048d48f4e9cfa23ead3ba192d1a004c80badf718b41b3789b`。通过真实终端准备一个保留旧计划的空库和一个已完成 v1 导入的库，正文及因素仅保存在受限私有材料中，日志 `login-notes-parent-upgrade-prepare.log` 只有固定结果。早期固定 core-v1 CLI（SHA256 `9e4241fd1e2c22f6c6ac47e83a97bb7adfba7d4152ade8b48c12eb04f7e20456`）已在新建旧版夹具上独立通过这些边界，以及真实 CLI 多行/Unicode/TAB/CRLF/尾空格迁入、PyKeePass Notes 字节与保护位核对、单行编辑后原始来源字节语义不变，日志 `login-notes-parent-upgrade-core-v1-round2.log`。首轮父工具错误地预期重复来源能先生成计划再在导入时拒绝，产品实际在计划时已拒绝；仅修正 oracle 后重建夹具通过，首轮 `login-notes-parent-upgrade-core-v1.log` 保留，不记为产品缺陷。固定完整 v1 后又重新从旧 CLI 创建新夹具并完整重跑，通过 `login-notes-parent-upgrade-v1.log`；主代理另对完整重定向 stdout/stderr 扫描因素、正文/随机标记及 JSON/URL/Base64 变体，零命中。
 
 Luna 架构预审提示统一取值分支原先对非 password 默认取 Username；实现须明确处理 notes，并保持公共 reveal/inject/run/browser 验证器范围。复用 NativeField 的前提是严格的原生目的与字段校验；编辑填入的 intent 不推进条目修订，保存成功才推进。
 
@@ -14,7 +14,7 @@ Luna 架构预审提示统一取值分支原先对非 password 默认取 Usernam
 
 ## 固定产品候选 v1
 
-`/tmp/locklark-tools/login-notes-v1/` 包含 CLI、desktop 和两浏览器宿主。主代理独立核对全部148项产品源码清单，manifest SHA256 `35bdfb4ce36d990c3bb42910764e5b753b1b5e42c4fbb0c6327d1e989d3d30c5`。desktop SHA256 `fc4ff4b4b2fc06bad1687e860771d21f73470eb0621452300b9eebb8cd17d687`；CLI 与上述 core-v1 相同。Chromium `f315e7e6c3a9e992bef7690dc978a626cb69014379fa0deec2c52c05c103c924`，Firefox `0741f556e9a6a2bb5cd3ff613cdcd395150cb168789df389f09598046da28dc1`。
+`/tmp/passme-tools/login-notes-v1/` 包含 CLI、desktop 和两浏览器宿主。主代理独立核对全部148项产品源码清单，manifest SHA256 `35bdfb4ce36d990c3bb42910764e5b753b1b5e42c4fbb0c6327d1e989d3d30c5`。desktop SHA256 `fc4ff4b4b2fc06bad1687e860771d21f73470eb0621452300b9eebb8cd17d687`；CLI 与上述 core-v1 相同。Chromium `f315e7e6c3a9e992bef7690dc978a626cb69014379fa0deec2c52c05c103c924`，Firefox `0741f556e9a6a2bb5cd3ff613cdcd395150cb168789df389f09598046da28dc1`。
 
 Luna 已独立审阅此冻结产品，运行 vault/onepux `Test.*Notes`、personal `Test(NativeNotes|LoginNotes|NotesBoundary)` 和 desktop `TestNotes`，均通过且无剩余产品阻塞。审阅不替代主代理 GUI 或硬件验收。主代理另要求并修复系统剪贴板清理重入时的页面/会话/目标与操作代次检查；保存和读取均不得跨过已失效的 UI 上下文。
 
@@ -28,11 +28,11 @@ Sol95 的 v1/draft1、draft2 完整流程在复制核对未通过，日志 `logi
 
 draft4 通过实际清空/省略 Notes 字段、恢复备注和锁定处理，但在进程重开后的旧无障碍读取器失败，日志 `login-notes-v1-native-draft4.log`、state `w90p1imu`。定向实验 `login-notes-v1-reopen-probe-diagnostic.log` 确认同一 observer 对第二 PID 再初始化 AT-SPI 被工具按非零状态拒绝；固定函数/行号诊断不含值。新应用完全退出/重开后，仅更换专属显示 observer，保留独立剪贴板 owner；相同两次完整解锁的正对照均通过，日志 `login-notes-v1-reopen-probe-fresh.log`。不把这些失败写成整轮成功，也不改产品来配合工具。
 
-工具 draft5 冻结15项，manifest `/tmp/locklark-validation/login-notes-tools-draft5.sha256`，SHA256 `fe81a2f1fbdd0a2486cbe992ffe6a821968efafdd11d10ac61454b15e94f478a`，父代理已独立逐项匹配。增加对实际产品原始 UTF8_STRING 与 GTK 接收端转换的双检查、明确 BaseRevision 审计比对、唯一导出路径、foreign clipboard 锁定保留与 owned clipboard 清除。69项工具测试通过，旧桌面/快捷搜索/两浏览器门槛保留，CI新增 notes 正常/故障隐私及固定版本 PyKeePass，并扩展 macOS Notes 测试筛选。最终 Notes GUI 与故障隐私的精确冻结版证据随后记录。
+工具 draft5 冻结15项，manifest `/tmp/passme-validation/login-notes-tools-draft5.sha256`，SHA256 `fe81a2f1fbdd0a2486cbe992ffe6a821968efafdd11d10ac61454b15e94f478a`，父代理已独立逐项匹配。增加对实际产品原始 UTF8_STRING 与 GTK 接收端转换的双检查、明确 BaseRevision 审计比对、唯一导出路径、foreign clipboard 锁定保留与 owned clipboard 清除。69项工具测试通过，旧桌面/快捷搜索/两浏览器门槛保留，CI新增 notes 正常/故障隐私及固定版本 PyKeePass，并扩展 macOS Notes 测试筛选。最终 Notes GUI 与故障隐私的精确冻结版证据随后记录。
 
 ## 产品完整检查
 
-Sol 完成一次 `GOTOOLCHAIN=go1.27.3 LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python go test -count=1 ./... -timeout=15m`，exit0，日志 `login-notes-go-all.log`；personal 326.680s、preview 148.367s、desktop 56.582s、CLI 14.709s。Notes core/边界/UI 的定向 race exit0（personal 248.964s、desktop 125.854s），日志 `login-notes-native-race.log`。vet 与 Windows amd64 / Darwin arm64 desktop 测试包交叉编译通过；后者不冒充平台原生运行。另补真实两会话同时保存同一修订，恰一成功一冲突，认证读回精确赢家且其他字段/来源不变；含 Notes 的备份恢复及历史验证通过，日志 `login-notes-concurrency-recovery.log`。148项产品 manifest 仍匹配冻结 v1。
+Sol 完成一次 `GOTOOLCHAIN=go1.27.3 PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python go test -count=1 ./... -timeout=15m`，exit0，日志 `login-notes-go-all.log`；personal 326.680s、preview 148.367s、desktop 56.582s、CLI 14.709s。Notes core/边界/UI 的定向 race exit0（personal 248.964s、desktop 125.854s），日志 `login-notes-native-race.log`。vet 与 Windows amd64 / Darwin arm64 desktop 测试包交叉编译通过；后者不冒充平台原生运行。另补真实两会话同时保存同一修订，恰一成功一冲突，认证读回精确赢家且其他字段/来源不变；含 Notes 的备份恢复及历史验证通过，日志 `login-notes-concurrency-recovery.log`。148项产品 manifest 仍匹配冻结 v1。
 
 ## 主代理最终 Notes GUI 与工具冻结
 
@@ -46,11 +46,11 @@ Sol95 与主代理94 分别在固定 v1/draft6 运行 `scripts/login_notes_priva
 
 ## PR 与首轮远端检查
 
-[PR #31](https://github.com/jihuayu/locklark/pull/31) 初始 head `3b50eca15213300768bd02d17332d972185ca620`，[CI 42144714585](https://github.com/jihuayu/locklark/actions/runs/42144714585) 的 macOS 与 Web 成功。父代理下载完整 Web 日志，逐一核对旧桌面日常、快捷搜索、Notes 正常/故障隐私、Chromium/Firefox 完整填充保存 OTP 及两项 OTP 故障门槛均实际 PASS，不能据此把整轮标绿。
+[PR #31](https://github.com/jihuayu/passme/pull/31) 初始 head `3b50eca15213300768bd02d17332d972185ca620`，[CI 42144714585](https://github.com/jihuayu/passme/actions/runs/42144714585) 的 macOS 与 Web 成功。父代理下载完整 Web 日志，逐一核对旧桌面日常、快捷搜索、Notes 正常/故障隐私、Chromium/Firefox 完整填充保存 OTP 及两项 OTP 故障门槛均实际 PASS，不能据此把整轮标绿。
 
 Ubuntu 全 Go 中旧 `TestDailyOTPRequiresDurableRevalidationAndSingleDelivery` 在 daily_test.go:82 预期 ErrConflict 却收到 ErrDesktopDelivery，日志 `login-notes-pr31-ubuntu-failed.log`；Windows 被矩阵 fail-fast 取消，非独立 Windows 产品失败（此前原生剪贴板 smoke 已通过）。该测试在真实 TOTP 窗口末端准备 holder，再进行另一会话的解锁和修改；到期 timer 可以先清值并删登记，合法的到期拒绝先于旧修订检查。Sol 的修正仅涉及 `daily_test.go`：版本/重放语义测试使用已有受控 OTP 时钟并独占本次 holder timer，必须实际走到精确 ErrConflict；同类跨会话测试同步强化，独立真实到期/回拨测试保留，新增到期先于只读检查的零调用/零交付/清零对照。产品 v1 源码和二进制不变；主代理重新核对148项产品源文件和15项最终工具manifest均一致。
 
-Sol使用 `GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go test ./internal/personal -run '^TestDailyOTP(RequiresDurableRevalidationAndSingleDelivery|SecondSessionChangesAreRejected|ExpiryPrecedesStaleRevalidation)$'`，定向重复 `-count=3 -timeout=180s`（53.026s）和定向 `-race -count=1 -timeout=240s`（79.895s）通过，日志 `login-notes-otp-ci-timing-repeat.log` / `login-notes-otp-ci-timing-race.log`。Luna max 对精确测试增量审阅无阻塞，独立运行 `go test ./internal/personal -run 'TestDailyOTPRequiresDurableRevalidationAndSingleDelivery|TestDailyOTPExpiryPrecedesStaleRevalidation|TestDailyOTPSecondSessionChangesAreRejected|TestDailyOTPFinalClockSampleRejectsRollbackAndExpiredWindow' -count=5` 通过（58.372s），以及 `go test -race ./internal/personal -run '^TestDailyOTPRequiresDurableRevalidationAndSingleDelivery$' -count=1` 通过（16.047s）。Luna另一次更宽的重复race被主动停止，不计通过。主代理独立阅读断言、错误优先级和timer所有权后接受这份仅测试的修正；新head完整CI仍须核验。
+Sol使用 `GOTOOLCHAIN=go1.27.3 /tmp/passme-tools/go/bin/go test ./internal/personal -run '^TestDailyOTP(RequiresDurableRevalidationAndSingleDelivery|SecondSessionChangesAreRejected|ExpiryPrecedesStaleRevalidation)$'`，定向重复 `-count=3 -timeout=180s`（53.026s）和定向 `-race -count=1 -timeout=240s`（79.895s）通过，日志 `login-notes-otp-ci-timing-repeat.log` / `login-notes-otp-ci-timing-race.log`。Luna max 对精确测试增量审阅无阻塞，独立运行 `go test ./internal/personal -run 'TestDailyOTPRequiresDurableRevalidationAndSingleDelivery|TestDailyOTPExpiryPrecedesStaleRevalidation|TestDailyOTPSecondSessionChangesAreRejected|TestDailyOTPFinalClockSampleRejectsRollbackAndExpiredWindow' -count=5` 通过（58.372s），以及 `go test -race ./internal/personal -run '^TestDailyOTPRequiresDurableRevalidationAndSingleDelivery$' -count=1` 通过（16.047s）。Luna另一次更宽的重复race被主动停止，不计通过。主代理独立阅读断言、错误优先级和timer所有权后接受这份仅测试的修正；新head完整CI仍须核验。
 
 ## 当前门槛
 
@@ -58,4 +58,4 @@ Sol使用 `GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go test ./internal/pe
 
 ## 最终远端与合并
 
-最终 head `9b11713ee3a215117be78ed1f54b167fec10c80f` 的 [CI 42146467829](https://github.com/jihuayu/locklark/actions/runs/42146467829) Ubuntu、Windows、macOS、Web 四项全部成功。主代理下载完整日志核对 Windows/Ubuntu 真实终端与独立 Notes KDBX 对账、macOS 原生剪贴板，以及 Web 中旧桌面日常、快捷搜索、备注正常/故障隐私、Chromium/Firefox 完整流程与两项 OTP 故障门槛各实际成功一次。PR #31 于北京时间2026-11-06 10:01:20经正常 squash 合入 `9d8d57475f3fb904fc9fe4bedc0c1e6b4ce07535`，无保护绕过；main 已快进同步。本段关闭前述最终 CI/合并待办，不关闭其余产品范围。
+最终 head `9b11713ee3a215117be78ed1f54b167fec10c80f` 的 [CI 42146467829](https://github.com/jihuayu/passme/actions/runs/42146467829) Ubuntu、Windows、macOS、Web 四项全部成功。主代理下载完整日志核对 Windows/Ubuntu 真实终端与独立 Notes KDBX 对账、macOS 原生剪贴板，以及 Web 中旧桌面日常、快捷搜索、备注正常/故障隐私、Chromium/Firefox 完整流程与两项 OTP 故障门槛各实际成功一次。PR #31 于北京时间2026-11-06 10:01:20经正常 squash 合入 `9d8d57475f3fb904fc9fe4bedc0c1e6b4ce07535`，无保护绕过；main 已快进同步。本段关闭前述最终 CI/合并待办，不关闭其余产品范围。

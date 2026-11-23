@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -197,7 +197,9 @@ func TestStorageFailuresNeverReturnReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err = commitWithClose(func() (Receipt, error) { return commitWithUpdate(db.Update, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes) }, func() error {
+	r, err = commitWithClose(func() (Receipt, error) {
+		return commitWithUpdate(db.Update, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes)
+	}, func() error {
 		if err := db.Close(); err != nil {
 			return err
 		}

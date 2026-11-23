@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline checks for a Locklark.app that is supposed to use the macOS data
+# Offline checks for a Passme.app that is supposed to use the macOS data
 # protection keychain. This cannot prove Touch ID works (that needs a real
 # signed app and a human), but it catches the common packaging mistakes first:
 # ad-hoc signing, a missing Team ID, no keychain-access-groups entitlement, no
@@ -8,7 +8,7 @@ set -euo pipefail
 
 app="${1:-}"
 if [[ -z "$app" ]]; then
-  echo "usage: $0 /Applications/Locklark.app" >&2
+  echo "usage: $0 /Applications/Passme.app" >&2
   exit 2
 fi
 if [[ ! -d "$app" ]]; then

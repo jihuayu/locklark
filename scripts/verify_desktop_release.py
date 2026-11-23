@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a Locklark desktop draft release and rebuild SHA256SUMS.
+"""Verify a Passme desktop draft release and rebuild SHA256SUMS.
 
 The release workflow runs this after the Windows and macOS jobs upload to
 the same draft. It checks that each MyGo update manifest names the exact
@@ -25,13 +25,13 @@ import urllib.parse
 from pathlib import Path
 
 
-# mygo.config.ts sets slug=locklark and the release workflow builds the two
+# mygo.config.ts sets slug=passme and the release workflow builds the two
 # targets below. MyGo names update archives "<slug>-<version>-<target>.tar.gz"
 # and deltas "<slug>-<from>-to-<version>-<target>.delta" (see
 # cmd/mygo/updates.go in github.com/egoist/mygo v0.7.4). The manifest URL is
 # checked against this exact name so a valid archive signed for one target
 # cannot stand in for another, or for another version.
-APP_SLUG = "locklark"
+APP_SLUG = "passme"
 PLATFORMS = ("windows-amd64", "darwin-universal")
 CHECKSUMS = "SHA256SUMS"
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
@@ -91,7 +91,7 @@ def identity_helper() -> Path:
     global _IDENTITY_HELPER
     if _IDENTITY_HELPER is not None:
         return _IDENTITY_HELPER
-    directory = Path(tempfile.mkdtemp(prefix="locklark-release-identity-"))
+    directory = Path(tempfile.mkdtemp(prefix="passme-release-identity-"))
     try:
         os.chmod(directory, 0o700)
         helper = directory / "desktop_release_identity"
@@ -177,7 +177,7 @@ def sha256(path: Path) -> bytes:
 
 
 def verify_signature(public_key: bytes, digest: bytes, signature: bytes, label: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="locklark-release-verify-") as raw_dir:
+    with tempfile.TemporaryDirectory(prefix="passme-release-verify-") as raw_dir:
         directory = Path(raw_dir)
         key_path = directory / "update-public.der"
         digest_path = directory / "digest.bin"
@@ -327,8 +327,8 @@ def main() -> None:
 
     version = args.version
     required = {
-        f"locklark-setup-{version}-amd64.exe",
-        f"locklark-{version}.dmg",
+        f"passme-setup-{version}-amd64.exe",
+        f"passme-{version}.dmg",
         "install.ps1",
         "install.sh",
     }

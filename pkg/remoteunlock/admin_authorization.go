@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Wire constants of the v1 canonical owner-root admin remote-unlock
@@ -29,12 +29,12 @@ const (
 	// AdminDelegationSignatureDomain separates the delegation signature
 	// preimage. The preimage is this domain followed by the canonical JSON of
 	// members 1..19.
-	AdminDelegationSignatureDomain = "locklark.remote-unlock/v1/admin-delegation\x00"
+	AdminDelegationSignatureDomain = "passme.remote-unlock/v1/admin-delegation\x00"
 	// AdminDelegationDigestDomain separates the complete delegation digest
 	// preimage. The preimage is this domain followed by the complete
 	// canonical EncodeOwnerRootAdminRemoteUnlockDelegation bytes, signature
 	// included.
-	AdminDelegationDigestDomain = "locklark.remote-unlock/v1/admin-delegation-digest\x00"
+	AdminDelegationDigestDomain = "passme.remote-unlock/v1/admin-delegation-digest\x00"
 	// MaxAdminDelegationSize is the maximum encoded or accepted delegation
 	// size in bytes.
 	MaxAdminDelegationSize = 2048

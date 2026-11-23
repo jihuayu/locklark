@@ -130,7 +130,7 @@ export async function acceptBrowserPasskey({
     },
     { rp, challenge },
   );
-  await inlineClick("保存到 Locklark");
+  await inlineClick("保存到 Passme");
   input([
     { wait_label: "验证主密码" },
     { click_label: "验证主密码" },
@@ -166,9 +166,9 @@ export async function acceptBrowserPasskey({
   );
   assert.equal(auth[32] & 0x45, 0x45);
   let registration, verifier;
-  if (process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) {
+  if (process.env.PASSME_TEST_WEBAUTHN_SERVER) {
     verifier = createRequire(import.meta.url)(
-      process.env.LOCKLARK_TEST_WEBAUTHN_SERVER,
+      process.env.PASSME_TEST_WEBAUTHN_SERVER,
     );
     registration = await verifier.verifyRegistrationResponse({
       response: created.json,
@@ -219,7 +219,7 @@ export async function acceptBrowserPasskey({
     },
     { id: created.json.id, rp, challenge: getChallenge },
   );
-  await inlineClick("使用 Locklark 登录");
+  await inlineClick("使用 Passme 登录");
   input([
     { wait_label: "验证主密码" },
     { click_label: "验证主密码" },
@@ -306,7 +306,7 @@ export async function acceptBrowserPasskey({
     () => page.evaluate(() => window.abortResult === "AbortError"),
     "AbortSignal not honored",
   );
-  if (process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_CONDITIONAL === "1") {
     await acceptConditionalPasskey({
       origin, fixture, first: created.json, pageEval: (fn, arg) => page.evaluate(fn, arg),
       clickDocument: async selector => { await page.bringToFront(); await page.locator(selector).click(); },
@@ -316,8 +316,8 @@ export async function acceptBrowserPasskey({
         const state = { panels: 0, choices: 0, expectedLabel: false };
         const visit = node => {
           const attrs = node.attributes || [];
-          if (attrs.includes("data-locklark-conditional")) state.panels++;
-          if (attrs.includes("data-locklark-passkey-choice")) {
+          if (attrs.includes("data-passme-conditional")) state.panels++;
+          if (attrs.includes("data-passme-passkey-choice")) {
             state.choices++;
             if ((node.children || []).some(c => c.nodeValue === "Synthetic user · passkey-test")) state.expectedLabel = true;
           }
@@ -329,7 +329,7 @@ export async function acceptBrowserPasskey({
       eventually, input, observe, phase, openPopup, reconnect,
     });
   }
-  if (process.env.LOCKLARK_TEST_OTHER_PROVIDER === "1") {
+  if (process.env.PASSME_TEST_OTHER_PROVIDER === "1") {
     await page.bringToFront();
     await acceptOtherProvider({
       page, cdp, origin, first: created.json, inlineClick,
@@ -341,12 +341,12 @@ export async function acceptBrowserPasskey({
   // metadata opens still need an explicit quick pairing, so re-pair here with
   // the real quick-fill control before signals/management inspect it. Item-get
   // rows are never approved on the normal path.
-  if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1" ||
-      process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_SIGNALS === "1" ||
+      process.env.PASSME_TEST_PASSKEY_MANAGEMENT === "1") {
     phase("passkey-metadata:explicit-quick-repair");
     await reconnectQuickFill();
   }
-  if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_SIGNALS === "1") {
     await acceptPasskeySignals({
       origin, fixture, first: created.json,
       pageEval: (fn, arg) => page.evaluate(fn, arg), inlineClick,
@@ -355,7 +355,7 @@ export async function acceptBrowserPasskey({
       dismissPopup: async () => { await page.bringToFront(); await page.keyboard.press("Escape"); },
     });
   }
-  if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+  if (process.env.PASSME_TEST_PASSKEY_MANAGEMENT === "1") {
     await acceptPasskeyManagement({
       origin, fixture, first: created.json, openPopup, observe, reconnect,
       pageEval: (fn, arg) => page.evaluate(fn, arg), inlineClick,

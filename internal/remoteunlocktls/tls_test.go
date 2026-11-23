@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/pkg/remoteunlock"
+	"github.com/jihuayu/passme/pkg/remoteunlock"
 )
 
 const (

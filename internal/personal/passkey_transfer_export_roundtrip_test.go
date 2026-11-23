@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
-	"github.com/jihuayu/locklark/internal/passkeytransfer"
+	"github.com/jihuayu/passme/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkeytransfer"
 )
 
 func TestPasskeyTransferExportRoundTripExactSelectorsAndNoSourceChange(t *testing.T) {

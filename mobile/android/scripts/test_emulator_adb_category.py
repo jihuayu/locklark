@@ -20,7 +20,7 @@ GETPROP = ["shell", "getprop"]
 INSTALL = ["install", "-t", "-r"]
 INSTRUMENT = ["shell", "am", "instrument"]
 SETTINGS = ["shell", "settings"]
-OWN_AUTOFILL = b"org.locklark.android/org.locklark.android.autofill.AutofillAuthService"
+OWN_AUTOFILL = b"org.passme.android/org.passme.android.autofill.AutofillAuthService"
 SENSITIVE = json.dumps(old.CANARIES).encode()
 
 
@@ -125,7 +125,7 @@ class EntryTests(unittest.TestCase):
             with self.subTest(category=category):
                 device = self.device()
                 code, printed = self.attempt(device, self.at(device, INSTRUMENT, lambda: reply(stderr=stderr)))
-                self.assertNotIn(["shell", "am", "force-stop", "org.locklark.android"], device.commands)
+                self.assertNotIn(["shell", "am", "force-stop", "org.passme.android"], device.commands)
                 self.page(code, printed, "complete-test-count", category)
 
     def test_instrument_timeout_is_fixed_and_keeps_the_page(self):
@@ -134,7 +134,7 @@ class EntryTests(unittest.TestCase):
             raise TIMEOUT()
         code, printed = self.attempt(device, self.at(device, INSTRUMENT, timeout))
         self.page(code, printed, "complete-test-count", "timeout")
-        self.assertIn(["shell", "am", "force-stop", "org.locklark.android"], device.commands)
+        self.assertIn(["shell", "am", "force-stop", "org.passme.android"], device.commands)
 
     def test_run_primary_beyond_getprop_install_instrument(self):
         # A later required reply refused carries its fixed category too.

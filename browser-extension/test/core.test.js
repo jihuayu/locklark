@@ -1035,24 +1035,24 @@ test("watchtower flag helper filters unknown and duplicate values in stable orde
   assert.equal(core.siteFromURL("chrome://settings"), null);
 });
 
-test("paste protection recognises only complete Locklark Secret Key material", () => {
-  const key = "LL1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
-  const seed = "LLR2-" + "A".repeat(52);
+test("paste protection recognises only complete Passme Secret Key material", () => {
+  const key = "PM1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
+  const seed = "PMR2-" + "A".repeat(52);
   assert.equal(key.length, 30);
-  assert.equal(core.looksLikeLocklarkSecret(key), true);
-  assert.equal(core.looksLikeLocklarkSecret("  " + key + "\n"), true);
-  assert.equal(core.looksLikeLocklarkSecret(seed), true);
-  assert.equal(core.looksLikeLocklarkSecret(seed + "-" + "B".repeat(52)), true);
-  assert.equal(core.looksLikeLocklarkSecret(key.toLowerCase()), false);
-  assert.equal(core.looksLikeLocklarkSecret("LL1-" + "A".repeat(25)), false);
-  assert.equal(core.looksLikeLocklarkSecret("LL1-" + "1".repeat(26)), false);
-  assert.equal(core.looksLikeLocklarkSecret(key + " trailer"), false);
-  assert.equal(core.looksLikeLocklarkSecret(""), false);
-  assert.equal(core.looksLikeLocklarkSecret(null), false);
+  assert.equal(core.looksLikePassmeSecret(key), true);
+  assert.equal(core.looksLikePassmeSecret("  " + key + "\n"), true);
+  assert.equal(core.looksLikePassmeSecret(seed), true);
+  assert.equal(core.looksLikePassmeSecret(seed + "-" + "B".repeat(52)), true);
+  assert.equal(core.looksLikePassmeSecret(key.toLowerCase()), false);
+  assert.equal(core.looksLikePassmeSecret("PM1-" + "A".repeat(25)), false);
+  assert.equal(core.looksLikePassmeSecret("PM1-" + "1".repeat(26)), false);
+  assert.equal(core.looksLikePassmeSecret(key + " trailer"), false);
+  assert.equal(core.looksLikePassmeSecret(""), false);
+  assert.equal(core.looksLikePassmeSecret(null), false);
 });
 
 test("paste protection warns only on known state and never blocks by default", () => {
-  const key = "LL1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
+  const key = "PM1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
   assert.equal(
     core.pasteWarning({ text: key, isPasswordField: false, siteLinked: true }),
     "secret-key",

@@ -3,10 +3,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert/strict");
-const playwright = require(process.env.LOCKLARK_TEST_PLAYWRIGHT || "../web/node_modules/playwright");
-const root = path.resolve(process.env.LOCKLARK_TEST_SOURCE_ROOT || path.join(__dirname, ".."));
+const playwright = require(process.env.PASSME_TEST_PLAYWRIGHT || "../web/node_modules/playwright");
+const root = path.resolve(process.env.PASSME_TEST_SOURCE_ROOT || path.join(__dirname, ".."));
 const observe = process.argv.includes("--observe-baseline");
-const family = process.env.LOCKLARK_TEST_BROWSER || "chromium";
+const family = process.env.PASSME_TEST_BROWSER || "chromium";
 const results = [];
 (async () => {
  const browser = await playwright[family].launch({headless:true,args:family==="chromium"?["--no-sandbox"]:[]});
@@ -14,7 +14,7 @@ const results = [];
   const context=await browser.newContext({viewport:{width,height:640},colorScheme:theme});
   await context.route("**/*", async route=>{
    const url=new URL(route.request().url()), name=url.pathname.slice(1);
-   if(url.origin!=="https://ui.locklark.test" || !["popup.html","popup.css","popup.js","core.js"].includes(name)) return route.abort();
+   if(url.origin!=="https://ui.passme.test" || !["popup.html","popup.css","popup.js","core.js"].includes(name)) return route.abort();
    return route.fulfill({body:fs.readFileSync(path.join(root,"browser-extension",name)),contentType:name.endsWith(".js")?"text/javascript":name.endsWith(".css")?"text/css":"text/html"});
   });
   await context.addInitScript(({count})=>{
@@ -59,7 +59,7 @@ const results = [];
   },{count});
   const page=await context.newPage();
   const errors=[];page.on("pageerror",e=>errors.push(e.message));
-  await page.goto("https://ui.locklark.test/popup.html");
+  await page.goto("https://ui.passme.test/popup.html");
   await page.locator("#vault-list .vault-item").first().waitFor();
   return {page,errors,close:()=>context.close()};
  }
@@ -368,7 +368,7 @@ const results = [];
      frame.title='popup zero-width viewport probe';
      frame.style.cssText='display:block;width:0;height:640px;border:0';
      const loaded=new Promise(resolve=>frame.addEventListener('load',resolve,{once:true}));
-     frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/popup.css"></head><body><main><h1>Locklark</h1></main></body></html>';
+     frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/popup.css"></head><body><main><h1>Passme</h1></main></body></html>';
      document.body.appendChild(frame);
      try{
       await loaded;
@@ -396,8 +396,8 @@ const results = [];
    const h=await popup(4,theme,width);try{
     const m=await h.page.evaluate(()=>({top:document.querySelector("#search-input").getBoundingClientRect().top,scrollWidth:document.documentElement.scrollWidth,width:innerWidth}));
     if(!observe){assert(m.top<320);assert(m.scrollWidth<=m.width);}
-    if(process.env.LOCKLARK_TEST_UI_ARTIFACTS) {
-     const folder=path.resolve(process.env.LOCKLARK_TEST_UI_ARTIFACTS);fs.mkdirSync(folder,{recursive:true});
+    if(process.env.PASSME_TEST_UI_ARTIFACTS) {
+     const folder=path.resolve(process.env.PASSME_TEST_UI_ARTIFACTS);fs.mkdirSync(folder,{recursive:true});
      await h.page.screenshot({path:path.join(folder,family+"-"+theme+"-"+width+"-vault.png")});
     }
     if((await h.page.locator("#generator-section").evaluate(e=>e.tagName))==="DETAILS")await h.page.locator("#generator-section > summary").click();

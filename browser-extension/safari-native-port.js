@@ -1,5 +1,5 @@
 /*
- * Locklark Safari native transport boundary.
+ * Passme Safari native transport boundary.
  *
  * Safari's standard `runtime.sendNativeMessage` reaches the Safari web
  * extension handler; its `connectNative` does not provide the Chromium-style
@@ -21,7 +21,7 @@
 (function (root) {
   "use strict";
 
-  const NATIVE_HOST_NAME = "org.locklark.browser";
+  const NATIVE_HOST_NAME = "org.passme.browser";
   const PROTOCOL_VERSION = 1;
   const MAX_FRAME_BYTES = 256 * 1024;
   const MAX_FRAMES_PER_POLL = 64;
@@ -368,7 +368,7 @@
     }
 
     const port = Object.freeze({
-      name: "locklark-native",
+      name: "passme-native",
       postMessage,
       disconnect,
       onMessage,
@@ -420,7 +420,7 @@
   if (typeof module === "object" && module.exports) module.exports = namespace;
   if (root && typeof root === "object") {
     try {
-      Object.defineProperty(root, "LocklarkSafariNativePort", {
+      Object.defineProperty(root, "PassmeSafariNativePort", {
         value: namespace,
         writable: false,
         configurable: true,

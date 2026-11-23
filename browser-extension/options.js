@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const api = globalThis.browser || globalThis.chrome;
-  const core = globalThis.LocklarkCore;
+  const core = globalThis.PassmeCore;
   const $ = (id) => document.getElementById(id);
   function fatal(message) {
     const element = $("options-status");
@@ -25,18 +25,18 @@
     /Mac OS X|Macintosh|iPhone|iPad|iPod/i.test(USER_AGENT);
   const IS_FIREFOX = /Firefox\//i.test(USER_AGENT);
   const SHORTCUT_LABELS = {
-    _execute_action: "打开 Locklark 弹窗",
+    _execute_action: "打开 Passme 弹窗",
     autofill: "填充当前页面登录",
     "autofill-current-tab": "填充当前页面登录",
-    lock: "立即锁定 Locklark",
-    "lock-vault": "立即锁定 Locklark",
+    lock: "立即锁定 Passme",
+    "lock-vault": "立即锁定 Passme",
   };
   // Used only when the browser cannot enumerate commands (for example in tests
   // or on a transient API failure). Actual bindings always win when available.
   const DEFAULT_SHORTCUTS = [
     {
       name: "_execute_action",
-      label: "打开 Locklark 弹窗",
+      label: "打开 Passme 弹窗",
       shortcut: IS_MAC ? "Command+Shift+Y" : "Ctrl+Shift+Y",
     },
     {
@@ -46,7 +46,7 @@
     },
     {
       name: "lock",
-      label: "立即锁定 Locklark",
+      label: "立即锁定 Passme",
       shortcut: IS_MAC ? "Command+Shift+U" : "Ctrl+Shift+U",
     },
   ];
@@ -392,7 +392,7 @@
   }
   $("native-refresh")?.addEventListener("click", () => void refreshNativeStatus());
   $("native-connect")?.addEventListener("click", async () => {
-    if (nativeStatus) nativeStatus.textContent = "已请求连接；请在 Locklark 窗口中确认";
+    if (nativeStatus) nativeStatus.textContent = "已请求连接；请在 Passme 窗口中确认";
     try {
       await api.runtime.sendMessage({ type: "native-connect" });
     } catch {}
@@ -424,12 +424,12 @@
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = "locklark-diagnostics.json";
+      anchor.download = "passme-diagnostics.json";
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       diagnosticsStatus.textContent = "已导出诊断报告。";
     } catch {
-      diagnosticsStatus.textContent = "无法导出：请先连接 Locklark 后重试。";
+      diagnosticsStatus.textContent = "无法导出：请先连接 Passme 后重试。";
     }
   });
   for (const [id, key] of Object.entries(BOOLEAN_FIELDS)) {

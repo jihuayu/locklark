@@ -3,7 +3,7 @@
 从 main `c8c38e4`（PR #18 经 Luna/max 与双平台 CI 合并）接通 `personal github-pull`。原录制网关流程仍固定 `recorded-response/v1`；本入口使用新的个人库审计动作和现场人工确认，不能拿旧的录制批准切换到真实网络。
 
 ```text
-locklark personal github-pull --file owner.ll --id ITEM_ID --revision REV --repository-id NUMERIC_REPO_ID --owner OWNER --repository NAME --number PR_NUMBER --api-ip PUBLIC_IPV4
+passme personal github-pull --file owner.pm --id ITEM_ID --revision REV --repository-id NUMERIC_REPO_ID --owner OWNER --repository NAME --number PR_NUMBER --api-ip PUBLIC_IPV4
 ```
 
 选定登录的 password 字段应存放本人准备的 GitHub token；建议使用只授予目标仓库 PR 读取的凭据。命令不会向 GitHub 验证 token 的完整授权范围，也不会把一般 token 变成上游强制限仓库的委托；宿主本身仅执行固定仓库/PR 的 GET。repo ID 是稳定的数字身份，owner/name 是 API 路径；须从可信独立来源核实，不能从插件或中继直接抄来授予权限。
@@ -22,7 +22,7 @@ locklark personal github-pull --file owner.ll --id ITEM_ID --revision REV --repo
 
 ## 验证
 
-失败先行 `/tmp/locklark-validation/live-pull-red.log`：缺少新请求、入口和事务选项。`TestLivePull*` 用真实个人库验证成功执行前可从另一句柄读到已提交意图、修订不变、目标/库隔离绑定、secret 清理、回滚/关闭失败/取消、错误因素/冲突/回收站拒绝、上游错误脱敏，以及含新意图的备份恢复。成功流程的上游是测试替身；既有 `gateway.TestFixedOriginTLSAndHostname` 另实跑受控 TLS、主机名和响应投影。不能把两层测试称为真实 GitHub 账号端到端成功。
+失败先行 `/tmp/passme-validation/live-pull-red.log`：缺少新请求、入口和事务选项。`TestLivePull*` 用真实个人库验证成功执行前可从另一句柄读到已提交意图、修订不变、目标/库隔离绑定、secret 清理、回滚/关闭失败/取消、错误因素/冲突/回收站拒绝、上游错误脱敏，以及含新意图的备份恢复。成功流程的上游是测试替身；既有 `gateway.TestFixedOriginTLSAndHostname` 另实跑受控 TLS、主机名和响应投影。不能把两层测试称为真实 GitHub 账号端到端成功。
 
 `scripts/live_pull_acceptance.py` 实跑 PTY/Windows ConPTY 的隐藏因素、取消/错误因素、精确目标显示及意图持久化。使用五字节合成 token，生产适配器在发网前拒绝；CI 不依赖外部 token，也不接触真实账号。真实 GitHub 只读仓库 token、权限收窄与完整在线调用仍待独立验收。
 

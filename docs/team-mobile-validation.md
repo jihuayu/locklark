@@ -36,11 +36,11 @@ Android 系统凭据认证工具已实现成功、取消、密钥属性和重装
 
 Sol 外部验收使用独立 TLS 服务、多个客户端进程、owner/publisher/sequencer 与独立设备密钥，以及真实 bbolt、age、KDBX。私有 oracle 不调用 vault.OpenItems，独立验签 proposal/receipt/snapshot、解开 age 并读取 KDBX。工具首轮因零 VerifiedState.Checkpoint 仍计算散列发现产品错误并修复；另一轮因捕获 wrapper 缺少 ResponseController.Unwrap 导致严格 deadline 被拒，修正工具以保留真实 socket deadline。失败记录保留，不把失败轮计为成功。
 
-候选 core1 固定清单 `/tmp/locklark-validation/team-sync-core-candidate1.sha256`，SHA256 `62148b82105c7209b91d5c43f0e2d7f36cdb0c4d76e62e3fe4163ed1dcdfc083`。主代理独立核对源码，固定外部工具清单 `team-sync-parent-tools-v1.sha256`，独立构建 `/tmp/locklark-validation/team-sync-parent-candidate1`，运行：
+候选 core1 固定清单 `/tmp/passme-validation/team-sync-core-candidate1.sha256`，SHA256 `62148b82105c7209b91d5c43f0e2d7f36cdb0c4d76e62e3fe4163ed1dcdfc083`。主代理独立核对源码，固定外部工具清单 `team-sync-parent-tools-v1.sha256`，独立构建 `/tmp/passme-validation/team-sync-parent-candidate1`，运行：
 
 ```sh
-GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go build -o /tmp/locklark-validation/team-sync-parent-candidate1 ./scripts/team_sync_fixture
-python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/locklark-validation/team-sync-parent-candidate1
+GOTOOLCHAIN=go1.27.3 /tmp/passme-tools/go/bin/go build -o /tmp/passme-validation/team-sync-parent-candidate1 ./scripts/team_sync_fixture
+python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/passme-validation/team-sync-parent-candidate1
 ```
 
 主代理完整流程 exit0，日志 `team-sync-parent-candidate1.log`，私有目录 `team-sync-v1xivquy`；前后产品和工具清单均一致。12组覆盖真实 TLS/身份与 owner 边界、设备入网/reader 可读但不可写、writer 更新与精确父 CAS、新 nonce 下旧响应/密文篡改/错误 pins/错误 TLS 主机/客户端检查点失败、超15秒完整响应拒绝、排序端独立检查点阻止真实旧数据库回滚（包括只持 Genesis 的新客户端）、并发单赢家、丢回执的未知与精确 proposal 对账、服务端提交后检查点失败不确认成功及后代恢复、设备/整成员撤销后网络和新密文解密拒绝、owner 读取冻结历史、完整控制器/网络正文 canary 与 nonce 检查。Sol 的独立完整轮另存 `team-sync-5dqfwjoh`，不是主代理的同一轮。
@@ -53,7 +53,7 @@ python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/locklark-validation/t
 
 Luna 独立运行移动字段延迟披露/另一会话旧修订拒绝、Clear 与交付竞争、锁定与交付先后、OTP 时限与审计等定向测试，5.406s通过；这是当时的定向结果，随后复核又发现 OTP 最终授权和排队操作的边界，见下文；原生 UI 迟到回调仍必须核对自身前台/选择代次。Sol 的移动及新增原生编辑定向 race 通过（core69.996s、personal16.383s）。一次更宽的 mobile/core+整个personal race 因旧浏览器 OTP 1秒控制窗口与测试负载发生到期拒绝，并在默认10分钟时限内仍运行 PBKDF 而超时；该轮没有完成，不计为全包 race 成功。原完整输出在工具会话70635，私有文件 `personal-race-failure-excerpt.log` 只有明确标注的摘录，不能冒充完整日志。随后完整 personal normal 回归在20分钟时限内通过（369.975s，`personal-normal-final.log`），不能据此把失败的宽范围race补记为成功。
 
-第一轮移动核心冻结并绑定，AAR SHA256 `b1f336c36c25a839f40354327e60213ce48c6265c2a5a680e04ca0b5685dfefe`，88项实际平台传递源码/嵌入资源及构建工具清单在构建前后完全一致，产物保留 `/tmp/locklark-tools/mobile/core-final/`。
+第一轮移动核心冻结并绑定，AAR SHA256 `b1f336c36c25a839f40354327e60213ce48c6265c2a5a680e04ca0b5685dfefe`，88项实际平台传递源码/嵌入资源及构建工具清单在构建前后完全一致，产物保留 `/tmp/passme-tools/mobile/core-final/`。
 
 Android 已安装固定 JDK/SDK/NDK 并以真实 AAR 编译原生应用。软件 TCG 模拟器虽后来报告 boot_completed=1，但安装时 package 服务不存在，未进入应用，不计 UI 通过。iOS 纯 Swift 逻辑从实际 runtime red 修复后通过；第一轮 macOS CI 的真实 XCFramework 绑定、XcodeGen 和纯逻辑均通过，随后模拟器型号与 runtime 不兼容，尚未进入应用 SDK 编译/XCTest。所有 runtime 日志私有保存，CI 只输出固定分类，禁止上传含因素/正文的日志、截图或 xcresult。生成物的源码清单需包括实际平台传递依赖和 go:embed 输入，不能用整个仍在变化的工作树清单冒充冻结构建。
 
@@ -71,9 +71,9 @@ Luna 复核和确定性测试发现：OTP 原生交付后到门面最终授权�
 
 两端工作队列还须在真正开始 Go/系统操作前检查线程安全的取消凭证，避免切后台之后才开始旧解锁；所有拒绝路径仍清理输入因素。Android 旧策略的阻塞工作队列测试实际失败，修复后 JVM 策略测试通过；两端集成和最终平台验收仍在继续。
 
-主代理对冻结的生产 `locklark-team-sync` 命令做独立 PTY+TLS 验收，完整通过：prompt 可见时 ECHO/ICANON 已关闭、立即粘贴合法 seed 无回显、服务就绪前恢复原终端状态、真实 pinned owner 通过生产 TLS 服务读取、错误 seed/短输入/Ctrl-C 拒绝、等待输入时 SIGTERM/SIGHUP 恢复终端、无控制终端与 argv seed 拒绝、完整输出私钥 canary 零命中。私有证据 `team-cli-parent-y52x80gm/result.json`，独立构建二进制 SHA256 `155d15a686f4c600e73d57db12f4e56a4ce0c6dafc116a000fdf834d63ddc3f4`；23项产品/依赖清单 `team-sync-cli-core-candidate1.sha256` 前后通过，清单 SHA256 `e557d5c03d6b8fafd72467cd26e2b3c747c61afd510ced69f1a1127c20df9b1e`。Luna 独立复核当前 CLI 无剩余阻塞，并重跑完整终端恢复测试通过。
+主代理对冻结的生产 `passme-team-sync` 命令做独立 PTY+TLS 验收，完整通过：prompt 可见时 ECHO/ICANON 已关闭、立即粘贴合法 seed 无回显、服务就绪前恢复原终端状态、真实 pinned owner 通过生产 TLS 服务读取、错误 seed/短输入/Ctrl-C 拒绝、等待输入时 SIGTERM/SIGHUP 恢复终端、无控制终端与 argv seed 拒绝、完整输出私钥 canary 零命中。私有证据 `team-cli-parent-y52x80gm/result.json`，独立构建二进制 SHA256 `155d15a686f4c600e73d57db12f4e56a4ce0c6dafc116a000fdf834d63ddc3f4`；23项产品/依赖清单 `team-sync-cli-core-candidate1.sha256` 前后通过，清单 SHA256 `e557d5c03d6b8fafd72467cd26e2b3c747c61afd510ced69f1a1127c20df9b1e`。Luna 独立复核当前 CLI 无剩余阻塞，并重跑完整终端恢复测试通过。
 
-全仓正常回归使用 Go1.27.3、Bun1.4.4、PyKeePass4.2.0，`go test -p 1 -count=1 ./... -timeout=20m` 35个包状态通过，日志 `team-mobile-full-go.log`。该轮核心编译早于第二轮修复，不冒充最终冻结源码的全仓结果。草稿 PR [#37](https://github.com/jihuayu/locklark/pull/37) 在 `0094325` 的 Linux、Windows、macOS 桌面和 Web 四组 CI 通过；Android 构建通过但运行验收在 complete-test-count 失败，iOS 在模拟器选择失败。两项移动 CI 失败都须修复后在新精确提交重跑，未满足合并条件。
+全仓正常回归使用 Go1.27.3、Bun1.4.4、PyKeePass4.2.0，`go test -p 1 -count=1 ./... -timeout=20m` 35个包状态通过，日志 `team-mobile-full-go.log`。该轮核心编译早于第二轮修复，不冒充最终冻结源码的全仓结果。草稿 PR [#37](https://github.com/jihuayu/passme/pull/37) 在 `0094325` 的 Linux、Windows、macOS 桌面和 Web 四组 CI 通过；Android 构建通过但运行验收在 complete-test-count 失败，iOS 在模拟器选择失败。两项移动 CI 失败都须修复后在新精确提交重跑，未满足合并条件。
 
 ## 原生排队调用与核心第三轮绑定
 
@@ -81,7 +81,7 @@ Luna 复核和确定性测试发现：OTP 原生交付后到门面最终授权�
 
 主代理独立运行9项 OTP/排队/绑定视图测试各两次，逐项 RUN 记录在 `mobile-core-parent-v3-focused.log`（9.534s），另对锁清理期间新视图测试两次（1.359s，`mobile-core-parent-v3-cleanup.log`）。Luna 最初两条带末尾 `$` 的表达式漏选了名称带后缀的新视图测试，已明确撤回该覆盖声明；随后使用正确前缀并逐项核对，5项 Capture/FreshCapture 及10项合并定向测试均通过。核心完整 normal 11.034s、完整 race 109.560s，通过；全仓 vet 与模块校验通过。
 
-第三轮固定 AAR 在 `/tmp/locklark-tools/mobile/core-final-v3/`，SHA256 `edc91ce26a07a83d381be8e2428a404bec1ce6224e8dca177324bae6ef859593`。清单 SHA256 `0c2eaffab9a9e12d1570613feec3acbe53f50fabd3a1322fc6c2aaa59976ca76`，88项传递输入及工具前后完全一致。第一轮和第二轮绑定及其日志保留为历史证据。
+第三轮固定 AAR 在 `/tmp/passme-tools/mobile/core-final-v3/`，SHA256 `edc91ce26a07a83d381be8e2428a404bec1ce6224e8dca177324bae6ef859593`。清单 SHA256 `0c2eaffab9a9e12d1570613feec3acbe53f50fabd3a1322fc6c2aaa59976ca76`，88项传递输入及工具前后完全一致。第一轮和第二轮绑定及其日志保留为历史证据。
 
 PR #37 第二轮 `4f35ec5` 的四组既有 CI 再次通过；Android 实际运行在 create 阶段180秒条件等待失败（固定诊断 AssertionError，非进程崩溃）；iOS 真实应用 SDK 编译无报错、模拟器开始测试，但运行报告3条失败记录，旧安全摘要未提供用例标识，不能据此推断3个不同根因。后续迭代增加固定用例/源码行诊断；Android 两套独立流程即使一套失败也执行另一套，任一失败仍拒绝通过。
 
@@ -97,4 +97,4 @@ iOS Foundation 保护值的公开接口允许 NSString/String；直接 as? FileP
 
 主代理还发现 Android AtomicFile 首次 startWrite 写入的是 .new，而旧代码 chmod 最终路径会因不存在失败。现在先 fchmod 实际文件描述符至0600，写完后核对提交文件权限和大小；应用测试验证真实首次写入和复读。显示期限同时核对原墙钟范围与不延长的单调预算，系统时间变化广播保留为额外保护。Luna 独立运行10项 Android 策略测试通过；新平台组件运行证据仍待收齐。
 
-Android 发布兼容性修复后的第四轮 AAR：`f306122940008c1e81bc45f91112fff32771d036d5120328fd08cf7196a3cd8f`，保留于 `/tmp/locklark-tools/mobile/core-final-v4/`。清单 SHA256 `45556f2cfce45630a6e956c115a49e048424187c6e28af1d5ba01c4eb93b99a7`；主代理独立核对89项实际输入与产物散列，零不一致。该绑定包含 Android 专用发布路径；第三轮绑定继续保留，用于实际应用 UID 的旧行为对照。
+Android 发布兼容性修复后的第四轮 AAR：`f306122940008c1e81bc45f91112fff32771d036d5120328fd08cf7196a3cd8f`，保留于 `/tmp/passme-tools/mobile/core-final-v4/`。清单 SHA256 `45556f2cfce45630a6e956c115a49e048424187c6e28af1d5ba01c4eb93b99a7`；主代理独立核对89项实际输入与产物散列，零不一致。该绑定包含 Android 专用发布路径；第三轮绑定继续保留，用于实际应用 UID 的旧行为对照。

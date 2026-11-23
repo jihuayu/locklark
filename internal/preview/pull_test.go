@@ -3,7 +3,7 @@ package preview
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 	"os"
 	"path/filepath"
 	"testing"

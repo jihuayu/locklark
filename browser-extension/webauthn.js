@@ -9,7 +9,7 @@
   const pending = new Map();
   // Extension capability probe. The isolated content script answers with one
   // boolean; account metadata never crosses this bridge.
-  const CAPABILITY_SOURCE = "locklark-capability-v1";
+  const CAPABILITY_SOURCE = "passme-capability-v1";
   const capabilityWaiters = new Map();
   function extensionConditionalAvailable(timeout = 800, registerCancel) {
     return new Promise((resolve) => {
@@ -129,7 +129,7 @@
       if (waiter) waiter(event.data.conditional);
       return;
     }
-    if (event.data?.source !== "locklark-result-v1") return;
+    if (event.data?.source !== "passme-result-v1") return;
     const call = pending.get(event.data.id);
     if (!call) return;
     call.finish(event.data);
@@ -266,7 +266,7 @@
         cleanup();
         if (wasPosted)
           window.postMessage(
-            { source: "locklark-request-v1", type: "cancel", id },
+            { source: "passme-request-v1", type: "cancel", id },
             location.origin,
           );
         reject(error);
@@ -296,7 +296,7 @@
               if (done) return;
               cleanup();
               window.postMessage(
-                { source: "locklark-request-v1", type: "cancel", id },
+                { source: "passme-request-v1", type: "cancel", id },
                 location.origin,
               );
               reject(
@@ -338,7 +338,7 @@
         });
         window.postMessage(
           {
-            source: "locklark-request-v1",
+            source: "passme-request-v1",
             type: kind,
             id,
             options: raw,
@@ -433,7 +433,7 @@
   // arguments, its exact return value is handed back untouched, and one
   // bounded public RP hint is posted only after that promise fulfils. Nothing
   // is awaited locally and a rejection never produces a hint.
-  const SIGNAL_SOURCE = "locklark-signal-v1";
+  const SIGNAL_SOURCE = "passme-signal-v1";
   const SIGNAL_MAX = 32768;
   const SIGNAL_ACCEPTED_MAX = 64;
   const SIGNAL_TEXT_MAX = 1024;

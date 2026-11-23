@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/localpath"
+	"github.com/jihuayu/passme/internal/localpath"
 )
 
 // trustedBrokerParent is the localpath trust check. It is a variable so the
@@ -22,7 +22,7 @@ import (
 var trustedBrokerParent = localpath.TrustedTemporaryParent
 
 func DefaultBrokerEndpoint() (string, error) {
-	if custom := os.Getenv("LOCKLARK_BROWSER_SOCKET"); custom != "" {
+	if custom := os.Getenv("PASSME_BROWSER_SOCKET"); custom != "" {
 		if !filepath.IsAbs(custom) || len(custom) > 100 {
 			return "", ErrBrokerUnavailable
 		}
@@ -35,7 +35,7 @@ func DefaultBrokerEndpoint() (string, error) {
 	if e != nil {
 		return "", ErrBrokerUnavailable
 	}
-	return filepath.Join(parent, "locklark-brw-"+strconv.Itoa(os.Geteuid()), "b.sock"), nil
+	return filepath.Join(parent, "passme-brw-"+strconv.Itoa(os.Geteuid()), "b.sock"), nil
 }
 
 type brokerUnixListener struct {

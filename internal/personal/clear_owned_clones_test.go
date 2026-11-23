@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Owned temporary clones are cleared at the end of the transaction callback,

@@ -1,11 +1,11 @@
 // Command desktop_release_identity verifies the signed content identity of a
-// Locklark desktop update archive.
+// Passme desktop update archive.
 //
 // It reads the archive in place, never extracts or executes an entry, and
 // checks the paths and bounded sizes of the tar stream. The Windows archive
 // must hold a real windows/amd64 Go PE; the macOS archive must hold a
 // darwin/universal fat Mach-O with both arm64 and amd64 slices. Each slice
-// must carry the requested MyGo package version and the Locklark identifier,
+// must carry the requested MyGo package version and the Passme identifier,
 // and the macOS Info.plist must name the same bundle and version.
 //
 // In plan mode it also checks each signed "mygo delta 1" index: the raw
@@ -43,13 +43,13 @@ import (
 )
 
 const (
-	appIdentifier = "app.locklark.desktop"
+	appIdentifier = "app.passme.desktop"
 	windowsTarget = "windows-amd64"
 	darwinTarget  = "darwin-universal"
 
-	windowsExecutable = "Locklark.exe"
-	darwinBundle      = "Locklark.app"
-	darwinExecutable  = darwinBundle + "/Contents/MacOS/Locklark"
+	windowsExecutable = "Passme.exe"
+	darwinBundle      = "Passme.app"
+	darwinExecutable  = darwinBundle + "/Contents/MacOS/Passme"
 	darwinInfoPlist   = darwinBundle + "/Contents/Info.plist"
 
 	maxArchiveSize    = int64(1 << 30)
@@ -794,28 +794,28 @@ func checkLink(name, target string) error {
 func verifyWindows(exe []byte, version string) error {
 	f, err := pe.NewFile(bytes.NewReader(exe))
 	if err != nil {
-		return fmt.Errorf("Locklark.exe is not a PE file: %w", err)
+		return fmt.Errorf("Passme.exe is not a PE file: %w", err)
 	}
 	defer f.Close()
 	if f.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
-		return fmt.Errorf("Locklark.exe has PE machine %#x, want amd64", f.Machine)
+		return fmt.Errorf("Passme.exe has PE machine %#x, want amd64", f.Machine)
 	}
 	optional, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
-		return errors.New("Locklark.exe is not a 64-bit PE file")
+		return errors.New("Passme.exe is not a 64-bit PE file")
 	}
 	sections, err := peStringSections(f, optional.ImageBase)
 	if err != nil {
-		return fmt.Errorf("cannot read Locklark.exe sections: %w", err)
+		return fmt.Errorf("cannot read Passme.exe sections: %w", err)
 	}
 	if err := checkBuildInfo(exe, "windows", "amd64"); err != nil {
-		return fmt.Errorf("Locklark.exe: %w", err)
+		return fmt.Errorf("Passme.exe: %w", err)
 	}
 	if !hasEmbeddedString(sections, version) {
-		return fmt.Errorf("Locklark.exe does not embed an exact Go string for version %q", version)
+		return fmt.Errorf("Passme.exe does not embed an exact Go string for version %q", version)
 	}
 	if !hasEmbeddedString(sections, appIdentifier) {
-		return fmt.Errorf("Locklark.exe does not embed an exact Go string for identifier %q", appIdentifier)
+		return fmt.Errorf("Passme.exe does not embed an exact Go string for identifier %q", appIdentifier)
 	}
 	// mygo build writes a VS_VERSIONINFO resource with these keys. Minimal
 	// Go fixtures may omit resources; when they exist, their values must
@@ -832,7 +832,7 @@ func verifyWindows(exe []byte, version string) error {
 				{"MyGoIdentifier", appIdentifier},
 			} {
 				if !bytes.Contains(data, utf16LE(pair[0])) || !bytes.Contains(data, utf16LE(pair[1])) {
-					return fmt.Errorf("Locklark.exe resource %s does not match %q", pair[0], pair[1])
+					return fmt.Errorf("Passme.exe resource %s does not match %q", pair[0], pair[1])
 				}
 			}
 		}

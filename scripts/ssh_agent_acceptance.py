@@ -26,7 +26,7 @@ import time
 from run_cli_acceptance import Acceptance as CLIController, AcceptanceFailure, require, scan
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-TITLE = "Locklark · 本地金库"
+TITLE = "Passme · 本地金库"
 STAGES = {"prerequisites", "create", "unlock", "generate", "import", "agent-start", "servers", "identities", "approve", "deny",
           "malformed", "concurrency", "disconnect", "expired", "slow-frame", "openssh", "forwarding", "lock",
           "export", "audit", "privacy", "cleanup", "complete"}
@@ -68,7 +68,7 @@ def owned_runtime():
     info = path.lstat()
     require(path == path.resolve(strict=True) and stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
             and info.st_mode & 0o077 == 0)
-    endpoint = path / ("locklark-ssh-" + str(os.geteuid())) / "agent.sock"
+    endpoint = path / ("passme-ssh-" + str(os.geteuid())) / "agent.sock"
     require(len(os.fsencode(endpoint)) <= 100)
     return path, (info.st_dev, info.st_ino, info.st_uid)
 
@@ -477,7 +477,7 @@ class Acceptance:
         self.env = {**os.environ, "HOME": str(self.cli.global_home), "NO_AT_BRIDGE": "0", "GTK_A11Y": "1"}
         self.runtime, self.runtime_identity = owned_runtime()
         self.runtime_owned, self.runtime_cleaned = True, False
-        self.expected_endpoint = self.runtime / ("locklark-ssh-" + str(os.geteuid())) / "agent.sock"
+        self.expected_endpoint = self.runtime / ("passme-ssh-" + str(os.geteuid())) / "agent.sock"
         self.runtime_endpoint_bytes = len(os.fsencode(self.expected_endpoint))
         self.env["TMPDIR"] = str(self.runtime)
         self.app, self.relay, self.servers, self.children, self.wm = None, None, [], [], None
@@ -988,7 +988,7 @@ def main(argv=None):
     parser.add_argument("--peer", required=True, help="Python executable with independent PyKeePass/cryptography")
     parser.add_argument("--fixture-bin")
     parser.add_argument("--window-manager", help="optional window manager executable for a fresh owned display only")
-    parser.add_argument("--artifacts", default="/tmp/locklark-validation")
+    parser.add_argument("--artifacts", default="/tmp/passme-validation")
     args = parser.parse_args(argv)
     os.umask(0o077)
     acceptance, success = None, False

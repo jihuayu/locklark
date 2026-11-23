@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -252,16 +252,16 @@ func TestReconcileRebaseMalformedShapesReview(t *testing.T) {
 			writeJournalNestedBucket(t, f.j, recordKey, "child", []byte("x"))
 		}},
 		{"corrupt legacy record", func(t *testing.T, f *reconcileFixture) {
-			writeRawJournalKey(t, f.j, recordKey, []byte("LLVJ-corrupt"))
+			writeRawJournalKey(t, f.j, recordKey, []byte("PMVJ-corrupt"))
 		}},
 		{"corrupt prepared record", func(t *testing.T, f *reconcileFixture) {
-			writeRawJournalKey(t, f.j, preparedKey, []byte("LLVP-corrupt"))
+			writeRawJournalKey(t, f.j, preparedKey, []byte("PMVP-corrupt"))
 		}},
 		{"corrupt state record", func(t *testing.T, f *reconcileFixture) {
-			writeRawState(t, f.j, []byte("LLVS-corrupt"))
+			writeRawState(t, f.j, []byte("PMVS-corrupt"))
 		}},
 		{"corrupt target audit", func(t *testing.T, f *reconcileFixture) {
-			corruptAudit(t, f.j, f.old.Generation+1, []byte("LLVA-corrupt"))
+			corruptAudit(t, f.j, f.old.Generation+1, []byte("PMVA-corrupt"))
 		}},
 		{"nested bucket at target audit", func(t *testing.T, f *reconcileFixture) {
 			nestAudit(t, f.j, auditKey(f.old.Generation+1), "child", []byte("x"))
@@ -273,7 +273,7 @@ func TestReconcileRebaseMalformedShapesReview(t *testing.T) {
 			malformedAuditKey(t, f.j, []byte("short"), rawAudit(t, f.j, f.old.Generation+1))
 		}},
 		{"corrupt historical audit", func(t *testing.T, f *reconcileFixture) {
-			corruptAudit(t, f.j, 0, []byte("LLVA-corrupt"))
+			corruptAudit(t, f.j, 0, []byte("PMVA-corrupt"))
 		}},
 	}
 	for _, c := range cases {

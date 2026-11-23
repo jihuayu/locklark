@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"sort"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // CodeAuthorSigningKeyMismatch is reported by SealAuthenticatedFile when the

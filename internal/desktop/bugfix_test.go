@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -250,7 +250,7 @@ func TestDesktopClipboardTimerPreservesExternalOwnerAndNewerCopyAndUnlockRace(t 
 
 func TestDesktopIdleTimerLocksSessionWithoutRendering(t *testing.T) {
 	a := New()
-	a.path = t.TempDir() + "/idle.ll"
+	a.path = t.TempDir() + "/idle.pm"
 	if err := personal.Create(a.path, "fixture", bugfixKey()); err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"filippo.io/age"
 	"fmt"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 	"path/filepath"
 	"testing"
 )

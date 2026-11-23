@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build reproducible, unsigned preparation ZIPs for the Locklark extension.
+"""Build reproducible, unsigned preparation ZIPs for the Passme extension.
 
 This tool intentionally has no signing, publishing, network, credential, or
 environment-discovery path. It runs the existing Node build with an argv list
@@ -49,10 +49,10 @@ PRODUCT_FILES = (
 MANIFEST_FILE = "manifest.json"
 ZIP_ENTRIES = (MANIFEST_FILE,) + PRODUCT_FILES
 
-EXPECTED_NAME = "Locklark"
+EXPECTED_NAME = "Passme"
 EXPECTED_VERSION = "0.1.0"
 EXPECTED_DESCRIPTION = (
-    "Passwords, automatic sign-in and passkeys with your native Locklark vault"
+    "Passwords, automatic sign-in and passkeys with your native Passme vault"
 )
 EXPECTED_HOST_PERMISSIONS = ["https://*/*"]
 CHROMIUM_KEY = (
@@ -64,7 +64,7 @@ CHROMIUM_KEY = (
     "YmHXRkje94JpCP/r9+ge6oLW93XnSwIDAQAB"
 )
 CHROMIUM_ID = "geldnhjapnackobgknocomedmjgphnpe"
-FIREFOX_ID = "browser@locklark.local"
+FIREFOX_ID = "browser@passme.local"
 FIREFOX_MIN_VERSION = "153.0"
 CHROMIUM_MIN_VERSION = "120"
 EXPECTED_PERMISSIONS = {
@@ -117,12 +117,12 @@ EXPECTED_COMMON_COMMANDS = {
     },
     "lock": {
         "suggested_key": {"default": "Ctrl+Shift+U", "mac": "Command+Shift+U"},
-        "description": "立即锁定 Locklark",
+        "description": "立即锁定 Passme",
     },
 }
 EXPECTED_ACTION_COMMAND = {
     "suggested_key": {"default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y"},
-    "description": "打开 Locklark 弹窗",
+    "description": "打开 Passme 弹窗",
 }
 COMMON_TOP_LEVEL = {
     "manifest_version",
@@ -149,7 +149,7 @@ ZIP_FILE_MODE = 0o644
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_BUNDLE_BYTES = 32 * 1024 * 1024
 MAX_RECEIPT_BYTES = 1024 * 1024
-RECEIPT_SCHEMA = "locklark-browser-extension-unsigned-receipt/v1"
+RECEIPT_SCHEMA = "passme-browser-extension-unsigned-receipt/v1"
 TOOL_NAME = "scripts/package_browser_extension.py"
 
 REMOTE_ATTRIBUTE = re.compile(
@@ -434,8 +434,8 @@ def _check_prior_receipt(
 
 def _artifact_names(product: str) -> tuple[str, str]:
     return (
-        f"locklark-browser-extension-{product}-unsigned.zip",
-        f"locklark-browser-extension-{product}-unsigned.receipt.json",
+        f"passme-browser-extension-{product}-unsigned.zip",
+        f"passme-browser-extension-{product}-unsigned.receipt.json",
     )
 
 
@@ -636,7 +636,7 @@ def _prebuilt_bundle(
     for name in ZIP_ENTRIES:
         if not isinstance(files[name], bytes):
             _fail("prebuilt browser extension input rejected")
-    with tempfile.TemporaryDirectory(prefix="locklark-prebuilt-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="passme-prebuilt-") as temporary:
         directory = Path(temporary)
         os.chmod(directory, 0o700)
         for name in ZIP_ENTRIES:
@@ -673,8 +673,8 @@ def package(
         zip_bytes = build_zip(files)
     else:
         files, zip_bytes = prebuilt_files, prebuilt_zip
-    artifact_name = f"locklark-browser-extension-{product}-unsigned.zip"
-    receipt_name = f"locklark-browser-extension-{product}-unsigned.receipt.json"
+    artifact_name = f"passme-browser-extension-{product}-unsigned.zip"
+    receipt_name = f"passme-browser-extension-{product}-unsigned.receipt.json"
     receipt = _receipt(product, files, zip_bytes, artifact_name)
     receipt_bytes = (
         json.dumps(receipt, indent=2, sort_keys=True, ensure_ascii=True) + "\n"

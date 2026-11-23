@@ -1,12 +1,12 @@
 // Real Chromium DOM checks for the exact static function used by the extension.
 // No product hooks, native approvals, extension privileges or secrets are faked.
 const playwright = require(
-  process.env.LOCKLARK_TEST_PLAYWRIGHT || "../web/node_modules/playwright",
+  process.env.PASSME_TEST_PLAYWRIGHT || "../web/node_modules/playwright",
 );
 const assert = require("node:assert/strict");
 const path = require("node:path");
 (async () => {
-  const browserName = process.env.LOCKLARK_TEST_BROWSER || "chromium";
+  const browserName = process.env.PASSME_TEST_BROWSER || "chromium";
   assert(["chromium", "firefox"].includes(browserName));
   const browser = await playwright[browserName].launch({
     headless: true,
@@ -37,7 +37,7 @@ const path = require("node:path");
           e.preventDefault();
           submits++;
         });
-        const filled = LocklarkCore.fillDocument(
+        const filled = PassmeCore.fillDocument(
           "https://example.test",
           "fixture-user",
           "fixture-password",
@@ -119,7 +119,7 @@ const path = require("node:path");
               events++;
               event.preventDefault();
             });
-          const value = LocklarkCore.fillDocument(
+          const value = PassmeCore.fillDocument(
             expected,
             "",
             "",
@@ -217,7 +217,7 @@ const path = require("node:path");
     });
     assert.equal(
       await frame.evaluate(() =>
-        LocklarkCore.fillDocument(
+        PassmeCore.fillDocument(
           location.origin,
           "fixture-user",
           "fixture-password",
@@ -231,7 +231,7 @@ const path = require("node:path");
         document.querySelector("input[type=password]").value =
           "Synthetic-frame-value";
         return (
-          LocklarkCore.fillDocument(
+          PassmeCore.fillDocument(
             location.origin,
             "",
             "",

@@ -92,7 +92,7 @@ func editorFieldRow(c *ui.Context, spec editorFieldSpec) {
 // hairline dividers and a single add action.
 func editorFieldGroup(c *ui.Context, spec editorFieldGroupSpec) {
 	t := c.Theme()
-	ui.Column(c.Key("editor-field-group:"+spec.Key)).FillWidth().MinWidth(0).Gap(t.Space(1.5)).Children(func() {
+	ui.Column(c.Key("editor-field-group:" + spec.Key)).FillWidth().MinWidth(0).Gap(t.Space(1.5)).Children(func() {
 		if spec.Title != "" || spec.Badge != "" || spec.HeaderAction != nil {
 			ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(1.5)).Padding(0, t.Space(1)).Children(func() {
 				if spec.Title != "" {
@@ -110,7 +110,7 @@ func editorFieldGroup(c *ui.Context, spec editorFieldGroupSpec) {
 		}
 
 		ui.Column(c).FillWidth().MinWidth(0).
-			Border(1, t.Border).Radius(t.Radius*1.25).Background(t.Surface).Children(func() {
+			Border(1, t.Border).Radius(t.Radius * 1.25).Background(t.Surface).Children(func() {
 			shown := false
 			for i := range spec.Fields {
 				if shown {

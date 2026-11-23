@@ -63,7 +63,7 @@ func TestHIBPClientPrefixOnlyAndParsing(t *testing.T) {
 		t.Fatal("query string sent")
 	}
 	header := headers[0]
-	if header.Get("Add-Padding") != "true" || header.Get("User-Agent") != "Locklark-Watchtower/1.0" || header.Get("Accept") != "text/plain" {
+	if header.Get("Add-Padding") != "true" || header.Get("User-Agent") != "Passme-Watchtower/1.0" || header.Get("Accept") != "text/plain" {
 		t.Fatalf("headers=%v", header)
 	}
 	for _, forbidden := range []string{"Cookie", "Referer", "Origin", "Authorization"} {

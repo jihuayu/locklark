@@ -3,8 +3,8 @@ package teambootstrapcli
 import (
 	"bytes"
 	"context"
-	"github.com/jihuayu/locklark/internal/teamclient"
-	"github.com/jihuayu/locklark/internal/teamconsent"
+	"github.com/jihuayu/passme/internal/teamclient"
+	"github.com/jihuayu/passme/internal/teamconsent"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +13,7 @@ import (
 )
 
 func TestBootstrapNoControllingTerminalRefusesBeforeMutation(t *testing.T) {
-	const marker = "LOCKLARK_TEST_BOOTSTRAP_NO_TTY"
+	const marker = "PASSME_TEST_BOOTSTRAP_NO_TTY"
 	if os.Getenv(marker) == "1" {
 		if detachChildConsole() != nil {
 			t.Fatal("no controlling console precondition failed")

@@ -235,7 +235,7 @@ func TestFieldErrors(t *testing.T) {
 		in  string
 		err error
 	}{
-		{strings.Replace(valid, Format, "locklark.vault-creation/v2", 1), ErrMalformed},
+		{strings.Replace(valid, Format, "passme.vault-creation/v2", 1), ErrMalformed},
 		{strings.Replace(valid, `"version":1`, `"version":2`, 1), ErrMalformed},
 		{strings.Replace(valid, `"kind":"`+Kind+`"`, `"kind":"scope-proof"`, 1), ErrMalformed},
 		// Field wrong types and missing members are malformed.

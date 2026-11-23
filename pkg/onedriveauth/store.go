@@ -39,7 +39,7 @@ type RefreshTokenStore struct {
 // StoreNamespace is the fixed service namespace of every item this store
 // writes. It is a constant so the store can never be redirected to another
 // service.
-const StoreNamespace = "app.locklark.onedrive.oauth.v1"
+const StoreNamespace = "app.passme.onedrive.oauth.v1"
 
 // Bounds on the caller's profile label and on a stored refresh token. The label
 // bound is a format bound; the token bound is mygo's MaxSecretSize, the most
@@ -53,7 +53,7 @@ const (
 
 // storeKeyDomain is the SHA-256 domain separation label of the per-profile key.
 // Changing it changes every derived key.
-const storeKeyDomain = "locklark/onedrive-oauth/refresh-token/v2\x00"
+const storeKeyDomain = "passme/onedrive-oauth/refresh-token/v2\x00"
 
 // Store sentinels. Each is a fixed text with no detail, so none can carry a
 // label, client ID, tenant, derived key, token or library error. Callers test

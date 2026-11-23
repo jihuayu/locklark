@@ -1,5 +1,5 @@
 {
-  "schema": "locklark.browser-parity-evidence.v1",
+  "schema": "passme.browser-parity-evidence.v1",
   "generated_at": "2026-11-09",
   "head": "20f3f25fcc2749f0466e4f3b5cdaf0dcfad89dc9",
   "source_checklist": "docs/browser-parity-checklist.md",
@@ -1585,7 +1585,7 @@
       "implementation_paths": [
         "browser-extension/build.js",
         "browser-extension/safari-native-port.js",
-        "safari/LocklarkSafariExtension/Sources/SafariWebExtensionHandler.swift",
+        "safari/PassmeSafariExtension/Sources/SafariWebExtensionHandler.swift",
         "safari/scripts/test_safari_swift.sh"
       ],
       "test_paths": [

@@ -20,7 +20,7 @@ loginFields 缺失或空数组有效；显式 null、非数组和非对象元素
 
 ## 证据
 
-先写 `TestLoginFields*` 并运行，旧实现实际失败：缺少报告、接受畸形 designation 元数据和超限 loginFields（`/tmp/locklark-validation/login-fields-red.log`）。随后覆盖所有值形状、重复作用域、未知/空/缺失 designation、大小写/空白、type 与 fieldType 同/异/缺失、未知类型、畸形对象在有效条目之后、预算精确边界与超限、报告秘密扫描。模糊测试保持有效 ZIP/外层层级，以变异直达 loginFields，并检查分类计数守恒和零部分结果。
+先写 `TestLoginFields*` 并运行，旧实现实际失败：缺少报告、接受畸形 designation 元数据和超限 loginFields（`/tmp/passme-validation/login-fields-red.log`）。随后覆盖所有值形状、重复作用域、未知/空/缺失 designation、大小写/空白、type 与 fieldType 同/异/缺失、未知类型、畸形对象在有效条目之后、预算精确边界与超限、报告秘密扫描。模糊测试保持有效 ZIP/外层层级，以变异直达 loginFields，并检查分类计数守恒和零部分结果。
 
 真实加密合成预览从验签审计与独立检查点核验的来源读回归档，断言已有 `fieldType: P` 登录字段没有被归一化为 `type`，预检/审计报告不含源值。这个来源验证不是新增预检操作的持久审计入口。
 

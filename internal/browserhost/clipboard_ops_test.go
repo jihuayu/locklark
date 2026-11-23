@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 type clipboardFake struct {
@@ -120,7 +120,7 @@ func clipboardFixture(t *testing.T, fake *clipboardFake, ttl time.Duration) (*Co
 	if !nativeclipboard.NativeLeaseSupported() {
 		t.Skip("native clipboard leases are unavailable; platform fallback has separate coverage")
 	}
-	path := filepath.Join(t.TempDir(), "clipboard.ll")
+	path := filepath.Join(t.TempDir(), "clipboard.pm")
 	key := bytes.Repeat([]byte{5}, 16)
 	if e := personal.Create(path, "clipboard", key); e != nil {
 		t.Fatal(e)

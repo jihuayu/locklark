@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/password"
-	"github.com/jihuayu/locklark/internal/reference"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/password"
+	"github.com/jihuayu/passme/internal/reference"
+	"github.com/jihuayu/passme/internal/vault"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -231,7 +231,7 @@ func TestReferenceConcurrentEditAndRecovery(t *testing.T) {
 	if _, err := RevealReference(path, "fixture", key, raw, target.Revision, &output); !errors.Is(err, ErrConflict) || output.Len() != 0 {
 		t.Fatal("stale reference disclosed", err)
 	}
-	archive := filepath.Join(t.TempDir(), "backup.llb")
+	archive := filepath.Join(t.TempDir(), "backup.pmb")
 	backup, err := PrepareBackup(path, archive, "fixture", key)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func TestReferenceConcurrentEditAndRecovery(t *testing.T) {
 	if err := backup.Publish(); err != nil {
 		t.Fatal(err)
 	}
-	restored := filepath.Join(t.TempDir(), "restored.ll")
+	restored := filepath.Join(t.TempDir(), "restored.pm")
 	recovery, err := PrepareRestore(archive, restored, "fixture", key, kit)
 	if err != nil {
 		t.Fatal(err)

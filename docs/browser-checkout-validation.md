@@ -11,4 +11,4 @@
 
 403 项整合 Node 检查通过（397 扩展检查与 6 项驱动检查）；此前整合后的 host / desktop / personal race 检查通过。CI 新增同一真实浏览器旅程。以上是增量证据，不代表重跑所有 E2E，也不声明所有浏览器或平台均已验证。
 
-运行：先构建 Chromium 原生宿主，再设置 LOCKLARK_BROWSER_HOST 和 LOCKLARK_TEST_CHECKOUT_FRAMES=1，在可见 X11 会话执行 node scripts/browser_native_acceptance.mjs。输出仅含固定阶段；合成凭据、字段内容和原始诊断留在私有验收目录。
+运行：先构建 Chromium 原生宿主，再设置 PASSME_BROWSER_HOST 和 PASSME_TEST_CHECKOUT_FRAMES=1，在可见 X11 会话执行 node scripts/browser_native_acceptance.mjs。输出仅含固定阶段；合成凭据、字段内容和原始诊断留在私有验收目录。

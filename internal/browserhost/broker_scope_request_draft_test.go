@@ -10,7 +10,7 @@ package browserhost
 import (
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // TestCLIRunScope_Request proves the shared request check resolves the gh
@@ -41,7 +41,7 @@ func TestCLIRunScope_Request(t *testing.T) {
 			}
 		})
 	}
-	if validCLIRunRequest(1, "relative.ll", scope, good) {
+	if validCLIRunRequest(1, "relative.pm", scope, good) {
 		t.Fatal("accepted relative vault path")
 	}
 }

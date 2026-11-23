@@ -1,7 +1,7 @@
 # Browser extension release preparation
 
 This document covers **preparation only**: deterministic unsigned submission
-ZIPs for the Locklark browser extension, the public metadata needed to review
+ZIPs for the Passme browser extension, the public metadata needed to review
 them, and the native-host/store identity facts that a later release must keep
 continuous. It does not sign, publish, upload, review, or install a release.
 
@@ -66,14 +66,14 @@ exactly those names; a symlink or non-regular file at any allowlisted path is a
 hard failure. Normal output is:
 
 ```text
-locklark-browser-extension-chromium-unsigned.zip
-locklark-browser-extension-chromium-unsigned.receipt.json
-locklark-browser-extension-firefox-unsigned.zip
-locklark-browser-extension-firefox-unsigned.receipt.json
+passme-browser-extension-chromium-unsigned.zip
+passme-browser-extension-chromium-unsigned.receipt.json
+passme-browser-extension-firefox-unsigned.zip
+passme-browser-extension-firefox-unsigned.receipt.json
 ```
 
 Both products may use the same output directory. Re-running into a directory is
-allowed only when every existing file is a complete, receipt-verified Locklark
+allowed only when every existing file is a complete, receipt-verified Passme
 preparation artifact. Any unrelated file, partial pair, unreadable receipt, or
 hash mismatch refuses the run. Note that this original tool replaces each file
 separately through a same-directory temporary file plus `os.replace` with fsync
@@ -103,8 +103,8 @@ the repository. It is public metadata, not a signature. Verify a prepared ZIP
 with, for example:
 
 ```sh
-sha256sum /absolute/release-parent/locklark-browser-extension-chromium-unsigned.zip
-unzip -l /absolute/release-parent/locklark-browser-extension-chromium-unsigned.zip
+sha256sum /absolute/release-parent/passme-browser-extension-chromium-unsigned.zip
+unzip -l /absolute/release-parent/passme-browser-extension-chromium-unsigned.zip
 ```
 
 Two independent runs from identical repository content produce identical ZIP
@@ -146,7 +146,7 @@ document identities.
 ### `nativeMessaging`
 
 The worker connects only to the fixed native host name
-`org.locklark.browser` through `runtime.connectNative` at
+`org.passme.browser` through `runtime.connectNative` at
 `browser-extension/background.js:1030-1035`. The host name constant is
 `internal/browserhost/protocol.go:24`. There is no localhost HTTP proxy. Vault unlock factors, private keys and TOTP seeds stay in the native process.
 After explicit authorization, the selected username/password or short-lived OTP
@@ -248,7 +248,7 @@ store package is a later artifact**:
   host. Do not assume the Chrome Web Store item, review status, or signing
   result applies to Edge.
 - **Firefox AMO:** upload the prepared Firefox ZIP to AMO for signing. The
-  manifest fixes the add-on ID to `browser@locklark.local` and minimum Firefox
+  manifest fixes the add-on ID to `browser@passme.local` and minimum Firefox
   `153.0` (`browser-extension/build.js:61-72`). AMO's signed XPI is the release
   artifact; the prepared ZIP here is unsigned. The manifest declares
   `data_collection_permissions.required = ["none"]`
@@ -263,12 +263,12 @@ not create a signed release.
 
 Build the native binaries separately, as documented in
 `browser-extension/README.md:12-15`. Registration flags are declared in
-`cmd/locklark-browser-register/main.go:12-16`:
+`cmd/passme-browser-register/main.go:12-16`:
 
 ```text
 --browser       chrome, edge or firefox
 --host          absolute path to the matching native binary
---output        absolute manifest path ending in org.locklark.browser.json;
+--output        absolute manifest path ending in org.passme.browser.json;
                 defaults to the browser's per-user NativeMessagingHosts directory
 --register-user Windows only: register in HKCU; never elevates
 --replace       explicitly replace an existing manifest/registration
@@ -277,18 +277,18 @@ Build the native binaries separately, as documented in
 Typical per-user registration (absolute paths required):
 
 ```sh
-/absolute/path/locklark-browser-register \
+/absolute/path/passme-browser-register \
   --browser chrome \
-  --host /absolute/path/locklark-browser-chromium
-/absolute/path/locklark-browser-register \
+  --host /absolute/path/passme-browser-chromium
+/absolute/path/passme-browser-register \
   --browser edge \
-  --host /absolute/path/locklark-browser-chromium
-/absolute/path/locklark-browser-register \
+  --host /absolute/path/passme-browser-chromium
+/absolute/path/passme-browser-register \
   --browser firefox \
-  --host /absolute/path/locklark-browser-firefox
+  --host /absolute/path/passme-browser-firefox
 ```
 
-Use `--output /absolute/directory/org.locklark.browser.json` for an isolated
+Use `--output /absolute/directory/org.passme.browser.json` for an isolated
 profile/manifest location. Registration refuses overwrite unless `--replace` is
 explicit, rejects final symlinks/reparse points, and checks executable/manifest
 ownership and write permissions; see
@@ -297,10 +297,10 @@ ownership and write permissions; see
 absolute `.exe` paths. Native messaging registration does not sign the browser
 extension or prove a store install.
 
-The native host name is fixed as `org.locklark.browser`
+The native host name is fixed as `org.passme.browser`
 (`internal/browserhost/protocol.go:24`). The registration manifest allows
 exactly `chrome-extension://geldnhjapnackobgknocomedmjgphnpe/` for Chrome/Edge
-and exactly `browser@locklark.local` for Firefox
+and exactly `browser@passme.local` for Firefox
 (`internal/browserhost/protocol.go:24-26`,
 `internal/browserhost/manifest.go:60-66`). If a store flow assigns a different
 identity, that is a release blocker: do not change the extension identity,
@@ -312,9 +312,9 @@ For updates, preserve continuity:
 - Chromium/Edge: same store item, same public key/extension ID, monotonically
   increased manifest version, and a native-host manifest that still names the
   same allowed origin.
-- Firefox: same AMO add-on ID `browser@locklark.local`, increased version, and
+- Firefox: same AMO add-on ID `browser@passme.local`, increased version, and
   an AMO-signed XPI update.
-- Native host: keep the host name `org.locklark.browser`; if the binary path
+- Native host: keep the host name `org.passme.browser`; if the binary path
   changes, rerun registration with `--replace`. Updating the native binary does
   not itself change extension identity.
 - The native vault must be unlocked and the connection and operation must
@@ -450,7 +450,7 @@ automatic deletion or replacement:
 - every other known product pair already in the output directory is verified
   (and a partial or corrupt one refused) before the target product is built.
 
-The receipt (`locklark-browser-extension-unsigned-receipt/v2`) records the
+The receipt (`passme-browser-extension-unsigned-receipt/v2`) records the
 canonical version, product, browser identity, 40-hex source commit, artifact
 and per-entry sizes/SHA256, and the build-script plus version-metadata hashes.
 It contains no absolute path, host name, user name, wall-clock time or

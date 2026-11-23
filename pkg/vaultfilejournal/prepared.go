@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
+	"github.com/jihuayu/passme/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -21,37 +21,37 @@ import (
 //   - WorkingGeneration: the local state generation the proposal was prepared
 //     against. It is a local CAS value; the proposal's own Generation is the
 //     legacy record field and is never used in its place.
-//   - ProposalRecord: the proposal encoded by the legacy LLVJ v1 record codec,
+//   - ProposalRecord: the proposal encoded by the legacy PMVJ v1 record codec,
 //     stored verbatim, byte for byte.
 //
 // Prepared record layout (version 1), all integers big-endian:
 //
 //	offset  size  field
-//	0       4     magic "LLVP"
+//	0       4     magic "PMVP"
 //	4       2     format version (1)
 //	6       8     working generation
 //	14      4     embedded proposal record length   1..maxRecordLen
-//	18      n     embedded LLVJ v1 proposal record, verbatim
+//	18      n     embedded PMVJ v1 proposal record, verbatim
 //	18+n    32    SHA-256 of magic through proposal record (domain separated)
 //
 // There are no trailing bytes. The decoder rejects a declared length against
 // its fixed cap and derives the exact total length in uint64 before
 // converting any length to int, checks the exact total and the checksum, and
-// only then decodes the inner LLVJ v1 record and allocates the copies it
+// only then decodes the inner PMVJ v1 record and allocates the copies it
 // returns. It never repairs a damaged record.
 const (
-	preparedMagic    = "LLVP"
+	preparedMagic    = "PMVP"
 	preparedVersion  = uint16(1)
 	preparedPrefix   = 4 + 2 + 8 + 4
 	preparedDigest   = sha256.Size
 	preparedOverhead = preparedPrefix + preparedDigest
 
 	// MaxPreparedRecordBytes is the absolute upper bound of one encoded
-	// prepared record (wrapper overhead plus the largest LLVJ v1 record); any
+	// prepared record (wrapper overhead plus the largest PMVJ v1 record); any
 	// longer stored value is rejected from its length alone.
 	MaxPreparedRecordBytes = preparedOverhead + maxRecordLen
 
-	preparedDigestDomain = "locklark vault-file journal prepared v1\x00"
+	preparedDigestDomain = "passme vault-file journal prepared v1\x00"
 
 	preparedKey = "prepared"
 )
@@ -211,7 +211,7 @@ func (j *Journal) LoadPrepared() (PreparedProposal, error) {
 //   - a state record exists and its Generation equals expectedWorkingGeneration;
 //   - p.ExpectedRevision equals the stored RemoteRevision;
 //   - p.Bytes equals the stored WorkingBytes byte for byte;
-//   - p is a valid LLVJ v1 proposal (positive Generation, valid operation ID,
+//   - p is a valid PMVJ v1 proposal (positive Generation, valid operation ID,
 //     bounded expected revision and non-empty bounded bytes).
 //
 // An exact replay of the already prepared proposal is an idempotent no-op. A
@@ -300,8 +300,8 @@ func (j *Journal) prepare(expectedWorkingGeneration uint64, p Proposal, hook fun
 //   - exactProposalBytes, the sealed proposal file bytes the backend or caller
 //     read, equal the prepared Proposal.Bytes byte for byte (else
 //     ErrPreparedMismatch). Pass those raw file bytes as read: do not wrap them
-//     in the LLVJ v1 record encoding nor in the prepared wrapper. The stored
-//     prepared record itself still embeds the exact LLVJ v1 encoding of the
+//     in the PMVJ v1 record encoding nor in the prepared wrapper. The stored
+//     prepared record itself still embeds the exact PMVJ v1 encoding of the
 //     proposal;
 //   - its ExpectedRevision still equals the stored RemoteRevision (else
 //     ErrPreparedMismatch);

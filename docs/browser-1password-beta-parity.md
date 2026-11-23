@@ -1,6 +1,6 @@
 # 1Password beta 浏览器扩展对照与粘贴保护同步
 
-日期：2026-11-10。本文件记录用 REA 对 1Password beta Chromium 扩展（8.12.46.26）做的静态对照，以及据此在 Locklark 浏览器扩展中补齐的粘贴保护。它是**增量对照记录**，不替换 65 项冻结的[浏览器 1:1 清单](browser-parity-checklist.md)，也不声称完成完整参考对照。所有结论区分“静态观测”“推断”和“未验证”。
+日期：2026-11-10。本文件记录用 REA 对 1Password beta Chromium 扩展（8.12.46.26）做的静态对照，以及据此在 Passme 浏览器扩展中补齐的粘贴保护。它是**增量对照记录**，不替换 65 项冻结的[浏览器 1:1 清单](browser-parity-checklist.md)，也不声称完成完整参考对照。所有结论区分“静态观测”“推断”和“未验证”。
 
 ## 参考对象与身份
 
@@ -16,7 +16,7 @@
 | 对照的 stable | 8.12.44.33，CRX SHA-256 `1cdc5bfbe2d13f38bbceeeb6fb41ff08477939c42567bf7cbcd0016ac00b09cb` |
 | 另取 nightly（仅作边界参考） | 8.12.48.17，CRX SHA-256 `9aa25a705c6e5c664f65a06757d99eb913fe9cd5272bf4325f65c584e410ad6e` |
 
-参考包只用于行为分析；没有把 1Password 的代码、素材或文案复制进 Locklark，也没有把参考包放进仓库。解包树放在工作区的 `.tmp/1p-artifacts/`（未跟踪）。
+参考包只用于行为分析；没有把 1Password 的代码、素材或文案复制进 Passme，也没有把参考包放进仓库。解包树放在工作区的 `.tmp/1p-artifacts/`（未跟踪）。
 
 ## 方法
 
@@ -83,9 +83,9 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 3. Secret Key 形态的粘贴保护独立于站点链接状态，在确认后由脚本执行 `insertText` 回填。
 4. 两个确认都只发生在页面世界的内容脚本里，不向后台发送剪贴板内容。
 
-## 观测三：与 Locklark 现有实现的对照
+## 观测三：与 Passme 现有实现的对照
 
-| 参考行为 | Locklark 现状 | 结论 |
+| 参考行为 | Passme 现状 | 结论 |
 | --- | --- | --- |
 | 内联菜单（关闭 Shadow DOM、焦点触发、键盘导航） | `content.js` `panel()`/`button()`；`focusin`；方向键/Esc | 已实现，实现方式不同（参考用页面世界 + 菜单页） |
 | 候选按来源过滤、原生逐次批准 | `core.js` `sameContext`、`background.js` `inline-match`/`inline-fill` | 已实现，信任模型更严格 |
@@ -93,10 +93,10 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 | 生成器（random/memorable/pin）与历史 | `core.js` `generatePasswordObject`，`background.js` 生成历史 | 已实现；参考另有 smart/SSH 类型，未同步 |
 | Passkey 创建/断言/条件式/管理 | `webauthn.js`、`background.js` passkey 路由 | 已实现 |
 | 身份/银行卡填充、结算 iframe 选择 | `content.js` `showAutofillSuggestions`、checkout picker | 已实现 |
-| 右键“在此网站隐藏” | `background.js` `locklark-toggle-site-inline` | 已实现（等价于参考 Hide on this page） |
+| 右键“在此网站隐藏” | `background.js` `passme-toggle-site-inline` | 已实现（等价于参考 Hide on this page） |
 | 站点级禁用、永不保存、选项页、快捷键、徽章 | `options.*`、`background.js` commands/badge | 已实现 |
 | Watchtower 本地体检 + 可选 HIBP | `background.js` watchtower 路由 | 已实现 |
-| HTTP 页面填充警告 | Locklark 只注册 `https://*/*`，非 HTTPS 不运行 | 平台不适用 |
+| HTTP 页面填充警告 | Passme 只注册 `https://*/*`，非 HTTPS 不运行 | 平台不适用 |
 | 富图标下载、Masked Email、Privacy/Brex 虚拟卡、SSH 密钥、开发者平台 API 凭据自动保存、企业 Kolide/Trelica/Apono、agentic autofill / local MCP | 无对应产品能力或与本地优先模型冲突 | 未实现，见下文 |
 | **钓鱼粘贴警告** | 本轮补齐 | 新增 |
 | **Secret Key 粘贴保护** | 本轮补齐 | 新增 |
@@ -111,7 +111,7 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 | --- | --- |
 | 设置关闭（`pasteProtection === false`） | 不处理 |
 | 目标不是可编辑的 `input`/`textarea`，或 disabled/readOnly | 不处理 |
-| 粘贴文本匹配 `LL1-`（26 位 Base32）、`LLR2-`（52 位）或 110 位恢复材料 | 警告 `secret-key`（与站点是否已关联无关） |
+| 粘贴文本匹配 `PM1-`（26 位 Base32）、`PMR2-`（52 位）或 110 位恢复材料 | 警告 `secret-key`（与站点是否已关联无关） |
 | 文本不匹配 Secret Key，目标是当前密码框，且本页最近一次 `inline-match` 明确报告 `siteLinked === false` | 警告 `phishing` |
 | 站点状态未知（未连接、锁定、有未完成的原生请求、观测过期或从未发生） | 不拦截 |
 | 目标是注册/确认新密码框 | 不按钓鱼处理（允许生成密码粘贴） |
@@ -129,10 +129,10 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 ### 与参考实现的差异（经确认的设计选择）
 
 1. **不复制 `window.confirm`**：使用扩展自己的关闭 Shadow DOM 面板，保持与现有内联 UI、键盘可达性和主题一致。代价是必须在用户确认后手动插入文本，而不是依赖浏览器原生默认动作。
-2. **“未关联”以精确来源的 login 匹配为准**，不是参考的裸域集合；这与 Locklark“精确来源 + 原生批准”的既有模型一致，也避免把同裸域的不同端口/子域当作已关联。
-3. **未知状态不告警**：参考由后台在标签页状态变化时把“未关联”布尔值推给页面；Locklark 只在内容脚本请求候选时获得状态，因此首次快速粘贴可能漏报。选择漏报而不是误报。
-4. **跳过注册/确认新密码框**：这类字段经常接收生成密码，参考未明确区分；Locklark 明确排除，避免阻断生成器流程。
-5. **没有遥测**：参考在警告时上报 `phishing_detection` 事件；Locklark 不上报。
+2. **“未关联”以精确来源的 login 匹配为准**，不是参考的裸域集合；这与 Passme“精确来源 + 原生批准”的既有模型一致，也避免把同裸域的不同端口/子域当作已关联。
+3. **未知状态不告警**：参考由后台在标签页状态变化时把“未关联”布尔值推给页面；Passme 只在内容脚本请求候选时获得状态，因此首次快速粘贴可能漏报。选择漏报而不是误报。
+4. **跳过注册/确认新密码框**：这类字段经常接收生成密码，参考未明确区分；Passme 明确排除，避免阻断生成器流程。
+5. **没有遥测**：参考在警告时上报 `phishing_detection` 事件；Passme 不上报。
 
 ### 测试
 
@@ -148,13 +148,13 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 
 - 未在真实 Chromium/Edge/Firefox 中加载运行；没有真实站点、真实剪贴板或真实原生连接验证。
 - 只覆盖内容脚本能够运行的顶层 HTTPS 文档与同源 iframe；跨源 iframe 不在 UI 范围。
-- 页面世界若在捕获阶段更早注册了 `paste` 处理器，仍可能先看到事件；Locklark 只能阻止其后的处理器。
+- 页面世界若在捕获阶段更早注册了 `paste` 处理器，仍可能先看到事件；Passme 只能阻止其后的处理器。
 - 手动插入绕过页面的 `paste` 处理器，可能影响依赖 `paste` 事件做格式处理的前端框架；`setRangeText`/原生 setter 与 `input`/`change` 事件是当前兼容手段。
 - 关闭 Shadow DOM 内部的输入目标不可见，不触发保护。
 - 未知站点状态与首次快速粘贴会漏报；这是有意的失败方向。
 - 面板因锚点失效（滚动出视口、目标被移除）或按 Esc 关闭时，本次粘贴已经被取消且不会自动重放；需要用户重新粘贴。
 - 手动回填失败时只显示“无法自动完成粘贴”的提示，该失败路径没有自动化测试。
-- 参考用裸域、Locklark 用精确来源，两者对“已关联”的判断可能不同；本文件不声称行为等价。
+- 参考用裸域、Passme 用精确来源，两者对“已关联”的判断可能不同；本文件不声称行为等价。
 
 ## 同轮追加：两步验证二维码捕获
 
@@ -165,13 +165,13 @@ REA 声明的局限（原文要点）：选定源分析使 414 个 inventoried �
 | 行为 | 未同步原因 |
 | --- | --- |
 | “Sign in with” 第三方身份识别与保存 | 需要供应商按钮识别、跨步骤状态机与新的条目类型；与本地库模型不匹配 |
-| 生成器 smart/SSH 类型 | Locklark 库类别只有 login/identity/card，SSH 条目无存储与使用路径 |
+| 生成器 smart/SSH 类型 | Passme 库类别只有 login/identity/card，SSH 条目无存储与使用路径 |
 | 富图标下载 | 会引入外部请求与域名泄露；与本地优先、无持续联网的模型冲突 |
 | Masked Email、Privacy/Brex 虚拟卡 | 依赖第三方账号与服务端集成 |
 | 开发者平台 API 凭据自动保存 | 依赖站点专用规则集与“shellPlugins”类别 |
 | 企业集成（Kolide/Trelica/Apono/特权访问） | 依赖企业服务端策略与设备信任链 |
-| agentic autofill、local MCP server | 参考中的账号级 AI 能力；Locklark 的 MCP/网关边界另在仓库其他文档定义 |
-| 系统通知、默认密码管理器引导、睡眠/空闲锁定 | 需要新权限或浏览器无对应 API；Locklark 的锁定由原生会话负责 |
+| agentic autofill、local MCP server | 参考中的账号级 AI 能力；Passme 的 MCP/网关边界另在仓库其他文档定义 |
+| 系统通知、默认密码管理器引导、睡眠/空闲锁定 | 需要新权限或浏览器无对应 API；Passme 的锁定由原生会话负责 |
 | 通用登录合并提示 | 现有内联菜单已是统一入口；参考的 USO 是账号级产品流程 |
 
 ## 复跑

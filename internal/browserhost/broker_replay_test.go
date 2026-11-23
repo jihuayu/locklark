@@ -57,7 +57,7 @@ func replayReserve(c *cliRunNonceCache, n int) bool {
 	return c.reserve(cliRunNonceDigest(key))
 }
 
-func replayPeer() Peer { return Peer{User: "UID 501", PID: 42, Process: "/bin/locklark"} }
+func replayPeer() Peer { return Peer{User: "UID 501", PID: 42, Process: "/bin/passme"} }
 
 func replayLive(t *testing.T, c *cliRunNonceCache) int {
 	t.Helper()

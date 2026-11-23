@@ -12,7 +12,7 @@ import (
 
 	"filippo.io/age"
 
-	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/passme/pkg/vaultfile"
 )
 
 // Every key, identity, policy, vault-file content byte and timestamp in this
@@ -62,27 +62,27 @@ const (
 )
 
 const (
-	authSourceVectorJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"uroxw4IlNDuKaRvqabPBbnpE_AHH7NNXqKi6EzCrG3mRbMHrm8qqKjoKGHzrGHN2s9MIbkmkWAn43EPrPOiVDQ"}`
+	authSourceVectorJSON = `{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"aFWdKb3iOuZK_0ysDifaq_ft_AM1Mqx8ljBCjqgIEr-7gE3rNK--M118-ARoI5B-lNX3BgOtsUsANLwlFZtrBA"}`
 
-	authTargetVectorJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-target","install_id":"install-0002","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","recipient_public_key":"age174eluezwt4dz6f3pj7mt520y6m9n85lgpnezw4j9e266m763vp6suajx3z","signature":"xBQxwub1OV2wW3NfmTaRLWOlZoidOvieEVUcGxFzcc6SuqI3L2Pn76eEbyr0wwagj_nXcWZeCIg4Ime33htADQ"}`
+	authTargetVectorJSON = `{"format":"passme.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-target","install_id":"install-0002","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","recipient_public_key":"age174eluezwt4dz6f3pj7mt520y6m9n85lgpnezw4j9e266m763vp6suajx3z","signature":"ROhkK9yUO9uIwX9K58yc4Vbu81OgU2rpibjisq2Q1zgwGHVQtsmQyuLfSOLCZF6aqCD_WbhhwDCSuY28jXzPBA"}`
 
 	// authContextDigestVector is SHA-256(AuthorizationContextDomain ||
 	// EncodeChannelBindingContext(vectorContext())).
-	authContextDigestVector = "SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU"
+	authContextDigestVector = "fC70V79jL_x1zIHAH3tpNJeriZWXmkYpphduZMSVDLs"
 	// authSourceDigestVector and authTargetDigestVector are
 	// DeviceTransportBindingDigest of the two bindings above.
-	authSourceDigestVector = "H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U"
-	authTargetDigestVector = "yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM"
+	authSourceDigestVector = "yjnBQ-AsJsx94BGoiK_11QDS9ltZuDwuHrR6X8FGw9k"
+	authTargetDigestVector = "uw5uhdEb3vVsEsSgsE38ZwVog5TBeYkTX-4fbEX4hL8"
 
 	// authSignedJSONVector is the authorization without its signature member.
-	authSignedJSONVector = `{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}`
+	authSignedJSONVector = `{"format":"passme.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"fC70V79jL_x1zIHAH3tpNJeriZWXmkYpphduZMSVDLs","source_binding_sha256":"yjnBQ-AsJsx94BGoiK_11QDS9ltZuDwuHrR6X8FGw9k","target_binding_sha256":"uw5uhdEb3vVsEsSgsE38ZwVog5TBeYkTX-4fbEX4hL8","expires_unix_ms":1799999999000}`
 
 	// authVectorJSON is the full canonical authorization, pinned literally so
 	// authVector() and its JSON spelling are checked against one value.
-	authVectorJSONPin = `{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw"}`
+	authVectorJSONPin = `{"format":"passme.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"fC70V79jL_x1zIHAH3tpNJeriZWXmkYpphduZMSVDLs","source_binding_sha256":"yjnBQ-AsJsx94BGoiK_11QDS9ltZuDwuHrR6X8FGw9k","target_binding_sha256":"uw5uhdEb3vVsEsSgsE38ZwVog5TBeYkTX-4fbEX4hL8","expires_unix_ms":1799999999000,"signature":"AYJi6KdF3h57ebSqzkBWwHL4aCk8QK29OJQg4uoRoaX_osGf-_IsiQy4Ho7Otw6Fmvig61o9l5-n7x3pdB1vDg"}`
 
 	// authVectorSignature is the fixed synthetic owner-root signature.
-	authVectorSignature = "uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw"
+	authVectorSignature = "AYJi6KdF3h57ebSqzkBWwHL4aCk8QK29OJQg4uoRoaX_osGf-_IsiQy4Ho7Otw6Fmvig61o9l5-n7x3pdB1vDg"
 )
 
 // authVectorJSON is the complete canonical authorization: the signed JSON with
@@ -348,8 +348,8 @@ func TestAuthorizationMaximumLegalBudget(t *testing.T) {
 	// width, so the maximum is the fixed skeleton plus the identifier and
 	// int64 digits the schema allows.
 	fixed := len(authVectorJSONPin) - len("owner-root-0001") - len("1799999999000") - len(authVectorSignature)
-	const wantMax = 450 - len("owner-root-0001") - len("1799999999000") + MaxIdentifierLen + 19
-	if len(encoded) != wantMax || len(authVectorJSONPin) != 450 || fixed < 0 {
+	const wantMax = 448 - len("owner-root-0001") - len("1799999999000") + MaxIdentifierLen + 19
+	if len(encoded) != wantMax || len(authVectorJSONPin) != 448 || fixed < 0 {
 		t.Fatalf("maximum legal authorization is %d bytes, want %d", len(encoded), wantMax)
 	}
 	if wantMax > MaxAuthorizationSize {
@@ -445,8 +445,8 @@ func TestAuthorizationParseRejectsNonCanonicalInput(t *testing.T) {
 				`"target_binding_sha256":"`+authTargetDigestVector+`","source_binding_sha256":`)
 		}, field: ""},
 		{name: "reordered constants", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"format":"locklark.remote-unlock","version":1,`,
-				`"version":1,"format":"locklark.remote-unlock",`)
+			return replaceOnce(t, b, `"format":"passme.remote-unlock","version":1,`,
+				`"version":1,"format":"passme.remote-unlock",`)
 		}, field: ""},
 
 		// Whitespace and trailing data.
@@ -484,7 +484,7 @@ func TestAuthorizationParseRejectsNonCanonicalInput(t *testing.T) {
 
 		// Constants and member types.
 		{name: "wrong format", mutate: func(t *testing.T, b []byte) []byte {
-			return replaceOnce(t, b, `"locklark.remote-unlock"`, `"locklark.remote-unlock.v2"`)
+			return replaceOnce(t, b, `"passme.remote-unlock"`, `"passme.remote-unlock.v2"`)
 		}, field: "format"},
 		{name: "wrong kind", mutate: func(t *testing.T, b []byte) []byte {
 			return replaceOnce(t, b, `"owner-authorization"`, `"channel-binding-context"`)
@@ -711,7 +711,7 @@ func authPolicy() *vaultfile.Policy {
 // authTestX25519Scalar is a deterministic X25519 scalar for synthetic age
 // recipients; no identity derived from it is ever used.
 func authTestX25519Scalar(label string) []byte {
-	k := sha256.Sum256([]byte("locklark-synthetic-age-scalar/" + label))
+	k := sha256.Sum256([]byte("passme-synthetic-age-scalar/" + label))
 	s := k[:]
 	s[0] &= 248
 	s[31] &= 127

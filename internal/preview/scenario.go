@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/account"
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/account"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 // Public fixture password. Never use this profile or on-disk fixture secret for a real vault.
-const fixturePassword = "locklark synthetic preview only"
-const systemSession = "locklark-bootstrap"
+const fixturePassword = "passme synthetic preview only"
+const systemSession = "passme-bootstrap"
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
 var errInput = errors.New("use a new output directory, a non-reserved session ID (1-96 ASCII identifier characters) and a nonempty synthetic reason (max 240 characters, no control characters)")

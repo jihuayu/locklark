@@ -2,8 +2,8 @@
 set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_dir"
-go_bin="${GO_BIN:-${LOCKLARK_GO:-go}}"
-mobile_tools="${LOCKLARK_MOBILE_TOOLS:-${TMPDIR:-/tmp}/locklark-mobile-tools}"
+go_bin="${GO_BIN:-${PASSME_GO:-go}}"
+mobile_tools="${PASSME_MOBILE_TOOLS:-${TMPDIR:-/tmp}/passme-mobile-tools}"
 export GOTOOLCHAIN="${GOTOOLCHAIN:-go$(awk '$1 == "go" { print $2; exit }' go.mod)}"
 export PATH="$(dirname "$(command -v "$go_bin")"):$mobile_tools/bin:$PATH"
 : "${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK root}"

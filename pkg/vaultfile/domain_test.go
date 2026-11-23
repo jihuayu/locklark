@@ -11,9 +11,9 @@ func TestDomainConstantsExact(t *testing.T) {
 		"DomainFileDigest":       DomainFileDigest,
 	}
 	want := map[string]string{
-		"DomainRevision":         "locklark.vault-file/v1/revision",
-		"DomainContentSignature": "locklark.vault-file/v1/content-signature",
-		"DomainFileDigest":       "locklark.vault-file/v1/file-digest",
+		"DomainRevision":         "passme.vault-file/v1/revision",
+		"DomainContentSignature": "passme.vault-file/v1/content-signature",
+		"DomainFileDigest":       "passme.vault-file/v1/file-digest",
 	}
 	for name, got := range cases {
 		if got != want[name] {

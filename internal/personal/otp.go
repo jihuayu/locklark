@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/passme/internal/vault"
 )
 
 const otpDisclosureAction = "item.reveal.otp-code"

@@ -6,7 +6,7 @@
 
 - main：`3901bc8d8c91c8da039fa02d83e1521746c3c5aa`。
 - 分支：`codex/first-preview`；接续 `46ca0f5881406d02385d25c8d7d771b40d5a05d7`；实现 head：`63cb54fde5c72834baef0fd0fafe0360f9232d61`。本交接文档随后作为同分支提交，具体文档 head 见 git 历史和 PR。
-- PR：[#1](https://github.com/jihuayu/locklark/pull/1)，仍未合并。fetch 后未发现并发提交，未修改 main。
+- PR：[#1](https://github.com/jihuayu/passme/pull/1)，仍未合并。fetch 后未发现并发提交，未修改 main。
 - 独立复核仍待完成；本轮自查不是独立复核。既有恢复、MCP 与后续基础切片的未完成复核没有被关闭。
 
 ## 行为与限制
@@ -21,11 +21,11 @@
 
 ## 实跑验证
 
-先写合成测试，再运行 `go test ./internal/onepux -run TestSectionInventory -count=1`，实际失败：缺少区段清点报告、畸形 fields 返回成功、超过新容量限制未拒绝。原始输出保存在临时路径 `/tmp/locklark-validation/sections/red.log`；临时日志不是持久 CI 证据。
+先写合成测试，再运行 `go test ./internal/onepux -run TestSectionInventory -count=1`，实际失败：缺少区段清点报告、畸形 fields 返回成功、超过新容量限制未拒绝。原始输出保存在临时路径 `/tmp/passme-validation/sections/red.log`；临时日志不是持久 CI 证据。
 
 实现后验证：
 
-- 配置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python` 后，`/tmp/locklark-tools/go/bin/go test -count=1 ./...` 全仓通过（日志 `go-all.log`）。
+- 配置 `PASSME_TEST_BUN=/tmp/passme-tools/bun-linux-x64/bun`、`PASSME_TEST_PYKEEPASS=/tmp/passme-tools/python/bin/python` 后，`/tmp/passme-tools/go/bin/go test -count=1 ./...` 全仓通过（日志 `go-all.log`）。
 
 - 包内完整测试通过；覆盖跨条目/跨区段作用域、重复 ID、缺失与 null 区分、大整数 JSON 值、大小写区分、所有值形状、报告秘密扫描、畸形拒绝和超限零报告。
 - `go test -race -count=1 ./internal/onepux ./internal/preview -run 'TestSectionInventory|TestInventory|TestOnepux'` 通过。真实加密合成库的来源审计与独立检查点回归通过，报告不包含源秘密；该来源证明不等于新增清点操作的持久审计入口。
@@ -36,6 +36,6 @@
 
 ## 合并条件与下一项
 
-本轮读取 PR 最新已完成检查时，head `46ca0f5` 的 [Ubuntu 检查](https://github.com/jihuayu/locklark/actions/runs/41937705459/job/126950272644) 仍为付款/额度原因未启动，Windows 取消。实现 `63cb54f` 的 [Windows 检查](https://github.com/jihuayu/locklark/actions/runs/41941414108/job/126962879802) 亦因相同付款/额度原因未启动，Ubuntu 取消，已读取该检查 annotation 确认。没有把本地通过记作远端通过，也没有绕过用户要求的检查与独立复核门槛。
+本轮读取 PR 最新已完成检查时，head `46ca0f5` 的 [Ubuntu 检查](https://github.com/jihuayu/passme/actions/runs/41937705459/job/126950272644) 仍为付款/额度原因未启动，Windows 取消。实现 `63cb54f` 的 [Windows 检查](https://github.com/jihuayu/passme/actions/runs/41941414108/job/126962879802) 亦因相同付款/额度原因未启动，Ubuntu 取消，已读取该检查 annotation 确认。没有把本地通过记作远端通过，也没有绕过用户要求的检查与独立复核门槛。
 
 下一项可继续实现 loginFields 的 designation/字段形状清点，保留重复/未知语义，不把清点当作迁移授权。PR 条件满足并 squash 合入 main 后，再从更新后的 main 开分支接通个人 CLI 受控单字段披露。完整语义映射和产品审计入口仍保留为未完成验收。

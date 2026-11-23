@@ -21,7 +21,7 @@ module.exports = async (page) => {
         submissions++;
       });
       document.addEventListener("change", () => changes++);
-      const filled = LocklarkCore.fillDocument(
+      const filled = PassmeCore.fillDocument(
         location.origin,
         "test-user",
         "test-password",

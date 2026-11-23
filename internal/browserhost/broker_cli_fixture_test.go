@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/passme/internal/personal"
 )
 
 // Shared, OS-independent CLI-run fixtures. They live in an untagged file so
@@ -34,7 +34,7 @@ var cliRunFixturePaths = struct {
 
 var _ = func() bool {
 	p := &cliRunFixturePaths
-	p.base = filepath.Join(volumeRoot(), "locklark", "fixture")
+	p.base = filepath.Join(volumeRoot(), "passme", "fixture")
 	join := func(elem ...string) string { return filepath.Join(append([]string{p.base}, elem...)...) }
 	program := "gh"
 	if runtime.GOOS == "windows" {
@@ -49,7 +49,7 @@ var _ = func() bool {
 
 // cliRunFixtureVault is the absolute, host-native vault path a fixture request
 // names.
-var cliRunFixtureVault = cliRunFixturePaths.base + string(filepath.Separator) + "vault.ll"
+var cliRunFixtureVault = cliRunFixturePaths.base + string(filepath.Separator) + "vault.pm"
 
 // passthruFixture is the fixture passthrough value that must never be
 // returned as a name or echoed into an error.

@@ -2,7 +2,7 @@
 """Privately export and scan the complete iOS XCTest UI evidence.
 
 Call on xcodebuild success AND failure. Simulator mode requires a newly created
-Locklark-CI-* simulator and --owned-simulator. Physical mode requires --device
+Passme-CI-* simulator and --owned-simulator. Physical mode requires --device
 and an explicit test-only --runner-bundle; it only copies the runner manifest
 through devicectl. It never resets, deletes, installs, or launches a device app.
 Both modes preserve the same complete-result and full-output canary gates.
@@ -25,8 +25,8 @@ from collections import deque
 from device_policy import validate_device_id, validate_runner_bundle
 
 
-RUNNER_BUNDLE = "org.locklark.mobile.ios.uitests.xctrunner"
-MANIFEST = pathlib.Path("Library/Application Support/LocklarkUITestEvidence/canaries.json")
+RUNNER_BUNDLE = "org.passme.mobile.ios.uitests.xctrunner"
+MANIFEST = pathlib.Path("Library/Application Support/PassmeUITestEvidence/canaries.json")
 TEST_NAME = "OfflineVaultFlowTests.testActualOfflineCreateUnlockEditRevealAndBackgroundLock"
 STAGES = {"prerequisites", "owned-simulator", "device-manifest", "manifest", "xcresult-export", "canary-scan", "test-outcome", "complete"}
 
@@ -118,7 +118,7 @@ def parse_canaries(raw):
     except (ValueError, TypeError, AttributeError):
         valid = False
     complete = bool(valid and value["complete"] and len(available) >= 10
-                    and any(re.fullmatch(r"LL1-[A-Z2-7]{26}", part) for part in available)
+                    and any(re.fullmatch(r"PM1-[A-Z2-7]{26}", part) for part in available)
                     and any(re.fullmatch(r"[0-9]{6}", part) for part in available)
                     and any(part.startswith("otpauth://totp/") for part in available))
     return available, valid, complete
@@ -133,7 +133,7 @@ def owned_device(raw, identifier):
     require(len(matches) == 1)
     device = matches[0]
     require(device.get("isAvailable") is True and device.get("state") == "Booted")
-    require(isinstance(device.get("name"), str) and device["name"].startswith("Locklark-CI-"))
+    require(isinstance(device.get("name"), str) and device["name"].startswith("Passme-CI-"))
 
 
 def references(value):
@@ -324,12 +324,12 @@ def parser():
     target.add_argument("--simulator")
     target.add_argument("--device")
     result.add_argument("--owned-simulator", action="store_true")
-    result.add_argument("--runner-bundle", help="physical-device runner under an explicit test-only .locklark.acceptance base")
+    result.add_argument("--runner-bundle", help="physical-device runner under an explicit test-only .passme.acceptance base")
     result.add_argument("--runtime-log", required=True)
     result.add_argument("--xcresult", required=True)
     result.add_argument("--test-exit-code", required=True, type=int)
     result.add_argument("--xcrun", default="xcrun")
-    result.add_argument("--artifacts", default="/tmp/locklark-validation")
+    result.add_argument("--artifacts", default="/tmp/passme-validation")
     return result
 
 

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/passkey"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -240,7 +240,7 @@ func TestItemModelV2ExportAndSlotCompatibility(t *testing.T) {
 		t.Fatalf("attachments were not deduplicated per protection flag: %v", binaries)
 	}
 	for _, entry := range group.Entries {
-		id := entry.GetContent("Locklark.ID")
+		id := entry.GetContent("Passme.ID")
 		values := map[string]kdbx.V{}
 		for _, v := range entry.Values {
 			values[v.Key] = v.Value
@@ -261,14 +261,14 @@ func TestItemModelV2ExportAndSlotCompatibility(t *testing.T) {
 	}
 	// The pure v1 login keeps its exact legacy slot set.
 	for _, entry := range group.Entries {
-		if entry.GetContent("Locklark.ID") != "v1-login" {
+		if entry.GetContent("Passme.ID") != "v1-login" {
 			continue
 		}
 		keys := make([]string, 0, len(entry.Values))
 		for _, v := range entry.Values {
 			keys = append(keys, v.Key)
 		}
-		want := []string{"Title", "Locklark.ID", "Locklark.Kind", "Notes", "URL", "Password", "otp", "UserName"}
+		want := []string{"Title", "Passme.ID", "Passme.Kind", "Notes", "URL", "Password", "otp", "UserName"}
 		if !reflect.DeepEqual(keys, want) {
 			t.Fatalf("v1 slot layout changed: %v", keys)
 		}
@@ -315,7 +315,7 @@ func TestItemModelV2RejectsTampering(t *testing.T) {
 			}
 			group := db.Content.Root.Groups[0]
 			for n := range group.Entries {
-				if group.Entries[n].GetContent("Locklark.ID") != tc.target {
+				if group.Entries[n].GetContent("Passme.ID") != tc.target {
 					continue
 				}
 				if err := db.LockProtectedEntries(); err == nil {

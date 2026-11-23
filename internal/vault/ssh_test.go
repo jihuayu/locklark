@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	"github.com/jihuayu/locklark/internal/passkey"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/passme/internal/passkey"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -36,7 +36,7 @@ func TestSSHKeyProtectedSeedRoundTrip(t *testing.T) {
 	}
 	found := false
 	for _, v := range db.Content.Root.Groups[0].Entries[1].Values {
-		if v.Key == "Locklark.SSHSeed" {
+		if v.Key == "Passme.SSHSeed" {
 			found = v.Value.Protected.Bool
 		}
 	}
@@ -88,14 +88,14 @@ func TestSSHKeyRejectsHybridAndUnprotectedShapes(t *testing.T) {
 	}
 	for _, change := range []func(*kdbx.Entry){func(e *kdbx.Entry) {
 		for n := range e.Values {
-			if e.Values[n].Key == "Locklark.SSHSeed" {
-				e.Values[n] = slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(seed), false)
+			if e.Values[n].Key == "Passme.SSHSeed" {
+				e.Values[n] = slot("Passme.SSHSeed", base64.StdEncoding.EncodeToString(seed), false)
 			}
 		}
 	}, func(e *kdbx.Entry) { e.Values = append(e.Values, slot("Password", "hybrid", true)) }, func(e *kdbx.Entry) {
 		for n := range e.Values {
-			if e.Values[n].Key == "Locklark.SSHPublicKey" {
-				e.Values[n] = slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 51)), false)
+			if e.Values[n].Key == "Passme.SSHPublicKey" {
+				e.Values[n] = slot("Passme.SSHPublicKey", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 51)), false)
 			}
 		}
 	}} {
@@ -135,7 +135,7 @@ func TestSSHKeyEncryptedExportPreservesProtectedSeed(t *testing.T) {
 	}
 	found := false
 	for _, v := range db.Content.Root.Groups[0].Entries[0].Values {
-		if v.Key == "Locklark.SSHSeed" {
+		if v.Key == "Passme.SSHSeed" {
 			found = true
 			decoded, e := base64.StdEncoding.Strict().DecodeString(v.Value.Content)
 			if e != nil || !bytes.Equal(decoded, seed) || !v.Value.Protected.Bool {

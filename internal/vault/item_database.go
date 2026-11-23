@@ -3,7 +3,7 @@ package vault
 import (
 	"bytes"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 // This file is the item-database adapter: it turns the internal vault items
@@ -16,7 +16,7 @@ import (
 // or authorization check. All of that belongs to the caller.
 
 // NewItemDatabase returns an unlocked KDBX 4.1 database holding exactly the
-// established personal snapshot layout: the single "Locklark items v1" root
+// established personal snapshot layout: the single "Passme items v1" root
 // group, the protected metadata entry and one entry per item as written by the
 // snapshot write path. Its KDF profile is the shared personal snapshot profile
 // (Argon2id, 16 MiB, 3 iterations, default parallelism).
@@ -67,10 +67,10 @@ func NewItemDatabase(metadata []byte, items []Item) (*kdbx.Database, error) {
 // the supported in-memory shape: a non-nil header whose signature is exactly
 // KDBX 4.1 (kdbx.DefaultKDBX41Sig, the format OpenItems dispatches), file
 // header, KDF parameters, content, meta, root and inner header, exactly one
-// root group named "Locklark items v1", the metadata entry readItems requires,
+// root group named "Passme items v1", the metadata entry readItems requires,
 // and exactly the entry, value and binary layout that readItems enforces. A
 // nil, non-4.1, rootless, multi-group, wrong-group, malformed or legacy
-// "Locklark" preview database returns ErrSnapshot with nil outputs.
+// "Passme" preview database returns ErrSnapshot with nil outputs.
 //
 // The metadata entry is required and the returned metadata is bounded by
 // readItems. The entry stores metadata as a Base64 value, so a KDBX empty

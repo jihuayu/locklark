@@ -27,19 +27,19 @@ from tests.e2e.harness import (  # noqa: E402
 )
 
 CHECKOUT_ENV_KEYS = (
-    "LOCKLARK_E2E_CHECKOUT_EVIDENCE",
-    "LOCKLARK_E2E_CHECKOUT_NATIVE",
-    "LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT",
-    "LOCKLARK_BROWSER_FIXTURE",
-    "LOCKLARK_TEST_BROWSER_EXECUTABLE",
-    "LOCKLARK_TEST_PLAYWRIGHT",
-    "LOCKLARK_TEST_CHECKOUT_FRAMES",
-    "LOCKLARK_TEST_BROWSER",
-    "LOCKLARK_TEST_SHARED_CLIPBOARD",
-    "LOCKLARK_TEST_FAILURE_STAGE",
-    "LOCKLARK_TEST_BROWSER_PARITY",
-    "LOCKLARK_BROWSER_HOST",
-    "LOCKLARK_BROWSER_REGISTER",
+    "PASSME_E2E_CHECKOUT_EVIDENCE",
+    "PASSME_E2E_CHECKOUT_NATIVE",
+    "PASSME_E2E_CHECKOUT_EVIDENCE_OUT",
+    "PASSME_BROWSER_FIXTURE",
+    "PASSME_TEST_BROWSER_EXECUTABLE",
+    "PASSME_TEST_PLAYWRIGHT",
+    "PASSME_TEST_CHECKOUT_FRAMES",
+    "PASSME_TEST_BROWSER",
+    "PASSME_TEST_SHARED_CLIPBOARD",
+    "PASSME_TEST_FAILURE_STAGE",
+    "PASSME_TEST_BROWSER_PARITY",
+    "PASSME_BROWSER_HOST",
+    "PASSME_BROWSER_REGISTER",
 )
 
 
@@ -176,14 +176,14 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
     def _generate_evidence(self) -> tuple[dict, Path]:
         output = self.temp / "evidence" / "checkout.json"
         output.parent.mkdir()
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT"] = str(output)
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE_OUT"] = str(output)
         evidence, calls = self._run_and_capture(_pass_stdout(CROSS_SITE_NATIVE_REVIEW))
         self.assertEqual(len(calls), 1)
         self.assertTrue(output.is_file())
         support._CHECKOUT_JOURNEY_CACHE.clear()
-        os.environ.pop("LOCKLARK_E2E_CHECKOUT_NATIVE", None)
-        os.environ.pop("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT", None)
+        os.environ.pop("PASSME_E2E_CHECKOUT_NATIVE", None)
+        os.environ.pop("PASSME_E2E_CHECKOUT_EVIDENCE_OUT", None)
         return evidence, output
 
     def test_no_opt_in_is_pending_feature_without_touching_prerequisites(self):
@@ -196,7 +196,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         resolve.assert_not_called()
 
     def test_missing_native_prerequisite_is_pending_feature(self):
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         with mock.patch.object(
             support,
             "_resolve_checkout_artifacts",
@@ -209,7 +209,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
 
     def test_valid_evidence_consumes_pass_without_invoking_the_browser(self):
         generated, output = self._generate_evidence()
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(output)
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(output)
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
@@ -230,7 +230,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
 
     def test_stale_malformed_and_missing_case_evidence_fail(self):
         generated, output = self._generate_evidence()
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(output)
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(output)
 
         with self.subTest("stale binary hash"):
             self.artifacts["chromium_host"].write_bytes(b"different binary")
@@ -246,7 +246,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         with self.subTest("malformed manifest"):
             malformed = self.temp / "evidence" / "malformed.json"
             malformed.write_text("{not-json", encoding="utf-8")
-            os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(malformed)
+            os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(malformed)
             support._CHECKOUT_JOURNEY_CACHE.clear()
             with self.assertRaises(AssertionError):
                 support.checkout_native_acceptance(self._ctx())
@@ -256,7 +256,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             payload = json.loads(json.dumps(generated))
             payload["cases"].pop()
             missing.write_text(json.dumps(payload), encoding="utf-8")
-            os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(missing)
+            os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(missing)
             support._CHECKOUT_JOURNEY_CACHE.clear()
             with self.assertRaisesRegex(
                 AssertionError, "missing an expected checkout case"
@@ -268,7 +268,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             payload = json.loads(json.dumps(generated))
             payload["source"]["source_sha256"] = "0" * 64
             stale.write_text(json.dumps(payload), encoding="utf-8")
-            os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(stale)
+            os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(stale)
             support._CHECKOUT_JOURNEY_CACHE.clear()
             with self.assertRaisesRegex(
                 AssertionError, "stale for the current source"
@@ -285,7 +285,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         del payload["source"]["source_sha256"]
         incomplete = self.temp / "evidence" / "incomplete-source.json"
         incomplete.write_text(json.dumps(payload), encoding="utf-8")
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(incomplete)
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(incomplete)
         support._CHECKOUT_JOURNEY_CACHE.clear()
         with self.assertRaisesRegex(AssertionError, "malformed"):
             support.checkout_native_acceptance(self._ctx())
@@ -294,8 +294,8 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
     def test_explicit_run_executes_once_with_private_runtime_and_evidence(self):
         output = self.temp / "evidence" / "out.json"
         output.parent.mkdir()
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT"] = str(output)
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE_OUT"] = str(output)
         captured: dict[str, object] = {}
 
         def fake_invoke(command, *, env, cwd, timeout):
@@ -332,27 +332,27 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             command[7:], ["scripts/browser_native_acceptance.mjs"]
         )
         env = captured["env"]
-        self.assertEqual(env["LOCKLARK_TEST_CHECKOUT_FRAMES"], "1")
-        self.assertEqual(env["LOCKLARK_TEST_BROWSER"], "chromium")
+        self.assertEqual(env["PASSME_TEST_CHECKOUT_FRAMES"], "1")
+        self.assertEqual(env["PASSME_TEST_BROWSER"], "chromium")
         self.assertTrue(Path(env["TMPDIR"]).name.startswith("lk-"))
         self.assertEqual(captured["tmpdir_mode"], 0o700)
         self.assertEqual(captured["runtime_mode"], 0o700)
         self.assertEqual(
-            env["LOCKLARK_BROWSER_HOST"], str(self.artifacts["chromium_host"])
+            env["PASSME_BROWSER_HOST"], str(self.artifacts["chromium_host"])
         )
         self.assertEqual(
-            env["LOCKLARK_BROWSER_REGISTER"],
+            env["PASSME_BROWSER_REGISTER"],
             str(self.artifacts["browser_register"]),
         )
         self.assertEqual(
-            env["LOCKLARK_BROWSER_FIXTURE"], str(self.artifacts["fixture"])
+            env["PASSME_BROWSER_FIXTURE"], str(self.artifacts["fixture"])
         )
         self.assertEqual(
-            env["LOCKLARK_TEST_BROWSER_EXECUTABLE"],
+            env["PASSME_TEST_BROWSER_EXECUTABLE"],
             str(self.artifacts["chromium"]),
         )
         self.assertEqual(
-            env["LOCKLARK_TEST_PLAYWRIGHT"], str(self.playwright)
+            env["PASSME_TEST_PLAYWRIGHT"], str(self.playwright)
         )
 
         self.assertEqual(evidence["status"], "PASS")
@@ -393,7 +393,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertFalse(Path(env["TMPDIR"]).exists())
 
     def test_nonzero_timeout_and_missing_output_are_failures(self):
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
 
         with self.subTest("nonzero"):
             with mock.patch.object(
@@ -477,7 +477,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         ) + "\n"
         # A non-allowlisted fabricated stage line must not be echoed.
         stdout += "Native browser stage: forged-stage:leak\n"
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
@@ -495,7 +495,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertNotIn(support.CHECKOUT_PASS_SUMMARY, message)
 
     def _nonzero(self, stderr: str, stdout: str = "") -> tuple[dict, str]:
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         support._CHECKOUT_JOURNEY_CACHE.clear()
         ctx = self._ctx()
         with mock.patch.object(
@@ -707,7 +707,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                     else "absent",
                 )
             with self.subTest(case=stdout[-20:] + stderr[:20]):
-                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
                 ctx = self._ctx()
                 with mock.patch.object(
                     support, "_invoke_checkout_journey",
@@ -1114,7 +1114,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
     def _run_branch(self, stdout: str) -> dict:
         """Run one explicit native journey from ``stdout`` with no evidence file."""
 
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         # Each branch model is its own journey: no earlier success is reused.
         support._CHECKOUT_JOURNEY_CACHE.clear()
         with mock.patch.object(
@@ -1164,7 +1164,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 output = _pass_stdout(branch).replace(
                     "Native browser stage: checkout-cross-site:refused\n", ""
                 )
-                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
                 with mock.patch.object(
                     support,
                     "_invoke_checkout_journey",
@@ -1187,7 +1187,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 output = _pass_stdout(CROSS_SITE_EXCLUDED).replace(
                     "Native browser stage: " + stage + "\n", ""
                 )
-                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
                 with mock.patch.object(
                     support,
                     "_invoke_checkout_journey",
@@ -1209,7 +1209,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             ["Native browser stage: " + stage for stage in stages]
             + [support.CHECKOUT_PASS_SUMMARY]
         ) + "\n"
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
@@ -1359,7 +1359,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 )
 
     def test_cache_reuses_one_validated_journey(self):
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         calls = 0
 
         def fake_invoke(command, *, env, cwd, timeout):
@@ -1396,7 +1396,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
 
     def _assert_native_cache_hit_fails(self, mutate, pattern):
         path, original = self._mutating_source()
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
@@ -1430,7 +1430,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
     def test_native_cache_hit_fails_after_binary_mutation_without_rerun(self):
         self._copy_sources_repo()
         self._mutating_source()
-        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        os.environ["PASSME_E2E_CHECKOUT_NATIVE"] = "1"
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
@@ -1453,7 +1453,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         output = self.temp / "evidence" / "checkout.json"
         output.parent.mkdir()
         self._generate_evidence_into(output)
-        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(output)
+        os.environ["PASSME_E2E_CHECKOUT_EVIDENCE"] = str(output)
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/passkey"
+	"github.com/jihuayu/passme/internal/passkey"
 )
 
 func testSelection(item byte, raw []byte, credential string) Selection {

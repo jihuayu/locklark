@@ -10,7 +10,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/jihuayu/locklark/internal/localpath"
+	"github.com/jihuayu/passme/internal/localpath"
 )
 
 func DefaultEndpoint() (string, error) {
@@ -18,7 +18,7 @@ func DefaultEndpoint() (string, error) {
 	if e != nil {
 		return "", ErrUnavailable
 	}
-	return filepath.Join(parent, "locklark-ssh-"+strconv.Itoa(os.Geteuid()), "agent.sock"), nil
+	return filepath.Join(parent, "passme-ssh-"+strconv.Itoa(os.Geteuid()), "agent.sock"), nil
 }
 func prepareConnection(c net.Conn) (Peer, []byte, error) {
 	peer, e := authenticatedPeer(c)

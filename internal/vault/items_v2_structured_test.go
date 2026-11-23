@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	kdbx "github.com/jihuayu/passme/third_party/gokeepasslib"
 )
 
 func TestItemV2StructuredFieldsRejectXMLControlCharacters(t *testing.T) {
@@ -172,7 +172,7 @@ func TestItemV2StructuredDetailsExportRoundTrip(t *testing.T) {
 	}
 	entries := map[string]kdbx.Entry{}
 	for _, entry := range db.Content.Root.Groups[0].Entries {
-		entries[entry.GetContent("Locklark.ID")] = entry
+		entries[entry.GetContent("Passme.ID")] = entry
 	}
 	envelopes := map[string]itemV2Envelope{}
 	for n := range items {

@@ -21,9 +21,9 @@ func TestExportKDBXIndependentReader(t *testing.T) {
 			t.Fatal("export not encrypted")
 		}
 	}
-	python := os.Getenv("LOCKLARK_TEST_PYKEEPASS")
+	python := os.Getenv("PASSME_TEST_PYKEEPASS")
 	if python == "" {
-		t.Skip("set LOCKLARK_TEST_PYKEEPASS for independent reader")
+		t.Skip("set PASSME_TEST_PYKEEPASS for independent reader")
 	}
 	path := filepath.Join(t.TempDir(), "export.kdbx")
 	if err = os.WriteFile(path, raw, 0600); err != nil {

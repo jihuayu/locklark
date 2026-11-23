@@ -65,7 +65,7 @@ printing it (PowerShell on Windows):
 
 ```powershell
 Get-Content -Raw "$env:APPDATA\mygo\update-keys\mygo-update.key" |
-  gh secret set MYGO_UPDATER_PRIVATE_KEY --env production --repo jihuayu/locklark
+  gh secret set MYGO_UPDATER_PRIVATE_KEY --env production --repo jihuayu/passme
 ```
 
 Keep an offline backup in a password manager. Losing the key prevents every
@@ -82,7 +82,7 @@ before creating the draft when one is missing:
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
 - `MACOS_SIGNING_IDENTITY`: the full Developer ID identity;
 - `MACOS_PROVISIONING_PROFILE`: base64-encoded provisioning profile for
-  `app.locklark.desktop` and its `keychain-access-groups`;
+  `app.passme.desktop` and its `keychain-access-groups`;
 - `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`: notarization
   credentials.
 
@@ -127,9 +127,9 @@ fixed enum. Do not widen the token or weaken the policy gate to make it pass.
    release workflow:
 
    ```sh
-   git tag -s v0.2.0 -m "Locklark v0.2.0"
+   git tag -s v0.2.0 -m "Passme v0.2.0"
    git push origin v0.2.0
-   gh api --method POST "/repos/jihuayu/locklark/dispatches" \
+   gh api --method POST "/repos/jihuayu/passme/dispatches" \
      -f event_type=desktop-release \
      -f 'client_payload[tag]=v0.2.0'
    ```
@@ -145,14 +145,14 @@ already published release.
 
 MyGo builds Windows x64 with the per-user NSIS installer:
 
-- `locklark-setup-<version>-amd64.exe`;
-- `Locklark.exe` inside the installer and update archive;
-- `locklark-<version>-windows-<arch>.tar.gz`, the update archive;
+- `passme-setup-<version>-amd64.exe`;
+- `Passme.exe` inside the installer and update archive;
+- `passme-<version>-windows-<arch>.tar.gz`, the update archive;
 - `update-windows-<arch>.json`, the signed update manifest;
 - `install.ps1`, the MyGo one-line installer.
 
 The NSIS installer requests no administrator rights. It installs under
-`%LOCALAPPDATA%\Programs\Locklark`, writes the uninstall entry under `HKCU`,
+`%LOCALAPPDATA%\Programs\Passme`, writes the uninstall entry under `HKCU`,
 adds Start menu and optional desktop shortcuts, and includes an uninstaller
 listed in Windows Settings. Upgrading replaces the files in the existing
 per-user install folder; vault data and settings stay outside that folder
@@ -165,7 +165,7 @@ checks it against `SHA256SUMS`, and runs it silently.
 
 ## Automatic updates
 
-`updates.github` points to the public `jihuayu/locklark` repository.
+`updates.github` points to the public `jihuayu/passme` repository.
 Applications built with this configuration read:
 
 - `update-windows-amd64.json` on Windows;

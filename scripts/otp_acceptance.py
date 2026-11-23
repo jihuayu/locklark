@@ -18,7 +18,7 @@ def check(binary, legacy=None):
     seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
     config = "otpauth://totp/synthetic?secret=" + seed + "&digits=8"
     with tempfile.TemporaryDirectory() as tmp:
-        path = str(pathlib.Path(tmp) / "owner.ll")
+        path = str(pathlib.Path(tmp) / "owner.pm")
         pw = "synthetic-master-" + os.urandom(8).hex()
         _, key = invoke(legacy or binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                         ("重新输入刚保存的 Secret Key", None)], issue=True)
@@ -46,7 +46,7 @@ def check(binary, legacy=None):
         current = ("--id", edited["id"], "--revision", edited["revision"])
         invoke(binary, "otp", path, factors + [(show[0][0], "no")], options=current,
                ok=False, expect_error="OTP disclosure cancelled", forbidden=(seed, config))
-        for wrong in ([("主密码", pw + "x"), factors[1]], [factors[0], ("Secret Key", "LL1-" + "A" * 26)]):
+        for wrong in ([("主密码", pw + "x"), factors[1]], [factors[0], ("Secret Key", "PM1-" + "A" * 26)]):
             invoke(binary, "otp", path, wrong + show, options=current, ok=False,
                    expect_error="invalid personal vault", forbidden=(seed, config))
         before = time.time()

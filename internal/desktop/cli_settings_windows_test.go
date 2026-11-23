@@ -39,7 +39,7 @@ func newPrivateCLIConfigDir(t *testing.T) string {
 		if _, err := rand.Read(suffix[:]); err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(parent, "locklark-desktop-test-"+hex.EncodeToString(suffix[:]))
+		path := filepath.Join(parent, "passme-desktop-test-"+hex.EncodeToString(suffix[:]))
 		wide, err := windows.UTF16PtrFromString(path)
 		if err != nil {
 			t.Fatal(err)

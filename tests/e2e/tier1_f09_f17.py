@@ -787,7 +787,7 @@ def t1_f15_01(ctx):
     ready = f15_run_bundle_ready(ctx)
     gate(ctx, "F15", ready, "public cli run / multi-slot profile contract is absent")
     usage = _run_help(ctx)
-    assert "locklark cli run <tool>" in usage and "-- [ARG...]" in usage
+    assert "passme cli run <tool>" in usage and "-- [ARG...]" in usage
 
 
 @e2e_test("T1_F15_02", 1, ["F15"], "Capability probe: run help documents binding, cwd and timeout")
@@ -851,10 +851,10 @@ def t1_f16_03(ctx):
     gate(ctx, "F16", ready, "cli shell-init is absent")
     result = ctx.run_cli(["cli", "shell-init", "bash"])
     assert result.returncode == 0
-    assert "locklark cli run" in result.stdout
+    assert "passme cli run" in result.stdout
 
 
-@e2e_test("T1_F16_04", 1, ["F16"], "Evaluating shell-init wraps gh through locklark cli run")
+@e2e_test("T1_F16_04", 1, ["F16"], "Evaluating shell-init wraps gh through passme cli run")
 def t1_f16_04(ctx):
     ready = f16_cli_shell_ready(ctx)
     gate(ctx, "F16", ready, "shell function wrapper is absent")

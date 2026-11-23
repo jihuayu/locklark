@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/sshagent"
 	"golang.org/x/crypto/ssh"
 )
 
 func sshSessionFixture(t *testing.T) (*personal.Session, personal.SSHKeyRow) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "ssh.ll")
+	path := filepath.Join(t.TempDir(), "ssh.pm")
 	key := bytes.Repeat([]byte{53}, 16)
 	defer clear(key)
 	if personal.Create(path, "ssh-native-fixture", key) != nil {

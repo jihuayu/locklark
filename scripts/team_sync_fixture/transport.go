@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/directory"
-	"github.com/jihuayu/locklark/internal/teamsync"
+	"github.com/jihuayu/passme/internal/directory"
+	"github.com/jihuayu/passme/internal/teamsync"
 )
 
 type clientPublic struct {

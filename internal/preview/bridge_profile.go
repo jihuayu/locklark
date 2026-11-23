@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/gateway"
+	"github.com/jihuayu/passme/internal/gateway"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -27,7 +27,7 @@ type BridgeProfile struct {
 
 func (p BridgeProfile) proof() []byte {
 	p.Sig = nil
-	return message("locklark/stdio-profile/v1\x00", p)
+	return message("passme/stdio-profile/v1\x00", p)
 }
 func ExportBridgeProfile(device, session, path string) error {
 	id, e := mailIdentity(device)

@@ -13,7 +13,7 @@ import (
 
 // smokeStoreEnv opts in to the real OS credential store smoke test. This
 // package never sets it, and without it no test touches the real store.
-const smokeStoreEnv = "LOCKLARK_TEST_OS_CREDENTIAL_STORE"
+const smokeStoreEnv = "PASSME_TEST_OS_CREDENTIAL_STORE"
 
 // TestCredentialStoreSmoke exercises the real system credential store through
 // the adapter with a random, otherwise unused profile under a synthetic client
@@ -22,7 +22,7 @@ const smokeStoreEnv = "LOCKLARK_TEST_OS_CREDENTIAL_STORE"
 // is registered before the first Set, and the only read is of the same key after
 // Set.
 //
-// Run with: LOCKLARK_TEST_OS_CREDENTIAL_STORE=1 go test ./pkg/onedriveauth -run TestCredentialStoreSmoke -count=1 -v
+// Run with: PASSME_TEST_OS_CREDENTIAL_STORE=1 go test ./pkg/onedriveauth -run TestCredentialStoreSmoke -count=1 -v
 func TestCredentialStoreSmoke(t *testing.T) {
 	if os.Getenv(smokeStoreEnv) != "1" {
 		t.Skipf("set %s=1 to exercise the real OS credential store", smokeStoreEnv)
@@ -34,7 +34,7 @@ func TestCredentialStoreSmoke(t *testing.T) {
 		t.Fatal("random source failed")
 	}
 	hexRandom := hex.EncodeToString(random)
-	label := []byte("locklark smoke " + hexRandom)
+	label := []byte("passme smoke " + hexRandom)
 	clientID := "synthetic-" + hexRandom
 	tenant := "synthetic.invalid"
 	token := []byte("smoke-token-" + hexRandom)

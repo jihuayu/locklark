@@ -136,7 +136,7 @@ function harness(options = {}) {
     removeEventListener() {},
   };
   const context = {
-    LocklarkCore: core,
+    PassmeCore: core,
     document,
     location: {
       get hash() { return hash; },

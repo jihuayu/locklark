@@ -23,11 +23,11 @@ import (
 	updatenative "github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/nativeclipboard"
-	"github.com/jihuayu/locklark/internal/osunlock"
-	"github.com/jihuayu/locklark/internal/personal"
-	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/jihuayu/passme/internal/browserhost"
+	"github.com/jihuayu/passme/internal/nativeclipboard"
+	"github.com/jihuayu/passme/internal/osunlock"
+	"github.com/jihuayu/passme/internal/personal"
+	"github.com/jihuayu/passme/internal/sshagent"
 	oneui "github.com/oneo-me/onevra/source/components"
 	"github.com/oneo-me/onevra/source/icons/lucide"
 	"github.com/oneo-me/onevra/source/shells/plain"
@@ -39,7 +39,7 @@ type outcome struct {
 }
 
 // errEmergencyKitRequired aborts a generated-key vault creation before any
-// .ll is published when no durable Emergency Kit could be written.
+// .pm is published when no durable Emergency Kit could be written.
 var errEmergencyKitRequired = errors.New("emergency kit backup is required before vault creation")
 
 type App struct {
@@ -757,7 +757,7 @@ func (a *App) createVaultFile() {
 				return outcome{err: statErr}
 			}
 			// A generated key is only safe to commit with a durable kit on
-			// disk. If this fails, no .ll is created and the wizard key stays
+			// disk. If this fails, no .pm is created and the wizard key stays
 			// available for retry.
 			var kitErr error
 			kitPath, kitErr = a.saveNewVaultKit(path, secret)
@@ -773,7 +773,7 @@ func (a *App) createVaultFile() {
 			return outcome{err: e}
 		}
 		// The device store is optional once the kit above is durable, and it
-		// is only attempted after the exclusive .ll publish succeeded.
+		// is only attempted after the exclusive .pm publish succeeded.
 		rememberErr := a.storeDeviceSecret(path, secret)
 		return outcome{drop: s.Lock, apply: func() {
 			a.issued = ""
@@ -1014,7 +1014,7 @@ func (a *App) View(c *ui.Context) {
 	ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(14).Children(func() {
 		if !a.onevra.shellActive && (classicLayoutRequested() || a.session != nil) {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
-				ui.Text(c, "LOCKLARK").FontSize(22).Bold().TextColor(t.Text)
+				ui.Text(c, "PASSME").FontSize(22).Bold().TextColor(t.Text)
 				ui.Text(c, "本地金库").TextColor(t.TextMuted).Grow(1)
 				if a.browser == nil {
 					ui.Button(c, "快捷搜索").OnClick(a.showQuickSearch)
@@ -1104,7 +1104,7 @@ func (a *App) lockView(c *ui.Context) {
 		if a.showSecretFallback {
 			onevraBanner(c, lucide.TriangleAlert(), "此设备未保存 Secret Key，请从应急文件粘贴一次；解锁后会重新存入系统凭据库。", t.Warning, nil)
 			oneui.TextBox(c, &a.secret, oneui.TextBoxOptions{LeadingIcon: lucide.FingerprintPattern()}).
-				Label("Secret Key").Placeholder("LL1-…（从应急文件粘贴）").Password().Disabled(a.uiBusy(c)).
+				Label("Secret Key").Placeholder("PM1-…（从应急文件粘贴）").Password().Disabled(a.uiBusy(c)).
 				OnSubmit(a.unlock)
 		}
 
@@ -1171,7 +1171,7 @@ func (a *App) lockIntroView(c *ui.Context) {
 			oneui.Icon(c, lucide.LockKeyhole()).Size(t.Space(6), t.Space(6)).TextColor(t.AccentText)
 		})
 		ui.Text(c, "你的密码，只属于你。").FontSize(25).Bold().TextColor(t.Text).Wrap()
-		ui.Text(c, "Locklark 在本机完成解密与密钥派生。日常解锁只需要主密码，Secret Key 交由系统凭据存储保护。").FontSize(13).TextColor(t.TextMuted).Wrap()
+		ui.Text(c, "Passme 在本机完成解密与密钥派生。日常解锁只需要主密码，Secret Key 交由系统凭据存储保护。").FontSize(13).TextColor(t.TextMuted).Wrap()
 		ui.Box(c).FillWidth().Height(1).Background(t.Border).Margin(t.Space(1), 0)
 		for _, feature := range []struct{ title, detail string }{
 			{"离线解密", "金库文件和字段值不会因为解锁而上传。"},
@@ -1243,7 +1243,7 @@ func (a *App) lockFormView(c *ui.Context) {
 			ui.Text(c, "此设备没有可用的已保存 Secret Key，请从应急文件粘贴一次。").FontSize(12).Bold().TextColor(t.Warning)
 			ui.Text(c, "成功解锁后会在本机系统凭据存储中重新保存，之后仍然只需主密码。").FontSize(12).TextColor(t.TextMuted).Wrap()
 		})
-		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（仅从应急文件使用）").Password().Disabled(a.busy)
+		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("PM1-…（仅从应急文件使用）").Password().Disabled(a.busy)
 	}
 	ui.Row(c).Gap(8).Wrap().Children(func() {
 		ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
@@ -1608,7 +1608,7 @@ func (a *App) transferView(c *ui.Context) {
 					})
 				})
 			})
-			ui.Text(c, "1Password 8：选择金库 → 导出 → 1PUX；Locklark 不接收 1Password 主密码或 Secret Key。").FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "1Password 8：选择金库 → 导出 → 1PUX；Passme 不接收 1Password 主密码或 Secret Key。").FontSize(12).TextColor(t.TextMuted)
 			ui.Text(c, "1Password 7 的 .opvault 目录不能直接导入；请先导出为 .1pux。").FontSize(12).TextColor(t.TextMuted)
 			ui.Text(c, "1PUX 是未加密导出文件；导入完成后请安全删除。").FontSize(12).TextColor(t.Warning)
 			if a.report != "" {
@@ -1690,7 +1690,7 @@ func RunWithSettingsPath(path string) error {
 // is active, so every desktop entry point must reach this exactly once.
 // mygo.Use panics on a duplicate or failed registration; do not recover it.
 func registerNativeUpdater() {
-	// Draw MyGo's updater window in native UI as well: Locklark ships no
+	// Draw MyGo's updater window in native UI as well: Passme ships no
 	// WebView runtime, and development builds keep the updater disabled.
 	mygo.Use(updatenative.Plugin)
 }
@@ -1717,7 +1717,7 @@ func runDesktop(settingsPaths ...string) error {
 	a.syncInitialVaultState()
 	a.startBackgroundLoop()
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
-	mygo.App.SetName("Locklark")
+	mygo.App.SetName("Passme")
 	mygo.App.WhenReady(func() {
 		if classicLayoutRequested() {
 			// Keep the classic layout on its original window and header. The
@@ -1725,7 +1725,7 @@ func runDesktop(settingsPaths ...string) error {
 			// "安全设置" controls, which breaks accessibility and the native
 			// acceptance driver's unique-label requirement.
 			a.win = mygo.NewWindow(mygo.WindowOptions{
-				Title:     "Locklark · 本地金库",
+				Title:     "Passme · 本地金库",
 				Width:     1100,
 				Height:    820,
 				MinWidth:  900,
@@ -1735,12 +1735,12 @@ func runDesktop(settingsPaths ...string) error {
 		} else {
 			a.onevra.shellActive = true
 			shell := plain.NewShell(plain.ShellOptions{
-				Title:         "Locklark · 本地金库",
+				Title:         "Passme · 本地金库",
 				Width:         1240,
 				Height:        820,
 				MinWidth:      980,
 				MinHeight:     680,
-				StateKey:      "locklark.main",
+				StateKey:      "passme.main",
 				Theme:         a.onevraTheme,
 				Toasts:        oneui.ToastOptions{Placement: oneui.ToastBottom},
 				HeaderLeading: a.onevraHeaderLeading,
@@ -1782,7 +1782,7 @@ func runDesktop(settingsPaths ...string) error {
 		}
 		var pngIcon bytes.Buffer
 		_ = png.Encode(&pngIcon, icon)
-		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.winHidden = false; a.win.Show(); a.win.Focus() }}, updater.MenuItem(), {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) {
+		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "passme", Icon: pngIcon.Bytes(), ToolTip: "Passme", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.winHidden = false; a.win.Show(); a.win.Focus() }}, updater.MenuItem(), {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.quitting = true
 			a.Lock()
 			a.hideApprovalWindow()
@@ -1933,10 +1933,10 @@ func (a *App) chooseVault() {
 		var path string
 		var e error
 		if create {
-			path, e = mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: win, Title: "创建金库", DefaultPath: "personal.ll", Filters: []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}}})
+			path, e = mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: win, Title: "创建金库", DefaultPath: "personal.pm", Filters: []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}}})
 		} else {
 			var paths []string
-			paths, e = mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择金库", Filters: []mygo.FileFilter{{Name: "Locklark 金库", Extensions: []string{"ll"}}}})
+			paths, e = mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择金库", Filters: []mygo.FileFilter{{Name: "Passme 金库", Extensions: []string{"pm"}}}})
 			if len(paths) == 1 {
 				path = paths[0]
 			}
